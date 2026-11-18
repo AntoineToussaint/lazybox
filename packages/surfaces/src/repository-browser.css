@@ -267,6 +267,7 @@
 .workspace-repositories-dialog header small { color: var(--text-subtle); font-size: calc(11px * var(--text-scale)); }
 .workspace-repositories-dialog h2 { font-size: calc(19px * var(--text-scale)); line-height: 1.35; overflow-wrap: anywhere; margin-top: 4px; }
 .workspace-repositories-dialog .workspace-repository-list li > div { min-width: 0; }
+.workspace-repository-list li > button { margin-inline-start: auto; flex: none; }
 .workspace-repository-list strong { font-size: calc(13px * var(--text-scale)); font-weight: 500; overflow-wrap: anywhere; }
 .workspace-repository-list small { font-size: calc(11px * var(--text-scale)); color: var(--text-subtle); overflow-wrap: anywhere; }
 .workspace-repository-list svg { flex: none; }

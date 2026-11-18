@@ -15,6 +15,8 @@ import (
 // first on PATH and the terminal's own credential (terminal_credentials.go),
 // so `lazybox log` and `lazybox run` publish to the workspace without flags.
 func (b *Bench) OpenTerminal(collectionID, directory string, cols, rows uint16, requestKey string) (*terminals.Terminal, error) {
+	b.terminalStart.Lock()
+	defer b.terminalStart.Unlock()
 	if b.Collections == nil {
 		return nil, errors.New("workspaces unavailable")
 	}

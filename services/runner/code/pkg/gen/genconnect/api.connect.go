@@ -181,6 +181,9 @@ const (
 	// RunnerServiceAddCollectionRepositoriesProcedure is the fully-qualified name of the
 	// RunnerService's AddCollectionRepositories RPC.
 	RunnerServiceAddCollectionRepositoriesProcedure = "/lazybox.bench.v1.RunnerService/AddCollectionRepositories"
+	// RunnerServiceRemoveCollectionRepositoryProcedure is the fully-qualified name of the
+	// RunnerService's RemoveCollectionRepository RPC.
+	RunnerServiceRemoveCollectionRepositoryProcedure = "/lazybox.bench.v1.RunnerService/RemoveCollectionRepository"
 	// RunnerServiceGetCollectionProcedure is the fully-qualified name of the RunnerService's
 	// GetCollection RPC.
 	RunnerServiceGetCollectionProcedure = "/lazybox.bench.v1.RunnerService/GetCollection"
@@ -763,6 +766,7 @@ type RunnerServiceClient interface {
 	UpdateRepositoryHome(context.Context, *connect.Request[gen.UpdateRepositoryHomeRequest]) (*connect.Response[gen.RepositoryHomeUpdate], error)
 	CreateCollection(context.Context, *connect.Request[gen.CreateCollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	AddCollectionRepositories(context.Context, *connect.Request[gen.AddCollectionRepositoriesRequest]) (*connect.Response[gen.CollectionResponse], error)
+	RemoveCollectionRepository(context.Context, *connect.Request[gen.RemoveCollectionRepositoryRequest]) (*connect.Response[gen.CollectionResponse], error)
 	GetCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	// The workspaces in the person's order (ArrangeWorkspaces).
 	ListCollections(context.Context, *connect.Request[gen.ListCollectionsRequest]) (*connect.Response[gen.ListCollectionsResponse], error)
@@ -1495,6 +1499,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceAddCollectionRepositoriesProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("AddCollectionRepositories")),
+			connect.WithClientOptions(opts...),
+		),
+		removeCollectionRepository: connect.NewClient[gen.RemoveCollectionRepositoryRequest, gen.CollectionResponse](
+			httpClient,
+			baseURL+RunnerServiceRemoveCollectionRepositoryProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("RemoveCollectionRepository")),
 			connect.WithClientOptions(opts...),
 		),
 		getCollection: connect.NewClient[gen.CollectionRequest, gen.CollectionResponse](
@@ -2536,6 +2546,7 @@ type runnerServiceClient struct {
 	updateRepositoryHome         *connect.Client[gen.UpdateRepositoryHomeRequest, gen.RepositoryHomeUpdate]
 	createCollection             *connect.Client[gen.CreateCollectionRequest, gen.CollectionResponse]
 	addCollectionRepositories    *connect.Client[gen.AddCollectionRepositoriesRequest, gen.CollectionResponse]
+	removeCollectionRepository   *connect.Client[gen.RemoveCollectionRepositoryRequest, gen.CollectionResponse]
 	getCollection                *connect.Client[gen.CollectionRequest, gen.CollectionResponse]
 	listCollections              *connect.Client[gen.ListCollectionsRequest, gen.ListCollectionsResponse]
 	arrangeWorkspaces            *connect.Client[gen.ArrangeWorkspacesRequest, gen.ListCollectionsResponse]
@@ -2950,6 +2961,11 @@ func (c *runnerServiceClient) CreateCollection(ctx context.Context, req *connect
 // AddCollectionRepositories calls lazybox.bench.v1.RunnerService.AddCollectionRepositories.
 func (c *runnerServiceClient) AddCollectionRepositories(ctx context.Context, req *connect.Request[gen.AddCollectionRepositoriesRequest]) (*connect.Response[gen.CollectionResponse], error) {
 	return c.addCollectionRepositories.CallUnary(ctx, req)
+}
+
+// RemoveCollectionRepository calls lazybox.bench.v1.RunnerService.RemoveCollectionRepository.
+func (c *runnerServiceClient) RemoveCollectionRepository(ctx context.Context, req *connect.Request[gen.RemoveCollectionRepositoryRequest]) (*connect.Response[gen.CollectionResponse], error) {
+	return c.removeCollectionRepository.CallUnary(ctx, req)
 }
 
 // GetCollection calls lazybox.bench.v1.RunnerService.GetCollection.
@@ -3866,6 +3882,7 @@ type RunnerServiceHandler interface {
 	UpdateRepositoryHome(context.Context, *connect.Request[gen.UpdateRepositoryHomeRequest]) (*connect.Response[gen.RepositoryHomeUpdate], error)
 	CreateCollection(context.Context, *connect.Request[gen.CreateCollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	AddCollectionRepositories(context.Context, *connect.Request[gen.AddCollectionRepositoriesRequest]) (*connect.Response[gen.CollectionResponse], error)
+	RemoveCollectionRepository(context.Context, *connect.Request[gen.RemoveCollectionRepositoryRequest]) (*connect.Response[gen.CollectionResponse], error)
 	GetCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	// The workspaces in the person's order (ArrangeWorkspaces).
 	ListCollections(context.Context, *connect.Request[gen.ListCollectionsRequest]) (*connect.Response[gen.ListCollectionsResponse], error)
@@ -4594,6 +4611,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceAddCollectionRepositoriesProcedure,
 		svc.AddCollectionRepositories,
 		connect.WithSchema(runnerServiceMethods.ByName("AddCollectionRepositories")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceRemoveCollectionRepositoryHandler := connect.NewUnaryHandler(
+		RunnerServiceRemoveCollectionRepositoryProcedure,
+		svc.RemoveCollectionRepository,
+		connect.WithSchema(runnerServiceMethods.ByName("RemoveCollectionRepository")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceGetCollectionHandler := connect.NewUnaryHandler(
@@ -5682,6 +5705,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceCreateCollectionHandler.ServeHTTP(w, r)
 		case RunnerServiceAddCollectionRepositoriesProcedure:
 			runnerServiceAddCollectionRepositoriesHandler.ServeHTTP(w, r)
+		case RunnerServiceRemoveCollectionRepositoryProcedure:
+			runnerServiceRemoveCollectionRepositoryHandler.ServeHTTP(w, r)
 		case RunnerServiceGetCollectionProcedure:
 			runnerServiceGetCollectionHandler.ServeHTTP(w, r)
 		case RunnerServiceListCollectionsProcedure:
@@ -6217,6 +6242,10 @@ func (UnimplementedRunnerServiceHandler) CreateCollection(context.Context, *conn
 
 func (UnimplementedRunnerServiceHandler) AddCollectionRepositories(context.Context, *connect.Request[gen.AddCollectionRepositoriesRequest]) (*connect.Response[gen.CollectionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.AddCollectionRepositories is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) RemoveCollectionRepository(context.Context, *connect.Request[gen.RemoveCollectionRepositoryRequest]) (*connect.Response[gen.CollectionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.RemoveCollectionRepository is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) GetCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error) {

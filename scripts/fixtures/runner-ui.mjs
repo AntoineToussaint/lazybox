@@ -943,6 +943,13 @@ actions:
         }
         return json({ collection: requests.get(body.requestKey) });
       }
+      case 'RemoveCollectionRepository': {
+        const collection = collections.find(c => c.id === body.collectionId);
+        if (!collection?.members.some(member => member.spec.name === body.memberName)) return error('not_found', 'Workspace repository missing');
+        mutations.push({ method, body });
+        collection.members = collection.members.filter(member => member.spec.name !== body.memberName);
+        return json({ collection });
+      }
       case 'AddCollectionRepositories': {
         mutations.push({method,body});const collection=collections.find(c=>c.id===body.collectionId);
         if(!collection)return error('not_found','Workspace missing');

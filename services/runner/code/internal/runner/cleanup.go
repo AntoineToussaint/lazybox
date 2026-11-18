@@ -3,8 +3,10 @@ package runner
 import (
 	"context"
 	"errors"
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
+	"strings"
 	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
 )
 
 // StopExecution closes the provider and cancels/waits for every Runner-owned
@@ -100,4 +102,45 @@ func (b *Bench) DeleteWorkspace(ctx context.Context, id, name string, discard, s
 		err = b.Artifacts.DeleteWorkspace(id)
 	}
 	return c, err
+}
+
+// RemoveWorkspaceRepository removes one clean worktree while preserving the workspace.
+func (b *Bench) RemoveWorkspaceRepository(ctx context.Context, id, name string) (collections.Collection, error) {
+	if b.Collections == nil {
+		return collections.Collection{}, errors.New("workspaces unavailable")
+	}
+	if b.runtime != nil {
+		b.runtime.control.Lock()
+		defer b.runtime.control.Unlock()
+	}
+	b.terminalStart.Lock()
+	defer b.terminalStart.Unlock()
+	if b.Terminals != nil {
+		for _, terminal := range b.Terminals.List(id) {
+			if !terminal.Done {
+				return collections.Collection{}, errors.New("close active workspace terminals before removing a repository")
+			}
+		}
+	}
+	for _, command := range b.Commands.ListWorkspace(id) {
+		if !command.Done || command.CleanupUnconfirmed() {
+			return collections.Collection{}, errors.New("stop active workspace actions and commands before removing a repository")
+		}
+	}
+	forgetRuntime := func() error {
+		if b.runtime == nil {
+			return nil
+		}
+		return b.runtime.update(id, func(record *runtimeRecord) {
+			delete(record.Setup, name)
+			delete(record.Archive, name)
+			delete(record.Files, name)
+			for key := range record.Actions {
+				if strings.HasPrefix(key, name+"/") {
+					delete(record.Actions, key)
+				}
+			}
+		})
+	}
+	return b.Collections.RemoveRepositoryMember(ctx, id, name, b.Active, forgetRuntime)
 }

@@ -23,6 +23,11 @@ GitHub API connection supplies repository discovery/import and issue/PR lists.
    streamed; errors preserve the selection and request identity for retry.
 4. Use a workspace's **Add repositories…** action to open the same picker with an
    explicit destination. Existing members are marked **In workspace**.
+5. To remove one, open the workspace’s **Manage repositories…** action and
+   choose **Remove…** beside the checkout. Confirm to remove the clean
+   worktree while keeping its local branch and repository library entry.
+   End active workspace sessions, terminals, and commands first. Commit or
+   move changed, untracked, or ignored files before removing the checkout.
    Conversations and existing worktrees remain in place.
 
 **Connections & folders** expands inside the picker: connect GitHub or choose a

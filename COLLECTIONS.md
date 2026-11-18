@@ -144,6 +144,11 @@ across Runners remain future integration work.
 - `AddCollectionRepositories` appends worktrees to the existing root with an
   idempotent request key and pinned source commits. It retains existing files,
   members and ownership. Failed additions retain evidence and can be retried.
+- `RemoveCollectionRepository` removes one clean, branch-attached worktree
+  from a ready workspace with no active sessions, terminals, or commands. It
+  keeps the branch and repository library entry. The workspace can be empty.
+  An implicit branch name receives a numeric suffix on re-add if the original
+  branch still exists.
 - Normal Runner shutdown stops owned execution before releasing its root lock
   and clears leases only for confirmed inactive executions. A persisted lease
   after an unclean restart becomes **uncertain**, blocking new attachment.

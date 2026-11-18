@@ -55,5 +55,23 @@ for(const viewport of [{width:900,height:420},{width:390,height:640}]){
  await page.screenshot({path:`/tmp/lazybox-workspace-menu-${viewport.width}.png`});
  await page.keyboard.press('Escape');if(viewport.width<761)await page.getByRole('button',{name:'Close workspace navigator'}).click();
 }
-console.log('PASS: reachable top-layer actions in clipped/narrow panels; right-click, keyboard and outside dismissal; no toolbar overlap; focused cancel, dirty/running guards and scoped deletion. Fixture only.');
+ await page.setViewportSize({width:1250,height:900});
+ await page.getByLabel('Actions for Alpha feature',{exact:true}).click();
+ await page.getByRole('button',{name:'Manage repositories…'}).click();
+ const repositories=page.getByRole('dialog',{name:'Repositories in Alpha feature'});
+ const removeApi=repositories.getByRole('button',{name:'Remove api from Alpha feature'});
+ await removeApi.click();
+ await expect(repositories.getByRole('button',{name:'Cancel',exact:true})).toBeFocused();
+ await repositories.getByRole('button',{name:'Cancel',exact:true}).click();
+ assert.equal(fixture.mutations.filter(m=>m.method==='RemoveCollectionRepository').length,0);
+ await page.route('**/RemoveCollectionRepository',route=>route.fulfill({status:400,json:{code:'failed_precondition',message:'worktree contains changed files'}}),{times:1});
+ await removeApi.click();
+ await repositories.getByRole('button',{name:'Remove repository',exact:true}).click();
+ await expect(repositories.getByRole('alert')).toContainText('worktree contains changed files');
+ await expect(removeApi).toBeVisible();
+ await repositories.getByRole('button',{name:'Remove repository',exact:true}).click();
+ await expect(removeApi).toHaveCount(0);
+ await expect(repositories.getByRole('button',{name:'Remove web from Alpha feature'})).toBeVisible();
+ assert.deepEqual(fixture.mutations.filter(m=>m.method==='RemoveCollectionRepository').map(m=>m.body),[{collectionId:'alpha',memberName:'api'}]);
+console.log('PASS: reachable top-layer actions in clipped/narrow panels; right-click, keyboard and outside dismissal; no toolbar overlap; focused cancel, dirty/running guards, scoped workspace deletion and repository removal. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

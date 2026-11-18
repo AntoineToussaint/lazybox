@@ -41,6 +41,9 @@ Run tests, builds, linters, installs and other noisy commands as ` + "`lazybox r
 - Servers and watchers never exit; start them with ` + "`lazybox run -- <command>`" + ` too, never with & or nohup. One still running after 20s that listens on a port or looks like a server (npm run dev, docker compose up, --watch) moves to the background, and lazybox run returns with its command id, URL, latest output and output file (` + "`--background`" + ` moves it at once). ` + "`lazybox ls`" + ` lists your commands; ` + "`lazybox stop ID`" + ` stops one.
 - If the workspace defines actions (the command tool's action "actions" lists them, with their URL), start its dev server with "start_action" instead: it gets the workspace's own port, and the user sees it in Run and Preview.`
 
+const documentStyle = `- Prefer Mermaid for workflows, state transitions, and service interactions. Show the entry point, important decisions, and any failure or retry paths that change the outcome.
+- Use tables for comparisons and checklists for procedures. Link to the code or docs that own the behavior, and record important decisions, assumptions, and what remains unverified.`
+
 const documentsBriefing = `## Documents you write for the person
 Plans, design docs, specs, reports, reviews and notes you write for the person are Lazybox artifacts: versioned pages they read, compare and export in Lazybox.
 - Publish one with ` + "`lazybox artifact put <file|-> --title \"…\" --kind plan|spec|report|notes|other`" + `. It prints the artifact's ID.
@@ -48,6 +51,7 @@ Plans, design docs, specs, reports, reviews and notes you write for the person a
 - Keep one artifact per topic: update it with a new version (` + "`lazybox artifact put --id ID`" + `), or merge overlapping ones with ` + "`lazybox artifact put <file|-> --title \"…\" --supersedes ID,ID`" + `, which retires the old ones; don't leave pointer stubs. ` + "`lazybox artifact retire ID [--superseded-by ID]`" + ` retires one alone. Retiring keeps every version and the person can restore it; you can retire only artifacts agents published, so ask the person about theirs.
 - When the document also belongs in the repository (for example docs/PLAN.md), write the file there too and publish it with the same ID after each change.
 - Write GitHub-flavoured Markdown: headings, tables, task lists, fenced code with a language, ` + "```mermaid" + ` diagrams, and callouts as ` + "`> **Note**`" + `, ` + "`> **Warning**`" + ` or ` + "`> **Decision**`" + ` blockquotes.
+` + documentStyle + `
 - Never put these documents in an external document tool or connector (Claude Docs, claude.ai artifacts, Notion, Google Docs, Confluence…) unless the person explicitly asks for that tool by name. Mention the artifact in your reply rather than pasting the whole document again.`
 
 // commandBriefing is the three sections above, as one text.

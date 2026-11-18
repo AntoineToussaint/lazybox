@@ -171,6 +171,37 @@ func Create(dir, name, content string) (file, path string, err error) {
 	return file, path, nil
 }
 
+// Delete removes one regular theme file from the configured folder.
+func Delete(dir, file string) error {
+	ext := filepath.Ext(file)
+	if (!strings.EqualFold(ext, ".toml") && !strings.EqualFold(ext, ".json")) || validName(strings.TrimSuffix(file, ext)) != nil {
+		return ErrInvalid
+	}
+	root, err := os.OpenRoot(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	info, err := root.Lstat(file)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return ErrInvalid
+	}
+	err = root.Remove(file)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // errSkip marks a file that changed into something List does not read
 // between its listing and its opening.
 var errSkip = errors.New("not a regular file")

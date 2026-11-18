@@ -615,7 +615,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
             sending={sending} canCompose={canCompose} canAttach={canAttach} canSend={canSend}
             permissionPrompt={<>{restartTo && <PermissionRestartPrompt mode={restartTo} busy={!!session?.busy} returnTo={composer} onRestart={() => void restartWithPermission(restartTo)} onCancel={() => setRestartTo('')}/>}{slash.prompt}</>}
             slash={slash}
-            info={embedded && session && !firstMessage ? <ComposerInfo agentName={agentName} modelLabel={modelLabel} modelRequested={!!session.model && !session.modelReported && !transcript.reportedModel} sessionID={sessionID} onPickModel={session.closed ? undefined : slash.models.pick}/> : undefined}
+            info={session ? <ComposerInfo agentName={agentName} modelLabel={modelLabel} modelRequested={!!session.model && !session.modelReported && !transcript.reportedModel} sessionID={sessionID} onPickModel={session.closed ? undefined : slash.models.pick}/> : undefined}
             onSubmit={send}
             onChange={text => { if (sendingRef.current) return; recall.reset(); setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); }}
             onDictate={setMessage}

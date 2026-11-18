@@ -220,9 +220,10 @@ conversation's host record left on disk with nothing listening on it.
   confirm that processes they cannot see are stopped. The journal gets one
   `agent_lost` event whose text says what happened, what the interruption cost
   (a turn in progress, a request that was waiting, queued messages) and what to
-  do; the app shows it as a notice line. Sending a message resumes the agent
-  through the provider's own session (`Bench.Resume` with the saved reference),
-  as a continuation of the same conversation.
+  do; the app shows it as a notice line. After confirming old hosts are gone,
+  the Runner automatically resumes idle conversations with a supported
+  provider reference and no pending or queued work. An interrupted turn needs
+  an explicit resume or a new message. A session ended on purpose stays ended.
 - **The workspace.** Its record still names that session as working in it,
   which a Runner that did not re-attach it reads as "Owner uncertain". The
   Runner checks at startup that none of the session's recorded processes

@@ -443,6 +443,10 @@ on the artifact side:
   its items move there with one registration under the `message` extension
   point.
 
+
+The reader limits paragraph width on large displays and gives diagrams, code
+blocks and tables more room. The outline beside the document can collapse.
+
 ## Review findings reports
 
 The Code review and Security review conversation templates publish a report

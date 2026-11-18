@@ -81,6 +81,10 @@ it did.
 - **End session** stops the agent but keeps the conversation; sending a new
   message resumes it. **Delete conversation…** removes it.
 
+The composer shows the model picker before the first message and shows the
+context percentage when the provider reports it. **Dictate** sits beside
+**Send**. Double-click a tool row or live command output to expand or collapse it.
+
 ## Hand off to another conversation
 
 The workspace sidebar and chat tabs show an agent icon next to each conversation.

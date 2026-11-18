@@ -40,6 +40,17 @@ func (s *Service) CreateTheme(_ context.Context, r *pb.CreateThemeRequest) (*pb.
 	return &pb.CreateThemeResponse{Folder: wireThemeFolder(folder), File: file, Path: path}, nil
 }
 
+func (s *Service) DeleteTheme(ctx context.Context, r *pb.DeleteThemeRequest) (*pb.ThemeFolder, error) {
+	err := themes.Delete(s.Bench.Config.ThemeDirectory, r.GetFile())
+	if errors.Is(err, themes.ErrInvalid) {
+		return nil, grpcError(codes.InvalidArgument, err)
+	}
+	if err != nil {
+		return nil, grpcError(codes.Internal, err)
+	}
+	return s.ListThemes(ctx, &pb.ListThemesRequest{})
+}
+
 func wireThemeFolder(f themes.Folder) *pb.ThemeFolder {
 	out := &pb.ThemeFolder{Directory: f.Directory, Revision: f.Revision}
 	for _, file := range f.Files {

@@ -664,6 +664,9 @@ const (
 	// RunnerServiceInstallBrowserProcedure is the fully-qualified name of the RunnerService's
 	// InstallBrowser RPC.
 	RunnerServiceInstallBrowserProcedure = "/lazybox.bench.v1.RunnerService/InstallBrowser"
+	// RunnerServiceDeleteThemeProcedure is the fully-qualified name of the RunnerService's DeleteTheme
+	// RPC.
+	RunnerServiceDeleteThemeProcedure = "/lazybox.bench.v1.RunnerService/DeleteTheme"
 )
 
 // RunnerServiceClient is a client for the lazybox.bench.v1.RunnerService service.
@@ -1180,6 +1183,7 @@ type RunnerServiceClient interface {
 	// output Settings → Browser shows. One at a time: a second call returns the
 	// install already running.
 	InstallBrowser(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.CommandStatus], error)
+	DeleteTheme(context.Context, *connect.Request[gen.DeleteThemeRequest]) (*connect.Response[gen.ThemeFolder], error)
 }
 
 // NewRunnerServiceClient constructs a client for the lazybox.bench.v1.RunnerService service. By
@@ -2471,6 +2475,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("InstallBrowser")),
 			connect.WithClientOptions(opts...),
 		),
+		deleteTheme: connect.NewClient[gen.DeleteThemeRequest, gen.ThemeFolder](
+			httpClient,
+			baseURL+RunnerServiceDeleteThemeProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("DeleteTheme")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -2689,6 +2699,7 @@ type runnerServiceClient struct {
 	saveBrowserSettings          *connect.Client[gen.BrowserSettings, gen.BrowserSettings]
 	clearBrowserData             *connect.Client[gen.ClearBrowserDataRequest, gen.BrowserSettings]
 	installBrowser               *connect.Client[gen.InfoRequest, gen.CommandStatus]
+	deleteTheme                  *connect.Client[gen.DeleteThemeRequest, gen.ThemeFolder]
 }
 
 // ListSnippets calls lazybox.bench.v1.RunnerService.ListSnippets.
@@ -3756,6 +3767,11 @@ func (c *runnerServiceClient) InstallBrowser(ctx context.Context, req *connect.R
 	return c.installBrowser.CallUnary(ctx, req)
 }
 
+// DeleteTheme calls lazybox.bench.v1.RunnerService.DeleteTheme.
+func (c *runnerServiceClient) DeleteTheme(ctx context.Context, req *connect.Request[gen.DeleteThemeRequest]) (*connect.Response[gen.ThemeFolder], error) {
+	return c.deleteTheme.CallUnary(ctx, req)
+}
+
 // RunnerServiceHandler is an implementation of the lazybox.bench.v1.RunnerService service.
 type RunnerServiceHandler interface {
 	ListSnippets(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.SnippetCatalog], error)
@@ -4270,6 +4286,7 @@ type RunnerServiceHandler interface {
 	// output Settings → Browser shows. One at a time: a second call returns the
 	// install already running.
 	InstallBrowser(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.CommandStatus], error)
+	DeleteTheme(context.Context, *connect.Request[gen.DeleteThemeRequest]) (*connect.Response[gen.ThemeFolder], error)
 }
 
 // NewRunnerServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -5557,6 +5574,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(runnerServiceMethods.ByName("InstallBrowser")),
 		connect.WithHandlerOptions(opts...),
 	)
+	runnerServiceDeleteThemeHandler := connect.NewUnaryHandler(
+		RunnerServiceDeleteThemeProcedure,
+		svc.DeleteTheme,
+		connect.WithSchema(runnerServiceMethods.ByName("DeleteTheme")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/lazybox.bench.v1.RunnerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case RunnerServiceListSnippetsProcedure:
@@ -5985,6 +6008,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceClearBrowserDataHandler.ServeHTTP(w, r)
 		case RunnerServiceInstallBrowserProcedure:
 			runnerServiceInstallBrowserHandler.ServeHTTP(w, r)
+		case RunnerServiceDeleteThemeProcedure:
+			runnerServiceDeleteThemeHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -6844,4 +6869,8 @@ func (UnimplementedRunnerServiceHandler) ClearBrowserData(context.Context, *conn
 
 func (UnimplementedRunnerServiceHandler) InstallBrowser(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.CommandStatus], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.InstallBrowser is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) DeleteTheme(context.Context, *connect.Request[gen.DeleteThemeRequest]) (*connect.Response[gen.ThemeFolder], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.DeleteTheme is not implemented"))
 }

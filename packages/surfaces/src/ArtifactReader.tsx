@@ -170,10 +170,10 @@ export function useScrollSpy(scroller: RefObject<HTMLElement | null>, ids: strin
 export function TableOfContents({ entries, active, scroller, onPick }: { entries: TocEntry[]; active: string; scroller: RefObject<HTMLElement | null>; onPick?(): void }) {
   const top = Math.min(...entries.map(e => e.level));
   return <nav className="doc-toc" aria-label="On this page">
-    <p className="doc-toc-title">On this page</p>
+    <details open><summary className="doc-toc-title">On this page</summary>
     <ol>{entries.map(entry => <li key={entry.id} className={entry.level > top ? 'is-sub' : undefined}>
       <a href={`#${entry.id}`} aria-current={entry.id === active ? 'location' : undefined} onClick={event => { event.preventDefault(); scrollToId(scroller.current, entry.id); onPick?.(); }}>{entry.text}</a>
-    </li>)}</ol>
+    </li>)}</ol></details>
   </nav>;
 }
 

@@ -8,10 +8,11 @@ import { useUserThemes, adoptUserThemes } from './appearance/useUserThemes';
 import { BUILTIN_THEMES, resolveTheme, type ThemeDefinition } from './appearance/themes';
 import { TOKENS, type Scheme, type TokenGroup } from './appearance/tokens';
 import { CONTRAST_CHOICES, DEFAULT_PREFERENCES, DENSITY_PRESETS, TYPOGRAPHY_LIMITS, effectiveTypography, findTheme, validFont, type AppearancePreferences, type Density, type Mode, type Motion, type Typography } from './appearance/preferences';
-import { themeTemplate } from './appearance/user-themes';
+import { themeTemplate, userThemeId } from './appearance/user-themes';
 import { normalizeColor, parseColor } from './appearance/color';
 import { useRunner } from './RunnerContext';
 import { runAction } from './actions';
+import { ConfirmDialog } from './ConfirmDialog';
 import { ConfigFileStatus } from './ConfigFileStatus';
 import { writeConfigSoon } from './config-writer';
 import './appearance-settings.css';
@@ -74,6 +75,7 @@ export function AppearanceSettings({ store, zoom }: { store?: ViewStateStore; zo
   const user = useUserThemes(true);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
+  const [deleting, setDeleting] = useState('');
   const [reference, setReference] = useState(false);
   const [filter, setFilter] = useState('');
   const [zoomLevel, setZoomLevel] = useState<number>();
@@ -110,10 +112,30 @@ export function AppearanceSettings({ store, zoom }: { store?: ViewStateStore; zo
     const taken = new Set(user.files.map(f => f.file.replace(/\.(json|toml)$/i, '')));
     let name = base; for (let i = 2; taken.has(name); i++) name = `${base}-${i}`;
     try {
-      const created = await api.createTheme({ name, content: themeTemplate(`My ${scheme} theme`, scheme, shown.tokens) }, { timeoutMs: 10000 });
+      const created = await api.createTheme({ name, content: themeTemplate(`My ${scheme} theme`, scheme, shown.tokens, current.source?.kind === 'builtin' ? current.id : current.extends) }, { timeoutMs: 10000 });
       setStatus(`Created ${created.path}. Edit it in any editor: Lazybox reloads it each time you save.`);
       user.reload();
     } catch (failure) { setError(settingsError(failure)); }
+  };
+  const deleteTheme = async (file: string) => {
+    const folder = await api.deleteTheme({ file }, { timeoutMs: 10000 });
+    const id = userThemeId(file);
+    // JSON and TOML can share a stem. Preserve the selection if its other file remains.
+    if (!folder.files.some(theme => userThemeId(theme.name) === id)) {
+      update(p => {
+        const snapshot = { ...p.userThemes };
+        const parent = snapshot[id]?.extends;
+        delete snapshot[id];
+        return {
+          ...p, userThemes: snapshot,
+          darkTheme: p.darkTheme === id ? parent || 'dark' : p.darkTheme,
+          lightTheme: p.lightTheme === id ? parent || 'light' : p.lightTheme,
+        };
+      });
+    }
+    user.reload();
+    setDeleting('');
+    setStatus(`Deleted ${file}.`);
   };
   const copy = (text: string, what: string) => { void navigator.clipboard?.writeText(text).then(() => setStatus(`Copied ${what}.`), () => setStatus('')); };
   const overrides = Object.entries(preferences.tokens || {});
@@ -146,6 +168,15 @@ export function AppearanceSettings({ store, zoom }: { store?: ViewStateStore; zo
           <button type="button" onClick={() => void createTheme()} disabled={!user.directory}><Icon name="plus" size={13}/> New theme from current</button>
         </div>
       </div>
+      {user.files.length > 0 && <ul className="theme-file-list" aria-label="Theme files">
+        {user.files.map(({ file, theme }) => <li key={file}>
+          <span>{theme?.name || file}</span>
+          <button type="button" aria-label={`Delete theme ${file}`} onClick={() => setDeleting(file)}><Icon name="close" size={13}/><span>Delete</span></button>
+        </li>)}
+      </ul>}
+      {deleting && <ConfirmDialog title="Delete theme?" subject={deleting} confirm="Delete theme" working="Deleting…" onClose={() => setDeleting('')} onConfirm={() => deleteTheme(deleting)}>
+        This permanently removes the theme file from the Runner.
+      </ConfirmDialog>}
       {user.files.filter(f => f.errors.length || f.warnings.length).map(f => <div key={f.file} className={`theme-problems${f.errors.length ? ' is-error' : ''}`} role={f.errors.length ? 'alert' : undefined}>
         <strong>{f.file}</strong>{f.errors.length ? <span> is not loaded:</span> : <span> loaded, with notes:</span>}
         <ul>{[...f.errors, ...f.warnings].map(problem => <li key={problem}>{problem}</li>)}</ul>

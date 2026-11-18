@@ -365,9 +365,9 @@ export class ConversationHandle {
         if (pending) run.write(pending);
         const outputBytes = options.console.outputBytes ?? Buffer.byteLength(output);
         run.report = { exitCode: exit, outputBytes: String(outputBytes), agentBytes: String(Buffer.byteLength(options.console.agentView)), filter: options.console.filter || 'passthrough', outputPath: `/Users/you/Library/Application Support/Lazybox/output/${live.session.id}/${slug(command)}-1.log`, agentView: options.console.agentView };
-        // The console decides by its own polls whether a run is long enough to take it
-        // over (1.5 s): in a test too, a run of a few seconds stays open in real time.
-        if (!ctx.video) { const real = Math.min(seconds, 3.5); await ctx.hold(real); await ctx.pause(seconds - real); }
+        // The console uses real polling intervals to discover a run and then
+        // track its age. Keep the run live for its declared duration in tests too.
+        if (!ctx.video) await ctx.hold(seconds);
         run.finish(exit);
         live.toolEnd(id, [{ type: 'text', text: (exit ? `Exit code ${exit}\n` : '') + options.console.agentView }], exit ? 'failed' : 'completed');
       } else {

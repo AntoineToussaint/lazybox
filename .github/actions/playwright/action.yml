@@ -10,6 +10,9 @@ inputs:
   browsers:
     description: Space-separated Playwright browsers (e.g. "chromium webkit").
     required: true
+  chromium-shell-only:
+    description: Install only Chromium's headless shell.
+    default: 'false'
 
 runs:
   using: composite
@@ -30,17 +33,17 @@ runs:
     - uses: actions/cache@v6
       with:
         path: ${{ steps.playwright.outputs.path }}
-        key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-${{ steps.playwright.outputs.browsers }}
+        key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}-${{ steps.playwright.outputs.browsers }}${{ inputs.chromium-shell-only == 'true' && '-shell' || '' }}
     # A cache hit makes this a no-op check; on Linux it also needs system
     # libraries, which are not cached.
     - name: Install browsers
       shell: bash
       env:
         BROWSERS: ${{ inputs.browsers }}
+        SHELL_ONLY: ${{ inputs.chromium-shell-only }}
       run: |
-        # shellcheck disable=SC2086 # one argument per browser
-        if [ "$RUNNER_OS" = Linux ]; then
-          node_modules/.bin/playwright install --with-deps $BROWSERS
-        else
-          node_modules/.bin/playwright install $BROWSERS
-        fi
+        flags=()
+        if [ "$RUNNER_OS" = Linux ]; then flags+=(--with-deps); fi
+        if [ "$SHELL_ONLY" = true ]; then flags+=(--only-shell); fi
+        read -r -a browsers <<< "$BROWSERS"
+        node_modules/.bin/playwright install "${flags[@]}" "${browsers[@]}"

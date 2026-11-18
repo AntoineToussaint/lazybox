@@ -79,6 +79,9 @@ func (c *cli) do(args []string) error {
 	}
 	answer, err := c.ask(cl, request, *timeout)
 	if err != nil {
+		if id == "conversation.new" && c.getenv("LAZYBOX_V2_SESSION_ID") != "" && exitCode(err) == exitDenied {
+			return fail(exitDenied, "to start another conversation from an agent, run lazybox conversation new --title TITLE --brief BRIEF --no-wait; the person can start it from the request card")
+		}
 		return err
 	}
 	if c.json {

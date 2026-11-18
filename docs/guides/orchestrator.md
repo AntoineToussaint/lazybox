@@ -57,6 +57,17 @@ lazybox conversation new --title "Review all modules" --brief "What to do, done 
                          [--timeout 90s] [--no-wait]
 ```
 
+For example, if you ask the agent to start a separate TODO conversation in
+this workspace, it can run:
+
+```sh
+lazybox conversation new --title TODO --brief "Maintain the Workspace TODO artifact." --no-wait
+```
+
+Choose **Start** on the request card to open the conversation. This is the
+agent command for creating a conversation. `lazybox do conversation.new`
+opens the owner's New conversation dialog.
+
 With `--workspace new`, the new workspace's branches start from this one's;
 `--start-from B` starts them from origin's branch `B` instead, fetched first
 (the request says so).

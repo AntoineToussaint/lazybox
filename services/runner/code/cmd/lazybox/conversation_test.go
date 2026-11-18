@@ -46,6 +46,10 @@ func TestAnAgentStartsAConversationThePersonApproves(t *testing.T) {
 	asker, native := r.open("Planner")
 	env := agentEnv(t, native, asker.Id)
 
+	if out := r.cli(env, "", "do", "conversation.new"); out.code != exitDenied || !strings.Contains(out.err.Error(), "lazybox conversation new --title") || r.pendingStart(asker.Id) != nil {
+		t.Fatalf("agent window action should point to the request command without starting a conversation: %+v", out)
+	}
+
 	if out := r.cli(env, "", "conversation", "new", "--title", "Review all modules"); out.code != exitUsage || !strings.Contains(out.err.Error(), "--brief") {
 		t.Fatalf("no brief: %+v", out)
 	}

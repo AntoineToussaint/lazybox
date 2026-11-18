@@ -40,7 +40,8 @@ On-device and private by default. User guide:
   `finishAndSend` (a send while listening waits for the last words), and
   read-aloud.
 - **`VoiceLayer.tsx`** — the voice actions in the registry (`voice.dictate`,
-  `voice.command`, `voice.stop-reading`), the held keys and `Esc` (window
+  `voice.command`, `voice.read-latest`, `voice.repeat`, `voice.open-announcement`,
+  `voice.stop-reading`), the held keys and `Esc` (window
   capture, before the chord and sequence dispatchers, which skip `hold`
   actions), and the pill. A press shorter than `TAP_MS` (350 ms) turns a hold
   into a toggle. A right-hand modifier alone (`AltRight`, `MetaRight`; the

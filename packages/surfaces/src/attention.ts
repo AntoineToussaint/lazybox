@@ -3,6 +3,7 @@ import type { AgentEvent, Session } from '@lazybox/protocol';
 import { repositoryRequestSummary } from './repository-request-model';
 import { browserRequestSummary } from './browser-model';
 import { startRequestSummary } from './conversation-request-model';
+import { questionsOf } from './request-model';
 import { providerData } from '@lazybox/client-core';
 import { accountLabel, awaitingFirstMessage } from './agent-status';
 import { backAt, isLimitState } from './subscription-model';
@@ -191,7 +192,8 @@ export function seenMark(row: Pick<Attention, 'at' | 'turnEndedAt'>): number {
 /** Notifications (a system notification, or a toast in a focused window) per kind; sounds apart from them. */
 export type NotificationPreferences = { needsInput: boolean; failed: boolean; review: boolean; badge: boolean; soundNeedsYou: boolean; soundDone: boolean };
 export const defaultNotificationPreferences: NotificationPreferences = { needsInput: true, failed: true, review: false, badge: true, soundNeedsYou: true, soundDone: false };
-export type AttentionNotice = { key: string; kind: 'needs-input' | 'failed' | 'review'; title: string; body: string; collectionId: string; sessionId: string; runner?: string };
+export type AttentionSpeech = { id: string; text: string; at: number; requestId?: string };
+export type AttentionNotice = { speech?: AttentionSpeech; key: string; kind: 'needs-input' | 'failed' | 'review'; title: string; body: string; collectionId: string; sessionId: string; runner?: string };
 
 /**
  * Pure: what deserves a notification between two observations of one
@@ -208,13 +210,22 @@ export function noticeFor(previous: Attention | undefined, next: Attention, pref
   if (next.state === 'needs-input') {
     const fresh = next.requests.filter(id => !previous.requests.includes(id));
     if (!preferences.needsInput || (previous.state === 'needs-input' && !fresh.length) || (!fresh.length && next.at <= previous.at)) return undefined;
-    return { ...target, kind: 'needs-input', title: `${next.reason.startsWith('Question') ? 'Question' : 'Approval needed'} · ${title}`, body: where + (next.line || 'The agent is waiting for you') };
+    const request = next.session.pending.find(item => fresh.includes(item.requestId)) || next.session.pending[0];
+    const question = request?.type === 'question' ? questionsOf(providerData(request.providerDataJson))[0] : undefined;
+    const label = request?.type === 'question' || (!request && next.session.status === 'waiting_input') ? 'Question' : 'Approval needed';
+    const detail = question?.text || (request ? requestSummary(request) : 'The agent is waiting for you');
+    const choices = question?.options.map(option => option.label) || [];
+    const options = choices.length && choices.length <= 2 && choices.every(choice => choice.length <= 32) ? ` Choices: ${choices.join(' or ')}.` : '';
+    const context = [workspace, title].filter(Boolean).join('. ');
+    const speech = { id: JSON.stringify([next.runner, next.key, 'request', request?.requestId || next.at]), at: next.at, requestId: request?.requestId, text: `${context}. ${label === 'Question' ? '' : 'Approval needed. '}${detail}${options}` };
+    return { ...target, speech, kind: 'needs-input', title: `${label} · ${title}`, body: where + (request ? requestSummary(request) : (next.line || 'The agent is waiting for you')) };
   }
   if (next.state === 'failed') {
     if (!preferences.failed || previous.state === 'failed') return undefined;
     // An interruption needs a turn the restart actually stopped; a fault needs new activity.
     if (next.reason === 'Interrupted' ? previous.state !== 'working' : next.at <= previous.at) return undefined;
-    return { ...target, kind: 'failed', title: `${next.reason} · ${title}`, body: where + next.line };
+    const speech = { id: JSON.stringify([next.runner, next.key, 'failed', next.at]), at: next.at, text: [workspace, title, next.reason, next.line].filter(Boolean).join('. ') };
+    return { ...target, speech, kind: 'failed', title: `${next.reason} · ${title}`, body: where + next.line };
   }
   if (next.state === 'review') {
     if (!preferences.review || previous.state === 'review' || next.turnEndedAt <= previous.turnEndedAt) return undefined;

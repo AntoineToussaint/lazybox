@@ -6,6 +6,7 @@
 .voice-pill.is-error .voice-pill-icon{color:var(--danger)}
 .voice-pill.is-reading .voice-pill-icon{color:var(--accent)}
 .voice-pill-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.voice-pill-destination{font-weight:400;color:var(--text-muted)}
 .voice-pill.is-error .voice-pill-text{white-space:normal;font-weight:500;line-height:1.4}
 .voice-pill-icon{display:inline-flex}
 /* The recording light: on for exactly as long as the microphone is open. */

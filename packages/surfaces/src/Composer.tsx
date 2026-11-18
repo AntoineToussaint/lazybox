@@ -1,4 +1,5 @@
 import { useMemo, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
+import { conversationName } from './conversation-model';
 import { ComposerAttachment } from './AttachmentThumbnail';
 import { ErrorBox } from './AttachmentBox';
 import { fileKey, pastedFiles } from './attachment-images';
@@ -70,7 +71,7 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
   const vimEditing = useVimPreferences(viewState).composer;
   const reservedKeys = useMemo(() => leaderKeys(keymap), [keymap]);
   const vim = useComposerVim({ textarea, enabled: vimEditing, value: message, resetKey: sessionID, reserved: reservedKeys, onSend: () => { if (canSend || missingFiles.length > 0 || !!message.trim()) textarea.current?.form?.requestSubmit(); } });
-  const dictation = useComposerDictation({ textarea, value: message, enabled: canCompose && !sending, onPreview: text => (onDictate || onChange)(text), onCommit: onChange,
+  const dictation = useComposerDictation({ textarea, destination: conversationName(session), value: message, enabled: canCompose && !sending, onPreview: text => (onDictate || onChange)(text), onCommit: onChange,
     onSend: () => textarea.current?.form?.requestSubmit() });
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const mod = event.metaKey || event.ctrlKey;
@@ -158,7 +159,7 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
       {info}
       {vim.mode && <span className="vim-mode-chip" data-mode={vim.mode} role="status" aria-label={`Vim ${vim.mode} mode`} title="Vim editing: Esc for normal mode, i to type, Enter in normal mode sends. Turn it off in Settings → Shortcuts.">{vim.status}</span>}
       {session?.instructionsPending && !session.closed && <span className="composer-chip" role="status" title="What Lazybox tells agents changed since this conversation started. Only what changed goes to the agent, with your next message that starts a turn.">Instructions updated</span>}
-      {dictation.supported && <button type="button" className={'icon-button composer-mic' + (dictation.active ? ' is-active' : '')} aria-label={dictation.active ? 'Send dictation' : 'Dictate'} title={dictation.active ? 'Finish dictation and send the message' : dictateHint} disabled={!canCompose || sending} onClick={dictation.active ? dictation.finishAndSend : dictation.start}><Icon name={dictation.active ? 'send' : 'mic'}/></button>}
+      {dictation.supported && <button type="button" className={'icon-button composer-mic' + (dictation.active ? ' is-active' : '')} aria-label={dictation.active ? 'Stop dictation' : 'Dictate'} title={dictation.active ? 'Stop and keep the draft' : dictateHint} disabled={!canCompose || sending} onClick={dictation.active ? dictation.stop : dictation.start}><Icon name={dictation.active ? 'stop' : 'mic'}/></button>}
       <button type="button" className="icon-button" aria-label="Snippets" title={`Snippets · ${keymap['snippets.open']}`} disabled={!canCompose || sending} onClick={onOpenSnippets}><Icon name="snippets"/></button>
       <button type="button" className="attachment" aria-label={embedded ? 'Attach files' : undefined} disabled={!canAttach} onClick={() => fileInput.current?.click()}>{embedded ? <><Icon name="attach"/> <span className="attachment-label">Attach</span></> : '+ Attach files'}</button>
       <input ref={fileInput} hidden aria-label="Attach files" type="file" multiple onChange={e => { onSelectFiles(e.target.files); e.target.value = ''; }}/>

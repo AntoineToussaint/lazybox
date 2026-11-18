@@ -227,6 +227,10 @@ export function CommandPalette({ keymap, navigator, viewState, initialQuery = ''
     const ranked: Shown[] = [];
     if (spokenMode) {
       // Said, not typed: words matter, not letters in order (the decision reads these scores).
+      if (/^open that[.!?]?$/i.test(term.trim())) {
+        const announcement = pool.find(item => item.key === 'action:voice.open-announcement');
+        return announcement ? [{ title: '', items: [{ ...announcement, positions: [], score: 100 }] }] : [];
+      }
       for (const item of [...pool, ...fileItems]) {
         const score = spokenScore(term, item.title, `${item.extra || ''} ${item.detail || ''}`);
         if (score > 0) ranked.push({ ...item, positions: [], score });

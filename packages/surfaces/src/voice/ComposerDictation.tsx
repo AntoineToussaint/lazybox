@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { mergeDictation } from './voice-model';
-import { finishAndSend, registerDictationTarget, startDictation, takeOverDictation, useVoiceState, voiceState, recognizers, type DictationSink, type DictationTarget } from './voice-session';
+import { finishAndSend, registerDictationTarget, startDictation, stopDictation, takeOverDictation, useVoiceState, voiceState, recognizers, type DictationSink, type DictationTarget } from './voice-session';
 
 /** The span of the draft still being recognized, drawn over the message box. */
 export type LiveRange = { start: number; end: number };
@@ -12,8 +12,9 @@ export type LiveRange = { start: number; end: number };
  * it was; typing or sending takes over (the words stay, the microphone
  * closes). The draft is saved when the dictation ends, not on every word.
  */
-export function useComposerDictation({ textarea, value, enabled, onPreview, onCommit, onSend }: {
+export function useComposerDictation({ textarea, destination, value, enabled, onPreview, onCommit, onSend }: {
   textarea: RefObject<HTMLTextAreaElement | null>;
+  destination: string;
   value: string;
   enabled: boolean;
   /** Show this text in the box (while dictating; not saved). */
@@ -23,7 +24,7 @@ export function useComposerDictation({ textarea, value, enabled, onPreview, onCo
   /** "Send" was said and sending by voice is on. */
   onSend(): void;
 }) {
-  const latest = useRef({ value, enabled, onPreview, onCommit, onSend }); latest.current = { value, enabled, onPreview, onCommit, onSend };
+  const latest = useRef({ destination, value, enabled, onPreview, onCommit, onSend }); latest.current = { destination, value, enabled, onPreview, onCommit, onSend };
   const [live, setLive] = useState<LiveRange | null>(null);
   const [active, setActive] = useState(false);
   const pendingSend = useRef<string | null>(null);
@@ -42,6 +43,7 @@ export function useComposerDictation({ textarea, value, enabled, onPreview, onCo
     const own: DictationTarget = {
       kind: 'composer',
       element: () => textarea.current,
+      label: () => latest.current.destination,
       available: () => latest.current.enabled && !!textarea.current && !textarea.current.disabled && !textarea.current.readOnly,
       begin(): DictationSink | null {
         const box = textarea.current;
@@ -88,7 +90,8 @@ export function useComposerDictation({ textarea, value, enabled, onPreview, onCo
       },
     };
     target.current = own;
-    return registerDictationTarget(own);
+    const unregister = registerDictationTarget(own);
+    return () => { unregister(); pendingSend.current = null; };
   }, [textarea]);
 
   // Send once the box holds the dictated text (the chat sends what it shows).
@@ -108,6 +111,7 @@ export function useComposerDictation({ textarea, value, enabled, onPreview, onCo
     start() {
       if (target.current) void startDictation({ mode: 'toggle', target: target.current });
     },
+    stop() { if (active) void stopDictation(); },
     /** The person typed: their text stands. */
     takeOver() { if (active) takeOverDictation(); },
     /**

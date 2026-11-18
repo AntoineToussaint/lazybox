@@ -204,6 +204,8 @@ repository.
   the repository's owners, members and collaborators are sent; others'
   comments are counted in a note and stay on GitHub. What GitHub wrote
   reaches the agent quoted as data, never as instructions.
+  When there is nothing eligible to send, the Inbox shows a status and
+  keeps **Open review** available to read the feedback on GitHub.
 - **Merge**: the same merge as the PR loop, after a confirmation, only the
   head you saw.
 

@@ -18,15 +18,37 @@ try {
   await server.listen(); browser = await chromium.launch({ headless: true });
   page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
   const errors = []; page.on('pageerror', error => errors.push(String(error)));
+  await page.addInitScript(() => localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'));
+  let historyTimedOut = false;
+  await page.route('**/ListHistory', async route => {
+    if (historyTimedOut) { await route.continue(); return; }
+    await route.fulfill({ status: 504, json: { code: 'deadline_exceeded', message: 'Fixture history was slow' } });
+    historyTimedOut = true;
+  });
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`);
   await page.getByRole('combobox', { name: 'Workspace', exact: true }).selectOption('alpha');
   await page.getByRole('combobox', { name: 'Session', exact: true }).selectOption('alpha-session');
   const message = page.getByRole('textbox', { name: 'Message', exact: true });
   await message.fill('draft that survives a Runner restart');
+  await expect.poll(() => historyTimedOut).toBe(true);
+  await expect(page.getByText('Could not refresh conversation history.', { exact: false })).toHaveCount(0);
 
   // The header status is the way in: it opens Settings at the Runner section.
   const indicator = page.locator('.workspace-header .runner-indicator');
   await expect(indicator).toHaveText('Connected');
+  await mkdir('.cache', { recursive: true });
+
+  const infoRpc = '**/Info';
+  await page.route(infoRpc, route => route.fulfill({ status: 504, json: { code: 'deadline_exceeded', message: 'Fixture Runner was slow' } }));
+  await expect(indicator).toHaveText('Slow to respond');
+  await expect(page.getByText('Runner disconnected.', { exact: true })).toHaveCount(0);
+  await page.screenshot({ path: '.cache/runner-health-slow.png' });
+  await expect(page.getByText('Runner is not responding.', { exact: true })).toBeVisible({ timeout: 10000 });
+  await page.unroute(infoRpc);
+  await expect(indicator).toHaveText('Connected');
+  await expect(page.getByText('Runner is not responding.', { exact: true })).toHaveCount(0);
+  await expect(message).toHaveValue('draft that survives a Runner restart');
+
   await indicator.click();
   await expect(page.getByRole('tab', { name: 'Runner', exact: true })).toHaveAttribute('aria-selected', 'true');
   const section = page.getByRole('tabpanel', { name: 'Runner' });
@@ -40,7 +62,7 @@ try {
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText('Agents, managed commands and terminals keep running');
   await expect(dialog.getByRole('button', { name: 'Restart Runner', exact: true })).toBeFocused();
-  await mkdir('.cache', { recursive: true }); await page.screenshot({ path: '.cache/runner-restart-confirm.png' });
+  await page.screenshot({ path: '.cache/runner-restart-confirm.png' });
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
   assert.equal(restarts(), 0, 'cancelling the confirmation restarted the Runner');

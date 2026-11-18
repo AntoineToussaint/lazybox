@@ -111,6 +111,7 @@ leave out.
 
 ### Pull requests and issues
 
+- **Review feedback on GitHub** When there is nothing eligible to send to the agent, the Inbox points you to the review on GitHub.
 - **Every pull request tracked** The pull requests your agents open, push or link are tracked, with a pill in the header and one badge per sidebar row: checks failed, changes requested or ready to merge.
 - **A Pull requests panel** Needs you, Waiting on others, Merged this week. Send the failing checks or the review comments to the agent in one click, always after your confirmation.
 - **Start from an issue** Paste an issue's link into New task, or pick from your issues: the workspace is named after it, and you can read exactly what the agent gets.
@@ -147,6 +148,7 @@ leave out.
 
 ### Runner reliability
 
+- **Slow Runners have their own status** Lazybox retries a late Runner response or history refresh and reconnects automatically.
 - **Agents outlive the Runner** Restarting or updating the Runner leaves agents, commands and terminals running; the new Runner picks them back up within seconds, and an approval that was waiting stays waiting.
 - **Back after your Mac restarts** A conversation whose agent was running keeps its checkpoints, commands and queued messages, and resumes the agent's own session with your next message.
 - **Said plainly when something is off** No network, a Runner on another version than the app, an update that did not finish: one sentence each, with the fix.

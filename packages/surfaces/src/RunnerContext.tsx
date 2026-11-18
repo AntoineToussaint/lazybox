@@ -10,7 +10,7 @@ import type { InfoResponse } from '@lazybox/protocol';
 export type RunnerConnection = { baseUrl: string; token: string; fetch?: typeof globalThis.fetch; renew?(): Promise<RunnerAuthority | undefined> };
 /** A restart the person asked for, from request until a new Runner process serves. */
 export type RunnerRestart = { phase: 'idle' } | { phase: 'restarting' } | { phase: 'restarted' } | { phase: 'failed'; message: string };
-export type RunnerState = { connection: RunnerConnection; api: RunnerClient; info?: InfoResponse; connecting: boolean; error: string; authFailed: boolean; refresh(): void; revision: number; restart: RunnerRestart; restartRunner(): Promise<void>; dismissRestart(): void };
+export type RunnerState = { connection: RunnerConnection; api: RunnerClient; info?: InfoResponse; connecting: boolean; slow: boolean; error: string; authFailed: boolean; refresh(): void; revision: number; restart: RunnerRestart; restartRunner(): Promise<void>; dismissRestart(): void };
 const Context = createContext<RunnerState | null>(null);
 
 // The launcher waits up to three minutes for a Runner to serve; Dev may also
@@ -53,6 +53,7 @@ export function useRunnerState(connection: RunnerConnection, expectRestart?: () 
   const api = useMemo(() => link.client(), [link, version]);
   const [info, setInfo] = useState<InfoResponse>();
   const [connecting, setConnecting] = useState(true);
+  const [slow, setSlow] = useState(false);
   const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
   const [restart, setRestart] = useState<RunnerRestart>({ phase: 'idle' });
@@ -67,17 +68,26 @@ export function useRunnerState(connection: RunnerConnection, expectRestart?: () 
   useEffect(() => {
     const control = new AbortController();
     let updating = false;
+    let timeouts = 0;
     const update = async () => {
       if (updating) return; updating = true;
       try {
         const next = await api.info({}, { signal: control.signal, timeoutMs:5000 });
         if (!control.signal.aborted) {
-          latest.current = next; setInfo(next); setError('');
+          timeouts = 0;
+          latest.current = next; setInfo(next); setError(''); setSlow(false);
           const waiting = pending.current;
           if (waiting && next.instanceId && next.instanceId !== waiting.previous) { pending.current = null; setRestart({ phase: 'restarted' }); }
         }
       }
-      catch (error) { if (!control.signal.aborted) setError(String(error)); }
+      catch (error) {
+        if (!control.signal.aborted) {
+          const timedOut = ConnectError.from(error).code === Code.DeadlineExceeded;
+          timeouts = timedOut ? timeouts + 1 : 0;
+          setSlow(timedOut);
+          if (!timedOut || timeouts >= 3) setError(String(error));
+        }
+      }
       finally {
         updating = false;
         if (!control.signal.aborted) {
@@ -120,7 +130,7 @@ export function useRunnerState(connection: RunnerConnection, expectRestart?: () 
   // A refused bearer anywhere in the window is a connection fault, not a panel's.
   const shown = error || (authFailure ? `The Runner refused this window's credentials (${authFailure}). Reconnecting…` : '');
   const authFailed = !!authFailure || error.includes('[unauthenticated]');
-  return useMemo(() => ({ connection, api, info, connecting, error: shown, authFailed, refresh, revision, restart, restartRunner, dismissRestart }), [connection, api, info, connecting, shown, authFailed, refresh, revision, restart, restartRunner, dismissRestart]);
+  return useMemo(() => ({ connection, api, info, connecting, slow, error: shown, authFailed, refresh, revision, restart, restartRunner, dismissRestart }), [connection, api, info, connecting, slow, shown, authFailed, refresh, revision, restart, restartRunner, dismissRestart]);
 }
 
 export function useRunner(): RunnerState {

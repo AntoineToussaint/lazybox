@@ -1,0 +1,8 @@
+/* Reordering a list by drag (useListReorder): the row picked up, the line where it lands. */
+html.is-reordering,html.is-reordering *{-webkit-user-select:none!important;user-select:none!important;cursor:grabbing!important}
+[data-reorder-id]{position:relative}
+[data-reorder-id][data-dragging]{opacity:.45}
+[data-reorder-id][data-drop]::after{content:"";position:absolute;left:4px;right:4px;height:2px;border-radius:1px;background:var(--accent);box-shadow:0 0 0 1px var(--surface);pointer-events:none;z-index:3}
+[data-reorder-id][data-drop=before]::after{top:-2px}
+[data-reorder-id][data-drop=after]::after{bottom:-2px}
+[data-reordering] .workspace-row:hover,[data-reordering] .runner-workspace-row:hover{background:transparent}

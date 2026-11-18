@@ -43,3 +43,7 @@ body { margin: 0; background: Canvas; }
 .first-run-confirm { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--fr-line); }
 .first-run pre { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--fr-surface); border: 1px solid var(--fr-line); border-radius: 6px; padding: 6px 8px; margin: 4px 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .first-run-output { max-height: 160px; overflow: auto; }
+/* No separate title bar (title-bar.ts): the strip under the window buttons, and room for it. */
+.first-run-title-bar { display: none; }
+:root[data-title-bar="overlay"] .first-run-title-bar { display: block; position: fixed; top: 0; left: 0; right: 0; height: var(--title-bar-height); }
+:root[data-title-bar="overlay"] .first-run { padding-top: calc(var(--title-bar-height) + 8px); }

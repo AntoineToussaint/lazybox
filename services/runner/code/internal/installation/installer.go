@@ -12,15 +12,20 @@ import (
 // Installer installs, updates and removes the Runner service of one runtime
 // for one person.
 type Installer struct {
-	Paths   Paths
-	Layout  Layout
-	Launchd Launchd
+	Paths  Paths
+	Layout Layout
+	// Manager runs the service: launchd, systemd or Lazybox's own supervisor.
+	Manager Manager
 	// Shell reads the login shell's environment (ReadShellEnvironment).
 	Shell func(context.Context) ShellEnvironment
 }
 
-// ServeArguments are the Runner's arguments under launchd: serve mode, as a
-// supervised job (Restart Runner is available), with this person's paths.
+// Definition is the file the service's definition is written to.
+func (i Installer) Definition() string { return i.Manager.DefinitionPath(i.Paths) }
+
+// ServeArguments are the Runner's arguments under its service manager: serve
+// mode, as a supervised service (Restart Runner is available), with this
+// person's paths.
 func (i Installer) ServeArguments() []string {
 	return []string{"serve", "--supervised",
 		"--state", i.Paths.State,
@@ -31,7 +36,7 @@ func (i Installer) ServeArguments() []string {
 	}
 }
 
-// Plan is the job the installer would write, with the shell environment it read.
+// Plan is the service the installer would write, with the shell environment it read.
 func (i Installer) Plan(ctx context.Context) (Service, ShellEnvironment, error) {
 	if err := i.Layout.Check(); err != nil {
 		return Service{}, ShellEnvironment{}, err
@@ -63,7 +68,7 @@ func (i Installer) Plan(ctx context.Context) (Service, ShellEnvironment, error) 
 type InstallResult struct {
 	Service Service
 	Shell   ShellEnvironment
-	// Previous is the job that was installed before, if any.
+	// Previous is the service that was installed before, if any.
 	Previous *Installed
 	// Restarted: a running Runner was stopped and the new one started. Its
 	// agents, commands and terminals kept running and are re-attached.
@@ -71,10 +76,11 @@ type InstallResult struct {
 	Started   bool
 }
 
-// Install writes the job, replacing an installed one, and (with start)
-// loads it. Replacing a loaded job stops the old Runner first: it detaches
-// its agents, which the new Runner re-attaches. Nothing else is touched:
-// state, credentials and the person's configuration stay where they are.
+// Install writes the service definition, replacing an installed one, and
+// (with start) starts it. Replacing a running service stops the old Runner
+// first: it detaches its agents, which the new Runner re-attaches. Nothing
+// else is touched: state, credentials and the person's configuration stay
+// where they are.
 func (i Installer) Install(ctx context.Context, start bool) (InstallResult, error) {
 	if reason := i.Layout.Unstable(); reason != "" {
 		return InstallResult{}, errors.New(reason)
@@ -89,40 +95,41 @@ func (i Installer) Install(ctx context.Context, start bool) (InstallResult, erro
 			return result, err
 		}
 	}
-	if err = os.MkdirAll(filepath.Dir(i.Paths.Plist), 0o755); err != nil {
+	definition := i.Definition()
+	if err = os.MkdirAll(filepath.Dir(definition), 0o755); err != nil {
 		return result, err
 	}
 	// The private Runner configuration (RUNNING.md): created once, never replaced.
 	if err = writeNew(i.Paths.Config, []byte("{\n  \"profiles\": []\n}\n"), 0o600); err != nil && !errors.Is(err, os.ErrExist) {
 		return result, err
 	}
-	if previous, err := ReadPlist(ctx, i.Paths.Plist); err == nil {
+	if previous, err := i.Manager.ReadDefinition(ctx, definition); err == nil {
 		result.Previous = &previous
 	}
-	data, err := service.Plist()
+	data, err := i.Manager.Render(service)
 	if err != nil {
 		return result, err
 	}
-	job, err := i.Launchd.Print(ctx, service.Label)
+	job, err := i.Manager.Status(ctx, i.Paths)
 	if err != nil {
 		return result, err
 	}
 	if job.Loaded {
-		// launchd reads a plist when it loads it: an updated job takes effect
-		// only through bootout and bootstrap.
-		if err = i.Launchd.Bootout(ctx, service.Label); err != nil {
+		// A manager reads the definition when it loads it: an updated
+		// service takes effect only through a stop and a start.
+		if err = i.Manager.Deactivate(ctx, i.Paths); err != nil {
 			return result, err
 		}
 		result.Restarted = job.Running
 	}
-	if err = writeAtomic(i.Paths.Plist, data, 0o644); err != nil {
+	if err = writeAtomic(definition, data, 0o644); err != nil {
 		return result, err
 	}
 	if err = i.WriteLocator(); err != nil {
 		return result, err
 	}
 	if start || job.Loaded {
-		if err = i.Launchd.Bootstrap(ctx, i.Paths.Plist); err != nil {
+		if err = i.Manager.Activate(ctx, i.Paths); err != nil {
 			return result, err
 		}
 		result.Started = true
@@ -152,48 +159,58 @@ func (i Installer) WriteLocator() error {
 	return writeAtomic(i.Paths.Locator(), append(data, '\n'), 0o600)
 }
 
-// Start loads an installed job that is not loaded, or does nothing.
+// Start starts an installed service that is not running, or does nothing.
 func (i Installer) Start(ctx context.Context) error {
-	if _, err := os.Stat(i.Paths.Plist); err != nil {
+	if _, err := os.Stat(i.Definition()); err != nil {
 		return fmt.Errorf("the Runner service is not installed; run `lazybox service install`: %w", err)
 	}
-	job, err := i.Launchd.Print(ctx, i.Paths.Label)
+	job, err := i.Manager.Status(ctx, i.Paths)
 	if err != nil || job.Running {
 		return err
 	}
 	if job.Loaded {
-		return i.Launchd.Kickstart(ctx, i.Paths.Label)
+		return i.Manager.Restart(ctx, i.Paths)
 	}
-	return i.Launchd.Bootstrap(ctx, i.Paths.Plist)
+	return i.Manager.Activate(ctx, i.Paths)
 }
 
-// Stop unloads the job: the Runner stops, its agents keep running.
+// Stop stops the Runner; its agents keep running.
 func (i Installer) Stop(ctx context.Context) error {
-	return i.Launchd.Bootout(ctx, i.Paths.Label)
+	return i.Manager.Deactivate(ctx, i.Paths)
 }
 
 // Restart replaces the running Runner with a fresh one of the same release.
 func (i Installer) Restart(ctx context.Context) error {
-	job, err := i.Launchd.Print(ctx, i.Paths.Label)
+	job, err := i.Manager.Status(ctx, i.Paths)
 	if err != nil {
 		return err
 	}
 	if !job.Loaded {
 		return i.Start(ctx)
 	}
-	return i.Launchd.Kickstart(ctx, i.Paths.Label)
+	return i.Manager.Restart(ctx, i.Paths)
 }
 
-// Uninstall unloads the job and removes its plist and locator. State, logs
-// and credentials stay (`lazybox uninstall --remove-data` removes them).
+// forgetter is a manager that must be told a definition was deleted (systemd).
+type forgetter interface {
+	Forget(ctx context.Context) error
+}
+
+// Uninstall stops the service and removes its definition and locator.
+// State, logs and credentials stay (`lazybox uninstall --remove-data` removes them).
 func (i Installer) Uninstall(ctx context.Context) (removed []string, err error) {
-	if err = i.Launchd.Bootout(ctx, i.Paths.Label); err != nil {
+	if err = i.Manager.Remove(ctx, i.Paths); err != nil {
 		return nil, err
 	}
-	for _, path := range []string{i.Paths.Plist, i.Paths.Locator()} {
+	for _, path := range []string{i.Definition(), i.Paths.Locator()} {
 		if err = os.Remove(path); err == nil {
 			removed = append(removed, path)
 		} else if !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+	}
+	if f, ok := i.Manager.(forgetter); ok && len(removed) > 0 {
+		if err = f.Forget(ctx); err != nil {
 			return removed, err
 		}
 	}
@@ -202,35 +219,61 @@ func (i Installer) Uninstall(ctx context.Context) (removed []string, err error) 
 
 // Status is the service as the system sees it, without asking the Runner.
 type Status struct {
-	Label     string `json:"label"`
-	Plist     string `json:"plist"`
-	Installed bool   `json:"installed"`
-	Loaded    bool   `json:"loaded"`
-	Running   bool   `json:"running"`
-	PID       int    `json:"pid,omitempty"`
-	LastExit  string `json:"lastExit,omitempty"`
-	// Program and Version are the Runner the installed job runs.
+	Label string `json:"label"`
+	// Manager is launchd, systemd or supervisor.
+	Manager string `json:"manager"`
+	// Unit is the systemd unit, under systemd.
+	Unit string `json:"unit,omitempty"`
+	// Definition is the service definition; Plist is the same file under
+	// launchd, kept for the app's older readers.
+	Definition string `json:"definition"`
+	Plist      string `json:"plist,omitempty"`
+	Installed  bool   `json:"installed"`
+	Loaded     bool   `json:"loaded"`
+	Running    bool   `json:"running"`
+	PID        int    `json:"pid,omitempty"`
+	LastExit   string `json:"lastExit,omitempty"`
+	// StartsWhen says when the service starts by itself: at login, at boot, or not.
+	StartsWhen string `json:"startsWhen,omitempty"`
+	// Program and Version are the Runner the installed service runs.
 	Program  string `json:"program,omitempty"`
 	Version  string `json:"version,omitempty"`
 	Path     string `json:"path,omitempty"`
 	Endpoint string `json:"endpoint"`
-	Log      string `json:"log"`
-	State    string `json:"state"`
+	// Log is the Runner's log file, or the command that prints it (journalctl).
+	Log   string `json:"log"`
+	State string `json:"state"`
 }
 
-// Status reads the plist and launchd's view of the job.
+// LogDescription is where a person reads the Runner's output.
+func (i Installer) LogDescription() string {
+	src := i.Manager.Logs(i.Paths)
+	if src.File != "" {
+		return src.File
+	}
+	return shellJoin(src.Command)
+}
+
+// Status reads the definition and the manager's view of the service.
 func (i Installer) Status(ctx context.Context) (Status, error) {
-	s := Status{Label: i.Paths.Label, Plist: i.Paths.Plist, Endpoint: i.Paths.Endpoint(), Log: i.Paths.Log(), State: i.Paths.State}
-	if installed, err := ReadPlist(ctx, i.Paths.Plist); err == nil {
+	definition := i.Definition()
+	s := Status{Label: i.Paths.Label, Manager: i.Manager.Kind(), Definition: definition, Endpoint: i.Paths.Endpoint(), Log: i.LogDescription(), State: i.Paths.State}
+	switch i.Manager.Kind() {
+	case ManagerLaunchd:
+		s.Plist = definition
+	case ManagerSystemd:
+		s.Unit = i.Paths.Unit()
+	}
+	if installed, err := i.Manager.ReadDefinition(ctx, definition); err == nil {
 		s.Installed, s.Program, s.Version, s.Path = true, installed.Program, installed.Version, installed.Env["PATH"]
-	} else if _, statErr := os.Stat(i.Paths.Plist); statErr == nil {
+	} else if _, statErr := os.Stat(definition); statErr == nil {
 		return s, err
 	}
-	job, err := i.Launchd.Print(ctx, i.Paths.Label)
+	job, err := i.Manager.Status(ctx, i.Paths)
 	if err != nil {
 		return s, err
 	}
-	s.Loaded, s.Running, s.PID, s.LastExit = job.Loaded, job.Running, job.PID, job.LastExit
+	s.Loaded, s.Running, s.PID, s.LastExit, s.StartsWhen = job.Loaded, job.Running, job.PID, job.LastExit, job.Detail
 	return s, nil
 }
 
@@ -243,7 +286,8 @@ func writeNew(path string, data []byte, mode os.FileMode) error {
 	return errors.Join(err, f.Close())
 }
 
-// writeAtomic replaces path in one rename, so launchd or the CLI never reads half a file.
+// writeAtomic replaces path in one rename, so a service manager or the CLI
+// never reads half a file.
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".")
 	if err != nil {
@@ -260,4 +304,28 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(f.Name(), path)
+}
+
+// shellJoin quotes words for a POSIX shell, for a command shown to a person.
+func shellJoin(words []string) string {
+	out := make([]byte, 0, 64)
+	for n, w := range words {
+		if n > 0 {
+			out = append(out, ' ')
+		}
+		if w != "" && plainWord.MatchString(w) {
+			out = append(out, w...)
+			continue
+		}
+		out = append(out, '\'')
+		for _, c := range []byte(w) {
+			if c == '\'' {
+				out = append(out, `'\''`...)
+				continue
+			}
+			out = append(out, c)
+		}
+		out = append(out, '\'')
+	}
+	return string(out)
 }

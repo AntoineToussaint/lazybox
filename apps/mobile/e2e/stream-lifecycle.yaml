@@ -1,0 +1,55 @@
+# Streaming spike S1 (MOBILE_CLOUD_HUB.md) on the simulator: a live
+# conversation's WatchEvents stream through expo/fetch stays open while idle
+# for minutes (the Runner's 15 s heartbeats inside iOS's 60 s idle timeout),
+# closes when the app goes to the background, and continues from its cursor
+# when the app comes back, with what was written meanwhile. Run by
+# scripts/test-mobile-simulator.mjs, which plays the Runner's side and checks
+# the streams it saw open and close.
+appId: ai.lazybox.mobile
+---
+- launchApp:
+    clearState: true
+    clearKeychain: true
+- openLink: "lazybox://pair?link=${LINK}"
+- runFlow:
+    when:
+      visible: "Open"
+    commands:
+      - tapOn: "Open"
+- tapOn:
+    id: "pair-submit"
+- extendedWaitUntil:
+    visible: "Paired"
+    timeout: 30000
+- tapOn:
+    id: "open-inbox"
+- extendedWaitUntil:
+    visible: "3 waiting for you"
+    timeout: 15000
+- scrollUntilVisible:
+    element: "Index the API routes.*"
+    direction: DOWN
+- tapOn: "Index the API routes.*"
+- extendedWaitUntil:
+    visible: "Reading the admin routes next.*"
+    timeout: 30000
+# The stream now idles: the test says something only after IDLE_MS of silence.
+- extendedWaitUntil:
+    visible: "Still here after a quiet stretch.*"
+    timeout: 400000
+- takeScreenshot: 10-after-idle
+# To the background: another app in front.
+- launchApp:
+    appId: "com.apple.Preferences"
+# Stay away a while (an absent text, waited for, is the pause).
+- extendedWaitUntil:
+    visible: "lazybox-never-shown"
+    timeout: 8000
+    optional: true
+- launchApp:
+    appId: "ai.lazybox.mobile"
+    stopApp: false
+- extendedWaitUntil:
+    visible: "Written while you were away.*"
+    timeout: 20000
+- takeScreenshot: 11-back

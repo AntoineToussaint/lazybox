@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agentshell"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sessionhost"
 )
 
@@ -47,6 +49,10 @@ type Spec struct {
 	// (runner/homes.go). Directory is then "".
 	Place        string `json:"place,omitempty"`
 	RepositoryID string `json:"repositoryId,omitempty"`
+	// PromptMarks: the shell says when its prompt is ready for input (zsh
+	// with Lazybox's integration, agentshell). Set by Start, from the shell
+	// and its environment: a window waits for that mark before typing.
+	PromptMarks bool `json:"promptMarks,omitempty"`
 }
 
 // Status is a terminal's state. Output [Offset-Retained, Offset) is readable.
@@ -68,7 +74,24 @@ type Status struct {
 	// without following the output itself.
 	CommandEnds       uint64 `json:"commandEnds,omitempty"`
 	LastCommandStatus int    `json:"lastCommandStatus,omitempty"`
+
+	// PromptsReady counts the times the shell said its line editor reads a
+	// new command line (OSC 133;B): input written from then on is read as
+	// typed. Written before, while the terminal still echoes, it shows twice.
+	PromptsReady uint64 `json:"promptsReady,omitempty"`
+	// AtPrompt: the shell's latest mark is a prompt ready for input. A
+	// command starting (OSC 133;C) or ending clears it.
+	AtPrompt bool `json:"atPrompt,omitempty"`
+	// ShellCwd is the folder the shell said it was in at its latest prompt
+	// (OSC 7), and InStartFolder whether that is the folder it started in.
+	ShellCwd      string `json:"shellCwd,omitempty"`
+	InStartFolder bool   `json:"inStartFolder,omitempty"`
 }
+
+// Idle reports whether the shell waits at a prompt, in the folder it started
+// in, with nothing running: a window may type a command into it instead of
+// starting another shell.
+func (s Status) Idle() bool { return !s.Done && s.AtPrompt && s.InStartFolder }
 
 // Options bound a manager. Zero values select the defaults.
 type Options struct {
@@ -126,27 +149,89 @@ type Terminal struct {
 	detaching bool
 	following chan struct{}
 	// markTail is an unfinished escape at the end of the output, which a
-	// command-end mark may complete in the next chunk.
+	// shell mark may complete in the next chunk.
 	markTail []byte
+	// startCwd is the folder the shell started in, resolved, to tell whether
+	// the shell is still there.
+	startCwd string
 }
 
-// commandEnd is the shell's mark that a command line ended, with its status.
-var commandEnd = regexp.MustCompile("\x1b\\]133;D;([0-9]{1,3})(?:\x07|\x1b\\\\)")
+// shellMark is one of the shell's marks (agentshell's zsh integration): a
+// command line ended, with its status (OSC 133;D;<status>); the line editor
+// reads input (OSC 133;B); a command line starts (OSC 133;C); the folder the
+// shell is in (OSC 7, a file URL).
+var shellMark = regexp.MustCompile("\x1b\\](?:133;(?:D;([0-9]{1,3})|([BC]))|7;([^\x07\x1b]*))(?:\x07|\x1b\\\\)")
 
-// countCommandEnds counts the command-end marks in data into s and returns
-// what to carry into the next chunk: an escape that may be a mark cut short.
-func countCommandEnds(s *Status, data []byte) []byte {
+// markTailLimit bounds the output carried for a mark cut across two chunks:
+// an OSC 7 carries a path.
+const markTailLimit = 4200
+
+// scanMarks reads the shell's marks in data into s and returns what to carry
+// into the next chunk: an escape that may be a mark cut short. startCwd is
+// the folder the shell started in, resolved.
+func scanMarks(s *Status, data []byte, startCwd string) []byte {
 	last := 0
-	for _, m := range commandEnd.FindAllSubmatchIndex(data, -1) {
-		s.CommandEnds++
-		s.LastCommandStatus, _ = strconv.Atoi(string(data[m[2]:m[3]]))
+	for _, m := range shellMark.FindAllSubmatchIndex(data, -1) {
+		switch {
+		case m[2] >= 0:
+			s.CommandEnds++
+			s.LastCommandStatus, _ = strconv.Atoi(string(data[m[2]:m[3]]))
+			s.AtPrompt = false
+		case m[4] >= 0 && data[m[4]] == 'B':
+			s.PromptsReady++
+			s.AtPrompt = true
+		case m[4] >= 0:
+			s.AtPrompt = false
+		case m[6] >= 0:
+			if cwd := fileURLPath(string(data[m[6]:m[7]])); cwd != s.ShellCwd {
+				s.ShellCwd = cwd
+				s.InStartFolder = sameFolder(cwd, startCwd)
+			}
+		}
 		last = m[1]
 	}
 	rest := data[last:]
-	if i := bytes.LastIndexByte(rest, 0x1b); i >= 0 && len(rest)-i < 24 {
-		return append([]byte(nil), rest[i:]...)
+	i := bytes.LastIndexByte(rest, 0x1b)
+	if i < 0 {
+		return nil
+	}
+	// A short escape may start any mark; a longer one only an OSC still open.
+	tail := rest[i:]
+	if len(tail) < 24 || (len(tail) < markTailLimit && bytes.HasPrefix(tail, []byte("\x1b]")) && !bytes.ContainsAny(tail[2:], "\x07\x1b")) {
+		return append([]byte(nil), tail...)
 	}
 	return nil
+}
+
+// fileURLPath is the path of an OSC 7 file URL (file://host/path, with %XX
+// escapes), or "" when it is not one.
+func fileURLPath(value string) string {
+	rest, ok := strings.CutPrefix(value, "file://")
+	if !ok {
+		return ""
+	}
+	i := strings.IndexByte(rest, '/')
+	if i < 0 {
+		return ""
+	}
+	path, err := url.PathUnescape(rest[i:])
+	if err != nil {
+		return rest[i:]
+	}
+	return path
+}
+
+// sameFolder reports whether a folder the shell named is the one it started
+// in, after symbolic links ($PWD keeps them: /tmp, not /private/tmp).
+func sameFolder(cwd, startCwd string) bool {
+	if cwd == "" || startCwd == "" {
+		return false
+	}
+	if cwd == startCwd {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(cwd)
+	return err == nil && resolved == startCwd
 }
 
 // Open re-attaches every terminal a previous Runner left running. One whose
@@ -212,7 +297,11 @@ func (m *Manager) adopt(r record) {
 }
 
 func (m *Manager) newTerminal(r record) *Terminal {
-	return &Terminal{m: m, hostID: r.Host, status: Status{ID: r.ID, Spec: r.Spec, CreatedAt: r.CreatedAt}, changed: make(chan struct{}), finished: make(chan struct{})}
+	start, err := filepath.EvalSymlinks(r.Spec.Cwd)
+	if err != nil {
+		start = r.Spec.Cwd
+	}
+	return &Terminal{m: m, hostID: r.Host, status: Status{ID: r.ID, Spec: r.Spec, CreatedAt: r.CreatedAt}, changed: make(chan struct{}), finished: make(chan struct{}), startCwd: start}
 }
 
 func (m *Manager) recordPath(id string) string { return filepath.Join(m.dir, id+".json") }
@@ -237,6 +326,24 @@ func (m *Manager) save(r record) error {
 		return err
 	}
 	return os.Rename(f.Name(), m.recordPath(r.ID))
+}
+
+// promptMarks reports whether a shell started with env says when its prompt
+// is ready: zsh, with Lazybox's integration as its startup files. Others
+// (bash, fish, sh) do not; a window waits for their output to settle.
+func promptMarks(shell string, env []string) bool {
+	if filepath.Base(shell) != "zsh" {
+		return false
+	}
+	var zdotdir, integration string
+	for _, entry := range env {
+		if value, ok := strings.CutPrefix(entry, "ZDOTDIR="); ok {
+			zdotdir = value
+		} else if value, ok := strings.CutPrefix(entry, agentshell.EnvZDOTDIR+"="); ok {
+			integration = value
+		}
+	}
+	return integration != "" && zdotdir == integration
 }
 
 // ValidSize reports whether a terminal size is within bounds.
@@ -291,6 +398,7 @@ func (m *Manager) Start(spec Spec, requestKey string) (*Terminal, error) {
 	if err != nil {
 		return nil, fmt.Errorf("terminal host failed to start: %w", err)
 	}
+	spec.PromptMarks = promptMarks(spec.Shell, spec.Env)
 	r := record{ID: rand.Text(), Host: host.ID(), Spec: spec, CreatedAt: time.Now().UTC()}
 	r.Spec.Env, r.Spec.Prepare = nil, nil
 	// Recorded before the shell runs: a Runner that dies at any point leaves a
@@ -461,7 +569,7 @@ func (t *Terminal) append(data []byte, end uint64) {
 		t.buf = nil
 	}
 	t.buf = append(t.buf, data...)
-	t.markTail = countCommandEnds(&t.status, append(t.markTail, data...))
+	t.markTail = scanMarks(&t.status, append(t.markTail, data...), t.startCwd)
 	if limit := t.m.opts.Scrollback; len(t.buf) > 2*limit {
 		t.buf = append([]byte(nil), t.buf[len(t.buf)-limit:]...)
 	}

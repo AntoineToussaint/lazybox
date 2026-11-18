@@ -1,0 +1,34 @@
+{
+  "name": "@lazybox/mobile",
+  "version": "0.0.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "ios": "expo run:ios",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@connectrpc/connect": "2.3.0",
+    "@lazybox/client-core": "0.0.0",
+    "@lazybox/protocol": "0.0.0",
+    "@lazybox/surfaces": "0.0.0",
+    "@noble/curves": "2.4.0",
+    "expo": "~58.0.26",
+    "expo-camera": "~58.0.14",
+    "expo-clipboard": "~58.0.4",
+    "expo-constants": "~58.0.16",
+    "expo-crypto": "~58.0.8",
+    "expo-haptics": "~58.0.8",
+    "expo-linking": "~58.0.17",
+    "expo-router": "~58.0.32",
+    "expo-secure-store": "~58.0.3",
+    "expo-status-bar": "~58.0.5",
+    "expo-symbols": "~58.0.5",
+    "expo-system-ui": "~58.0.7",
+    "react": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-safe-area-context": "~5.11.1",
+    "react-native-screens": "~4.30.1"
+  }
+}

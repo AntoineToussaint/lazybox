@@ -102,6 +102,8 @@ type Manager struct {
 	adopted map[string]bool
 	// files caches each workspace's file index for search and link resolution.
 	files indexCache
+	// order is the person's order of their workspaces (arrangement.go).
+	order []string
 }
 
 func New(root string, repositories []Repository) (*Manager, error) {
@@ -243,6 +245,7 @@ func New(root string, repositories []Repository) (*Manager, error) {
 		c.syncOwners()
 		keys[c.RequestKey], work[c.WorkID], m.items[c.ID] = true, true, c
 	}
+	m.loadArrangement()
 	return m, nil
 }
 
@@ -327,7 +330,7 @@ func (m *Manager) List() []Collection {
 			out = append(out, clone(c))
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	arrange(out, m.order)
 	return out
 }
 func (m *Manager) Get(id string) (Collection, error) {

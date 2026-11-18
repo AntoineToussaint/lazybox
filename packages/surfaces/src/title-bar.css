@@ -1,0 +1,31 @@
+/*
+ * No separate title bar (title-bar.ts): in the desktop app on macOS each
+ * window's header is its title bar, with the system's window buttons over its
+ * leading edge. Only a window the host marks `data-title-bar="overlay"` changes;
+ * a browser, the phone and the web app never are. `--title-bar-inset` and
+ * `--title-bar-height` come from the host, divided by the zoom; in full screen
+ * the buttons are hidden and so is their room.
+ */
+:root[data-title-bar="overlay"] [data-window-drag-region]:not([data-window-drag-region="false"]){-webkit-user-select:none;user-select:none}
+
+/* A workspace window: its header (brand, pages, actions). */
+:root[data-title-bar="overlay"] .workspace-shell .workspace-header{height:max(48px,var(--title-bar-height));min-height:max(48px,var(--title-bar-height))}
+:root[data-title-bar="overlay"]:not([data-full-screen]) .workspace-shell .workspace-header{padding-left:var(--title-bar-inset)}
+
+/* A chat, command console or artifact in its own window: its one toolbar. */
+:root[data-title-bar="overlay"] .native-toolbar.window-controls{min-height:var(--title-bar-height);padding-top:0;padding-bottom:0}
+:root[data-title-bar="overlay"]:not([data-full-screen]) .native-toolbar.window-controls{padding-left:var(--title-bar-inset)}
+
+/* A Web panel in its own window: the viewer's toolbar. */
+:root[data-title-bar="overlay"] .web-window .web-toolbar[data-window-drag-region]{min-height:var(--title-bar-height);padding-top:0;padding-bottom:0}
+:root[data-title-bar="overlay"]:not([data-full-screen]) .web-window .web-toolbar[data-window-drag-region]{padding-left:var(--title-bar-inset)}
+
+/* A panel group popped out into a window of its own: its tab bar. */
+:root[data-title-bar="overlay"][data-popout] .dockview-theme-lazybox{--dv-tabs-and-actions-container-height:max(32px,var(--title-bar-height))}
+:root[data-title-bar="overlay"][data-popout]:not([data-full-screen]) .dv-tabs-and-actions-container{padding-left:var(--title-bar-inset)}
+
+/* A notice drawn above a window's header, while it shows. */
+:root[data-title-bar="overlay"]:not([data-full-screen]) #root>.error:first-child,
+:root[data-title-bar="overlay"]:not([data-full-screen]) .desktop-root>.error:first-child,
+:root[data-title-bar="overlay"]:not([data-full-screen]) #root>p:only-child{padding-left:var(--title-bar-inset)}
+:root[data-title-bar="overlay"] #root>p:only-child{margin:0;min-height:var(--title-bar-height);display:flex;align-items:center}

@@ -3,6 +3,9 @@
 A release is an installable macOS app (Apple Silicon): `Lazybox.app` with the
 Runner, the `lazybox` CLI, the Claude worker and a pinned Node inside, shipped
 as a disk image and a Homebrew cask, and updating itself from a signed feed.
+It also carries the Runner and the CLI for Linux (x64 and arm64), as
+checksummed tarballs, for a Runner on another machine
+([REMOTE_RUNNERS.md](REMOTE_RUNNERS.md)); there is no Linux desktop app.
 What people do with it is in [INSTALL.md](INSTALL.md).
 
 | | |
@@ -59,6 +62,8 @@ artifacts on the run, nothing published.
 | `lazybox-v2.rb` | The cask for this version (the workflow pushes it to the tap) |
 | `RELEASE_NOTES.md` | The GitHub release body, from the changelog |
 | `THIRD_PARTY_NOTICES.txt` | Every bundled component's licence (below); also in the app and on the disk image |
+| `lazybox-runner-<v>-linux-{x64,arm64}.tar.gz` and `.sha256` | The Runner for a Linux machine: the app's `runtime/` tree without the app (static Runner and CLI, the pinned Node's official Linux build, the Claude worker without Claude Code, the phone app, the docs, the notices), with a `SHA256SUMS` of every file inside, all at the top level: the bundle `lazybox remote add --bundle` uploads. `node scripts/release/build.mjs --linux-only --version <v>` builds just these, on any OS |
+| `lazybox-cli-<v>-linux-{x64,arm64}.tar.gz` and `.sha256` | The CLI alone |
 | `SHA256SUMS` | Checksums of everything above |
 | `release.json` | How it was built: signing, notarization, updater key, Node, each runtime binary's signer |
 

@@ -1,6 +1,7 @@
 import { forwardRef, useLayoutEffect, useImperativeHandle, useRef, useState, type ComponentPropsWithoutRef } from 'react';
 import { createPortal } from 'react-dom';
 import { bindBackdropDismiss, isEditField, nudge, requestDialogClose } from './dismiss';
+import { beginDrag, preventMouseDown } from './drag-gesture';
 import './dialog.css';
 
 type DismissProps = {
@@ -25,16 +26,12 @@ export const DraggableDialog = forwardRef<HTMLDialogElement, ComponentPropsWitho
   const dismissal = useRef({ draft, onDismiss }); dismissal.current = { draft, onDismiss };
   /** A field of this dialog changed since it opened: its work would be lost. */
   const edited = useRef(false);
-  const drag = useRef<{ id: number; x: number; y: number; left: number; top: number } | null>(null);
+  /** Ends the header drag under way. */
+  const drag = useRef<(() => void) | null>(null);
   const moved = useRef(false);
   const [dragging, setDragging] = useState(false);
 
-  const stop = () => {
-    const id = drag.current?.id;
-    drag.current = null;
-    if (id !== undefined && dialog.current?.hasPointerCapture(id)) dialog.current.releasePointerCapture(id);
-    setDragging(false);
-  };
+  const stop = () => { drag.current?.(); drag.current = null; setDragging(false); };
   const center = () => {
     stop(); moved.current = false;
     for (const property of ['left', 'top', 'right', 'bottom', 'margin']) dialog.current?.style.removeProperty(property);
@@ -85,7 +82,6 @@ export const DraggableDialog = forwardRef<HTMLDialogElement, ComponentPropsWitho
     open.observe(node, { attributes: true, attributeFilter: ['open'] });
     const size = new ResizeObserver(fit); size.observe(node);
     window.addEventListener('resize', fit);
-    window.addEventListener('blur', stop);
     const change = (event: Event) => { if (event.isTrusted && isEditField(event.target)) edited.current = true; };
     node.addEventListener('input', change); node.addEventListener('change', change);
     const unbind = bindBackdropDismiss(node, () => {
@@ -94,7 +90,8 @@ export const DraggableDialog = forwardRef<HTMLDialogElement, ComponentPropsWitho
       if (onDismiss) onDismiss(); else requestDialogClose(node);
     });
     return () => {
-      open.disconnect(); size.disconnect(); window.removeEventListener('resize', fit); window.removeEventListener('blur', stop); node.removeEventListener('input', change); node.removeEventListener('change', change); unbind();
+      drag.current?.();
+      open.disconnect(); size.disconnect(); window.removeEventListener('resize', fit); node.removeEventListener('input', change); node.removeEventListener('change', change); unbind();
       document.removeEventListener('focusin', remember, true);
       // Unmounted while open (most dialogs close by going away): the focus goes back too.
       if (node.open || node.contains(document.activeElement)) giveBack();
@@ -114,18 +111,23 @@ export const DraggableDialog = forwardRef<HTMLDialogElement, ComponentPropsWitho
     onPointerDown={event => {
       props.onPointerDown?.(event);
       if (event.defaultPrevented || event.button !== 0 || !event.isPrimary || !isHandle(event.target)) return;
-      const bounds = event.currentTarget.getBoundingClientRect();
-      drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, left: bounds.left, top: bounds.top };
-      event.currentTarget.setPointerCapture(event.pointerId); setDragging(true); event.preventDefault();
+      event.preventDefault();
+      const node = event.currentTarget, bounds = node.getBoundingClientRect(), x = event.clientX, y = event.clientY;
+      // Where it was, for Escape to put it back.
+      const was = { moved: moved.current, style: ['left', 'top', 'right', 'bottom', 'margin'].map(property => [property, node.style.getPropertyValue(property)] as const) };
+      setDragging(true);
+      drag.current = beginDrag('move', {
+        pointerId: event.pointerId, capture: node,
+        onMove: next => move(bounds.left + next.clientX - x, bounds.top + next.clientY - y),
+        onEnd: reason => {
+          drag.current = null; setDragging(false);
+          if (reason !== 'escape') return;
+          for (const [property, value] of was.style) { if (value) node.style.setProperty(property, value); else node.style.removeProperty(property); }
+          moved.current = was.moved;
+        },
+      });
     }}
-    onPointerMove={event => {
-      props.onPointerMove?.(event);
-      const start = drag.current;
-      if (start?.id === event.pointerId) move(start.left + event.clientX - start.x, start.top + event.clientY - start.y);
-    }}
-    onPointerUp={event => { props.onPointerUp?.(event); if (drag.current?.id === event.pointerId) stop(); }}
-    onPointerCancel={event => { props.onPointerCancel?.(event); stop(); }}
-    onLostPointerCapture={event => { props.onLostPointerCapture?.(event); stop(); }}
+    onMouseDown={event => { props.onMouseDown?.(event); if (!event.defaultPrevented && isHandle(event.target)) preventMouseDown(event); }}
     onDoubleClick={event => { props.onDoubleClick?.(event); if (!event.defaultPrevented && isHandle(event.target)) center(); }}
     onKeyDown={event => {
       props.onKeyDown?.(event);

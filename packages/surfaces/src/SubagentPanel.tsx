@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { beginDrag, preventMouseDown } from './drag-gesture';
 import { Icon } from './Icons';
 import { CodeBlock } from './RichContent';
 import { useNow } from './LiveIndicator';
@@ -77,10 +78,14 @@ export function SubagentPanel() {
     const node = host.current, bounds = chat()?.getBoundingClientRect();
     if (!node || !bounds) return;
     const own = node.getBoundingClientRect(), start = { x: event.clientX, y: event.clientY, left: own.left - bounds.left, top: own.top - bounds.top };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const move = (next: PointerEvent) => setPosition(clamp(start.left + next.clientX - start.x, start.top + next.clientY - start.y));
-    const end = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); };
-    window.addEventListener('pointermove', move); window.addEventListener('pointerup', end);
+    event.preventDefault();
+    event.currentTarget.focus({ preventScroll: true });
+    beginDrag('move', {
+      pointerId: event.pointerId, capture: event.currentTarget,
+      onMove: next => setPosition(clamp(start.left + next.clientX - start.x, start.top + next.clientY - start.y)),
+      // Escape puts it back where it was (and does not close it).
+      onEnd: reason => { if (reason === 'escape') setPosition(clamp(start.left, start.top)); },
+    });
   };
   const headerKeys = (event: KeyboardEvent<HTMLElement>) => {
     if (event.target !== event.currentTarget || docked || narrow) return;
@@ -97,11 +102,14 @@ export function SubagentPanel() {
     if (event.button !== 0) return;
     event.preventDefault();
     const startX = event.clientX, startWidth = width, max = (chat()?.clientWidth ?? 1200) - 320;
-    event.currentTarget.setPointerCapture(event.pointerId);
+    event.currentTarget.focus({ preventScroll: true });
     let last = startWidth;
-    const move = (next: PointerEvent) => { last = Math.max(280, Math.min(max, startWidth - (next.clientX - startX))); setWidth(last); };
-    const end = () => { saveWidth(last); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); };
-    window.addEventListener('pointermove', move); window.addEventListener('pointerup', end);
+    beginDrag('x', {
+      pointerId: event.pointerId, capture: event.currentTarget,
+      onMove: next => { last = Math.max(280, Math.min(max, startWidth - (next.clientX - startX))); setWidth(last); },
+      // Escape puts the width back.
+      onEnd: reason => { if (reason === 'escape') setWidth(startWidth); else saveWidth(last); },
+    });
   };
   const resizeKeys = (event: KeyboardEvent<HTMLElement>) => {
     const delta = event.key === 'ArrowLeft' ? 24 : event.key === 'ArrowRight' ? -24 : 0;
@@ -113,8 +121,8 @@ export function SubagentPanel() {
   return <aside ref={host} className="subagent-panel" data-mode={narrow ? 'sheet' : panel.mode} data-status={status} aria-label={`${command ? 'Background command' : 'Sub-agent'}: ${title}`} data-kind={agent.kind}
     style={!docked && !narrow && position ? { left: position.left, top: position.top, right: 'auto' } : undefined}
     onKeyDown={event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.stopPropagation(); close(); } }}>
-    {docked && <div className="subagent-panel-resize" role="separator" aria-orientation="vertical" aria-label={`Resize ${noun} panel`} aria-valuenow={width} aria-valuemin={280} tabIndex={0} onPointerDown={resize} onKeyDown={resizeKeys}/>}
-    <header ref={header} tabIndex={-1} className="subagent-panel-head" data-movable={!docked && !narrow || undefined} title={!docked && !narrow ? 'Drag to move. Arrow keys move it.' : undefined} onPointerDown={startDrag} onKeyDown={headerKeys}>
+    {docked && <div className="subagent-panel-resize" role="separator" aria-orientation="vertical" aria-label={`Resize ${noun} panel`} aria-valuenow={width} aria-valuemin={280} tabIndex={0} onPointerDown={resize} onMouseDown={preventMouseDown} onKeyDown={resizeKeys}/>}
+    <header ref={header} tabIndex={-1} className="subagent-panel-head" data-movable={!docked && !narrow || undefined} title={!docked && !narrow ? 'Drag to move. Arrow keys move it.' : undefined} onPointerDown={startDrag} onMouseDown={event => { if (!docked && !narrow && !(event.target as Element).closest('button')) preventMouseDown(event); }} onKeyDown={headerKeys}>
       <SubagentMark status={status}/>
       <div className="subagent-panel-title">
         <span className="subagent-eyebrow">{command ? 'Background command' : agent.depth > 0 ? 'Nested sub-agent' : 'Sub-agent'}</span>

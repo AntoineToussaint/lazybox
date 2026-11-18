@@ -66,7 +66,7 @@ function textWidth(text: string, font: string): number {
  * when it is not the only one, then the numbers as compact chips. What does
  * not fit folds whole into "⋯" — nothing on the line is cut.
  */
-export function ChatHeader({ agentName, session, sessionID, title, status, statusText, statusBusy, modelLabel, realTitle, branch, modelRequested, shownAccount, onOpenChat, menu, onContextMenu, onPickModel, stats, origin, review }: Omit<HeaderProps, 'inspection'> & {
+export function ChatHeader({ agentName, session, sessionID, title, status, statusText, statusBusy, modelLabel, realTitle, branch, modelRequested, shownAccount, onOpenChat, menu, onContextMenu, onPickModel, onSwitchSubscription, stats, origin, review }: Omit<HeaderProps, 'inspection'> & {
   /** Review this conversation's work (ReviewFromChat.tsx): first of the actions; folds into ⋯ in a slim panel. */
   review?: ReactNode;
   /** Where the workspace's work started (an issue), as a chip beside the actions. */
@@ -87,6 +87,8 @@ export function ChatHeader({ agentName, session, sessionID, title, status, statu
   menu: ReactNode;
   /** The model picker (`/model`): the model chip opens it. */
   onPickModel?(): void;
+  /** Switch subscription… (`/subscription`): the subscription chip opens it. */
+  onSwitchSubscription?(): void;
   stats: HeaderStats;
 }) {
   const header = useRef<HTMLElement>(null), line = useRef<HTMLDivElement>(null), details = useRef<HTMLDivElement>(null), more = useRef<HTMLButtonElement>(null);
@@ -137,11 +139,11 @@ export function ChatHeader({ agentName, session, sessionID, title, status, statu
     const items: HeaderItem[] = [{ id: 'status', width: Math.max(reserve(textWidth(statusText, font), 12), statusBusy ? textWidth('Running a command · 10m 00s', font) : 0) + 14 * scale }];
     if (showBranch) items.push({ id: 'branch', width: dot + textWidth(branch!.name, mono) + 15 * scale });
     items.push({ id: 'model', width: dot + textWidth(modelText, font) + (onPickModel ? 17 : 0) * scale });
-    if (shownAccount) items.push({ id: 'account', width: dot + textWidth(shownAccount, font) });
+    if (shownAccount) items.push({ id: 'account', width: dot + textWidth(shownAccount, font) + (onSwitchSubscription ? 17 : 0) * scale });
     for (const id of ['prompts', 'artifacts', 'background', 'usage', 'tools'] as const) if (present[id]) items.push({ id, width: chip + STAT_WIDTH[id] * scale, urgent: present[id] === 'running' });
     // A little slack: an estimate never runs the line under the panel's edge.
     return fitHeader(items, width - 6 - 12 * scale, 0, MORE_WIDTH * scale);
-  }, [width, present, statusText, statusBusy, showBranch, branch, modelText, onPickModel, shownAccount]);
+  }, [width, present, statusText, statusBusy, showBranch, branch, modelText, onPickModel, shownAccount, !!onSwitchSubscription]);
   const folded = new Set(plan.folded);
   useEffect(() => {
     const close = () => details.current?.hidePopover?.();
@@ -157,7 +159,9 @@ export function ChatHeader({ agentName, session, sessionID, title, status, statu
         // tabIndex: in WebKit (the desktop app) a button is in the Tab order only when it asks.
         ? <button type="button" tabIndex={0} className="chat-model chat-model-button" data-requested={modelRequested || undefined} title={`${modelLabel || agentName}${requested}\nSwitch model (/model)`} aria-label={`Model ${modelText}: switch model`} onClick={onPickModel}>{modelText}<Icon name="chevron" size={10}/></button>
         : <span className="chat-model" data-requested={modelRequested || undefined} title={`${modelLabel || agentName}${requested}`}>{modelText}</span>;
-      case 'account': return shownAccount && <span className="chat-account" title="Subscription">{shownAccount}</span>;
+      case 'account': return shownAccount && (onSwitchSubscription
+        ? <button type="button" tabIndex={0} className="chat-account chat-model-button" title={`Subscription: ${shownAccount}\nSwitch subscription (/subscription)`} aria-label={`Subscription ${shownAccount}: switch subscription`} onClick={onSwitchSubscription}>{shownAccount}<Icon name="chevron" size={10}/></button>
+        : <span className="chat-account" title="Subscription">{shownAccount}</span>);
       // A number chip moves between the line and "⋯" without remounting: its open list, its
       // polling and the "N prompts" slot (PromptNavigator renders into it) stay as they are.
       case 'prompts': case 'artifacts': case 'background': case 'usage': case 'tools': return <span className="chat-stat-host" ref={host => { if (host && chips[id].parentNode !== host) host.appendChild(chips[id]); }}/>;

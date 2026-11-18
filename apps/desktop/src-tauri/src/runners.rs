@@ -6,8 +6,11 @@
 //! Runner). Each is read as the window's own is: a loopback origin and a
 //! bearer from a private endpoint file that only this user can read. A Runner
 //! that is listed gets an HTTP scope for exactly its RPC path, so the webview
-//! can reach it and nothing else. Nothing here listens or leaves the machine;
-//! Runners on other machines are reached as paired devices (step 3), not here.
+//! can reach it and nothing else. Nothing here listens or leaves the machine.
+//! A Runner on another computer (REMOTE_RUNNERS.md) is listed the same way:
+//! its locator, written by `lazybox remote add`, names the endpoint file of
+//! the link agent that serves it on loopback (links.rs keeps one running), and
+//! carries a `remote` field; the agent's `status.json` says how the link is.
 use crate::{Bootstrap, RPC_PATH, host::APP_WEBVIEWS};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,6 +42,80 @@ pub struct Listing {
     url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    /// A Runner on another computer, reached through a link agent (links.rs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<Remote>,
+}
+
+/// What `lazybox remote add` writes in a remote Runner's locator, and what
+/// its link agent says in `status.json` beside the endpoint file.
+#[derive(Debug, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Remote {
+    host: String,
+    route: String,
+    machine: String,
+    os: String,
+    fingerprint: String,
+    /// The link: "connecting", "connected", "reconnecting", "refused", "stopped".
+    state: String,
+    code: String,
+    problem: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rtt_ms: Option<u64>,
+}
+
+/// A remote Runner's locator `remote` field, when the file has one.
+fn remote_of(locator: &Path) -> Option<Remote> {
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(locator).ok()?).ok()?;
+    let remote = value.get("remote")?;
+    let text = |key: &str| {
+        remote
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .chars()
+            .take(256)
+            .collect::<String>()
+    };
+    Some(Remote {
+        host: text("host"),
+        route: text("route"),
+        machine: text("machine"),
+        os: text("os"),
+        fingerprint: text("fingerprint"),
+        state: "stopped".into(),
+        ..Remote::default()
+    })
+}
+
+/// The link agent's last word about its link (`status.json` beside the endpoint).
+fn read_link_status(remote: &mut Remote, endpoint: &Path) {
+    let Some(value) = endpoint
+        .parent()
+        .and_then(|dir| fs::read(dir.join("status.json")).ok())
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+    else {
+        return;
+    };
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .chars()
+            .take(512)
+            .collect::<String>()
+    };
+    remote.state = text("state");
+    remote.code = text("code");
+    remote.problem = text("problem");
+    remote.rtt_ms = value.get("rttMs").and_then(|v| v.as_u64());
+}
+
+/// What to do about a remote Runner whose link agent is not serving yet.
+fn remote_hint(remote: &Remote) -> String {
+    format!("Connecting to {} over SSH…", remote.host)
 }
 
 /// What a launcher writes (scripts/user-config.mjs): where the Runner's private endpoint file is.
@@ -225,9 +302,14 @@ fn listing(
         problem: String::new(),
         url: None,
         token: None,
+        remote: remote_of(locator),
+    };
+    let hint = |out: &Listing| match &out.remote {
+        Some(remote) => remote_hint(remote),
+        None => start_hint(&name),
     };
     if !endpoint.exists() {
-        out.problem = start_hint(&name);
+        out.problem = hint(&out);
         return out;
     }
     if let Err(problem) = private_file(endpoint) {
@@ -252,8 +334,12 @@ fn listing(
         return out;
     }
     if !listening(&found.url) {
-        out.problem = start_hint(&name);
+        out.problem = hint(&out);
         return out;
+    }
+    // The link agent serves even while it reconnects: its status says how the link is.
+    if let Some(remote) = out.remote.as_mut() {
+        read_link_status(remote, endpoint);
     }
     out.state = "running";
     out.url = Some(found.url);
@@ -322,6 +408,7 @@ fn discover(
                 problem,
                 url: None,
                 token: None,
+                remote: None,
             }),
         }
     }
@@ -355,12 +442,26 @@ fn list(
 ) -> Result<Vec<Listing>, String> {
     let own = host.connection.lock().map_err(|e| e.to_string())?.clone();
     let added = read_added(&added_file(app)?);
-    let listings = discover(
+    let mut listings = discover(
         config_dir().as_deref(),
         &added,
         &own,
         host.reload_endpoint.as_deref(),
     );
+    // One link agent per computer the person added (links.rs).
+    let remotes: Vec<(String, bool)> = listings
+        .iter()
+        .filter(|l| l.remote.is_some() && l.state != "invalid")
+        .map(|l| (l.name.clone(), l.state == "running"))
+        .collect();
+    if let Some(problem) = crate::links::ensure(app, &remotes) {
+        for listing in listings
+            .iter_mut()
+            .filter(|l| l.remote.is_some() && l.state == "stopped")
+        {
+            listing.problem = problem.clone();
+        }
+    }
     for url in listings.iter().filter_map(|l| l.url.as_deref()) {
         allow(app, runners, url)?;
     }
@@ -625,6 +726,66 @@ mod tests {
         );
         assert_eq!(listings[0].state, "invalid");
         assert_eq!(listings[0].source, "added");
+    }
+
+    #[test]
+    fn a_remote_runner_is_listed_through_its_link_agent_with_the_links_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let live = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        // What `lazybox remote add` writes: a locator with `remote`, naming the link agent's endpoint.
+        let file = endpoint(
+            temp.path(),
+            "remotes/build-box/endpoint.json",
+            &live,
+            "remoterunneridentity00",
+        );
+        fs::create_dir_all(config.join("runners")).unwrap();
+        fs::write(
+            config.join("runners/build-box.json"),
+            serde_json::json!({ "name": "build-box", "product": "Lazybox", "endpoint": file,
+                "remote": { "host": "build-box", "route": "ssh", "machine": "build-box", "os": "Linux", "fingerprint": "SHA256:abc" } })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            file.parent().unwrap().join("status.json"),
+            serde_json::json!({ "state": "reconnecting", "rttMs": 41, "problem": "", "pid": 1 })
+                .to_string(),
+        )
+        .unwrap();
+        let listings = discover(Some(&config), &Added::default(), &own(), None);
+        let remote = listings[0].remote.as_ref().unwrap();
+        assert_eq!(listings[0].state, "running");
+        assert_eq!(listings[0].url.as_deref(), Some(live.as_str()));
+        assert_eq!(
+            (
+                remote.host.as_str(),
+                remote.route.as_str(),
+                remote.state.as_str(),
+                remote.rtt_ms
+            ),
+            ("build-box", "ssh", "reconnecting", Some(41))
+        );
+        // The link agent is not serving (yet): stopped, and the app is connecting.
+        let gone = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead = format!("http://127.0.0.1:{}", gone.local_addr().unwrap().port());
+        drop(gone);
+        endpoint(
+            temp.path(),
+            "remotes/build-box/endpoint.json",
+            &dead,
+            "remoterunneridentity00",
+        );
+        let listings = discover(Some(&config), &Added::default(), &own(), None);
+        assert_eq!(listings[0].state, "stopped");
+        assert_eq!(listings[0].problem, "Connecting to build-box over SSH…");
+        assert!(listings[0].token.is_none());
+        // A local Runner has no `remote`.
+        let json = serde_json::to_value(&listings[0]).unwrap();
+        assert_eq!(json["remote"]["host"], "build-box");
+        assert!(json["remote"].get("rttMs").is_none());
     }
 
     #[test]

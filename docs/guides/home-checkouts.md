@@ -60,18 +60,22 @@ message gets one button per command:
 - **Create api home and run** when the repository has no home yet: it clones
   one first.
 
-The command is typed at the shell's prompt exactly as the agent wrote it,
-`env -u SOME_VAR` and every argument included, and waits there: read it, edit
-it if you like, and press Return. Nothing runs by itself. The shell is a real
-terminal, so a login can ask for a password or open a browser sign-in, which
-an agent's own commands cannot (they have no terminal). If the agent wrote a
+The command runs exactly as the agent wrote it, `env -u SOME_VAR` and every
+argument included, once the shell is ready, in the shell already open there
+when it is idle at its prompt, otherwise a new one. A script of several
+lines, or a command with something to fill in, is typed at the prompt
+instead: read it, edit it, and press Return. The shell is a real terminal, so
+a login can ask for a password or open a browser sign-in, which an agent's own
+commands cannot (they have no terminal); click the sign-in link it prints to
+open it. If the agent wrote a
 `cd` into a temporary checkout (`cd /tmp/api-main && …`), that `cd` is left
 out: the home checkout is the place it stood for.
 
 When the command ends, the button says *Finished in api home · exit 0* and
 offers **Tell Claude it's done**: it sends *Done: `<command>` finished (exit
 0).* to the conversation, so an agent waiting for your login goes on. The
-**⌄** beside the button runs it in another home or your home folder, opens
+**⌄** beside the button pastes it without running (**Paste in terminal
+(don't run)**), runs it in another home or your home folder, opens
 **your own terminal app** at the home with the command copied to paste, or
 just copies it.
 

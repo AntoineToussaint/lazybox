@@ -15,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const helperArgument = "--lazybox-owned-process-v1"
@@ -459,7 +461,7 @@ func sweep(group, owner int) {
 
 // stepOut moves the helper into another live group of its session.
 func stepOut(group, owner int) bool {
-	session, _ := syscall.Getsid(0)
+	session, _ := unix.Getsid(0) // syscall has Getsid on darwin only
 	for _, target := range []int{owner, session} {
 		if target > 0 && target != group && syscall.Setpgid(0, target) == nil {
 			return true

@@ -16,11 +16,13 @@ import (
 	"time"
 )
 
-// Service is the launchd job that runs the installed Runner as a per-user
-// agent: started at login, started again if it exits, and never tied to the
-// desktop app's lifetime. Its agents, commands and terminals live in session
-// hosts outside the job's process group (SESSION_HOSTS.md), so stopping or
-// replacing the job leaves them running for the next Runner to re-attach.
+// Service is how the installed Runner runs as a per-person service: started
+// at login (or boot), started again if it exits, and never tied to the
+// desktop app's lifetime. A Manager renders it as a launchd job, a systemd
+// user unit or its own record. Its agents, commands and terminals live in
+// session hosts outside the service's process group (SESSION_HOSTS.md), so
+// stopping or replacing the service leaves them running for the next Runner
+// to re-attach.
 type Service struct {
 	Label     string
 	Program   string
@@ -120,13 +122,6 @@ func (s Service) Plist() ([]byte, error) {
 
 func xmlEscape(b *bytes.Buffer, s string) { _ = xml.EscapeText(b, []byte(s)) }
 
-// Installed is what the plist on disk says: the program and the release it runs.
-type Installed struct {
-	Program string
-	Version string
-	Env     map[string]string
-}
-
 // ReadPlist reads a job definition back with plutil, the system's own parser.
 func ReadPlist(ctx context.Context, path string) (Installed, error) {
 	out, err := exec.CommandContext(ctx, "/usr/bin/plutil", "-convert", "json", "-o", "-", path).Output()
@@ -151,20 +146,41 @@ func ReadPlist(ctx context.Context, path string) (Installed, error) {
 	return i, nil
 }
 
-// Job is launchd's view of a loaded job.
-type Job struct {
-	Loaded   bool
-	Running  bool
-	PID      int
-	LastExit string
-}
-
 // Launchd drives launchctl in this person's GUI domain. Run is replaceable so
-// tests never touch the real launchd.
+// tests never touch the real launchd. It is the Manager on macOS.
 type Launchd struct {
 	Domain string
 	Run    func(ctx context.Context, args ...string) ([]byte, error)
 }
+
+func (Launchd) Kind() string                     { return ManagerLaunchd }
+func (Launchd) DefinitionPath(p Paths) string    { return p.Definition }
+func (Launchd) Render(s Service) ([]byte, error) { return s.Plist() }
+func (Launchd) ReadDefinition(ctx context.Context, path string) (Installed, error) {
+	return ReadPlist(ctx, path)
+}
+
+// Status is launchd's view of the job, which starts at every login.
+func (l Launchd) Status(ctx context.Context, p Paths) (Job, error) {
+	j, err := l.Print(ctx, p.Label)
+	if j.Loaded {
+		j.Detail = "starts at login"
+	}
+	return j, err
+}
+
+// Activate loads the plist; RunAtLoad starts the Runner.
+func (l Launchd) Activate(ctx context.Context, p Paths) error {
+	return l.Bootstrap(ctx, p.Definition)
+}
+
+// Deactivate boots the job out: launchd loads it again at the next login.
+func (l Launchd) Deactivate(ctx context.Context, p Paths) error { return l.Bootout(ctx, p.Label) }
+func (l Launchd) Restart(ctx context.Context, p Paths) error    { return l.Kickstart(ctx, p.Label) }
+func (l Launchd) Remove(ctx context.Context, p Paths) error     { return l.Bootout(ctx, p.Label) }
+
+// Logs is the file the plist sends the Runner's output to.
+func (Launchd) Logs(p Paths) LogSource { return LogSource{File: p.Log()} }
 
 // UserLaunchd is the current user's GUI domain (gui/<uid>), where per-user
 // agents in ~/Library/LaunchAgents load.

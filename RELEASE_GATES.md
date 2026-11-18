@@ -59,6 +59,7 @@ into parallel jobs:
 | Job | Runner | Runs |
 | --- | --- | --- |
 | `go` | macOS | `make fmt-check check-go`, `make test` at full parallelism, `make test-outlive` (`-race`, `GOMAXPROCS=1`), then the launcher's `make test-environments` |
+| `go-linux` | Linux | the same Go checks, tests and race run on Ubuntu 24.04, with a systemd user manager (lingering) so the scope tests run ([SESSION_HOSTS.md](SESSION_HOSTS.md#on-linux)) |
 | `generated` | Linux | `make check-generated`: Codefly + Buf regeneration drift, `buf lint`, `buf breaking` |
 | `typescript` | Linux | `make check-workspaces`: typecheck, workspace links, `test:client`, `test:worker` |
 | `desktop` | macOS | `make check-desktop` |
@@ -76,10 +77,10 @@ fails the first job, as it fails staging. A failed shard uploads the
 screenshots its suites saved (`.cache/*.png`, `/tmp/lazybox-*.png`) and its
 gate report. The suites drive Playwright as a library, so there are no traces.
 
-macOS runs only what cannot run elsewhere: the Runner does not compile for
-Linux today (`internal/processguard` calls `syscall.Getsid`, which Go defines
-only for darwin/BSD), the launcher refuses other hosts, and Tauri embeds
-WKWebView. CI runs the UI gates on Linux: they drive Playwright against the
+The Go suite runs on macOS, where the desktop's Runner runs, and on Linux,
+where a Runner for remote use runs ([REMOTE_RUNNERS.md](REMOTE_RUNNERS.md)).
+macOS runs only what cannot run elsewhere: the launcher refuses other hosts,
+and Tauri embeds WKWebView. CI runs the UI gates on Linux: they drive Playwright against the
 fixture Runner, and the suites take their browsers from
 [`scripts/fixtures/playwright.mjs`](scripts/fixtures/playwright.mjs), whose
 pages report macOS off a Mac, so ⌘ stays ⌘ (the suites press `Meta`). Run

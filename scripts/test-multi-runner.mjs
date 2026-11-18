@@ -87,6 +87,20 @@ try {
     await expect(workingGroup).toContainText('Billing service');
     await expect(workingGroup).toContainText('Docs site');
     await expect(devGroup).not.toContainText('Billing service');
+    // Each Runner keeps its own order: a row moves within its Runner's section, on that Runner (ArrangeWorkspaces).
+    if (scheme === 'dark') {
+      const names = workingGroup.locator('.runner-workspace-name');
+      const before = await names.allTextContents();
+      assert.equal(before.length, 2);
+      await workingGroup.locator('.runner-workspace-row').filter({ hasText: before[1] }).focus();
+      await page.keyboard.press('Alt+Shift+ArrowUp');
+      await expect(names).toHaveText([before[1], before[0]]);
+      await expect.poll(() => working.mutations.filter(m => m.method === 'ArrangeWorkspaces').length).toBe(1);
+      assert.equal(dev.mutations.filter(m => m.method === 'ArrangeWorkspaces').length, 0, 'another Runner\'s order changed');
+      await expect(workingGroup.locator('.runner-workspace-row').filter({ hasText: before[1] })).toBeFocused();
+      await page.keyboard.press('Alt+Shift+ArrowDown');
+      await expect(names).toHaveText(before);
+    }
     await expect(releaseGroup).toHaveAttribute('data-health', 'stopped');
     await expect(releaseGroup.locator('.runner-absent')).toHaveText('Open Lazybox to start it.');
     // What waits on each Runner, on its header.

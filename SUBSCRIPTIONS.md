@@ -102,8 +102,20 @@ each one's state and reset) and **Wait for reset**. Only while an account
 policy covers the provider does it also offer **Always switch automatically**
 (the first time, one question offers it for every conversation). Waiting continues the request on the same subscription
 at the reset while the conversation is open in a window, or the next time it is
-opened; this is the client's timer, not the Runner's. The session ⋯ menu has
-**Switch subscription…** at any time. Provider tokens are never shown.
+opened; this is the client's timer, not the Runner's. The session ⋯ menu, the
+subscription in the conversation's header and `/subscription` open **Switch
+subscription…** at any time. Provider tokens are never shown.
+
+Every list of subscriptions has one order (`subscription-groups.ts`, with
+`orderSubscriptions` in `subscription-model.ts`): grouped by provider (Claude,
+Codex, then each ACP agent by name) under a small header with its icon, and
+within a group the current one first, then the available ones, then those not
+known to be limited, then the limited ones, by name within each. One group
+shows no header. That is Settings → Subscriptions, the switch dialog and the
+limit card (the conversation's own provider only: a conversation cannot move
+across providers), and the account pickers of New conversation, New task, a
+start request and Missions (`<optgroup>`s when they mix providers); a limited
+one says when it is back.
 
 Every surface says when a limited subscription can be used again the same way
 (`backAt`/`comeback` in `subscription-model.ts`): the conversation card and

@@ -5,6 +5,7 @@ import 'dockview/dist/styles/dockview.css';
 import './dock.css';
 import { iconElement } from './Icons';
 import { focusWhenShown } from './focus';
+import { beginDrag, type DragAxis } from './drag-gesture';
 import { refreshNativeWebViews } from './native-web-view';
 import { EMPTY_CONTENT, fromDockview, groupStates, needsEmptyContent, paramsOf, PANEL_COMPONENT, sameSizes, structureKey, TAB_COMPONENT, toDockview, type Overlay, type PanelParams } from './dock-bridge';
 import { clampSidebar, SIDEBAR_MAX, SIDEBAR_MIN } from './PanelLayout';
@@ -12,6 +13,7 @@ import { fitWidth, groups, isSidebar, minWidthOf, sidebarAt, sidebarKinds, type 
 import type { LayoutDirection } from './actions';
 import { groupRects, neighbourIn, resizeEdge, resizeStep, shareOf, tabAt } from './dock-keyboard';
 import './dock-keyboard.css';
+import { attachPopoutTitleBar } from './title-bar';
 
 type Arranged = Pick<WorkspacePage, 'layout' | 'floating' | 'popouts'>;
 /** What a group's header actions and menus need to know about it. */
@@ -544,8 +546,25 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     };
     // Whether a divider is being dragged, until its last resize is reported.
     let dividerDrag = false, released = 0;
-    const pressed = (event: PointerEvent) => { dividerDrag = event.target instanceof Element && !!event.target.closest('.dv-sash'); clearTimeout(released); };
-    const lifted = () => { if (document.documentElement.classList.contains('dock-dragging')) { document.documentElement.classList.remove('dock-dragging'); refreshNativeWebViews(); } if (dividerDrag) { clearTimeout(released); released = window.setTimeout(() => { dividerDrag = false; }, 450); } };
+    // dockview's own drags (a divider, a floating group's edge or title bar, a tab or a group)
+    // go through the app's drag gesture, so none of them selects text (drag-gesture.ts).
+    let endDrag: (() => void) | undefined;
+    const drag = (axis: DragAxis, event?: PointerEvent, handle?: Element) => {
+      endDrag?.();
+      const cursor = handle ? getComputedStyle(handle).cursor : '';
+      endDrag = beginDrag(axis, { pointerId: event?.pointerId, cursor: cursor && cursor !== 'auto' ? cursor : undefined, escape: false, onEnd: () => { endDrag = undefined; } });
+    };
+    const pressed = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      dividerDrag = !!target?.closest('.dv-sash'); clearTimeout(released);
+      if (event.button !== 0 || !target) return;
+      const edge = target.closest('.dv-sash, [class^="dv-resize-handle-"]');
+      if (edge) { drag(/^(row|ns|n|s)-resize$/.test(getComputedStyle(edge).cursor) ? 'y' : 'x', event, edge); return; }
+      // A floating group moves by its title bar, or anywhere with Shift.
+      const floating = target.closest('.dv-resize-container');
+      if (floating && !target.closest('button, input, select, textarea, a, [contenteditable="true"]') && (target.closest('.dv-floating-titlebar') || event.shiftKey)) drag('move', event);
+    };
+    const lifted = () => { endDrag?.(); if (document.documentElement.classList.contains('dock-dragging')) { document.documentElement.classList.remove('dock-dragging'); refreshNativeWebViews(); } if (dividerDrag) { clearTimeout(released); released = window.setTimeout(() => { dividerDrag = false; }, 450); } };
     element.addEventListener('pointerdown', pressed, true);
     // Enter or Space on a minimized group's tab opens it, as a click does.
     const tabKey = (event: KeyboardEvent) => {
@@ -555,9 +574,14 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     };
     element.addEventListener('keydown', tabKey);
     window.addEventListener('pointerup', lifted, true);
-    // Text is not selected while a tab is dragged.
+    // A tab or a group dragged is a drag gesture too (a floating group's title bar already began one).
     // Native web views step aside while dragging (native-web-view.ts), and come back after.
-    const dragging = (on: boolean) => () => { if (document.documentElement.classList.toggle('dock-dragging', on) !== on) return; refreshNativeWebViews(); };
+    const dragging = (on: boolean) => () => {
+      const root = document.documentElement;
+      if (root.classList.contains('dock-dragging') === on) return;
+      if (!on) endDrag?.(); else if (!endDrag) drag('move');
+      root.classList.toggle('dock-dragging', on); refreshNativeWebViews();
+    };
     // A Web panel's native view belongs to this window: it is not dropped into a popped-out one.
     const webOnly = dock.onWillDrop(event => {
       const data = event.getData(), moved = data?.panelId ? [dock.getPanel(data.panelId)] : data ? dock.getGroup(data.groupId)?.panels || [] : [];
@@ -571,8 +595,8 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
       }
     });
     const subscriptions = [webOnly, dock.onWillDragPanel(dragging(true)), dock.onWillDragGroup(dragging(true)), dock.onDidDrop(dragging(false)), dock.onDidLayoutChange(dragging(false)),
-      { dispose: () => { element.removeEventListener('keydown', tabKey); element.removeEventListener('pointerdown', pressed, true); window.removeEventListener('pointerup', lifted, true); clearTimeout(released); } },
-      dock.onDidLayoutChange(event => report([...event.reasons].every(reason => reason === 'geometry') ? 200 : 0)), dock.onDidMaximizedGroupChange(() => { bump(); refreshNativeWebViews(); }), dock.onDidActiveGroupChange(bump), dock.onDidAddPopoutGroup(event => { bump(); refreshNativeWebViews(); listenInPopout(event.window); forgetFocus(event.group); }), dock.onDidRemovePopoutGroup(event => { bump(); refreshNativeWebViews(); forgetFocus(event.group); })];
+      { dispose: () => { endDrag?.(); element.removeEventListener('keydown', tabKey); element.removeEventListener('pointerdown', pressed, true); window.removeEventListener('pointerup', lifted, true); clearTimeout(released); } },
+      dock.onDidLayoutChange(event => report([...event.reasons].every(reason => reason === 'geometry') ? 200 : 0)), dock.onDidMaximizedGroupChange(() => { bump(); refreshNativeWebViews(); }), dock.onDidActiveGroupChange(bump), dock.onDidAddPopoutGroup(event => { bump(); refreshNativeWebViews(); listenInPopout(event.window); attachPopoutTitleBar(event.window, event.group.element.querySelector('.dv-tabs-and-actions-container')); forgetFocus(event.group); }), dock.onDidRemovePopoutGroup(event => { bump(); refreshNativeWebViews(); forgetFocus(event.group); })];
     // A panel that changed windows does not get the focus back where it was: that place belonged to the other window (Monaco keeps the window it was in).
     function forgetFocus(group: DockviewGroupPanel | undefined) { for (const panel of group?.panels || []) lastFocus.current.delete(panel.id); }
     // Keys pressed in a popped-out window go to `onPopoutKey`, with the group that window holds.

@@ -181,6 +181,11 @@ func (t Tmux) Launch(ctx context.Context, root string, opts Options) (*Client, e
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = tmuxEnv()
 	cmd.Dir = dir
+	// The server this client may start is its child, in its cgroup: on Linux
+	// the client runs in a scope of its own (scope_linux.go), so the server
+	// and every host in it outlive a stop of the Runner's service. A server
+	// already running stays where it is, and this scope ends with the client.
+	inOwnScope(cmd, "lazybox-tmux-"+strings.ToLower(id)+".scope", "Lazybox tmux server "+window.Server)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("tmux could not start the session host: %w: %s", err, bytes.TrimSpace(out))
 	}

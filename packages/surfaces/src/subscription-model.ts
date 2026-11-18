@@ -91,8 +91,11 @@ export function comeback(profile: Profile | undefined, now = Date.now()): Comeba
   return { kind: resetAt * 1000 > now ? 'back' : 'due', resetAt };
 }
 
+/** What naming, ordering and grouping a subscription read of it: a Profile, or as much of one as a list has. */
+export type SubscriptionLike = Pick<Profile, 'id' | 'provider'> & Partial<Pick<Profile, 'label' | 'isolation' | 'availability'>>;
+
 /** A subscription's name: its label, else the CLI sign-in the Runner inherited. */
-export function subscriptionName(profile: Profile | undefined, id = ''): string {
+export function subscriptionName(profile: Omit<SubscriptionLike, 'id'> | undefined, id = ''): string {
   if (profile?.label) return profile.label;
   const provider = profile?.provider || (id.startsWith('codex') ? 'codex' : id.startsWith('claude') ? 'claude' : '');
   if (profile?.isolation === 'inherited' || id === 'claude-default' || id === 'codex-default') return `${provider === 'codex' ? 'Codex' : 'Claude'} CLI sign-in`;
@@ -110,19 +113,20 @@ export function limitHeadline(name: string, state: LimitState, resetAt: bigint |
   }
 }
 
-export type SubscriptionChoice = { id: string; name: string; ready: boolean; detail: string; resetAt: number; current: boolean };
+export type SubscriptionChoice = { id: string; provider: string; name: string; ready: boolean; detail: string; resetAt: number; current: boolean };
 
 /** Can this subscription take work now, as far as anyone has observed? */
-function ready(profile: Profile, now: number): boolean {
+export function subscriptionReady(profile: SubscriptionLike, now: number): boolean {
   const state = profile.availability?.state || 'unknown';
   if (state === 'available' || state === 'unknown') return true;
   const reset = seconds(profile.availability?.resetAt) * 1000;
   return (state === 'exhausted' || state === 'throttled') && reset > 0 && reset <= now;
 }
 
-function detail(profile: Profile, now: number): string {
+/** How a subscription stands, in one line: "Available · 37% used", "Limit reached · back at 6:00 PM". */
+export function subscriptionDetail(profile: SubscriptionLike, now: number): string {
   const usage = profile.availability, state = usage?.state || 'unknown';
-  if (ready(profile, now)) {
+  if (subscriptionReady(profile, now)) {
     const used = Math.max(-1, ...(usage?.windows || []).map(w => Number.isFinite(w.usedPercent) ? w.usedPercent : -1));
     const prefix = state === 'available' ? 'Available' : 'Ready';
     return used >= 0 ? `${prefix} · ${Math.round(used)}% used` : prefix;
@@ -138,15 +142,31 @@ function detail(profile: Profile, now: number): string {
 }
 
 /**
- * The subscriptions a conversation of `provider` can continue on, best first:
- * ready ones, then the soonest to reset. The current one is listed last, so a
- * picker can show it, and never counts as the best.
+ * How ready a subscription is, for ordering: 0 known to be available, 1 not
+ * known to be limited, 2 limited (or needing sign-in, or billing).
+ */
+export function standing(profile: SubscriptionLike, now = Date.now()): 0 | 1 | 2 {
+  if (!subscriptionReady(profile, now)) return 2;
+  return profile.availability?.state === 'available' ? 0 : 1;
+}
+
+/**
+ * Subscriptions in the one order every list uses: the current one first (when
+ * there is one), then by standing (available, not known to be limited,
+ * limited), then by name. Grouping by provider is subscription-groups.ts.
+ */
+export function orderSubscriptions<T extends SubscriptionLike>(profiles: readonly T[], { currentId = '', now = Date.now() }: { currentId?: string; now?: number } = {}): T[] {
+  const rows = profiles.map(profile => ({ profile, current: !!currentId && profile.id === currentId, standing: standing(profile, now), name: subscriptionName(profile, profile.id) }));
+  return rows.sort((a, b) => Number(b.current) - Number(a.current) || a.standing - b.standing || a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }) || (a.profile.id < b.profile.id ? -1 : a.profile.id > b.profile.id ? 1 : 0)).map(row => row.profile);
+}
+
+/**
+ * The subscriptions a conversation of `provider` can continue on, in the one
+ * order every list uses (orderSubscriptions).
  */
 export function subscriptionChoices(profiles: readonly Profile[], provider: string, currentId: string, now = Date.now()): SubscriptionChoice[] {
-  const rows = profiles.filter(p => p.provider === provider).map(p => ({ id: p.id, name: subscriptionName(p, p.id), ready: ready(p, now), detail: detail(p, now), resetAt: seconds(p.availability?.resetAt), current: p.id === currentId, known: p.availability?.state === 'available' }));
-  // Known to be available beats merely not known to be limited.
-  const rank = (c: typeof rows[number]) => (c.current ? 3 : c.ready ? (c.known ? 0 : 1) : 2);
-  return rows.sort((a, b) => rank(a) - rank(b) || (a.ready ? 0 : (a.resetAt || Infinity) - (b.resetAt || Infinity)) || a.name.localeCompare(b.name)).map(({ known: _, ...choice }) => choice);
+  return orderSubscriptions(profiles.filter(p => p.provider === provider), { currentId, now })
+    .map(p => ({ id: p.id, provider: p.provider, name: subscriptionName(p, p.id), ready: subscriptionReady(p, now), detail: subscriptionDetail(p, now), resetAt: seconds(p.availability?.resetAt), current: p.id === currentId }));
 }
 
 /** The subscription "Switch to …" offers: the best other one that is ready. */

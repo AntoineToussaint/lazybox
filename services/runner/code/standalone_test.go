@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ func getenvOf(values map[string]string) func(string) string {
 }
 
 // An installed Runner needs no flags: its state goes to the person's
-// Application Support, and it runs the Node, worker and Claude Code its
+// Application Support (on Linux, ${XDG_DATA_HOME:-~/.local/share}/lazybox), and it runs the Node, worker and Claude Code its
 // release ships. Under launchd it offers Restart Runner and keeps agents.
 func TestServeDefaultsToTheInstalledLayout(t *testing.T) {
 	runtime := installation.Layout{Root: "/Applications/Lazybox.app/Contents/Resources/runtime"}
@@ -24,6 +25,9 @@ func TestServeDefaultsToTheInstalledLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	support := "/Users/me/Library/Application Support/Lazybox"
+	if goruntime.GOOS == "linux" {
+		support = "/Users/me/.local/share/lazybox"
+	}
 	if o.state != support+"/state" || o.config != support+"/runner.config.json" || o.worktrees != support+"/workspaces" || o.actions != "/Users/me/.config/lazybox/actions.yaml" {
 		t.Fatalf("paths %+v", o)
 	}

@@ -1,4 +1,5 @@
 import { peekProps } from './peek-model';
+import { SubscriptionOptions } from './SubscriptionGroups';
 import { useDismiss } from './dismiss';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { ConnectError } from '@lazybox/client-core';
@@ -374,7 +375,7 @@ function AssignDialog({ task, mission, collections, workspaceId, viewState, onCl
       {mode === 'new' ? <>
         {!ready.length && <p className="missions-notice tone-warn">Create a workspace with the task's repositories first: a task works in a workspace's own branches.</p>}
         <label>Workspace<select aria-label="Workspace" value={collectionId} onChange={e => setCollectionId(e.target.value)}>{ready.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
-        <label>Agent<select aria-label="Agent" value={profileId} onChange={e => setProfileId(e.target.value)}>{profiles.map(p => { const name = agentTitle(p.provider); return <option key={p.id} value={p.id}>{name}{p.label && p.label !== name ? ' · ' + p.label : ''}</option>; })}</select></label>
+        <label>Agent<select aria-label="Agent" value={profileId} onChange={e => setProfileId(e.target.value)}><SubscriptionOptions profiles={profiles} label={(p, _, grouped) => { const name = agentTitle(p.provider, profiles); return grouped ? p.label || name : `${name}${p.label && p.label !== name ? ' · ' + p.label : ''}`; }}/></select></label>
         <p className="mission-muted">Every conversation in a workspace shares its files. Give parallel tasks their own workspaces.</p>
       </> : <label>Conversation<select aria-label="Conversation" value={sessionId} onChange={e => setSessionId(e.target.value)}>{conversations.map(s => <option key={s.id} value={s.id}>{conversationName(s)} · {workspaceName(s.collectionId)}</option>)}</select></label>}
       <label className="mission-check"><input type="checkbox" checked={sendBrief} onChange={e => setSendBrief(e.target.checked)}/> Send the task's brief to the agent now</label>

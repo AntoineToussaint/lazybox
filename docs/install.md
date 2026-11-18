@@ -9,7 +9,8 @@ signed in as usual. You also need `git`.
 
 During the preview, Lazybox is installed [from source](#install-from-source):
 one command builds the app from a clone and installs it. The disk image and
-Homebrew (below) are for published releases.
+Homebrew (below) are for published releases. For a Runner on a Linux machine,
+see [Runner on a Linux machine](#runner-on-a-linux-machine).
 
 ## Install from source
 
@@ -326,6 +327,89 @@ which is why it asks.
 
 Agents still running when the service is removed stop by themselves within a
 day, or are re-attached if you install again before then.
+
+## Runner on a Linux machine
+
+For remote use: a Runner on a Linux server, VM or cloud box, so agents keep
+working there with your laptop closed. The desktop app connects to it once the
+SSH link ships ([REMOTE_RUNNERS.md](../REMOTE_RUNNERS.md)); until then you use
+it with the `lazybox` command on that machine. There is no Linux desktop app.
+
+**Needs:** Linux on x64 or arm64 with glibc 2.28 or newer (Ubuntu 20.04,
+Debian 11, RHEL 8 and later), the libraries the bundled Node needs
+(`sudo apt install libatomic1` on Debian and Ubuntu, `sudo dnf install
+libatomic` on Fedora and RHEL), and `git`. systemd is what starts the Runner
+at boot; without it (a container) the Runner runs, but you start it.
+
+**Add a computer** (Settings → Runners, or `lazybox remote add <ssh-host>`)
+does all of this over SSH ([guide](guides/remote-computers.md)). By hand:
+
+**Install.** Download the tarball for your architecture (`x64` or `arm64`)
+and its checksum from the
+[releases](https://github.com/AntoineToussaint/lazybox/releases), check it,
+unpack it, and set up the service:
+
+```sh
+v=0.1.0-pre.1 arch=x64
+sha256sum -c lazybox-runner-$v-linux-$arch.tar.gz.sha256
+root=${XDG_DATA_HOME:-$HOME/.local/share}/lazybox/runner
+mkdir -p "$root/versions/$v"
+tar -xzf lazybox-runner-$v-linux-$arch.tar.gz -C "$root/versions/$v"
+(cd "$root/versions/$v" && sha256sum --quiet -c SHA256SUMS)
+ln -sfn "versions/$v" "$root/current"
+"$root/current/bin/lazybox" link     # lazybox in ~/.local/bin, with completions
+lazybox service install              # the Runner as a systemd user service
+lazybox doctor
+```
+
+**Keep it running after you log out.** A systemd user service runs while you
+are logged in, unless lingering is on. Turn it on once (some systems need
+`sudo`); then the Runner also starts at boot:
+
+```sh
+loginctl enable-linger "$USER"
+```
+
+`lazybox doctor` says whether it is on (**Lingering**). Without it, the
+Runner and its agents stop when your last session on that machine ends: their
+scopes belong to your user manager, which stops then.
+
+**What runs where.**
+
+| | |
+| --- | --- |
+| Service | `~/.config/systemd/user/lazybox-runner.service`: `systemctl --user status lazybox-runner` |
+| Logs | the journal: `lazybox service logs` (`-f` to follow), or `journalctl --user -u lazybox-runner` |
+| State, configuration, workspaces | `~/.local/share/lazybox` (`state/`, `runner.config.json`, `workspaces/`) |
+| Each agent's session host | `~/.local/share/lazybox/state/hosts/*/host.log`; in systemd as `lazybox-host-*.scope` |
+
+**Agents outlive the Runner** here too: `lazybox service restart`, an update
+or a crash leaves agents, commands and terminals running, and the next Runner
+re-attaches them. Each runs in a systemd scope of its own, outside the
+service, which a restart would otherwise take down with it
+([SESSION_HOSTS.md](../SESSION_HOSTS.md#on-linux)).
+
+**Without systemd** (a container, WSL without systemd), `lazybox service
+install` runs the Runner under Lazybox's own supervisor, which starts it again
+whenever it exits; its log is `~/.local/state/lazybox/runner.log`. Agents then
+outlive a Runner restart, not a restart of the container, and nothing starts
+the Runner when the container starts: run `lazybox service start`. Give the
+container an init that reaps exited processes (`docker run --init`, or
+`"init": true` in `devcontainer.json`).
+
+**Claude Code and Codex** are not in the tarball: install and sign in to them
+on that machine, in its own shell. Claude Code with
+[Anthropic's installer](https://docs.anthropic.com/en/docs/claude-code), then
+`claude` and `/login`; Codex with `npm i -g @openai/codex`, then
+`codex login --device-auth`. Run `lazybox service install` afterwards so the
+Runner's PATH includes them.
+
+**Update.** Unpack the new version beside the old one as above, then run its
+`lazybox service install` (`"$root/versions/<new>/bin/lazybox" service
+install`) and `lazybox link`. Running agents are kept.
+
+**Uninstall.** `lazybox uninstall` (add `--remove-data` to delete state and
+workspaces), then delete `~/.local/share/lazybox/runner`.
 
 ## Dev and Working
 

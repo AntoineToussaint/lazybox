@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { artifactNames, latestJson, renderCask, signingPlan, tagOf, tauriReleaseConfig, downloadURL, bundleVersion, parseArgs, workerPackages } from './build.mjs';
+import { artifactNames, latestJson, renderCask, signingPlan, tagOf, tauriReleaseConfig, downloadURL, bundleVersion, parseArgs, workerPackages, LINUX_ARCHES, linuxArtifactNames, sumsText } from './build.mjs';
 import { productionPackages, isClaudeCodePackage } from './packages.mjs';
 import { renderNotices, needsAttention, NOTICES_FILE } from './notices.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync } from 'node:fs';
@@ -271,4 +271,28 @@ test('dated notes merged after a version\'s section are collected by the next ve
   // The changelog's newest version is releasable as it stands.
   const current = parseChangelog(await readFile(changelogPath, 'utf8'));
   assert.deepEqual(unfoldedAbove(current, current.find(r => versionPattern.test(r.id)).id), []);
+});
+
+// REMOTE_RUNNERS.md §5.2: the Linux Runner ships for x64 and arm64, each
+// tarball checksummed, with a pinned, checksummed Node for its platform.
+test('the Linux Runner ships for x64 and arm64 with a pinned Node each', async () => {
+  assert.deepEqual(LINUX_ARCHES.map(a => a.name), ['x64', 'arm64']);
+  assert.deepEqual(linuxArtifactNames('0.1.0-pre.1', 'arm64'), {
+    runner: 'lazybox-runner-0.1.0-pre.1-linux-arm64.tar.gz', runnerDir: 'lazybox-runner-0.1.0-pre.1-linux-arm64',
+    cli: 'lazybox-cli-0.1.0-pre.1-linux-arm64.tar.gz', cliDir: 'lazybox-cli-0.1.0-pre.1-linux-arm64',
+  });
+  assert.throws(() => linuxArtifactNames('0.1.0', 'riscv64'));
+  assert.throws(() => linuxArtifactNames('../x', 'x64'));
+  const pin = JSON.parse(await readFile(join(root, 'scripts/release/node.json'), 'utf8'));
+  for (const arch of LINUX_ARCHES) {
+    const archive = pin.archives[arch.node];
+    assert.ok(archive, `node.json pins no Node for ${arch.node}`);
+    assert.equal(archive.file, `node-${pin.version}-${arch.node}.tar.gz`);
+    assert.match(archive.sha256, /^[0-9a-f]{64}$/);
+  }
+  const sum = 'a'.repeat(64);
+  assert.equal(sumsText([['bin/lazybox', sum], ['VERSION', sum]]), `${sum}  bin/lazybox\n${sum}  VERSION\n`);
+  assert.throws(() => sumsText([['x', 'not-a-sum']]));
+  assert.equal(parseArgs(['--version', '1.0.0', '--linux-only'], {}).linuxOnly, true);
+  assert.throws(() => parseArgs(['--from-source', '--linux-only'], {}));
 });

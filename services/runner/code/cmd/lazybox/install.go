@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,7 +24,8 @@ import (
 // release this `lazybox` belongs to; a Dev or Working build says so.
 
 // setup is how this process finds its release and the system around it;
-// tests replace it so nothing touches the real launchd or home directory.
+// tests replace it so nothing touches the real service manager or home
+// directory.
 type setup struct {
 	installer func() (installation.Installer, error)
 	// ready waits for the service's Runner to answer, given the bearer the
@@ -44,7 +47,11 @@ func defaultSetup(getenv func(string) string) setup {
 			if err != nil {
 				return installation.Installer{}, err
 			}
-			return installation.Installer{Paths: paths, Layout: runtime, Launchd: installation.UserLaunchd(),
+			manager, err := installation.SystemManager(getenv)
+			if err != nil {
+				return installation.Installer{}, fail(exitUsage, "%v", err)
+			}
+			return installation.Installer{Paths: paths, Layout: runtime, Manager: manager,
 				Shell: func(ctx context.Context) installation.ShellEnvironment {
 					return installation.ReadShellEnvironment(ctx, getenv)
 				}}, nil
@@ -95,6 +102,9 @@ type serviceReport struct {
 	Problem        string `json:"problem,omitempty"`
 	// Unstable is why this copy of the app cannot back a service (run from a disk image).
 	Unstable string `json:"unstable,omitempty"`
+	// ManagerProblem is why the service manager could not be asked (systemd's
+	// user manager not reachable, say).
+	ManagerProblem string `json:"managerProblem,omitempty"`
 }
 
 func (c *cli) service(args []string) error {
@@ -146,7 +156,7 @@ func (c *cli) service(args []string) error {
 		if c.json {
 			return c.printJSON(map[string]bool{"stopped": true})
 		}
-		c.out("%s Stopped the Runner. Agents, commands and terminals keep running; the next Runner re-attaches them. It starts again at login, or with `lazybox service start`.\n", c.paint(green, "✓"))
+		c.out("%s Stopped the Runner. Agents, commands and terminals keep running; the next Runner re-attaches them. %s\n", c.paint(green, "✓"), startsAgain(in.Manager.Kind()))
 		return nil
 	case "restart":
 		previous := endpointToken(in.Paths.Endpoint())
@@ -165,13 +175,17 @@ func (c *cli) service(args []string) error {
 		}
 		return nil
 	case "logs":
-		return c.serviceLogs(in.Paths.Log(), *lines, *follow)
+		source := in.Manager.Logs(in.Paths)
+		if source.File == "" {
+			return c.commandLogs(source, *lines, *follow)
+		}
+		return c.serviceLogs(source.File, *lines, *follow)
 	case "plan":
 		service, shell, err := in.Plan(ctx)
 		if err != nil {
 			return err
 		}
-		data, err := service.Plist()
+		data, err := in.Manager.Render(service)
 		if err != nil {
 			return err
 		}
@@ -196,7 +210,17 @@ func (c *cli) serviceInstall(ctx context.Context, in installation.Installer, sta
 	if result.Shell.Problem != "" && !c.json {
 		c.note("%s %s; agents get a standard PATH (see `lazybox doctor`).\n", c.paint(yellow, "!"), result.Shell.Problem)
 	}
-	report := map[string]any{"version": result.Service.Version, "plist": in.Paths.Plist, "endpoint": in.Paths.Endpoint(), "log": in.Paths.Log(), "started": result.Started, "restarted": result.Restarted}
+	report := map[string]any{"version": result.Service.Version, "manager": in.Manager.Kind(), "definition": in.Definition(), "endpoint": in.Paths.Endpoint(), "log": in.LogDescription(), "started": result.Started, "restarted": result.Restarted}
+	if in.Manager.Kind() == installation.ManagerLaunchd {
+		report["plist"] = in.Definition()
+	}
+	// When it runs without a login session: on Linux, lingering may still
+	// be the person's to turn on.
+	startsWhen := ""
+	if status, err := in.Status(ctx); err == nil {
+		startsWhen = status.StartsWhen
+		report["startsWhen"] = startsWhen
+	}
 	if result.Shell.Problem != "" {
 		// The app's setup window shows it: agents then get a standard PATH,
 		// which may lack the person's tools.
@@ -228,8 +252,13 @@ func (c *cli) serviceInstall(ctx context.Context, in installation.Installer, sta
 		c.out("%s Updated the Runner from %s to %s.\n", c.paint(green, "✓"), result.Previous.Version, runnerVersion)
 	case result.Restarted:
 		c.out("%s Reinstalled and restarted the Runner (%s).\n", c.paint(green, "✓"), runnerVersion)
-	default:
+	case in.Manager.Kind() == installation.ManagerLaunchd:
 		c.out("%s The Runner (%s) is running. It starts when you log in and keeps working when the Lazybox window is closed.\n", c.paint(green, "✓"), runnerVersion)
+	default:
+		c.out("%s The Runner (%s) is running. It keeps working when you disconnect.\n", c.paint(green, "✓"), runnerVersion)
+	}
+	if startsWhen != "" && in.Manager.Kind() != installation.ManagerLaunchd {
+		c.out("  %s\n", capitalize(startsWhen)+".")
 	}
 	if result.Restarted && kept.total() > 0 {
 		c.out("  Kept running and re-attached: %s.\n", kept)
@@ -260,10 +289,11 @@ func (c *cli) serviceStatus(ctx context.Context, in installation.Installer) serv
 	switch {
 	case err != nil:
 		r.Problem = err.Error()
+		r.ManagerProblem = r.Problem
 	case !status.Installed:
 		r.Problem = "the Runner service is not installed; run `lazybox service install` (the app offers it on first launch)"
 	case !status.Loaded:
-		r.Problem = "the Runner service is installed but not loaded; run `lazybox service start`"
+		r.Problem = "the Runner service is installed but not running; run `lazybox service start`"
 	}
 	if t, err := loadTarget(in.Paths.RunnerName(), in.Paths.Endpoint(), false); err == nil {
 		r.URL = t.URL
@@ -293,7 +323,7 @@ func (c *cli) printServiceStatus(r serviceReport) {
 			state += " · last exit " + r.LastExit
 		}
 	case r.Installed:
-		state = c.paint(yellow, "○ installed, not loaded")
+		state = c.paint(yellow, "○ installed, not running")
 	}
 	c.out("  %s\n", state)
 	if r.Version != "" {
@@ -301,6 +331,9 @@ func (c *cli) printServiceStatus(r serviceReport) {
 	}
 	if r.Reachable {
 		c.out("  Answers   %s (Runner %s)\n", r.URL, r.RunnerVersion)
+	}
+	if r.StartsWhen != "" {
+		c.out("  Starts    %s\n", r.StartsWhen)
 	}
 	c.out("  State     %s\n  Logs      %s\n", r.State, r.Log)
 	if r.Problem != "" {
@@ -348,6 +381,38 @@ func (c *cli) serviceLogs(path string, lines int, follow bool) error {
 			return err
 		}
 	}
+}
+
+// commandLogs prints the Runner's output from the command that keeps it
+// (journalctl), passing its output through.
+func (c *cli) commandLogs(source installation.LogSource, lines int, follow bool) error {
+	argv := append([]string{}, source.Command...)
+	if follow {
+		argv = append([]string{}, source.Follow...)
+	}
+	if source.Lines != "" && lines > 0 {
+		argv = append(argv, source.Lines, strconv.Itoa(lines))
+	}
+	cmd := exec.CommandContext(c.ctx, argv[0], argv[1:]...)
+	cmd.Stdout, cmd.Stderr = c.stdout, c.stderr
+	if err := cmd.Run(); err != nil {
+		if c.ctx.Err() != nil {
+			return nil
+		}
+		return fail(exitUnavailable, "%s: %v", strings.Join(argv, " "), err)
+	}
+	return nil
+}
+
+// startsAgain says when a stopped service starts again.
+func startsAgain(manager string) string {
+	switch manager {
+	case installation.ManagerLaunchd:
+		return "It starts again at login, or with `lazybox service start`."
+	case installation.ManagerSystemd:
+		return "It starts again at boot (with lingering) or login, or with `lazybox service start`."
+	}
+	return "`lazybox service start` starts it again."
 }
 
 // lastLines reads the last n lines of a log, reading at most its last 4 MiB.

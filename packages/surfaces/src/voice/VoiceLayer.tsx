@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import type { ViewStateStore } from '@lazybox/platform';
 import { bindings, canonicalBinding, canonicalKey, chordFromEvent, displayBinding, isChord, isLoneModifier, runAction, useActions } from '../actions';
+import { beginDrag, preventMouseDown } from '../drag-gesture';
 import { Icon } from '../Icons';
 import type { Keymap } from '../keyboard';
 import { elapsed } from './voice-model';
@@ -202,7 +203,6 @@ function readOffset(): { x: number; y: number } {
 export function VoicePill({ state, keymap, onOpenSettings, inline }: { state: ReturnType<typeof useVoiceState>; keymap?: Keymap; onOpenSettings?(): void; inline?: boolean }) {
   const [now, setNow] = useState(Date.now());
   const [offset, setOffset] = useState(readOffset);
-  const drag = useRef<{ x: number; y: number; from: { x: number; y: number } } | null>(null);
   const listening = state.phase === 'starting' || state.phase === 'listening' || state.phase === 'stopping';
   // Just above the message box being dictated into, so it never covers the words; else low in the window.
   const [anchor, setAnchor] = useState<{ bottom: number; left: number } | undefined>();
@@ -219,23 +219,33 @@ export function VoicePill({ state, keymap, onOpenSettings, inline }: { state: Re
   const keyUnproven = useMemo(() => !voiceKeyUsed(), [state.startedAt]);
   if (!listening && state.phase !== 'error' && !state.reading) return null;
 
+  const movable = (event: { target: EventTarget; button: number }) => !inline && event.button === 0 && !(event.target as HTMLElement).closest('button');
+  // Dragged anywhere (a drag gesture: no text selected); Escape puts it back.
   const down = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (inline || (event.target as HTMLElement).closest('button')) return;
-    drag.current = { x: event.clientX, y: event.clientY, from: offset };
-    event.currentTarget.setPointerCapture(event.pointerId);
+    if (!movable(event)) return;
+    event.preventDefault();
+    const x = event.clientX, y = event.clientY, from = offset;
+    let last = from;
+    beginDrag('move', {
+      pointerId: event.pointerId, capture: event.currentTarget,
+      onMove: next => {
+        const half = window.innerWidth / 2 - 120;
+        last = { x: Math.max(-half, Math.min(half, from.x + next.clientX - x)), y: Math.max(-window.innerHeight + 140, Math.min(60, from.y + next.clientY - y)) };
+        setOffset(last);
+      },
+      onEnd: reason => {
+        if (reason === 'escape') { setOffset(from); return; }
+        try { localStorage.setItem(pillKey, JSON.stringify(last)); } catch { /* a convenience */ }
+      },
+    });
   };
-  const move = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!drag.current) return;
-    const half = window.innerWidth / 2 - 120;
-    setOffset({ x: Math.max(-half, Math.min(half, drag.current.from.x + event.clientX - drag.current.x)), y: Math.max(-window.innerHeight + 140, Math.min(60, drag.current.from.y + event.clientY - drag.current.y)) });
-  };
-  const up = () => { if (!drag.current) return; drag.current = null; try { localStorage.setItem(pillKey, JSON.stringify(offset)); } catch { /* a convenience */ } };
+  const press = (event: ReactMouseEvent<HTMLDivElement>) => { if (movable(event)) preventMouseDown(event); };
   const style: CSSProperties | undefined = inline ? undefined : { transform: `translate(calc(-50% + ${offset.x}px), ${offset.y}px)`, ...(anchor && listening ? anchor : {}) };
   const key = bindings(keymap?.['voice.dictate'])[0];
   const keyText = key ? displayBinding(key).join(' ') : '';
 
   if (state.phase === 'error') {
-    return <div className={'voice-pill is-error' + (inline ? ' is-inline' : '')} role="alert" style={style} onPointerDown={down} onPointerMove={move} onPointerUp={up}>
+    return <div className={'voice-pill is-error' + (inline ? ' is-inline' : '')} role="alert" style={style} onPointerDown={down} onMouseDown={press}>
       <span className="voice-pill-icon"><Icon name="alert" size={15}/></span>
       <span className="voice-pill-text">{state.error}</span>
       {state.errorCode === 'dictation-off' && canOpenVoiceSystemSettings()
@@ -245,7 +255,7 @@ export function VoicePill({ state, keymap, onOpenSettings, inline }: { state: Re
     </div>;
   }
   if (!listening) {
-    return <div className="voice-pill is-reading" role="status" aria-label="Reading aloud" style={style} onPointerDown={down} onPointerMove={move} onPointerUp={up}>
+    return <div className="voice-pill is-reading" role="status" aria-label="Reading aloud" style={style} onPointerDown={down} onMouseDown={press}>
       <span className="voice-pill-icon"><Icon name="speaker" size={15}/></span>
       <span className="voice-pill-text">Reading aloud</span>
       <kbd>Esc</kbd>
@@ -258,7 +268,7 @@ export function VoicePill({ state, keymap, onOpenSettings, inline }: { state: Re
   // Sending while listening waits for the last words (Composer, finishAndSend); ⌘↵ is Send now, a plain send while the agent is idle.
   const sendChord = state.kind === 'composer' ? bindings(keymap?.['chat.send-now']).find(isChord) : undefined;
   const tip = !inline && state.kind === 'composer' && keyUnproven && keyText;
-  return <div className={'voice-pill' + (inline ? ' is-inline' : '')} data-phase={state.phase} data-kind={state.kind} role="status" aria-label={`${what}. ${state.onDevice ? 'On-device.' : ''}`} style={style} onPointerDown={down} onPointerMove={move} onPointerUp={up}>
+  return <div className={'voice-pill' + (inline ? ' is-inline' : '')} data-phase={state.phase} data-kind={state.kind} role="status" aria-label={`${what}. ${state.onDevice ? 'On-device.' : ''}`} style={style} onPointerDown={down} onMouseDown={press}>
     <span className="voice-pill-dot" aria-hidden="true"/>
     <span className={'voice-pill-meter' + (state.level === undefined ? ' is-estimated' : '')} aria-hidden="true">
       {[0.55, 0.8, 1, 0.8, 0.55].map((weight, i) => <i key={i} style={{ transform: `scaleY(${Math.max(0.18, Math.min(1, level * weight * 1.4))})` }}/>)}

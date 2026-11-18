@@ -22,7 +22,8 @@ export function withKeys(label: string, keys: string | undefined): string {
 export function WindowControls({ applicationName, viewState, onPutBack, onWorkspace, onReopenClosed, onReconnect }: { applicationName: string; viewState?: ViewStateStore; onPutBack?(): void; onWorkspace(): void; onReopenClosed?(): void; onReconnect?(): void }) {
   const keymap = useKeymap(viewState);
   useAction('window.put-back', () => onPutBack?.(), () => !!onPutBack);
-  return <nav className="native-toolbar window-controls" aria-label="Window controls">
+  // The window's title bar in the desktop app (title-bar.ts): its empty parts move the window.
+  return <nav className="native-toolbar window-controls" aria-label="Window controls" data-window-drag-region="deep">
     {onPutBack
       ? <button type="button" className="put-back-button" title={withKeys('Put this chat back where it was in the main window, and close this window', keymap['window.put-back'])} onClick={onPutBack}>
         <Icon name="put-back" size={14}/><span>Put back in main window</span>

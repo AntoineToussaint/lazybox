@@ -1,8 +1,10 @@
-// Builds an installable Lazybox release for macOS (RELEASING.md):
+// Builds an installable Lazybox release for macOS, and the Runner for Linux
+// (RELEASING.md):
 //
 //   make release VERSION=0.1.0                  # what CI runs on a v2-v0.1.0 tag
 //   node scripts/release/build.mjs --version 0.1.0 [--gates] [--skip-smoke] [--publishable] [--without-claude-code]
 //   node scripts/release/build.mjs --from-source [--version 0.1.0] [--skip-smoke] [--without-claude-code]
+//   node scripts/release/build.mjs --linux-only --version 0.1.0   # the Linux Runner alone, on any OS
 //
 // Output, in dist/<version>/ beside the Makefile:
 //   Lazybox_<version>_aarch64.dmg               the disk image (drag to Applications)
@@ -11,6 +13,9 @@
 //   lazybox-v2.rb                               the Homebrew cask
 //   RELEASE_NOTES.md, SHA256SUMS, release.json  notes, checksums, what was signed how
 //   THIRD_PARTY_NOTICES.txt                     every bundled component's licence (also in the app and the DMG)
+//   lazybox-runner-<version>-linux-{x64,arm64}.tar.gz   the Runner for a Linux machine (no desktop app)
+//   lazybox-cli-<version>-linux-{x64,arm64}.tar.gz      the CLI alone
+//   each with a .sha256 beside it, and in SHA256SUMS
 //
 // Signing follows the secrets present, never a flag: APPLE_SIGNING_IDENTITY
 // signs with a Developer ID (hardened runtime), APPLE_ID/APPLE_PASSWORD/
@@ -45,6 +50,29 @@ export const tagOf = version => `v2-v${version}`;
 /** The rolling release whose latest.json every installed app polls. */
 export const UPDATES_TAG = 'v2-updates';
 export const ARCH = { tauri: 'darwin-aarch64', file: 'aarch64', go: 'arm64', node: 'darwin-arm64' };
+/**
+ * The Linux Runner's targets: glibc 2.28 or newer (Node's official builds'
+ * floor; the Go binaries are static), x64 and arm64 (REMOTE_RUNNERS.md §5.2).
+ */
+export const LINUX_ARCHES = [
+  { name: 'x64', go: 'amd64', node: 'linux-x64' },
+  { name: 'arm64', go: 'arm64', node: 'linux-arm64' },
+];
+
+/** The Linux tarballs of a version for one architecture, and their top-level directories. */
+export function linuxArtifactNames(version, arch) {
+  if (!versionPattern.test(version)) throw new Error(`${version} is not a version`);
+  if (!LINUX_ARCHES.some(a => a.name === arch)) throw new Error(`${arch} is not a Linux release architecture`);
+  const runner = `lazybox-runner-${version}-linux-${arch}`;
+  const cli = `lazybox-cli-${version}-linux-${arch}`;
+  return { runner: `${runner}.tar.gz`, runnerDir: runner, cli: `${cli}.tar.gz`, cliDir: cli };
+}
+
+/** SHA256SUMS text: one `<sum>  <path>` line per file, in the order given. */
+export function sumsText(entries) {
+  for (const [path, sum] of entries) if (!/^[0-9a-f]{64}$/.test(sum) || !path || path.includes('\n')) throw new Error(`invalid checksum entry ${path}`);
+  return entries.map(([path, sum]) => `${sum}  ${path}`).join('\n') + '\n';
+}
 
 export function artifactNames(version) {
   const base = `Lazybox_${version}_${ARCH.file}`;
@@ -170,7 +198,8 @@ async function exists(path) { try { await access(path); return true; } catch { r
 export function parseArgs(argv, env = process.env) {
   // claudeCode: ship the SDK's copy of Claude Code. --without-claude-code (or
   // LAZYBOX_RELEASE_CLAUDE_CODE=omit) leaves it out (CLAUDE_COMPLIANCE.md).
-  const options = { version: env.VERSION || '', gates: false, smoke: true, publishable: false, source: false, launchd: env.LAZYBOX_V2_RELEASE_LAUNCHD === '1', claudeCode: env.LAZYBOX_RELEASE_CLAUDE_CODE !== 'omit' };
+  // The Linux Runner never ships it (REMOTE_RUNNERS.md §5.3).
+  const options = { version: env.VERSION || '', gates: false, smoke: true, publishable: false, source: false, linuxOnly: false, launchd: env.LAZYBOX_V2_RELEASE_LAUNCHD === '1', claudeCode: env.LAZYBOX_RELEASE_CLAUDE_CODE !== 'omit' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--version') options.version = argv[++i] || '';
@@ -179,11 +208,13 @@ export function parseArgs(argv, env = process.env) {
     else if (a === '--publishable') options.publishable = true;
     else if (a === '--launchd') options.launchd = true;
     else if (a === '--from-source') options.source = true;
+    else if (a === '--linux-only') options.linuxOnly = true;
     else if (a === '--without-claude-code') options.claudeCode = false;
     else if (a === '--with-claude-code') options.claudeCode = true;
     else throw new Error(`Unknown option ${a}`);
   }
   if (options.source && options.publishable) throw new Error('--from-source builds are never published');
+  if (options.source && options.linuxOnly) throw new Error('--from-source builds the macOS app; --linux-only builds the Linux Runner');
   if (options.source && !options.version) return options;
   if (!versionPattern.test(options.version)) throw new Error('Pass the release version: make release VERSION=x.y.z');
   return options;
@@ -206,17 +237,19 @@ async function updaterKey(publishable) {
   return { pubkey: (await readFile(key + '.pub', 'utf8')).trim(), env: { TAURI_SIGNING_PRIVATE_KEY: await readFile(key, 'utf8'), TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '' }, kind: 'test' };
 }
 
-async function buildGo(runtime, version) {
+async function buildGo(runtime, version, { goos = 'darwin', goarch = ARCH.go } = {}) {
   const ldflags = `-s -w -X github.com/AntoineToussaint/lazybox/services/runner/code/internal/version.Version=${version}`;
-  const env = { ...buildEnv, GOOS: 'darwin', GOARCH: ARCH.go, CGO_ENABLED: '0' };
+  // CGO off: static binaries, on Linux too (no glibc floor of their own).
+  const env = { ...buildEnv, GOOS: goos, GOARCH: goarch, CGO_ENABLED: '0' };
   const code = join(root, 'services/runner/code');
   await run('go', ['build', '-trimpath', '-ldflags', ldflags, '-o', join(runtime, 'bin', 'lazybox-runner'), '.'], { cwd: code, env });
   await run('go', ['build', '-trimpath', '-ldflags', ldflags, '-o', join(runtime, 'bin', 'lazybox'), './cmd/lazybox'], { cwd: code, env });
 }
 
-async function fetchNode(runtime) {
+async function fetchNode(runtime, platform = ARCH.node) {
   const pin = JSON.parse(await readFile(join(root, 'scripts/release/node.json'), 'utf8'));
-  const archive = pin.archives[ARCH.node];
+  const archive = pin.archives[platform];
+  if (!archive) throw new Error(`scripts/release/node.json pins no Node for ${platform}`);
   const downloads = join(cache, 'downloads');
   await mkdir(downloads, { recursive: true });
   const file = join(downloads, archive.file);
@@ -230,7 +263,7 @@ async function fetchNode(runtime) {
   }
   const digest = await sha256(file);
   if (digest !== archive.sha256) throw new Error(`${archive.file} has SHA-256 ${digest}, pinned ${archive.sha256}`);
-  const unpacked = join(cache, 'node');
+  const unpacked = join(cache, `node-${platform}`);
   await rm(unpacked, { recursive: true, force: true });
   await mkdir(unpacked, { recursive: true });
   await run('tar', ['-xzf', file, '-C', unpacked, '--strip-components', '1']);
@@ -248,8 +281,8 @@ export function workerPackages(packages, { claudeCode = true } = {}) {
 }
 
 /** The compiled worker and exactly the production packages the lockfile resolved for it. */
-async function bundleWorker(runtime, { claudeCode = true } = {}) {
-  await run('npm', ['run', 'build:worker']);
+async function bundleWorker(runtime, { claudeCode = true, platform = ARCH.node, build = true } = {}) {
+  if (build) await run('npm', ['run', 'build:worker']);
   const worker = join(runtime, 'worker');
   await cp(join(root, 'workers/claude-sdk/dist'), join(worker, 'dist'), { recursive: true, filter: source => !source.endsWith('.test.js') && !source.endsWith('.d.ts') });
   await cp(join(root, 'workers/claude-sdk/package.json'), join(worker, 'package.json'));
@@ -264,7 +297,7 @@ async function bundleWorker(runtime, { claudeCode = true } = {}) {
     // worker needs are in the list, at their own paths.
     await cp(p.dir, join(worker, 'node_modules', p.path), { recursive: true, filter: source => basename(source) !== '.bin' && !relative(p.dir, source).split('/').includes('node_modules') });
   }
-  if (claudeCode && !packages.some(p => p.name === `@anthropic-ai/claude-agent-sdk-${ARCH.node}`)) throw new Error(`The Claude Agent SDK for ${ARCH.node} is not installed; run npm ci on this platform`);
+  if (claudeCode && !packages.some(p => p.name === `@anthropic-ai/claude-agent-sdk-${platform}`)) throw new Error(`The Claude Agent SDK for ${platform} is not installed; run npm ci on this platform`);
   return packages.length;
 }
 
@@ -335,6 +368,106 @@ async function notarize(path, plan) {
   await run('xcrun', ['stapler', 'staple', path]);
 }
 
+/** Copies the documentation Ask Lazybox reads: Markdown only, never docs/internal. */
+async function copyDocs(runtime) {
+  const docs = join(root, 'docs');
+  await cp(docs, join(runtime, 'docs'), { recursive: true, filter: source => { const rel = relative(docs, source); return !rel.startsWith('internal') && !rel.startsWith('images') && (!rel || rel.endsWith('.md') || !rel.includes('.')); } });
+}
+
+/** Every regular file under dir, relative to it, sorted. */
+async function filesUnder(dir) {
+  const found = [];
+  const walk = async (path) => {
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      const full = join(path, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.isFile()) found.push(relative(dir, full));
+    }
+  };
+  await walk(dir);
+  return found.sort();
+}
+
+/**
+ * A gzipped tarball of dir's contents at its top level (VERSION, bin/, …):
+ * the bundle layout `lazybox remote add --bundle` uploads and its install
+ * script unpacks into versions/<version> (internal/link). No macOS metadata
+ * (AppleDouble files, extended attributes).
+ */
+async function tarball(file, dir) {
+  const flags = process.platform === 'darwin' ? ['--no-mac-metadata', '--no-xattrs', '--no-acls'] : ['--owner=0', '--group=0', '--numeric-owner'];
+  await run('tar', [...flags, '-czf', file, '-C', dir, '.'], { env: { ...buildEnv, COPYFILE_DISABLE: '1' } });
+}
+
+/**
+ * The Linux Runner, for each architecture: the macOS runtime's tree without
+ * the app (REMOTE_RUNNERS.md §5.2), as lazybox-runner-<version>-linux-<arch>.tar.gz
+ * with its own SHA256SUMS inside, plus the CLI alone. Claude Code is never
+ * included: on a Linux host the person installs it (§5.3). Returns the
+ * artifacts written to out with their SHA-256.
+ */
+async function buildLinuxBundles({ version, out, stage, notices }) {
+  const artifacts = [];
+  for (const arch of LINUX_ARCHES) {
+    const names = linuxArtifactNames(version, arch.name);
+    const parent = join(stage, `linux-${arch.name}`);
+    const runtime = join(parent, names.runnerDir);
+    await rm(parent, { recursive: true, force: true });
+    await mkdir(join(runtime, 'bin'), { recursive: true });
+    await buildGo(runtime, version, { goos: 'linux', goarch: arch.go });
+    await fetchNode(runtime, arch.node);
+    const packages = await bundleWorker(runtime, { claudeCode: false, platform: arch.node, build: false });
+    await cp(join(root, 'apps/web/dist'), join(runtime, 'web'), { recursive: true });
+    await copyDocs(runtime);
+    await cp(notices, join(runtime, NOTICES_FILE));
+    await writeFile(join(runtime, 'VERSION'), version + '\n');
+    for (const exe of ['bin/lazybox', 'bin/lazybox-runner', 'node/bin/node']) await chmod(join(runtime, exe), 0o755);
+    const inside = [];
+    for (const rel of await filesUnder(runtime)) inside.push([rel, await sha256(join(runtime, rel))]);
+    await writeFile(join(runtime, 'SHA256SUMS'), sumsText(inside));
+    await tarball(join(out, names.runner), runtime);
+    // The CLI alone: the one binary, with the notices.
+    const cliParent = join(parent, 'cli');
+    const cli = join(cliParent, names.cliDir);
+    await mkdir(cli, { recursive: true });
+    await cp(join(runtime, 'bin', 'lazybox'), join(cli, 'lazybox'));
+    await cp(notices, join(cli, NOTICES_FILE));
+    await writeFile(join(cli, 'SHA256SUMS'), sumsText([['lazybox', await sha256(join(cli, 'lazybox'))]]));
+    await tarball(join(out, names.cli), cli);
+    for (const file of [names.runner, names.cli]) {
+      const sum = await sha256(join(out, file));
+      await writeFile(join(out, file + '.sha256'), sumsText([[file, sum]]));
+      artifacts.push([file, sum]);
+    }
+    console.log(`  linux-${arch.name}: ${names.runner}, ${names.cli} (${packages} worker packages, without Claude Code)`);
+  }
+  return artifacts;
+}
+
+/** `--linux-only`: the Linux Runner and CLI, built on any OS, into dist/<version>/. */
+async function linuxOnly(version) {
+  const out = join(root, 'dist', version);
+  const stage = join(cache, 'stage', `${version}-linux`);
+  console.log(`Lazybox Runner ${version} for Linux (${LINUX_ARCHES.map(a => a.name).join(', ')})`);
+  step('Worker, phone app, notices');
+  await rm(stage, { recursive: true, force: true });
+  await mkdir(stage, { recursive: true });
+  await mkdir(out, { recursive: true });
+  await run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
+  await run('npm', ['run', 'build:worker']);
+  await run('npm', ['run', 'build:web']);
+  const pin = JSON.parse(await readFile(join(root, 'scripts/release/node.json'), 'utf8'));
+  const notices = join(stage, NOTICES_FILE);
+  // Node's licence is the same file on every platform; any architecture's will do.
+  const nodeLicenseDir = join(stage, 'node-license');
+  await fetchNode(nodeLicenseDir, LINUX_ARCHES[0].node);
+  writeNotices({ out: notices, version, nodeLicense: join(nodeLicenseDir, 'node', 'LICENSE'), nodeVersion: pin.version, omit: isClaudeCodePackage });
+  step('Linux Runner bundles');
+  const artifacts = await buildLinuxBundles({ version, out, stage, notices });
+  await writeFile(join(out, 'SHA256SUMS'), sumsText(artifacts));
+  console.log(`\n✓ The Linux Runner ${version} is in ${relative(process.cwd(), out) || out}`);
+}
+
 /** A git answer about this checkout, or '' outside one. */
 function gitText(args) {
   const result = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
@@ -342,8 +475,9 @@ function gitText(args) {
 }
 
 async function main() {
-  if (process.platform !== 'darwin') throw new Error('Releases are built on macOS');
   const options = parseArgs(process.argv.slice(2));
+  if (options.linuxOnly) return linuxOnly(options.version);
+  if (process.platform !== 'darwin') throw new Error('Releases are built on macOS (--linux-only builds the Linux Runner anywhere)');
   const releases = await readChangelog();
   const version = options.version || sourceVersion(releases);
   // A build from source never signs with what happens to be in the environment.
@@ -383,9 +517,8 @@ async function main() {
   await run('npm', ['run', 'build:web']);
   await cp(join(root, 'apps/web/dist'), join(runtime, 'web'), { recursive: true });
   // The documentation Ask Lazybox reads (the app bundles its own copy for
-  // Help → Documentation): Markdown only, never docs/internal.
-  const docs = join(root, 'docs');
-  await cp(docs, join(runtime, 'docs'), { recursive: true, filter: source => { const rel = relative(docs, source); return !rel.startsWith('internal') && !rel.startsWith('images') && (!rel || rel.endsWith('.md') || !rel.includes('.')); } });
+  // Help → Documentation).
+  await copyDocs(runtime);
   await writeFile(join(runtime, 'VERSION'), version + '\n');
   if (options.source) {
     const commit = gitText(['rev-parse', 'HEAD']);
@@ -448,6 +581,11 @@ async function main() {
   await cp(join(bundles, 'Lazybox.app.tar.gz'), join(out, names.updater));
   await cp(join(bundles, 'Lazybox.app.tar.gz.sig'), join(out, names.signature));
   await cp(notices, join(out, names.notices3p));
+  step('Linux Runner bundles');
+  // Their own notices: they never ship Claude Code, whatever the app does.
+  const linuxNotices = join(stage, `linux-${NOTICES_FILE}`);
+  writeNotices({ out: linuxNotices, version, nodeLicense: join(runtime, 'node', 'LICENSE'), nodeVersion, omit: isClaudeCodePackage });
+  const linux = await buildLinuxBundles({ version, out, stage, notices: linuxNotices });
   const signature = await readFile(join(out, names.signature), 'utf8');
   await writeFile(join(out, names.latest), JSON.stringify(latestJson({ version, notes: updaterNotes(releases, noteVersion), releases: updaterReleases(releases, noteVersion), signature }), null, 2) + '\n');
   const dmgSum = await sha256(dmg);
@@ -455,6 +593,7 @@ async function main() {
   await writeFile(join(out, names.notes), releaseBody(releases, noteVersion, { unsigned: !plan.notarize }));
   const sums = [];
   for (const file of [names.dmg, names.updater, names.signature, names.latest, names.cask, names.notices3p]) sums.push(`${await sha256(join(out, file))}  ${file}`);
+  for (const [file, sum] of linux) sums.push(`${sum}  ${file}`);
   await writeFile(join(out, names.sums), sums.join('\n') + '\n');
   const manifest = {
     version, tag: tagOf(version), arch: ARCH.file, builtAt: new Date().toISOString(),

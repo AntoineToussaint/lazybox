@@ -23,5 +23,8 @@
     "remark-gfm": "4.0.1",
     "uqr": "0.1.2"
   },
-  "exports": "./src/index.tsx"
+  "exports": {
+    ".": "./src/index.tsx",
+    "./models": "./src/models.ts"
+  }
 }

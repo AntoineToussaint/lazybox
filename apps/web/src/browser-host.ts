@@ -1,4 +1,4 @@
-import type { AttentionDestination, AttentionHost, ChatReturn, ChatTarget, NotificationPermission, RunnerDirectoryHost, RunnerListing, WorkspaceHost } from '@lazybox/platform';
+import type { AddComputerStep, AttentionDestination, AttentionHost, ChatReturn, ChatTarget, NotificationPermission, RunnerDirectoryHost, RunnerListing, SshHost, WorkspaceHost } from '@lazybox/platform';
 
 /**
  * Browser test host. Reconnect to existing views across an opener reload/close.
@@ -161,6 +161,41 @@ function browserRunners(): RunnerDirectoryHost {
         const url = new URL(runner.url, location.origin);
         return url.origin === location.origin ? [{ ...runner, url: url.href.replace(/\/+$/, '') }] : [];
       });
+    },
+    // Runners on other computers, when this page's server runs `lazybox
+    // remote` for it (the fixture server does; the desktop app uses its host).
+    async sshHosts() {
+      const response = await fetch('/__lazybox/remote/hosts', { cache: 'no-store', headers: { Accept: 'application/json' } });
+      if (!response.ok) throw new Error('This page cannot add computers: use the desktop app, or `lazybox remote add <host>` in a terminal.');
+      const value = await response.json() as { hosts?: SshHost[] };
+      return Array.isArray(value.hosts) ? value.hosts : [];
+    },
+    async addComputer(host, onStep, options) {
+      const response = await fetch('/__lazybox/remote/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ host, name: options?.name || '' }) });
+      if (!response.ok || !response.body) throw new Error('This page cannot add computers: use the desktop app, or `lazybox remote add <host>` in a terminal.');
+      const reader = response.body.getReader(), decoder = new TextDecoder();
+      let buffer = '', failure = '', done = false;
+      const take = (line: string) => {
+        if (!line.trim()) return;
+        const value = JSON.parse(line) as AddComputerStep & { error?: string; done?: boolean };
+        if (value.step) onStep(value);
+        else if (value.error) failure = value.error;
+        else if (value.done) done = true;
+      };
+      for (;;) {
+        const { value, done: end } = await reader.read();
+        if (end) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n'); buffer = lines.pop() || '';
+        lines.forEach(take);
+      }
+      take(buffer);
+      if (failure) throw new Error(failure);
+      if (!done) throw new Error('Adding the computer stopped before it finished.');
+    },
+    async removeComputer(name) {
+      const response = await fetch('/__lazybox/remote/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+      if (!response.ok) throw new Error(await response.text() || 'Could not remove it');
     },
   };
 }

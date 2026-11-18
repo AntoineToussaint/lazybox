@@ -8,11 +8,13 @@ mod capture;
 mod feedback;
 mod host;
 mod layout;
+mod links;
 mod placement;
 mod release;
 mod runners;
 mod sounds;
 mod terminal;
+mod title_bar;
 mod updates;
 mod viewer;
 mod viewstate;
@@ -138,6 +140,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .plugin(tauri_plugin_notification::init())
         .manage(attention::Attention::default())
         .manage(runners::Runners::default())
+        .manage(links::Links::default())
         .manage(viewer::Viewers::default())
         .manage(updates::Pending::default())
         .invoke_handler(tauri::generate_handler![
@@ -145,6 +148,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             runners::runner_list,
             runners::runner_add,
             runners::runner_forget,
+            links::remote_hosts,
+            links::remote_add,
+            links::remote_remove,
             host::save_view_state,
             host::open_sign_in,
             host::open_link,
@@ -177,6 +183,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             terminal::terminal_apps,
             terminal::open_terminal,
             sounds::play_system_sound,
+            title_bar::title_bar,
+            title_bar::title_bar_drag,
+            title_bar::title_bar_double_click,
             capture::capture_window,
             capture::focus_window,
             appearance::ui_zoom,
@@ -208,6 +217,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             voice::speech_speaking
         ])
         .setup(|app| {
+            // Measured here, on the main thread, before any window is built.
+            title_bar::buttons();
             attention::setup(app.handle())?;
             host::setup(app)
         })
@@ -221,7 +232,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         tauri::RunEvent::ExitRequested { code: Some(_), .. } => {
             host::finish(app);
         }
-        tauri::RunEvent::Exit => host::finish(app),
+        tauri::RunEvent::Exit => {
+            host::finish(app);
+            links::stop_all(app);
+        }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {
             has_visible_windows: false,

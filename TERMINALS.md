@@ -27,6 +27,43 @@ into a terminal.
   shows the workspace's running terminals.
 - A reload, another window, or a Runner restart re-attaches to the same shell
   and shows its recent output.
+- **Web links** in the output are links: hovering one underlines it with a
+  pointer, a click opens it as any link in Lazybox does (your browser; with ⌥,
+  the Web panel; swapped by **Settings → Web & links**), and the right-click
+  menu offers **Open in your browser**, **Open in Lazybox**, **Open in a new
+  Lazybox panel** and **Copy link**. An address that wraps across rows (a
+  sign-in URL of several hundred characters) is one link, opened whole. A
+  drag that selects text, a right-click and ⌃-click on a Mac open nothing.
+  Hyperlinks a program prints (OSC 8) open the same way.
+
+### Run a command for you
+
+**Run** on a command an agent wrote, or a home checkout's **Run in … home**
+([command output](COMMAND_OUTPUT.md), [home checkouts](WORKSPACES.md#home-checkouts)),
+puts it in a shell of this panel (`home-shell.ts`, rules in `shell-input.ts`):
+
+- **Which shell**: one already open in that place (the same folder of the
+  workspace, the same home, or `~`) that is idle, at a prompt in the folder
+  it started in with nothing running (`TerminalStatus.idle`). A busy one, one
+  that moved to another folder, or one holding a command typed for review is
+  left alone: a new shell opens. Into a reused shell, Ctrl+U clears the
+  prompt's line first.
+- **When**: only once the shell reads input. A shell still starting has not
+  turned its line editor on: the terminal echoes what arrives and the prompt
+  shows it again, so the command would appear twice (and, typed without
+  Return, nothing would run). zsh with Lazybox's integration says when its
+  line editor starts a line (OSC 133;B, counted as `prompts_ready`). A shell
+  without the mark (bash, fish; `prompt_marks` is false) gets it once its
+  output has been still for 0.7 s; a zsh whose line-init hook the person's
+  setup replaced, 1.5 s after its precmd mark. After 15 s (8 s without
+  marks) it is written anyway.
+- **What**: a one-line command with nothing to fill in runs (Return is
+  sent): a login like `gcloud auth login --no-launch-browser` runs
+  interactively in the panel, its link clickable. A script of several lines
+  (one bracketed paste) or a command with a placeholder (`<your-project>`) is
+  typed at the prompt; the notice and the block say *Typed in the terminal:
+  review and press Return*. **Paste in terminal (don't run)** types any
+  command that way.
 
 ### Send a command's output to the console, and to an agent
 
@@ -130,6 +167,17 @@ Login shell       session leader, the terminal as its controlling terminal
   runs.
 - `OpenTerminal` takes a request key: a retried request returns the shell it
   already started instead of starting a second one.
+- In an interactive zsh the integration marks, after the person's own
+  startup files: the end of each command line with its status (OSC
+  133;D;<status>, first among the precmd hooks), the start of one (OSC 133;C,
+  a preexec hook), and, from the line editor's line-init hook
+  (`add-zle-hook-widget`, which keeps the person's own), the folder (OSC 7)
+  then the prompt reading input (OSC 133;B). The Runner reads them from the
+  output (`terminals.scanMarks`) into `TerminalStatus`: `command_ends`,
+  `last_command_status`, `prompts_ready`, `idle` (at a prompt, in the folder
+  it started in after symbolic links, nothing running) and `prompt_marks` (zsh
+  with the integration, set at start and kept in the record). xterm.js
+  ignores the marks.
 - Deleting a workspace hangs up its terminals (revoking their credentials) and
   deletes their full-output files before its files are removed.
 
@@ -202,9 +250,11 @@ without this.
 | Command (from the repository root) | What it covers |
 | --- | --- |
 | `cd services/runner/code && go test ./internal/sessionhost -run Terminal` | PTY mode: controlling terminal, size, default signals, input, resize, exit code, hang-up, bounded scrollback handed over once |
-| `cd services/runner/code && go test ./internal/runner/terminals` | A real `/bin/sh`: input, cwd, environment, resize (`stty size`), exit, re-attachment after detach, close, directory confinement |
+| `cd services/runner/code && go test ./internal/runner/terminals` | A real `/bin/sh`: input, cwd, environment, resize (`stty size`), exit, re-attachment after detach, close, directory confinement; the shell's marks across chunks; a real zsh with the integration and a slow `.zshrc`: input written early shows twice, input written at the prompt-ready mark shows once and runs, idle after, busy while a command runs, not idle in another folder (skipped without zsh) |
+| `node --import tsx --test scripts/shell-input.test.ts scripts/terminal-links.test.ts` | When a shell is ready (mark, settled output, timeout), what Run writes, which shell it reuses; links found whole across wrapped rows |
 | `cd services/runner/code && go test ./internal/transport -run Terminal` | RPCs against a real workspace: refused directories, request-key retry, environment, close; the terminal credential's scope (own workspace only, never another's, never Apply/approve/history), exhaustive allowlist, revocation on close, shell exit and workspace deletion, survival across a Runner restart, `--to` resolution and claim-once |
 | `cd services/runner/code && go test ./internal/transport -run TestAPipeInAWorkspaceTerminal` | End to end: a real zsh login shell whose `.zshrc` puts another `lazybox` first; `printf … \| lazybox log` runs the Runner's CLI and publishes over Connect with the terminal credential |
 | `cd services/runner/code && go test ./cmd/lazybox` | `lazybox log` and `lazybox run` without a session: everything echoed, the compact view kept, `--to`, output preserved on publication failure |
 | `npm run test:terminal-share` | A terminal run in the console; **Send to agent** and `--to` fill the message box with the compact view, never the full output, and nothing is sent until the person sends (Chromium; `TEST_WEBKIT=1` for WebKit) |
-| `npm run test:terminal` | The panel against the fake Runner in WebKit (`TEST_CHROMIUM=1` for Chromium) |
+| `npm run test:terminal` | The panel against the fake Runner in WebKit (`TEST_CHROMIUM=1` for Chromium); a wrapped sign-in URL opened whole by a click, not by a drag, offered by the right-click menu |
+| `npm run test:home-checkouts` | Run in a home: a slow shell gets nothing before its prompt (the command shows once and runs), Paste types without running, a second Run reuses the idle shell, a busy shell is left alone |

@@ -93,3 +93,40 @@
 .runners-add-row>input{flex:1;min-width:0}
 .workspace-launching{display:flex;align-items:center;justify-content:center}
 .workspace-runner{margin-right:2px}
+
+/* Runners on other computers (REMOTE_RUNNERS.md): the sidebar groups Runners by computer. */
+.machine-group{display:flex;flex-direction:column;gap:6px;min-width:0}
+.machine-group+.machine-group{margin-top:4px;padding-top:6px;border-top:1px solid var(--line)}
+.machine-header{display:flex;align-items:center;gap:6px;min-width:0;height:20px;padding:0 6px;color:var(--text-faint);font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+.machine-header>svg{flex:none}
+.machine-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-subtle)}
+.machine-route,.machine-rtt{flex:none;font-weight:500;letter-spacing:0;text-transform:none;color:var(--text-faint)}
+.machine-rtt{font-variant-numeric:tabular-nums;display:none}
+.machine-header:hover>.machine-rtt,.machine-rtt[data-slow]{display:inline}
+.machine-rtt[data-slow]{color:var(--warn)}
+.machine-state{flex:none;margin-left:auto;font-weight:550;letter-spacing:0;text-transform:none;color:var(--warn)}
+.machine-group[data-link=down] .runner-workspaces{opacity:.55}
+
+/* Settings → Runners → Add a computer. */
+.runners-computers{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 16px}
+.runners-computers>div{display:flex;flex-direction:column;gap:3px;min-width:0}
+.runners-computers small{color:var(--text-muted);line-height:1.45}
+.runners-remote{font-size:calc(11px * var(--text-scale));color:var(--text-muted)}
+.add-computer{width:min(520px,calc(100vw - 32px))}
+.add-computer-body{display:flex;flex-direction:column;gap:10px;padding:12px 16px 16px}
+.add-computer-filter{width:100%;box-sizing:border-box}
+.add-computer-hosts{list-style:none;margin:0;padding:4px;max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.add-computer-hosts>li>button{display:flex;align-items:center;gap:8px;width:100%;min-width:0;height:30px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--text-soft);text-align:left}
+.add-computer-hosts>li>button[aria-selected=true],.add-computer-hosts>li>button:hover{background:var(--surface-selected);color:var(--text)}
+.add-computer-hosts>li>button>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.add-computer-hosts>li>button>small{margin-left:auto;flex:none;color:var(--text-faint)}
+.add-computer-note{margin:0;font-size:calc(11px * var(--text-scale));line-height:1.45;color:var(--text-muted)}
+.add-computer-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.add-computer-steps>li{display:grid;grid-template-columns:16px 1fr;gap:2px 8px;align-items:start}
+.add-computer-steps>li>svg{margin-top:2px;color:var(--text-faint)}
+.add-computer-steps>li[data-state=done]>svg{color:var(--ok)}
+.add-computer-steps>li[data-state=failed]>svg{color:var(--danger)}
+.add-computer-steps>li[data-state=running]>svg{color:var(--attention-working,var(--running))}
+.add-computer-steps>li>small{grid-column:2;color:var(--text-muted);overflow-wrap:anywhere}
+.add-computer-error{margin:0;padding:8px 10px;border-radius:6px;background:var(--danger-bg,var(--surface-sunken));color:var(--danger);line-height:1.45;overflow-wrap:anywhere}
+.add-computer-actions{display:flex;justify-content:flex-end;gap:8px}

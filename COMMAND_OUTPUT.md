@@ -200,8 +200,9 @@ text is JetBrains Mono (bundled), or the code font from Settings → Appearance.
 output lines are dropped) has a **Run** split button beside Copy
 (`code-runs.tsx`, rules in `code-run.ts`):
 
-- **Run** (also Enter on the focused block) opens a shell of the Terminal
-  panel with the command at its prompt; see "Run is the terminal" below.
+- **Run** (also Enter on the focused block) runs it in a shell of the
+  Terminal panel; see "Run is the terminal" below. **Paste in terminal (don't
+  run)**, in the ▾ menu, types it there without Return, to edit first.
 - **Ask the agent to run it (no terminal)**, in the ▾ menu, sends the agent
   "Run this and tell me the result:" and the block, fenced, as its own message: the draft in the
   message box is untouched. The agent runs it with `lazybox run`, so it sees a
@@ -246,9 +247,16 @@ without a click or key, and Run as command output always confirms.
 `Enter` on the focused block, `] ] r`, `/run`) used to ask the agent. An
 interactive command then failed there: an agent's commands have no TTY, so a
 login or browser sign-in cannot run through it, and an agent said as much when
-a Run arrived. Run now opens a shell of the workspace's Terminal panel (a real
-PTY) in the conversation's folder with the command typed at the prompt, never
-run by itself (`home-shell.ts`); the ▾ adds each repository's
+a Run arrived. Run now runs it in a shell of the workspace's Terminal panel (a
+real PTY) in the conversation's folder (`home-shell.ts`, rules in
+`shell-input.ts`): a shell already open there and idle at its prompt
+(`TerminalStatus.idle`), else a new one. A one-line command with nothing to
+fill in runs (Return is sent); a script of several lines or one with a
+placeholder is typed at the prompt, and the block says *Typed in the
+terminal: review and press Return*. Nothing is written before the shell can
+read it: zsh says so (OSC 133;B, `prompts_ready`); a shell without the mark
+(bash, fish) gets it once its output settles; a timeout types it anyway. The
+▾ adds **Paste in terminal (don't run)**, each repository's
 [home checkout](WORKSPACES.md#home-checkouts), the home folder, the person's
 own terminal app and Copy. Asking the agent and command output come last,
 labelled *no terminal*, and are not offered for a command that needs a

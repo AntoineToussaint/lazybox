@@ -12,6 +12,8 @@ const now=Date.now(),reset=Math.floor(now/1000)+3*3600;
 const clock=seconds=>new Date(seconds*1000).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
 const backLabel=new RegExp(`(tomorrow )?at ${clock(reset).replace(/\s/g,'\\s')}`);
 const saved=(id,label,availability)=>({id,label,provider:'claude',isolation:'environment',managed:true,availability});
+// Codex subscriptions too: a Claude conversation's lists never offer them (it cannot switch across providers).
+f.profiles.push({...saved('codex-work','Codex at work',{state:'available'}),provider:'codex'});
 f.profiles.push(saved('work-1','Work subscription 1',{state:'available',windows:[{name:'five_hour',usedPercent:37,durationMinutes:'300'}]}),saved('work-2','Work subscription 2',{state:'exhausted',resetAt:String(reset)}),saved('work-3','Work subscription 3',{state:'available'}));
 const data=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const limitEvent=resetAt=>({type:'failure',status:'exhausted',text:'rate_limit',account:{state:'exhausted',resetAt:String(resetAt)}});
@@ -58,6 +60,11 @@ try{
  await expect(chat.locator('.messages:visible .error')).toHaveCount(0);
  await raw(chat);
  await page.screenshot({path:'.cache/subscription-auto-switch.png'});
+ // The header's subscription chip opens Switch subscription… (the same as /subscription).
+ await chat.getByRole('button',{name:'Subscription Work subscription 1: switch subscription'}).click();
+ await expect(page.getByRole('dialog',{name:'Switch subscription'})).toBeVisible();
+ await page.keyboard.press('Escape');
+ await expect(page.getByRole('dialog',{name:'Switch subscription'})).toHaveCount(0);
 
  // 4. ⋯ → Switch subscription… at any time. Without an account policy it switches only when asked, and says where switching by itself lives.
  await chat.locator('summary[aria-label="Session actions"]').click();
@@ -66,12 +73,20 @@ try{
  await expect(dialog).toBeVisible();
  await expect(dialog.getByRole('radio',{name:/Work subscription 1/})).toBeDisabled();
  await expect(dialog.getByRole('radio',{name:/Work subscription 1/})).toHaveAccessibleName(/current/);
+ // One provider, so no group header: the current one first, then available, then not known to be limited, then limited; by name within each.
+ await expect(dialog.locator('.subscription-choice-name')).toHaveText(['Work subscription 1 · current','Work subscription 3','Claude CLI sign-in','Work subscription 2']);
+ await expect(dialog.locator('.provider-group-heading')).toHaveCount(0);
+ await expect(dialog).not.toContainText('Codex at work');
+ // Arrow keys move through the choices.
+ await dialog.getByRole('radio',{name:/Work subscription 3/}).focus();await page.keyboard.press('ArrowDown');
+ await expect(dialog.getByRole('radio',{name:/Claude CLI sign-in/})).toBeChecked();
  await expect(dialog.locator('.subscription-choice').filter({hasText:'Work subscription 2'})).toContainText(/Limit reached · back (tomorrow )?at/); // a reset after midnight reads "tomorrow at"
  await expect(dialog.locator('.subscription-choice').filter({hasText:'Work subscription 3'})).toContainText('Available');
  await expect(dialog.getByRole('checkbox',{name:'Switch automatically when a subscription reaches its limit'})).toHaveCount(0);
  await expect(dialog).toContainText('Lazybox switches only when you ask. Switching by itself at a limit is an extension: Settings → Extensions.');
  await dialog.getByRole('radio',{name:/Work subscription 3/}).check();
  await page.screenshot({path:'.cache/subscription-switch-dialog.png'});
+ await page.emulateMedia({colorScheme:'dark'});await page.waitForTimeout(400);await page.screenshot({path:'.cache/subscription-switch-dialog-dark.png'});await page.emulateMedia({colorScheme:'light'});
  await dialog.getByRole('button',{name:'Switch to Work subscription 3'}).click();
  await expect(dialog).toHaveCount(0);
  assert.deepEqual(f.mutations.findLast(m=>m.method==='SwitchSubscription').body,{sessionId:'alpha-session',profileId:'work-3'});
@@ -89,6 +104,10 @@ try{
  await expect(chat.locator('.messages:visible .error')).toHaveCount(0);
  await raw(chat);
  await expect(card.getByRole('radio')).toHaveCount(3);
+ // Only the conversation's own provider, available first then by name; no header for one group.
+ await expect(card.locator('.subscription-choice-name')).toHaveText(['Work subscription 1','Work subscription 3','Claude CLI sign-in']);
+ await expect(card.locator('.provider-group-heading')).toHaveCount(0);
+ await expect(card).not.toContainText('Codex');
  await expect(card.getByRole('radio',{name:/Work subscription 1/})).toBeChecked();
  await expect(card.locator('.subscription-choice').filter({hasText:'Work subscription 1'})).toContainText('Available · 37% used');
  await expect(card.getByRole('button',{name:'Wait for reset'})).toBeVisible();
@@ -157,5 +176,5 @@ try{
  await page.screenshot({path:'.cache/subscription-switch-dialog-policy.png'});
  await dialog.getByRole('button',{name:'Cancel'}).click();
  assert.deepEqual(errors,[]);
- console.log('PASS automatic switch line, one limit card in words (Switch to the best subscription, picker, wait), nothing switches by itself without an account policy, a message sent while limited goes once, wait-for-reset resumes once, ⋯ Switch subscription; with Subscription rotation allowed: Always switch automatically and the everywhere question. Fixture only.');
+ console.log('PASS automatic switch line, one limit card in words (Switch to the best subscription, picker of the same provider in order, wait), the header chip opens Switch subscription, nothing switches by itself without an account policy, a message sent while limited goes once, wait-for-reset resumes once, ⋯ Switch subscription; with Subscription rotation allowed: Always switch automatically and the everywhere question. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

@@ -52,9 +52,10 @@ export function runnerHealth(listing: Pick<RunnerListing, 'state'> | undefined, 
 export const healthLabel: Record<RunnerHealth, string> = { online: 'Connected', connecting: 'Connecting…', offline: 'Not reachable', stopped: 'Not running', invalid: 'Cannot be used' };
 
 const CHANNELS: Record<string, string> = { dev: 'Dev', working: 'Working', lazybox: 'Release', release: 'Release' };
-/** The name a Runner goes by in the window: its locator's ("Dev", "Working"), the product's, or the file's. */
-export function runnerLabel(listing: Pick<RunnerListing, 'name' | 'product'>): string {
+/** The name a Runner goes by in the window: its locator's ("Dev", "Working"), the product's, or the file's; a computer's name as it is ("build-box"). */
+export function runnerLabel(listing: Pick<RunnerListing, 'name' | 'product'> & Partial<Pick<RunnerListing, 'remote'>>): string {
   const name = listing.name.trim();
+  if (listing.remote && name) return name;
   if (CHANNELS[name.toLowerCase()]) return CHANNELS[name.toLowerCase()];
   if (name) return name.charAt(0).toUpperCase() + name.slice(1);
   return listing.product?.trim() || 'Runner';
@@ -163,3 +164,67 @@ export const localTarget = ({ collectionId, sessionId, commandId }: RunnerTarget
 export function runnerCounts(counts: Record<AttentionState, number> | undefined): { waiting: number; review: number } {
   return { waiting: (counts?.['needs-input'] || 0) + (counts?.failed || 0), review: counts?.review || 0 };
 }
+
+/**
+ * Runners on other computers (REMOTE_RUNNERS.md): a listing with `remote` is
+ * reached through a link agent on this computer. These say how its link is,
+ * in words, and group the window's Runners by the computer they run on.
+ */
+export const isRemote = (listing: Pick<RunnerListing, 'remote'> | undefined) => !!listing?.remote;
+
+/** How a remote Runner's link is, as its header says it; empty when it is connected. */
+export function linkStateText(listing: Pick<RunnerListing, 'remote' | 'state'> | undefined): string {
+  const remote = listing?.remote;
+  if (!remote) return '';
+  if (listing?.state !== 'running') return 'Connecting…';
+  switch (remote.state) {
+    case 'connected': return '';
+    case 'reconnecting': return 'Reconnecting…';
+    case 'refused': return remote.code === 'unknown-key' ? 'Access revoked' : remote.code === 'wrong-runner' ? 'Not its Runner' : 'Refused';
+    case 'stopped': return 'Not connected';
+    default: return 'Connecting…';
+  }
+}
+
+/** A Runner's state in words: the link's for a remote Runner, else its health's. */
+export function runnerStateText(row: Pick<RunnerSummary, 'health' | 'listing'>): string {
+  return linkStateText(row.listing) || healthLabel[row.health];
+}
+
+/** A round trip is on the header only when it is slow; always in its tooltip. */
+export const SLOW_RTT_MS = 300;
+export const rttText = (ms: number | undefined) => ms && ms > 0 ? `${Math.round(ms)} ms` : '';
+
+/** The route a remote Runner is reached by, as a short label. */
+export const routeLabel = (route: string | undefined) => ({ ssh: 'SSH', tailnet: 'Tailnet', relay: 'Relay', socket: 'Container' } as Record<string, string>)[route || ''] || (route || '').toUpperCase();
+
+/** One computer of the window: this one, or another reached over a link. */
+export type Machine<T> = { id: string; label: string; remote: boolean; host?: string; route?: string; rttMs?: number; state: string; problem?: string; rows: T[] };
+export const THIS_MACHINE = 'this-machine';
+
+/**
+ * The window's Runners by computer: this one first ("This Mac": Dev,
+ * Working, the release), then each other computer by name, keeping the
+ * Runners' order within each.
+ */
+export function groupByMachine<T extends Pick<RunnerSummary, 'listing'>>(rows: readonly T[], thisMachine = 'This Mac'): Machine<T>[] {
+  const local: Machine<T> = { id: THIS_MACHINE, label: thisMachine, remote: false, state: '', rows: [] };
+  const others = new Map<string, Machine<T>>();
+  for (const row of rows) {
+    const remote = row.listing?.remote;
+    if (!remote) { local.rows.push(row); continue; }
+    const label = remote.machine || remote.host;
+    const id = `machine:${label.toLowerCase()}`;
+    let machine = others.get(id);
+    if (!machine) {
+      machine = { id, label, remote: true, host: remote.host, route: remote.route, rttMs: remote.rttMs, state: linkStateText(row.listing), problem: remote.state === 'refused' ? remote.problem : undefined, rows: [] };
+      others.set(id, machine);
+    }
+    machine.rows.push(row);
+  }
+  const out = [...others.values()].sort((a, b) => a.label.localeCompare(b.label));
+  return local.rows.length ? [local, ...out] : out;
+}
+
+/** This computer's name in the window: "This Mac" on a Mac. */
+export const thisMachineLabel = (platform = typeof navigator === 'undefined' ? '' : navigator.platform || navigator.userAgent) => /Mac/i.test(platform) ? 'This Mac' : 'This computer';

@@ -6,7 +6,7 @@ import { RepositoryHostContext } from './RepositoryBrowser';
 import { ArtifactHostContext } from './ArtifactPage';
 import { useOpenArtifactRequests } from './artifact-events';
 import { WorkspaceRepositories } from './WorkspaceRepositories';
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import type { Collection } from '@lazybox/protocol';
 import type { ChatReturn, ViewStateStore, WorkspaceHost } from '@lazybox/platform';
@@ -17,6 +17,7 @@ import { AppearanceSync } from './appearance/AppearanceSync';
 import { UserThemeSync } from './appearance/useUserThemes';
 import { consolePlace, followConsole, noteConsoleUse, readFollowRuns, useRunFollowing } from './console-follow';
 import { requestTerminal } from './TerminalPanel';
+import { writeWhenReady } from './home-shell';
 import { AccountNotices } from './AccountNotices';
 import { groups, retireMonitor, defaultLayout, emptyTarget, parseLayout, resolveTarget, detachedFor, pinnedTarget, defaultDock, isDockSide, showPanel, dedupeChats, repairLayout, returnDetached, detachedChats, showCodePanel, adoptGeometry, allPanels, shownPanels, activatePanel, removeFromPage, insertDocked, mapPageGroups, mapPagePanels, groupOf, splitBeside, addToGroup, detachChat, sidebarKinds, pageGroups, fitAgentsEverywhere, isSidebarAgents, sidebarAgentsGroup, PANEL_LIMIT, settleLayout, sameConversation, tabFor, withSelection, closeTab, keepTab, previewTab, followFrontTab, isChatTab, openConversation, type DockSide, type SidebarAgents, type Panel, type ViewTarget, type WorkspaceLayout, type WorkspacePage } from './workspace-model';
 import { useConversationTabs, useTabsSetting } from './useConversationTabs';
@@ -55,7 +56,7 @@ import { lastWebPanel, requestWebPage, WebWindowContext } from './WebPanel';
 import { PowerLayer } from './PowerLayer';
 import { DockLayout, type DockHandle } from './DockLayout';
 import { GroupActions, GroupAdd, groupMenuItems, LayoutMenu, PanelsMenu, type AddCommands, type GroupCommands } from './DockMenus';
-import { useContextMenuContribution } from './ContextMenu';
+import { setPageFilesHere, useContextMenuContribution } from './ContextMenu';
 import { bindings, canonicalBinding, canonicalKey, chordFromEvent, displayBinding, layoutDirections, useActions, type LayoutDirection } from './actions';
 import { movePanel } from './dock-keyboard';
 import { showToast } from './toasts';
@@ -110,6 +111,11 @@ function foreignHost(host: WorkspaceHost): WorkspaceHost {
   const { openWorkspace: _w, openArtifact: _a, focusWindow: _f, captureWindow: _c, expectRunnerRestart: _e, reconnect: _r, ...rest } = host;
   return rest;
 }
+/** Another computer's Runner: a folder picked on this computer means nothing there. */
+function remoteHost(host: WorkspaceHost): WorkspaceHost {
+  const { chooseRepositoryFolder: _p, ...rest } = foreignHost(host);
+  return rest;
+}
 
 /**
  * The page shows one Runner at a time: the window's own, or another chosen in
@@ -119,8 +125,12 @@ function foreignHost(host: WorkspaceHost): WorkspaceHost {
 function ActiveRunner(props: Props) {
   const directory = useRunnerDirectory()!;
   const id = directory.active, own = id === OWN_RUNNER;
+  // A Runner on another computer is the whole page, as a local one is; only
+  // what acts on this computer's own files or folders is not offered.
+  const remote = !own && !!directory.runners.find(row => row.id === id)?.listing?.remote;
   const viewState = useMemo(() => own || !props.viewState ? props.viewState : runnerViewState(props.viewState, id), [own, props.viewState, id]);
-  const host = useMemo(() => own || !props.host ? props.host : foreignHost(props.host), [own, props.host]);
+  const host = useMemo(() => own || !props.host ? props.host : remote ? remoteHost(props.host) : foreignHost(props.host), [own, remote, props.host]);
+  useLayoutEffect(() => { setPageFilesHere(!remote); return () => setPageFilesHere(true); }, [remote]);
   if (directory.launching) return <main className="workspace-shell workspace-launching" aria-busy="true"><p className="module-empty" role="status">Connecting to your Runners…</p></main>;
   return <RunnerScope runner={id} fallback={<main className="workspace-shell"><p className="module-empty" role="status">Connecting…</p></main>}>
     <RepositoryHostContext.Provider value={host || {}}>
@@ -450,10 +460,11 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     const target = workspaceID || collections.find(c => c.state === 'ready')?.id || '';
     if (!target) throw new Error(`Create a workspace first: the shell runs in one. Or run this in a terminal: ${command}`);
     const terminal = await api.openTerminal({ collectionId: target, directory: '', cols: 100, rows: 30, requestKey: crypto.randomUUID() });
-    await api.writeTerminal({ terminalId: terminal.id, data: new TextEncoder().encode(command + '\r') });
     requestTerminal(target, terminal.id);
     showPanelFor('terminal', { collectionId: target, sessionId: '', commandId: '' });
     setSettings(false);
+    // Written once the shell can read it: earlier, the terminal echoes it and the prompt shows it again.
+    await writeWhenReady(api, target, terminal.id, command + '\r');
   };
   /** Show the panel of this kind for target: its workspace and conversation first, then the panel. */
   const showPanelFor = (kind: string, requested?: RunnerTarget) => {

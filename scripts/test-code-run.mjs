@@ -1,5 +1,6 @@
 // Run on what the agent wrote. A shell block's Run is the person's: a shell of
-// the Terminal panel with the command at its prompt, never a message to the
+// the Terminal panel runs a one-line command (a script, or one with a
+// placeholder, is typed at the prompt for review), never a message to the
 // agent. Its ▾ also asks the agent (no terminal: the exact block goes as a
 // message, at once or queued behind the turn in progress, and the block says
 // how the agent's run went) or runs it as command output (a confirm card with
@@ -45,7 +46,7 @@ try{
  await expect(blocks).toHaveCount(3);
  await expect(messages.locator('.code-block:not(.is-runnable)')).toHaveCount(1);
  const [first,token,tests]=[blocks.nth(0),blocks.nth(1),blocks.nth(2)];
- await expect(first.getByRole('button',{name:'Run: open a terminal with this command ready'})).toBeVisible();
+ await expect(first.getByRole('button',{name:'Run in the terminal',exact:true})).toBeVisible();
  await expect(first.getByRole('button',{name:'Copy code'})).toBeVisible();
  await page.screenshot({path:'.cache/code-run-blocks.png'});
 
@@ -79,7 +80,7 @@ try{
  // ── Run myself from ▾: confirm card with the script and the folder; Enter runs it in the chosen repository.
  fixture.power.holdCommands=true;
  await first.getByRole('button',{name:'More ways to run'}).click();
- assert.deepEqual(await labels(),['Run in the terminal','Run in your home folder','Open in Terminal (your app)','Copy command','Ask Claude to run it (no terminal)','Run as command output (no terminal)…']);
+ assert.deepEqual(await labels(),['Run in the terminal','Paste in terminal (don’t run)','Run in your home folder','Open in Terminal (your app)','Copy command','Ask Claude to run it (no terminal)','Run as command output (no terminal)…']);
  await menu.getByRole('menuitem',{name:/command output/}).click();
  const card=first.getByRole('form',{name:'Run this yourself'});
  await expect(card).toBeVisible();
@@ -144,7 +145,7 @@ try{
  await expect(messages.locator('.code-run-main')).toHaveCount(3);
  const inline=text=>messages.locator('p code',{hasText:new RegExp(`^${text}$`)});
  await inline('bin/devbox check').click({button:'right'});
- assert.deepEqual((await labels()).slice(0,2),['Run `bin/devbox check` in the terminal','Run in your home folder']);
+ assert.deepEqual((await labels()).slice(0,3),['Run `bin/devbox check` in the terminal','Paste in terminal (don’t run)','Run in your home folder']);
  await page.keyboard.press('Escape');
  await inline('build').click({button:'right'});
  await menu.getByRole('menuitem',{name:'Ask Claude to run it (no terminal)'}).click();
@@ -175,11 +176,18 @@ try{
  await expect(blocks).toHaveCount(4);
  const opened=()=>fixture.calls.filter(c=>c.method==='OpenTerminal').length;
  const lastShell=()=>[...fixture.terminals.values()].at(-1);
- await blocks.nth(3).getByRole('button',{name:'Run: open a terminal with this command ready'}).click();
+ await blocks.nth(3).getByRole('button',{name:'Run in the terminal',exact:true}).click();
  await expect.poll(opened).toBe(1);
- await expect.poll(()=>lastShell().input.join('')).toBe('npm run lint');
- assert.equal(lastShell().line,'npm run lint','typed at the prompt, not run');
- await expect(blocks.nth(3).locator('.code-run-chip').first()).toHaveText('In the terminal (the workspace): press Return to run it');
+ // One line, nothing to fill in: it runs, in the shell the person watches.
+ await expect.poll(()=>lastShell().input.join('')).toBe('npm run lint\r');
+ await expect(page.locator('.panel-terminal').getByTestId('terminal')).toContainText('ran: npm run lint');
+ await expect(blocks.nth(3).locator('.code-run-chip').first()).toHaveText('Finished in the workspace · exit 0');
+ // A placeholder is typed at the prompt for the person to fill in, in the same shell (idle again), not run.
+ await token.getByRole('button',{name:'Run in the terminal',exact:true}).click();
+ await expect.poll(()=>lastShell().line).toBe('acme connect --token <your-token>');
+ assert.equal(opened(),1,'the idle shell is reused');
+ await expect(token.locator('.code-run-terminal .code-run-chip').first()).toHaveText('Typed in the terminal (the workspace): review and press Return');
+ await expect(page.locator('.context-menu-notice').filter({hasText:'Typed in the terminal: review and press Return'}).first()).toBeVisible();
  // The shell takes the keyboard, so Return runs it there.
  const shellFocused=()=>expect(page.locator('.panel-terminal').getByTestId('terminal').locator('textarea')).toBeFocused();
  await shellFocused();
@@ -189,11 +197,16 @@ try{
  await palette.getByRole('combobox',{name:'Search commands'}).fill('>run the last command');
  await expect(palette.getByRole('option',{name:/Run the last command block as command output/})).toBeVisible();
  await palette.getByRole('option',{name:/^Run the last command block in the terminal/}).click();
+ // The workspace's shell holds the typed command: the next run opens another.
  await expect.poll(opened).toBe(2);
+ await expect.poll(()=>lastShell().input.join('')).toBe('npm run lint\r');
+ await expect(blocks.nth(3).locator('.code-run-chip').first()).toHaveText('Finished in the workspace · exit 0');
  await shellFocused();
  await messages.click({position:{x:5,y:5}});
  await page.keyboard.press(']');await page.keyboard.press(']');await page.keyboard.press('r');
- await expect.poll(opened).toBe(3);
+ // That one is idle again: reused.
+ await expect.poll(()=>lastShell().input.join('')).toBe('npm run lint\r\x15npm run lint\r');
+ assert.equal(opened(),2,'the idle shell is reused');
  await shellFocused();
  assert.equal(applies().length,3,'none of them asked the agent');
 
@@ -254,5 +267,5 @@ try{
  await expect.poll(()=>fixture.mutations.some(m=>m.method==='StopWorkspaceAction'&&m.body.action==='api/dev')).toBe(true);
  await expect(actionChip).toHaveText(/^■ Stopped/,{timeout:5000});
  assert.deepEqual(errors,[]);
- console.log('PASS: shell blocks in agent messages get Run (the Terminal panel, the command at its prompt), asking the agent from ▾ (the exact block sent at once or queued behind the turn, the agent\'s run followed to ✓) and command output (confirm card with script and folder, started in the chosen repository, console opened, outcome on the block, a failure handed to the message box); placeholders must be filled in; read-only warns and still runs; inline commands run from their menu, bare subcommands with their program; palette and ] ] r run the last block; servers: Run asks to start them in the background (by the workspace action when one runs the same command) and follows them there with their port; Run myself never waits, shows Running · port, Open preview and Stop, and starts the matching workspace action instead. Fixture only.');
+ console.log('PASS: shell blocks in agent messages get Run (the Terminal panel: one line runs, a placeholder is typed for review, an idle shell is reused), asking the agent from ▾ (the exact block sent at once or queued behind the turn, the agent\'s run followed to ✓) and command output (confirm card with script and folder, started in the chosen repository, console opened, outcome on the block, a failure handed to the message box); placeholders must be filled in; read-only warns and still runs; inline commands run from their menu, bare subcommands with their program; palette and ] ] r run the last block; servers: Run asks to start them in the background (by the workspace action when one runs the same command) and follows them there with their port; Run myself never waits, shows Running · port, Open preview and Stop, and starts the matching workspace action instead. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

@@ -40,6 +40,8 @@ export type WebViewerProps = {
   /** Bumped to put the cursor in the address bar. */
   focusAddress?: number;
   onIcon?(icon: string): void;
+  /** The toolbar is the window's title bar (a Web panel in its own window, title-bar.ts). */
+  titleBar?: boolean;
 };
 
 /**
@@ -50,7 +52,7 @@ export type WebViewerProps = {
  * screen, with a padlock for a secure page.
  */
 export function WebViewer(props: WebViewerProps) {
-  const { id, label, frameTitle, history, setHistory, zoom, onZoom, engine, addressLabel = 'Address', reloadLabel = 'Reload', leading, start, menu, focusAddress, onIcon } = props;
+  const { id, label, frameTitle, history, setHistory, zoom, onZoom, engine, addressLabel = 'Address', reloadLabel = 'Reload', leading, start, menu, focusAddress, onIcon, titleBar } = props;
   const views = useContext(WebViewsContext);
   const entry = current(history);
   const target = history.expect !== undefined ? history.entries[history.expect]?.url : undefined;
@@ -154,14 +156,15 @@ export function WebViewer(props: WebViewerProps) {
   const crossOrigin = !!origin && !native && !origin.local && (() => { try { return new URL(page).origin !== location.origin; } catch { return false; } })();
 
   return <section className="web-viewer" aria-label={label} onKeyDown={keys}>
-    <form className="web-toolbar" onSubmit={go} role="toolbar" aria-label={`${label} navigation`}>
+    <form className="web-toolbar" onSubmit={go} role="toolbar" aria-label={`${label} navigation`} data-window-drag-region={titleBar ? 'deep' : undefined}>
       {leading}
       <button type="button" className="icon-button" aria-label="Back" title={`Back (${alt}←)`} disabled={history.index <= 0} onClick={() => move(-1)}><Icon name="back" size={14}/></button>
       <button type="button" className="icon-button web-forward" aria-label="Forward" title={`Forward (${alt}→)`} disabled={history.index >= history.entries.length - 1} onClick={() => move(1)}><Icon name="back" size={14}/></button>
       {loading && page
         ? <button type="button" className="icon-button" aria-label="Stop loading" title="Stop" onClick={stop}><Icon name="close" size={14}/></button>
         : <button type="button" className="icon-button" aria-label={reloadLabel} title="Reload" disabled={!page} onClick={reload}><Icon name="refresh" size={14}/></button>}
-      <div className={`web-address${editing ? ' is-editing' : ''}${shownAddress ? ' is-shown' : ''}`}>
+      {/* A press anywhere on the address edits it, never moves the window. */}
+      <div className={`web-address${editing ? ' is-editing' : ''}${shownAddress ? ' is-shown' : ''}`} data-window-drag-region="false">
         {/* Read like a browser's: where the page is, prominent; the rest of its address, quiet. Typing shows the whole address. */}
         {shownAddress && <span className="web-shown-address" aria-hidden="true">
           <span className={`web-origin${origin!.secure ? ' is-secure' : ' is-insecure'}`} onClick={() => input.current?.focus()} title={origin!.local ? 'A page on this machine' : origin!.secure ? 'Secure connection (https)' : 'Not secure: this page is sent unencrypted (http)'}>

@@ -180,6 +180,8 @@ export function ownedByFocus(binding: string, target: Pick<Element, "closest"> |
   const mod = parts.includes("Meta") || parts.includes("Ctrl"), alt = parts.includes("Alt");
   if (alt && mod && (name === "ArrowLeft" || name === "ArrowRight") && target.closest(".editor-area")) return true;
   if (alt && (name === "ArrowUp" || name === "ArrowDown") && target.closest(".monaco-editor")) return true;
+  // ⌥⇧↑ / ⌥⇧↓ on a focused sidebar row move it (useListReorder), off a Mac too, where they also resize panels.
+  if (alt && parts.includes("Shift") && !mod && (name === "ArrowUp" || name === "ArrowDown") && target.closest("[data-reorder-id]")) return true;
   return false;
 }
 /** The keys of an action, one string per alternative. */

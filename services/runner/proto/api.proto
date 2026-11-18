@@ -88,7 +88,12 @@ service RunnerService {
   rpc CreateCollection(CreateCollectionRequest) returns (CollectionResponse);
   rpc AddCollectionRepositories(AddCollectionRepositoriesRequest) returns (CollectionResponse);
   rpc GetCollection(CollectionRequest) returns (CollectionResponse);
+  // The workspaces in the person's order (ArrangeWorkspaces).
   rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
+  // Puts the workspaces in the person's order: the one ListCollections
+  // answers in, so every window and a paired phone list them alike, across
+  // restarts. The owner's only. Answers the list in its new order.
+  rpc ArrangeWorkspaces(ArrangeWorkspacesRequest) returns (ListCollectionsResponse);
   rpc ArchiveCollection(CollectionRequest) returns (CollectionResponse);
   rpc ReconcileCollection(ReconcileCollectionRequest) returns (CollectionResponse);
   rpc OpenSession(OpenSessionRequest) returns (SessionResponse);
@@ -1520,7 +1525,15 @@ message AddCollectionRepositoriesRequest {
 message CollectionRequest { string collection_id = 1; }
 message CollectionResponse { Collection collection = 1; }
 message ListCollectionsRequest {}
+// The person's order (ArrangeWorkspaces): a workspace they never placed
+// (created since) comes first, newest first; with no order kept, by ID.
 message ListCollectionsResponse { repeated Collection collections = 1; }
+message ArrangeWorkspacesRequest {
+  // Every workspace's ID, in the order the person put them. One left out
+  // goes first, as a new one does; an unknown ID is ignored; none clears
+  // the order.
+  repeated string collection_ids = 1;
+}
 message ReconcileCollectionRequest {
   string collection_id = 1;
   string expected_owner_execution_id = 2;
@@ -1902,6 +1915,16 @@ message TerminalStatus {
   // window learns that a command it typed for the person finished.
   uint64 command_ends = 18;
   int32 last_command_status = 19;
+  // The shell says when its prompt is ready for input (zsh with Lazybox's
+  // integration). Without it, a window waits for the output to settle.
+  bool prompt_marks = 20;
+  // How many times the shell said its line editor reads a new command line
+  // (OSC 133;B). Input written before the first one is echoed, then shown
+  // again at the prompt: a window types only after it.
+  uint64 prompts_ready = 21;
+  // The shell waits at a prompt, in the folder it started in, with nothing
+  // running: a window may type a command into it rather than open another.
+  bool idle = 22;
 }
 message ListTerminalsRequest {
   string collection_id = 1;

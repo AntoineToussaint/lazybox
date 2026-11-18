@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,9 @@ import (
 )
 
 // release is an installed Lazybox for one test: a runtime with stand-in
-// programs, a temporary home, and a launchd that only records.
+// programs, a temporary home, and a service manager that only records: this
+// platform's (launchd on macOS, systemd on Linux), so the definition written
+// and read back is the real one.
 type release struct {
 	t       *testing.T
 	home    string
@@ -28,6 +31,9 @@ type release struct {
 	// shell is the login shell's PATH, the one a terminal gets; shellProblem
 	// makes reading it fail.
 	shell, shellProblem string
+	// logs, when set, is where the manager says the Runner's output goes
+	// (the journal would be the real one's on Linux).
+	logs *installation.LogSource
 }
 
 func newRelease(t *testing.T, version string) *release {
@@ -77,7 +83,7 @@ func (r *release) getenv(name string) string {
 func (r *release) setup() setup {
 	return setup{
 		installer: func() (installation.Installer, error) {
-			return installation.Installer{Paths: r.paths, Layout: r.runtime, Launchd: installation.Launchd{Domain: "gui/501", Run: r.launchctl},
+			return installation.Installer{Paths: r.paths, Layout: r.runtime, Manager: r.manager(),
 				Shell: func(context.Context) installation.ShellEnvironment {
 					if r.shellProblem != "" {
 						return installation.ShellEnvironment{Shell: "/bin/zsh", Problem: r.shellProblem}
@@ -87,6 +93,48 @@ func (r *release) setup() setup {
 		},
 		ready: func(context.Context, string, string) (string, error) { return r.ready, nil },
 	}
+}
+
+// manager is this platform's service manager, driven by a fake.
+func (r *release) manager() installation.Manager {
+	var m installation.Manager = installation.Launchd{Domain: "gui/501", Run: r.launchctl}
+	if runtime.GOOS == "linux" {
+		m = installation.Systemd{User: "me", Run: r.systemctl}
+	}
+	if r.logs != nil {
+		return logsAt{m, *r.logs}
+	}
+	return m
+}
+
+// logsAt is a manager whose Runner output goes where the test says.
+type logsAt struct {
+	installation.Manager
+	source installation.LogSource
+}
+
+func (l logsAt) Logs(installation.Paths) installation.LogSource { return l.source }
+
+// definition is where the service definition is written.
+func (r *release) definition() string { return r.manager().DefinitionPath(r.paths) }
+
+func (r *release) systemctl(_ context.Context, program string, args ...string) ([]byte, error) {
+	r.calls = append(r.calls, program+" "+strings.Join(args, " "))
+	if program == "loginctl" {
+		return []byte("Linger=yes\n"), nil
+	}
+	switch args[1] {
+	case "show":
+		if !r.loaded {
+			return []byte("LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nUnitFileState=enabled\n"), nil
+		}
+		return []byte("LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=777\nUnitFileState=enabled\n"), nil
+	case "enable", "restart", "start":
+		r.loaded = true
+	case "stop", "disable":
+		r.loaded = false
+	}
+	return nil, nil
 }
 
 func (r *release) launchctl(_ context.Context, args ...string) ([]byte, error) {
@@ -128,7 +176,7 @@ func TestServiceInstallUpdateStatusAndUninstall(t *testing.T) {
 	if got.code != 0 || !strings.Contains(got.stdout, "The Runner (0.1.0) is running") || !r.loaded {
 		t.Fatalf("install: %+v calls %v", got, r.calls)
 	}
-	if _, err := os.Stat(r.paths.Plist); err != nil {
+	if _, err := os.Stat(r.definition()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,7 +209,7 @@ func TestServiceInstallUpdateStatusAndUninstall(t *testing.T) {
 	if got = r.run("", false, "service", "uninstall"); got.code != 0 || r.loaded || !strings.Contains(got.stdout, "Removed the Runner service") {
 		t.Fatalf("uninstall: %+v", got)
 	}
-	if _, err := os.Stat(r.paths.Plist); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(r.definition()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("the plist survived uninstall")
 	}
 	if got = r.run("", false, "service", "bogus"); got.code != exitUsage {
@@ -171,6 +219,7 @@ func TestServiceInstallUpdateStatusAndUninstall(t *testing.T) {
 
 func TestServiceLogsPrintsTheTail(t *testing.T) {
 	r := newRelease(t, "0.1.0")
+	r.logs = &installation.LogSource{File: r.paths.Log()}
 	if got := r.run("", false, "service", "logs"); got.code != exitNotFound {
 		t.Fatalf("no log yet: %+v", got)
 	}
@@ -184,6 +233,21 @@ func TestServiceLogsPrintsTheTail(t *testing.T) {
 	got := r.run("", false, "service", "logs", "--lines", "3")
 	if lines := strings.Split(strings.TrimSpace(got.stdout), "\n"); len(lines) != 3 || lines[2] != "the last line" {
 		t.Fatalf("%q", got.stdout)
+	}
+}
+
+// Under systemd the Runner's output is in the journal: `service logs` runs
+// the command that prints it, limited to the lines asked for.
+func TestServiceLogsReadsTheJournal(t *testing.T) {
+	r := newRelease(t, "0.1.0")
+	r.logs = &installation.LogSource{Command: []string{"/bin/sh", "-c", `echo "journal $*"`, "journalctl"}, Lines: "--lines"}
+	got := r.run("", false, "service", "logs", "--lines", "5")
+	if got.code != 0 || strings.TrimSpace(got.stdout) != "journal --lines 5" {
+		t.Fatalf("%+v", got)
+	}
+	r.logs.Command = []string{"/bin/sh", "-c", "exit 3"}
+	if got = r.run("", false, "service", "logs"); got.code != exitUnavailable {
+		t.Fatalf("a failing journal: %+v", got)
 	}
 }
 
@@ -293,7 +357,7 @@ func TestLinkPutsTheCLIOnPathAndUninstallTakesItBack(t *testing.T) {
 	if !r.loaded {
 		t.Fatal("a dry run stopped the service")
 	}
-	for _, kept := range []string{link, completion, r.paths.Plist} {
+	for _, kept := range []string{link, completion, r.definition()} {
 		if _, err := os.Lstat(kept); err != nil {
 			t.Fatalf("a dry run removed %s", kept)
 		}
@@ -327,7 +391,7 @@ func TestLinkPutsTheCLIOnPathAndUninstallTakesItBack(t *testing.T) {
 	if got.code != 0 || r.loaded || !strings.Contains(got.stdout, "drag ") {
 		t.Fatalf("uninstall: %+v", got)
 	}
-	for _, gone := range []string{link, completion, r.paths.Plist} {
+	for _, gone := range []string{link, completion, r.definition()} {
 		if _, err := os.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s survived uninstall", gone)
 		}

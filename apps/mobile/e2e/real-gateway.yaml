@@ -1,0 +1,37 @@
+# Against the Runner's real device gateway on loopback (the Go test
+# TestSimulatorGateway in internal/remote): pairing, sign-in, the device
+# credential, the allowlist and Connect are the Runner's own code; only
+# execution behind it is a stand-in. Pair, open the waiting conversation,
+# Allow, and see the agent go on. Run by scripts/test-mobile-simulator.mjs --flow gateway.
+appId: ai.lazybox.mobile
+---
+- launchApp:
+    clearState: true
+    clearKeychain: true
+- openLink: "lazybox://pair?link=${LINK}"
+- runFlow:
+    when:
+      visible: "Open"
+    commands:
+      - tapOn: "Open"
+- tapOn:
+    id: "pair-submit"
+- extendedWaitUntil:
+    visible: "Paired"
+    timeout: 30000
+- takeScreenshot: 20-real-paired
+- tapOn:
+    id: "open-inbox"
+- extendedWaitUntil:
+    visible: "1 waiting for you"
+    timeout: 15000
+- tapOn: "Bump dependencies.*"
+- extendedWaitUntil:
+    visible: "Approval required"
+    timeout: 15000
+- tapOn:
+    id: "allow"
+- extendedWaitUntil:
+    visible: "Updated 14 packages.*"
+    timeout: 20000
+- takeScreenshot: 21-real-allowed

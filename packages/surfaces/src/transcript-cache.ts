@@ -2,9 +2,10 @@ import { Code, ConnectError, follow, runnerLink, type RunnerClient } from '@lazy
 import { foldTranscript, emptyTranscript, type Transcript } from './transcript-model';
 import type { JournalEvent } from '@lazybox/protocol';
 import type { Session } from '@lazybox/protocol';
-import { INITIAL_MESSAGES } from './useChatScroll';
 import { humanError } from './human-error';
 
+/** Messages mounted when a conversation opens, and added per step toward its start (useChatScroll, the phone's list). */
+export const INITIAL_MESSAGES=40,EARLIER_MESSAGES=60;
 /** Milliseconds between published batches while records stream in, and between progress reports of a replay. */
 const PUBLISH_INTERVAL=32,PROGRESS_INTERVAL=100;
 /**

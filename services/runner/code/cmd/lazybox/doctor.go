@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"connectrpc.com/connect"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/installation"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sessionhost"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/version"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"golang.org/x/sys/unix"
@@ -77,7 +79,9 @@ func (c *cli) diagnose(ctx context.Context) []check {
 	add := func(k check) { checks = append(checks, k) }
 	in, err := c.setup().installer()
 	if err != nil {
-		add(check{ID: "release", Title: "Release", Status: checkFail, Detail: err.Error(), Fix: "Install Lazybox from its disk image or `brew install --cask lazybox-v2`, then run the `lazybox` it ships"})
+		add(check{ID: "release", Title: "Release", Status: checkFail, Detail: err.Error(), Fix: platformFix(
+			"Install Lazybox from its disk image or `brew install --cask lazybox-v2`, then run the `lazybox` it ships",
+			"Unpack a Lazybox Runner release (docs/install.md, \"Runner on a Linux machine\"), then run the `lazybox` it ships")})
 		return checks
 	}
 	release, _ := in.Layout.ReadVersion()
@@ -86,7 +90,7 @@ func (c *cli) diagnose(ctx context.Context) []check {
 		app = in.Layout.Root
 	}
 	if err = in.Layout.Check(); err != nil {
-		add(check{ID: "release", Title: "Release", Status: checkFail, Detail: err.Error(), Fix: "Reinstall Lazybox: drag a fresh copy to Applications"})
+		add(check{ID: "release", Title: "Release", Status: checkFail, Detail: err.Error(), Fix: platformFix("Reinstall Lazybox: drag a fresh copy to Applications", "Unpack the release again, after checking its SHA-256")})
 	} else if reason := in.Layout.Unstable(); reason != "" {
 		add(check{ID: "release", Title: "Release", Status: checkFail, Detail: release + " at " + app, Fix: reason})
 	} else {
@@ -96,14 +100,26 @@ func (c *cli) diagnose(ctx context.Context) []check {
 	// The service and the Runner it runs.
 	report := c.serviceStatus(ctx, in)
 	switch {
+	case report.ManagerProblem != "":
+		add(check{ID: "service", Title: "Runner service", Status: checkFail, Detail: report.ManagerProblem})
 	case !report.Installed:
-		add(check{ID: "service", Title: "Runner service", Status: checkFail, Detail: "not installed", Fix: "Open Lazybox and choose Set up, or run `lazybox service install`"})
+		add(check{ID: "service", Title: "Runner service", Status: checkFail, Detail: "not installed", Fix: platformFix("Open Lazybox and choose Set up, or run `lazybox service install`", "`lazybox service install`")})
 	case !report.Running:
 		add(check{ID: "service", Title: "Runner service", Status: checkFail, Detail: "installed but not running" + suffix(" (last exit "+report.LastExit+")", report.LastExit != ""), Fix: "`lazybox service start`, then `lazybox service logs` if it stops again"})
 	case report.Program != in.Layout.Runner():
 		add(check{ID: "service", Title: "Runner service", Status: checkWarn, Detail: "runs " + report.Program + ", not this release's Runner", Fix: "`lazybox service install` points it at this release; running agents are kept"})
 	default:
-		add(check{ID: "service", Title: "Runner service", Status: checkOK, Detail: fmt.Sprintf("running (pid %d), starts at login", report.PID)})
+		detail := fmt.Sprintf("running (pid %d) under %s", report.PID, report.Manager)
+		if report.StartsWhen != "" {
+			detail += ", " + report.StartsWhen
+		}
+		add(check{ID: "service", Title: "Runner service", Status: checkOK, Detail: detail})
+	}
+	if k, ok := lingerCheck(ctx, in); ok {
+		add(k)
+	}
+	if k, ok := hostsCheck(in); ok {
+		add(k)
 	}
 	if info, err := os.Stat(in.Paths.Endpoint()); err != nil {
 		add(check{ID: "endpoint", Title: "Endpoint", Status: checkFail, Detail: "no endpoint file at " + in.Paths.Endpoint(), Fix: "The Runner writes it when it starts: `lazybox service start`"})
@@ -126,8 +142,13 @@ func (c *cli) diagnose(ctx context.Context) []check {
 	}
 
 	// What agents run with.
-	if out, err := exec.CommandContext(ctx, in.Layout.Node(), "--version").Output(); err != nil {
-		add(check{ID: "node", Title: "Node", Status: checkFail, Detail: "the bundled Node does not run: " + err.Error(), Fix: "Reinstall Lazybox; macOS may have quarantined part of it"})
+	if out, err := exec.CommandContext(ctx, in.Layout.Node(), "--version").CombinedOutput(); err != nil {
+		detail := "the bundled Node does not run: " + err.Error()
+		if text := strings.TrimSpace(string(out)); text != "" {
+			detail += ": " + strings.SplitN(text, "\n", 2)[0]
+		}
+		add(check{ID: "node", Title: "Node", Status: checkFail, Detail: detail, Fix: platformFix("Reinstall Lazybox; macOS may have quarantined part of it",
+			"Install the libraries Node needs: `sudo apt install libatomic1 libstdc++6` (Debian, Ubuntu) or `sudo dnf install libatomic libstdc++` (Fedora, RHEL); it also needs glibc 2.28 or newer (`ldd --version`)")})
 	} else {
 		add(check{ID: "node", Title: "Node", Status: checkOK, Detail: strings.TrimSpace(string(out)) + " (bundled; runs the Claude worker only)"})
 	}
@@ -146,9 +167,9 @@ func (c *cli) diagnose(ctx context.Context) []check {
 		if p := lookIn(tool, servicePath); p != "" {
 			add(check{ID: tool, Title: tool, Status: checkOK, Detail: p})
 		} else if tool == "git" {
-			add(check{ID: tool, Title: tool, Status: checkFail, Detail: "not on the Runner's PATH", Fix: "Install the Xcode command line tools (`xcode-select --install`), then `lazybox service install` to refresh the PATH"})
+			add(check{ID: tool, Title: tool, Status: checkFail, Detail: "not on the Runner's PATH", Fix: platformFix("Install the Xcode command line tools (`xcode-select --install`)", "Install git with the system's package manager (`sudo apt install git`, `sudo dnf install git`)") + ", then `lazybox service install` to refresh the PATH"})
 		} else {
-			add(check{ID: tool, Title: tool, Status: checkWarn, Detail: "not on the Runner's PATH (optional: agents use it for pull requests)", Fix: "`brew install gh`, then `lazybox service install` to refresh the PATH"})
+			add(check{ID: tool, Title: tool, Status: checkWarn, Detail: "not on the Runner's PATH (optional: agents use it for pull requests)", Fix: platformFix("`brew install gh`", "Install the GitHub CLI (https://cli.github.com)") + ", then `lazybox service install` to refresh the PATH"})
 		}
 	}
 
@@ -308,7 +329,12 @@ func (c *cli) providerCheck(ctx context.Context, id, title, bundled, servicePath
 		program = lookIn(id, servicePath)
 	}
 	if program == "" {
-		return check{ID: id, Title: title, Status: checkWarn, Detail: "not installed (optional: only needed to run " + title + " agents)", Fix: map[string]string{"codex": "`brew install codex` or `npm i -g @openai/codex`, then `lazybox service install` to refresh the PATH"}[id]}
+		fix := map[string]string{"codex": platformFix("`brew install codex` or `npm i -g @openai/codex`", "`npm i -g @openai/codex`") + ", then `lazybox service install` to refresh the PATH"}[id]
+		if id == "claude" && runtime.GOOS == "linux" {
+			// The Linux release does not ship Claude Code (REMOTE_RUNNERS.md §5.3).
+			fix = "Install Claude Code with Anthropic's installer (https://docs.anthropic.com/en/docs/claude-code), then `lazybox service install` to refresh the PATH"
+		}
+		return check{ID: id, Title: title, Status: checkWarn, Detail: "not installed (optional: only needed to run " + title + " agents)", Fix: fix}
 	}
 	probe, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -412,6 +438,49 @@ func (c *cli) pathCheck(in installation.Installer) check {
 		return check{ID: "cli", Title: "lazybox on PATH", Status: checkWarn, Detail: other.Problem, Fix: other.Fix}
 	}
 	return check{ID: "cli", Title: "lazybox on PATH", Status: checkOK, Detail: found}
+}
+
+// platformFix is the fix for this platform: macOS's, or Linux's.
+func platformFix(macOS, linux string) string {
+	if runtime.GOOS == "linux" {
+		return linux
+	}
+	return macOS
+}
+
+// lingerCheck says, under systemd, whether the Runner keeps running after
+// the person logs out and starts at boot: only with lingering on.
+func lingerCheck(ctx context.Context, in installation.Installer) (check, bool) {
+	s, ok := in.Manager.(installation.Systemd)
+	if !ok {
+		return check{}, false
+	}
+	linger, err := s.Linger(ctx)
+	switch {
+	case err != nil:
+		return check{ID: "linger", Title: "Lingering", Status: checkWarn, Detail: "could not read it: " + err.Error()}, true
+	case !linger:
+		return check{ID: "linger", Title: "Lingering", Status: checkWarn, Detail: "off: the Runner and its agents stop when you log out, and it does not start at boot",
+			Fix: "`loginctl enable-linger " + s.User + "` (some systems need `sudo`)"}, true
+	}
+	return check{ID: "linger", Title: "Lingering", Status: checkOK, Detail: "on: the Runner runs without a login session and starts at boot"}, true
+}
+
+// hostsCheck says, on Linux, whether agents outlive a stop of the Runner's
+// service: under systemd, only in scopes of their own.
+func hostsCheck(in installation.Installer) (check, bool) {
+	if runtime.GOOS != "linux" {
+		return check{}, false
+	}
+	status := sessionhost.Scopes()
+	switch {
+	case status.Scoped:
+		return check{ID: "hosts", Title: "Agents outlive", Status: checkOK, Detail: "a Runner restart: each agent, command and terminal runs in a systemd scope of its own"}, true
+	case in.Manager.Kind() == installation.ManagerSystemd:
+		return check{ID: "hosts", Title: "Agents outlive", Status: checkWarn, Detail: "a Runner restart, through the unit's KillMode=process only: agents cannot get scopes of their own (" + status.Reason + ")",
+			Fix: "Make sure `systemd-run --user --scope true` works for this account"}, true
+	}
+	return check{ID: "hosts", Title: "Agents outlive", Status: checkOK, Detail: "a Runner restart, not a restart of this machine or container (" + status.Reason + ")"}, true
 }
 
 func humanBytes(n uint64) string {

@@ -55,7 +55,7 @@ export function useRunnerLocator<T extends LocatedRunner>(read: () => Promise<T>
 }
 
 /** What a listing says that matters to the window: a new value only when one of these changes, so a poll that finds the same Runners rerenders nothing. */
-export const listingKey = (listings: readonly RunnerListing[]) => JSON.stringify(listings.map(({ id, name, product, channel, source, locator, current, state, problem, url, token }) => [id, name, product, channel, source, locator, current, state, problem, url, token]));
+export const listingKey = (listings: readonly RunnerListing[]) => JSON.stringify(listings.map(({ id, name, product, channel, source, locator, current, state, problem, url, token, remote }) => [id, name, product, channel, source, locator, current, state, problem, url, token, remote && [remote.host, remote.route, remote.machine, remote.os, remote.fingerprint, remote.state, remote.code, remote.problem, remote.rttMs]]));
 
 /**
  * The Runners a window's host can find (RunnerDirectoryHost.list), reread on

@@ -26,6 +26,19 @@ You rarely need to say. In order, it uses:
 `lazybox runners` shows them and which one is live. `--endpoint` and `--runner`
 go **before** the command: `lazybox --runner dev ls`.
 
+## Runners on your other computers
+
+Over your own `ssh` and `~/.ssh/config` ([Runners on your other
+computers](../guides/remote-computers.md)):
+
+| Command | What it does |
+| --- | --- |
+| `lazybox remote add <host> [--name N] [--bundle FILE]` | Checks the computer, installs and starts its Runner if needed (the computer verifies the SHA-256 first), adds this computer's key to its owners and pins its Runner's key. `--progress json` prints one line per step. |
+| `lazybox remote ls` · `remote rm <name>` · `remote hosts` | The computers added and how each link is; forget one (and revoke this computer's key there; `--keep-on-host` does not); the hosts of `~/.ssh/config`. |
+| `lazybox link connect <name>` | Keeps the link to that computer's Runner open and serves it on this computer, so `lazybox --runner <name> …` works. The app runs one per computer by itself. |
+| `lazybox link owners [ls\|revoke KEY]` | **On the other computer**: the computers with owner access to its Runner; a revoke ends their links within a second. |
+| `lazybox link up` | **On the other computer**: start its Runner if it is not running. |
+
 ## Follow and answer
 
 | Command | What it does |

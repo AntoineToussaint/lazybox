@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Lazybox",
+    "slug": "lazybox",
+    "scheme": "lazybox",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#121317",
+    "ios": {
+      "bundleIdentifier": "ai.lazybox.mobile",
+      "supportsTablet": true,
+      "config": { "usesNonExemptEncryption": false },
+      "infoPlist": {
+        "NSAppTransportSecurity": { "NSAllowsLocalNetworking": true }
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      ["expo-camera", { "cameraPermission": "Lazybox uses the camera to scan the pairing code your computer shows.", "recordAudioAndroid": false }]
+    ],
+    "experiments": { "typedRoutes": false }
+  }
+}

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -81,7 +83,8 @@ func completionFile(shell, home, xdgData string) (path, hint string) {
 }
 
 // ourCLI reports a link that points at a Lazybox release's CLI: this one, or
-// an older copy of the app (a link left by a previous install is replaced).
+// an older copy of the app or of a Linux release (a link left by a previous
+// install is replaced).
 func ourCLI(link, cli string) bool {
 	target, err := filepath.EvalSymlinks(link)
 	if err != nil {
@@ -90,8 +93,12 @@ func ourCLI(link, cli string) bool {
 			return false
 		}
 	}
-	return target == cli || strings.HasSuffix(target, "/Contents/Resources/runtime/bin/lazybox")
+	return target == cli || strings.HasSuffix(target, "/Contents/Resources/runtime/bin/lazybox") || linuxReleaseCLI.MatchString(target)
 }
+
+// linuxReleaseCLI is the CLI of a Linux release unpacked where the
+// documentation puts it: …/lazybox/runner/versions/<version>/bin/lazybox.
+var linuxReleaseCLI = regexp.MustCompile(`/lazybox/runner/versions/[^/]+/bin/lazybox$`)
 
 // replaceWithLink points link at target atomically: a new symlink renamed
 // over whatever was there.
@@ -130,6 +137,9 @@ type linkResult struct {
 }
 
 func (c *cli) link(args []string) error {
+	if len(args) > 0 && linkSubcommands[args[0]] {
+		return c.linkRemote(args)
+	}
 	if looksLikeItemURL(args) {
 		return c.linkItem(args)
 	}
@@ -180,7 +190,11 @@ func (c *cli) link(args []string) error {
 		}
 	}
 	if *shell == "" {
-		*shell = filepath.Base(c.getenv("SHELL"))
+		login := c.getenv("SHELL")
+		if login == "" {
+			login = installation.DefaultShell()
+		}
+		*shell = filepath.Base(login)
 	}
 	var completion string
 	if !*noCompletions {
@@ -209,6 +223,9 @@ func (c *cli) link(args []string) error {
 		switch *shell {
 		case "bash":
 			rc = "~/.bash_profile"
+			if runtime.GOOS == "linux" {
+				rc = "~/.bashrc"
+			}
 		case "fish":
 			line, rc = "fish_add_path "+target, "~/.config/fish/config.fish"
 		}
@@ -285,11 +302,17 @@ type removal struct {
 
 // uninstallPlan lists what `lazybox uninstall` removes, in order. Data (the
 // Runner's state, the app's own storage and the logs) is in it only when asked.
-func uninstallPlan(p installation.Paths, removeData bool) []removal {
+func uninstallPlan(in installation.Installer, removeData bool) []removal {
 	var plan []removal
+	p := in.Paths
 	exists := func(path string) bool { _, err := os.Lstat(path); return err == nil }
-	if exists(p.Plist) {
-		plan = append(plan, removal{What: "Runner service", Path: p.Plist, Detail: "stops the Runner and removes its launchd job (" + p.Label + ")"})
+	if definition := in.Definition(); exists(definition) {
+		job := map[string]string{
+			installation.ManagerLaunchd:    "its launchd job (" + p.Label + ")",
+			installation.ManagerSystemd:    "its systemd user unit (" + p.Unit() + ")",
+			installation.ManagerSupervisor: "its supervisor",
+		}[in.Manager.Kind()]
+		plan = append(plan, removal{What: "Runner service", Path: definition, Detail: "stops the Runner and removes " + job})
 	}
 	if exists(p.Locator()) {
 		plan = append(plan, removal{What: "CLI locator", Path: p.Locator()})
@@ -318,7 +341,7 @@ func uninstallPlan(p installation.Paths, removeData bool) []removal {
 	if exists(p.Logs) {
 		plan = append(plan, removal{What: "logs", Path: p.Logs, Data: true})
 	}
-	if p.Label == installation.DefaultLabel {
+	if p.Label == installation.DefaultLabel && p.OS == "darwin" {
 		library := filepath.Join(p.Home, "Library")
 		for _, dir := range []string{
 			filepath.Join(library, "Application Support", installation.AppIdentifier),
@@ -346,7 +369,7 @@ func (c *cli) uninstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	plan := uninstallPlan(in.Paths, *removeData)
+	plan := uninstallPlan(in, *removeData)
 	kept := hosted{}
 	if !*dryRun {
 		kept = c.liveProcesses(in.Paths.Endpoint())
@@ -423,6 +446,8 @@ func (c *cli) uninstall(args []string) error {
 	}
 	if app != "" {
 		c.out("  To remove the app itself, drag %s to the Trash (or `brew uninstall --cask lazybox-v2`).\n", app)
+	} else if in.Paths.OS == "linux" && !strings.HasPrefix(in.Layout.Root, in.Paths.Support+string(filepath.Separator)) {
+		c.out("  To remove the release itself, delete %s.\n", in.Layout.Root)
 	}
 	return nil
 }

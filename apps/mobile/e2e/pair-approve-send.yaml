@@ -1,0 +1,96 @@
+# The first vertical slice on the iOS Simulator, against the fixture Runner
+# (scripts/mobile-fixture.mjs): pair from a link, the Inbox, open a
+# conversation, Allow its request, reply; then follow a live conversation and
+# Send now behind its running turn. Run by scripts/test-mobile-simulator.mjs,
+# which starts the fixture, passes LINK and checks what the Runner received.
+appId: ai.lazybox.mobile
+---
+- launchApp:
+    clearState: true
+    clearKeychain: true
+# A system "Open in Lazybox?" prompt left from an earlier run.
+- runFlow:
+    when:
+      visible: "Cancel"
+    commands:
+      - tapOn: "Cancel"
+- assertVisible: "Your agents, in your pocket"
+- takeScreenshot: 01-welcome
+- openLink: "lazybox://pair?link=${LINK}"
+- runFlow:
+    when:
+      visible: "Open"
+    commands:
+      - tapOn: "Open"
+- assertVisible:
+    id: "pair-submit"
+- assertVisible: "Reply, answer and approve"
+- takeScreenshot: 02-pair
+- tapOn:
+    id: "pair-submit"
+- extendedWaitUntil:
+    visible: "Paired"
+    timeout: 30000
+- takeScreenshot: 03-paired
+- tapOn:
+    id: "open-inbox"
+- extendedWaitUntil:
+    visible: "Bump dependencies.*"
+    timeout: 15000
+- assertVisible: "3 waiting for you"
+- takeScreenshot: 04-inbox
+- tapOn: "Bump dependencies.*"
+- extendedWaitUntil:
+    visible: "Approval required"
+    timeout: 15000
+- assertVisible: "npm update --save"
+- takeScreenshot: 05-approval
+- tapOn:
+    id: "allow"
+- extendedWaitUntil:
+    visible: "Updated 14 packages.*"
+    timeout: 15000
+- tapOn:
+    id: "composer"
+- inputText: "Ship it and open a pull request."
+- tapOn:
+    id: "send"
+- extendedWaitUntil:
+    visible: "Got it. I’ll do that next."
+    timeout: 15000
+# Tap empty transcript space: the keyboard goes, as for a person.
+- tapOn:
+    point: "50%, 22%"
+- takeScreenshot: 06-replied
+# The back gesture, from the left edge.
+- swipe:
+    start: "1%, 50%"
+    end: "85%, 50%"
+    duration: 400
+# Back in the Inbox: the answered conversation left "Needs input".
+- extendedWaitUntil:
+    visible: "2 waiting for you"
+    timeout: 10000
+- scrollUntilVisible:
+    element: "Index the API routes.*"
+    direction: DOWN
+- tapOn: "Index the API routes.*"
+- extendedWaitUntil:
+    visible: "Live"
+    timeout: 15000
+- takeScreenshot: 07-live
+- tapOn:
+    id: "composer"
+- inputText: "Skip the admin routes for now."
+- assertVisible:
+    id: "send-now"
+- takeScreenshot: 08-send-now
+- tapOn:
+    id: "send-now"
+- extendedWaitUntil:
+    visible: "Stopped and switched to your message.*"
+    timeout: 15000
+# Tap empty transcript space: the keyboard goes, as for a person.
+- tapOn:
+    point: "50%, 22%"
+- takeScreenshot: 09-sent-now

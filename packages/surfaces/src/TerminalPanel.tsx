@@ -17,6 +17,11 @@ import { composeInConversation } from './compose';
 import { useWorkConversation } from './PullRequestFlow';
 import type { ViewTarget } from './workspace-model';
 import { useHomeChoices } from './home-checkouts';
+import { isMenuClick } from './context-menu-model';
+import { isMac } from './workbench';
+import { linkMenuItems, linkPreferences, openInBrowser, openInViewer } from './web-links';
+import { webPage } from './web-address';
+import { linksInRows, type TerminalRow } from './terminal-links';
 
 /** Workspaces whose terminal panel was just asked for (from the header, or for one shell). */
 const requested = new Map<string, string>();
@@ -34,6 +39,44 @@ export const terminalLabel = (terminal: TerminalStatus) => terminal.place ? term
 
 const encoder = new TextEncoder();
 const inputLimit = 32 << 10;
+
+/** A press that moves farther than this before its release is a drag (a selection), not a click on a link. */
+const dragDistance = 4;
+/**
+ * Opens a link clicked in a terminal as every link in the app opens: the
+ * person's browser by default, the Web panel with Alt (or the other way round,
+ * per Settings → Web & links). The exact address printed is what opens.
+ */
+function openTerminalLink(url: string, event: MouseEvent) {
+  const page = webPage(url);
+  if (!page) return;
+  const report = (error: unknown) => console.error('Could not open link', error);
+  if ((linkPreferences().target === 'viewer') !== event.altKey && openInViewer(page)) return;
+  void openInBrowser(url).catch(report);
+}
+/** The rows of the logical line through buffer row `y` (0-based), the wrapped rows joined, and the first row's index. */
+function logicalLine(view: Terminal, y: number): { first: number; rows: TerminalRow[] } {
+  const buffer = view.buffer.active;
+  let first = y;
+  while (first > 0 && buffer.getLine(first)?.isWrapped) first--;
+  const rows: TerminalRow[] = [];
+  // A sign-in URL of a few hundred characters spans a few rows; a line of thousands is not searched past 64 rows.
+  for (let row = first; row < buffer.length && rows.length < 64; row++) {
+    const line = buffer.getLine(row);
+    if (!line || (row > first && !line.isWrapped)) break;
+    let text = ''; const cells: number[] = [];
+    for (let x = 0; x < line.length; x++) {
+      const cell = line.getCell(x);
+      if (!cell || cell.getWidth() === 0) continue;
+      const chars = cell.getChars() || ' ';
+      text += chars; for (let i = 0; i < chars.length; i++) cells.push(x);
+    }
+    // The last row's blank end is not part of the line.
+    if (!buffer.getLine(row + 1)?.isWrapped) { const kept = text.trimEnd().length; text = text.slice(0, kept); cells.length = kept; }
+    rows.push({ text, cells });
+  }
+  return { first, rows };
+}
 
 const exitText = (status: TerminalStatus) => status.error || (status.signal ? `Shell ended by ${status.signal}` : status.exitCode === undefined ? 'Shell ended' : `Shell exited with code ${status.exitCode}`);
 
@@ -160,6 +203,8 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
 
 function TerminalView({ api, terminal, focusRef, onSize, onError, onCleanExit, workspaceId, canSend, onSendToAgent, onNewTerminal, onCloseTerminal }: { api: RunnerClient; terminal: TerminalStatus; focusRef: { current: (() => void) | null }; onSize(size: { cols: number; rows: number }): void; onError(error: string): void; onCleanExit?(): void; workspaceId: string; canSend: boolean; onSendToAgent(text: string): void; onNewTerminal?(): void; onCloseTerminal(): void }) {
   const xterm = useRef<Terminal | null>(null);
+  /** The web link under the pointer, for the right-click menu. */
+  const hovered = useRef('');
   const cleanExit = useRef(onCleanExit); cleanExit.current = onCleanExit;
   const startedLive = useRef(!terminal.done);
   const host = useRef<HTMLDivElement>(null);
@@ -173,6 +218,33 @@ function TerminalView({ api, terminal, focusRef, onSize, onError, onCleanExit, w
     const view = new Terminal({ theme: terminalTheme(getAppearance()), fontFamily: font.family, fontSize: font.size, lineHeight: 1.15, cursorBlink: true, scrollback: 5000, allowProposedApi: false, rightClickSelectsWord: false });
     xterm.current = view;
     const fit = new FitAddon(); view.loadAddon(fit); view.open(element);
+    // Web links: underlined with a pointer on hover, opened by a click, offered by the right-click menu.
+    // A drag that selects text, a right-click and a Mac's Ctrl+click never open one.
+    let pressedAt: { x: number; y: number } | null = null;
+    const press = (event: MouseEvent) => { pressedAt = event.button === 0 ? { x: event.clientX, y: event.clientY } : null; };
+    element.addEventListener('mousedown', press, true);
+    const activate = (event: MouseEvent, url: string) => {
+      const from = pressedAt; pressedAt = null;
+      if (event.button !== 0 || isMenuClick(event, isMac) || view.hasSelection()) return;
+      if (from && Math.hypot(event.clientX - from.x, event.clientY - from.y) > dragDistance) return;
+      openTerminalLink(url, event);
+    };
+    const hoverLink = (_event: MouseEvent, url: string) => { hovered.current = url; };
+    const leaveLink = (_event: MouseEvent, url: string) => { if (hovered.current === url) hovered.current = ''; };
+    // OSC 8 hyperlinks a program prints open the same way.
+    view.options.linkHandler = { activate, hover: hoverLink, leave: leaveLink, allowNonHttpProtocols: false };
+    const links = view.registerLinkProvider({
+      provideLinks(y, callback) {
+        const { first, rows } = logicalLine(view, y - 1);
+        const found = linksInRows(rows).filter(link => first + link.start.row <= y - 1 && y - 1 <= first + link.end.row);
+        callback(found.length ? found.map(link => ({
+          text: link.url,
+          range: { start: { x: link.start.col + 1, y: first + link.start.row + 1 }, end: { x: link.end.col + 1, y: first + link.end.row + 1 } },
+          decorations: { pointerCursor: true, underline: true },
+          activate, hover: hoverLink, leave: leaveLink,
+        })) : undefined);
+      },
+    });
     // The theme and code font follow Settings → Appearance live.
     const unfollow = subscribeAppearance(() => { const next = getAppearance(), f = codeFont(next); view.options.theme = terminalTheme(next); view.options.fontFamily = f.family; view.options.fontSize = f.size; try { fit.fit(); } catch { /* not laid out */ } });
     const focus = () => view.focus(); focusRef.current = focus;
@@ -231,13 +303,15 @@ function TerminalView({ api, terminal, focusRef, onSize, onError, onCleanExit, w
         await new Promise<void>(resolve => { const timer = setTimeout(resolve, 1000); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
       }
     })();
-    return () => { unfollow(); if (focusRef.current === focus) focusRef.current = null; control.abort(); observer.disconnect(); input.dispose(); binary.dispose(); view.dispose(); };
+    return () => { unfollow(); if (focusRef.current === focus) focusRef.current = null; control.abort(); observer.disconnect(); input.dispose(); binary.dispose(); links.dispose(); element.removeEventListener('mousedown', press, true); hovered.current = ''; view.dispose(); };
   }, [api, id]);
   return <div className="terminal-view">
     <div ref={host} className="terminal-host" data-testid="terminal" data-terminal-id={id} onContextMenu={contextMenu('terminal', (): MenuItem[] => {
       const view = xterm.current, selection = view?.getSelection() || '';
       const live = !status.done;
+      const link = hovered.current;
       return [
+        ...(link ? [...linkMenuItems(link), 'separator' as const] : []),
         { label: 'Copy', icon: 'copy', shortcut: 'Mod+C', disabled: !selection && 'Select text in the terminal first', run: () => copyText(selection) },
         { label: 'Paste', icon: 'paste', shortcut: 'Mod+V', disabled: !live && 'The shell has ended', run: async () => {
           let text = '';

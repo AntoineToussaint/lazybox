@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
+import { beginDrag, preventMouseDown } from './drag-gesture';
 import { Icon } from './Icons';
 import type { Rendered, Size } from './diagram-svg';
 import { diagramFailure, type DiagramFailure } from './diagram-errors';
@@ -121,6 +122,8 @@ function DiagramCanvas({ rendered, control, mode, onExpand, label }: { rendered:
   }, [viewport, zoomAt, pan, mode]);
   const down = (event: PointerEvent<HTMLDivElement>) => {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
+    // Panned with the mouse: a drag gesture, so no text is selected meanwhile.
+    if (event.pointerType === 'mouse') { event.preventDefault(); event.currentTarget.focus({ preventScroll: true }); beginDrag('move', { pointerId: event.pointerId, onEnd: () => { pointers.current.clear(); setDragging(false); } }); }
     event.currentTarget.setPointerCapture(event.pointerId);
     pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
     setDragging(true);
@@ -152,7 +155,7 @@ function DiagramCanvas({ rendered, control, mode, onExpand, label }: { rendered:
   return <div ref={viewport} className={`diagram-viewport ${mode}${dragging ? ' dragging' : ''}`} style={inlineHeight ? { height: inlineHeight } : undefined}
     tabIndex={0} role="group" aria-roledescription="zoomable diagram" aria-label={label} aria-describedby={help}
     title={mode === 'inline' ? 'Drag to pan · Ctrl/⌘ + scroll or pinch to zoom · double-click to zoom in · Enter for full screen' : undefined}
-    onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onKeyDown={key}
+    onPointerDown={down} onMouseDown={preventMouseDown} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onKeyDown={key}
     onDoubleClick={event => { const box = event.currentTarget.getBoundingClientRect(); zoomAt(event.shiftKey ? 1 / 2 : 2, event.clientX - box.left, event.clientY - box.top); }}>
     <span id={help} className="diagram-help">Arrow keys pan. Plus and minus zoom. 0 fits the diagram, 1 shows it at actual size.{onExpand ? ' Enter opens it full screen.' : ''}</span>
     <img src={rendered.src} alt="Mermaid diagram" draggable={false} width={Math.round(rendered.width * view.scale)} height={Math.round(rendered.height * view.scale)} style={{ transform: `translate(${view.x}px, ${view.y}px)` }}/>

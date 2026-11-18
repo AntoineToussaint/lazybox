@@ -1,21 +1,24 @@
 import { useState, type FormEvent } from 'react';
 import { Icon } from './Icons';
+import { AddComputerSheet } from './AddComputerSheet';
 import { RunnerHealthDot, useRunnerDirectory, type RunnerView } from './RunnerDirectory';
-import { healthLabel, OWN_RUNNER } from './runner-directory';
+import { OWN_RUNNER, routeLabel, rttText, runnerStateText } from './runner-directory';
 import { SettingsHeader } from './settings-parts';
 
 /**
  * Settings → Runners: every Runner this window can show — the launchers'
- * (Dev, Working, the installed release) and any the person added — with its
- * health and version; which one the window opens on (primary), which are
- * hidden, and adding one by its locator or endpoint file. A Runner is never
- * reached with another's credentials, and Runners on other machines are
- * reached only as paired devices (MULTI_RUNNER.md step 3), not from here.
+ * (Dev, Working, the installed release), any the person added, and Runners
+ * on other computers (REMOTE_RUNNERS.md) — with its health and version;
+ * which one the window opens on (primary), which are hidden, adding one by
+ * its locator or endpoint file, and Add a computer. A Runner is never reached
+ * with another's credentials: one on another computer is reached through a
+ * link this computer's own key opens, and its owner bearer stays there.
  */
 export function RunnersSettings() {
   const directory = useRunnerDirectory();
   const [path, setPath] = useState('');
   const [adding, setAdding] = useState(false);
+  const [addingComputer, setAddingComputer] = useState(false);
   const [error, setError] = useState('');
   if (!directory) return <><SettingsHeader title="Runners" description="This window shows one Runner."/></>;
   const { runners, preferences, setPreferences, host, active } = directory;
@@ -35,19 +38,32 @@ export function RunnersSettings() {
     try { await host.forget(row.id); setPreferences({ hidden: preferences.hidden.filter(id => id !== row.id), primary: preferences.primary === row.id ? '' : preferences.primary }); await directory.reread(); }
     catch (failure) { setError(String(failure).replace(/^Error: /, '')); }
   };
+  const remove = async (row: RunnerView) => {
+    if (!host?.removeComputer || !row.listing) return;
+    setError('');
+    try { await host.removeComputer(row.listing.name); setPreferences({ hidden: preferences.hidden.filter(id => id !== row.id), primary: preferences.primary === row.id ? '' : preferences.primary }); await directory.reread(); }
+    catch (failure) { setError(String(failure).replace(/^Error: /, '')); }
+  };
   return <>
-    <SettingsHeader title="Runners" description="Every Runner this window shows: Dev and Working, the installed app's, a standalone Runner or another checkout. The page shows one at a time; Workspaces, Agents, the Inbox and ⌘K show them all."/>
+    <SettingsHeader title="Runners" description="Every Runner this window shows: Dev and Working, the installed app's, a standalone Runner or another checkout, and Runners on your other computers. The page shows one at a time; Workspaces, Agents, the Inbox and ⌘K show them all."/>
     {directory.listError && <p className="settings-error" role="alert">Could not look for Runners: {directory.listError}</p>}
     {error && <p className="settings-error" role="alert">{error}</p>}
+    {host?.addComputer && <div className="runners-computers">
+      <div><strong>Runners on other computers</strong><small>A Linux box, a cloud VM, another Mac: anything you reach with <code>ssh</code>. Agents there keep working while this computer sleeps.</small></div>
+      <button type="button" className="primary" onClick={() => setAddingComputer(true)}><Icon name="plus" size={13}/>Add a computer…</button>
+    </div>}
+    {addingComputer && host && <AddComputerSheet host={host} onClose={() => setAddingComputer(false)} onAdded={() => void directory.reread()}/>}
     <ul className="runners-list" aria-label="Runners">
       {runners.map(row => <li key={row.id} className="runners-item" data-runner={row.id} data-health={row.health} data-hidden={row.hidden || undefined}>
         <div className="runners-item-main">
           <RunnerHealthDot health={row.health}/>
           <div className="runners-item-text">
             <strong>{row.label}{row.primary && <span className="runners-tag is-primary" title="The window opens on this Runner">Primary</span>}{row.id === active && <span className="runners-tag">Showing</span>}{row.own && <span className="runners-tag is-quiet" title="The Runner this window was opened on">This window's</span>}</strong>
-            <small>{[row.channel && row.channel !== row.label ? row.channel : '', row.version ? `version ${row.version.replace(/^v/, '')}` : '', row.hidden ? 'Hidden' : healthLabel[row.health]].filter(Boolean).join(' · ')}</small>
-            {row.listing?.locator && <code className="runners-path" title={row.listing.locator}>{row.listing.locator}</code>}
-            {row.listing?.problem && row.health !== 'online' && <small className="runners-problem">{row.listing.problem}</small>}
+            <small>{[row.channel && row.channel !== row.label ? row.channel : '', row.version ? `version ${row.version.replace(/^v/, '')}` : '', row.hidden ? 'Hidden' : runnerStateText(row)].filter(Boolean).join(' · ')}</small>
+            {row.listing?.remote
+              ? <small className="runners-remote" title={row.listing.remote.fingerprint ? `Pinned Runner key ${row.listing.remote.fingerprint}` : undefined}>{[`On ${row.listing.remote.machine || row.listing.remote.host}`, `${routeLabel(row.listing.remote.route)} ${row.listing.remote.host}`, rttText(row.listing.remote.rttMs), row.listing.remote.fingerprint].filter(Boolean).join(' · ')}</small>
+              : row.listing?.locator && <code className="runners-path" title={row.listing.locator}>{row.listing.locator}</code>}
+            {(row.listing?.remote?.state === 'refused' ? row.listing.remote.problem : row.health !== 'online' && row.listing?.problem) && <small className="runners-problem">{row.listing?.remote?.state === 'refused' ? row.listing.remote.problem : row.listing?.problem}</small>}
           </div>
         </div>
         <div className="runners-item-actions">
@@ -58,6 +74,7 @@ export function RunnersSettings() {
             <span>Shown</span>
           </label>
           {row.listing?.source === 'added' && host?.forget && <button type="button" className="danger-link" onClick={() => void forget(row)} aria-label={`Forget ${row.label}`}>Forget</button>}
+          {row.listing?.remote && host?.removeComputer && <button type="button" className="danger-link" title={`Forget it here and revoke this computer's key on ${row.listing.remote.host}. Its agents and workspaces stay there.`} onClick={() => void remove(row)} aria-label={`Remove ${row.label} from this computer`}>Remove</button>}
         </div>
       </li>)}
     </ul>
@@ -69,6 +86,6 @@ export function RunnersSettings() {
       </div>
     </form>}
     {!host && <p className="settings-note">This window finds no other Runners. The desktop app lists every Runner <code>lazybox runners</code> shows.</p>}
-    <p className="settings-note">A Runner on another machine is reached as a paired device over Tailscale, with the grants it gave (see <em>Several Runners in one window</em> in the docs). It is not added here.</p>
+    <p className="settings-note">A computer added here is yours: this computer gets full owner access to its Runner, over SSH, with a key of its own that it can revoke there (<code>lazybox link owners revoke</code>). A phone or a computer you trust less is paired as a device instead (Settings → Devices on that computer).</p>
   </>;
 }

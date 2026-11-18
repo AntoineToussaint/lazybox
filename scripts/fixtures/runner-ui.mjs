@@ -77,6 +77,8 @@ export async function startRunnerFixture() {
   const frozenSessions=new Map();
   const openEvents=id=>{const channel={events:[],clients:new Set(),done:false,push({receipt,...event},capturedAt){const record={cursor:String(this.events.length+1),event,...(receipt?{receipt}:{}),...(capturedAt?{capturedAt}:{})};this.events.push(record);for(const res of this.clients)res.write(frame({...record,retained:record.cursor}));},complete(){this.done=true;for(const res of this.clients)res.end(frame({},2));this.clients.clear();},cut(){for(const res of this.clients)res.end(frame({error:{code:'unavailable',message:'the Runner is restarting; reconnect'}},2));this.clients.clear();}};eventStreams.set(id,channel);return channel;};
   const collections = ['alpha', 'beta'].map((id, index) => ({ id, name: index ? 'Beta release' : 'Alpha feature', workId: id, root: `/fixture/collections/${id}`, state: 'ready', ownerExecutionId: `${id}-session`, members: ['api', 'web'].map((name, i) => ({ spec: { name, repositoryId: i ? 'frontend' : 'backend', baseRef: 'main', branch: `lazybox/${id}/${name}` }, path: `/fixture/collections/${id}/${name}`, baseCommit: (index ? 'b' : 'a').repeat(40), ready: true })) }));
+  const arrangement = [];
+  const arranged = () => { if (!arrangement.length) return collections; const at = new Map(arrangement.map((id, i) => [id, i])); return [...collections.filter(c => !at.has(c.id)).reverse(), ...collections.filter(c => at.has(c.id)).sort((a, b) => at.get(a.id) - at.get(b.id))]; };
   const sessions = collections.map(collection => ({ id: `${collection.id}-session`, collectionId: collection.id, workId: collection.id, profileId: 'claude-default', gatewayId: 'direct', workingDirectory: collection.root, capabilities: { files: true, images: true, resume: true, livePermission: true }, permission: 'ask', instructionsPending: collection.id === 'alpha', pending: [] }));
   sessions[0].status = 'running'; sessions[0].agents = [{ id: 'root', name: 'Main agent', status: 'done' }, { id: 'child-review', parentId: 'root', name: 'Review', status: 'running' }];
   const missions = createMissionFake({ sessions, collections, events: { open: openEvents, get: id => eventStreams.get(id) } });
@@ -151,12 +153,38 @@ export async function startRunnerFixture() {
   // The provider refused the sign-in: errorCode is what the client offers a way out of.
   const failEnrollment = (id, error, errorCode = '') => { const flow = enrollments.get(id); if (!flow) throw new Error('Unknown fixture enrollment'); Object.assign(flow, { state: 'failed', error, errorCode, signInUrl: '', userCode: '' }); };
 
-  // Terminals echo what is typed and answer each line, like a minimal shell.
-  const terminals=new Map();
-  const terminalStatus=t=>({id:t.id,collectionId:t.collectionId,directory:t.directory,title:t.title,shell:'/bin/fixture-sh',cols:t.cols,rows:t.rows,offset:String(t.output.length),retained:String(t.output.length),done:t.done,...(t.done?{exitCode:0}:{}),createdAtUnixMillis:String(t.createdAt),...(t.place?{place:t.place,repositoryId:t.repositoryId||'',cwd:t.cwd}:{}),...commandEnds(t)});
-  // As the Runner does: the shell's command-end marks (OSC 133;D;<status>) counted, with the latest status.
-  const commandEnds=t=>{const marks=[...t.output.toString().matchAll(/\x1b\]133;D;(\d+)\x07/g)];return marks.length?{commandEnds:String(marks.length),lastCommandStatus:Number(marks.at(-1)[1])}:{};};
+  // Terminals echo what is typed and answer each line, like a minimal zsh with
+  // Lazybox's integration: its prompt marks (OSC 7, then 133;B) once it can
+  // read a line, 133;C when a line runs, 133;D;<status> when it ends.
+  // `terminalStartDelayMs` makes a new shell start slowly, as a heavy .zshrc
+  // does, and its prompt theme take a moment after the precmd mark: until its
+  // prompt, the terminal echoes what is typed (tty echo), and the prompt
+  // shows it again, as zsh's line editor does with typeahead.
+  // A line starting `watch ` keeps running until Ctrl+C.
+  const terminals=new Map();let terminalStartDelayMs=0;
+  const terminalStatus=t=>({id:t.id,collectionId:t.collectionId,directory:t.directory,title:t.title,shell:'/bin/fixture-sh',cols:t.cols,rows:t.rows,offset:String(t.output.length),retained:String(t.output.length),done:t.done,...(t.done?{exitCode:0}:{}),createdAtUnixMillis:String(t.createdAt),...(t.place?{place:t.place,repositoryId:t.repositoryId||'',cwd:t.cwd}:{}),...shellMarks(t)});
+  // As the Runner does: the shell's command-end marks (OSC 133;D;<status>) counted, with the latest status; prompts ready (133;B); idle at the last one.
+  const shellMarks=t=>{const text=t.output.toString();const ends=[...text.matchAll(/\x1b\]133;D;(\d+)\x07/g)];const marks=[...text.matchAll(/\x1b\]133;([BCD])/g)];const ready=marks.filter(m=>m[1]==='B').length;
+    return {promptMarks:true,...(ends.length?{commandEnds:String(ends.length),lastCommandStatus:Number(ends.at(-1)[1])}:{}),...(ready?{promptsReady:String(ready)}:{}),idle:!t.done&&marks.at(-1)?.[1]==='B'};};
   const terminalOutput=(t,text)=>{const offset=t.output.length;const data=Buffer.from(text);t.output=Buffer.concat([t.output,data]);for(const res of t.clients)res.write(frame({offset:String(offset),data:data.toString('base64'),status:terminalStatus(t)}));};
+  const promptOf=t=>`\x1b]133;D;${t.lastStatus??0}\x07$ \x1b]7;file://fixture${t.cwd||'/fixture/workspace/'+(t.directory||'')}\x07\x1b]133;B\x07`;
+  // The shell's line editor reads keys: echoed onto its line, Return runs it, Ctrl+U clears it, Ctrl+C stops what runs.
+  const terminalKeys=(t,text)=>{
+    for(const character of text){
+      if(!t.ready){t.typeahead+=character;terminalOutput(t,character==='\r'?'\r\n':character);continue;}
+      if(t.running){if(character==='\x03'){t.running=false;t.lastStatus=130;terminalOutput(t,'^C\r\n'+promptOf(t));}continue;}
+      if(character==='\x15'){t.line='';terminalOutput(t,'\r$ \x1b[K');continue;}
+      if(character!=='\r'){t.line+=character;terminalOutput(t,character);continue;}
+      const line=t.line;t.line='';
+      if(line==='exit'){terminalOutput(t,'\r\nexit\r\n');t.done=true;for(const client of t.clients)client.end(Buffer.concat([frame({offset:String(t.output.length),status:terminalStatus(t)}),frame({},2)]));break;}
+      if(line.startsWith('watch ')){t.running=true;terminalOutput(t,`\r\n\x1b]133;C\x07watching: ${line.slice(6)}\r\n`);continue;}
+      t.lastStatus=/^(?:false|exit [1-9])|\bfail/.test(line)?1:0;terminalOutput(t,`\r\n\x1b]133;C\x07ran: ${line}\r\n`+promptOf(t));
+    }
+  };
+  // The first prompt: zsh's precmd marks (133;D) before a theme draws the prompt; only then does the line editor read keys.
+  const shellReady=t=>{if(t.done||t.ready)return;const [precmd,prompt]=promptOf(t).split(/(?<=\x07)(?=\$ )/);terminalOutput(t,precmd);
+    const draw=()=>{if(t.done||t.ready)return;t.ready=true;terminalOutput(t,prompt);const typeahead=t.typeahead;t.typeahead='';terminalKeys(t,typeahead);};
+    if(terminalStartDelayMs)setTimeout(draw,400);else draw();};
 
   // The PR loop per workspace member: uncommitted files, branch commits, push
   // state and its pull request. Nothing here runs Git or contacts GitHub.
@@ -656,7 +684,9 @@ actions:
       }
       case 'ListHistory': return json({sessions:sessions.filter(s=>(body.collectionId===undefined||s.collectionId===body.collectionId)&&(!body.search||(s.title||`Conversation ${s.id}`).toLowerCase().includes(body.search.toLowerCase()))).map(s=>({...s,title:s.title||`Conversation ${s.id}`,conversationId:s.workId||s.id})),hasMore:false});
       case 'RefreshSubscription': { const profile = profiles.find(p => p.id === body.profileId); if (!profile) return error('not_found', 'Unknown profile'); if (profile.provider === 'claude') profile.availability = {state:'available',plan:'max',windows:[{name:'five_hour',usedPercent:37,durationMinutes:'300',resetAt:String(Math.floor(Date.now()/1000)+3600)}]}; profile.availability.observedAtUnixMillis = String(Date.now()); profile.availability.windows[0].usedPercent += 5; return json(profile); }
-      case 'ListCollections': { if (runner.listDelayMs) await new Promise(resolve => setTimeout(resolve, runner.listDelayMs)); return json({ collections }); }
+      case 'ListCollections': { if (runner.listDelayMs) await new Promise(resolve => setTimeout(resolve, runner.listDelayMs)); return json({ collections: arranged() }); }
+      // The person's order, as the Runner keeps it (collections/arrangement.go): new ones first, then the kept order.
+      case 'ArrangeWorkspaces': { if (runner.arrangeError) return error('unavailable', runner.arrangeError); mutations.push({method,body}); arrangement.splice(0, arrangement.length, ...new Set((body.collectionIds || []).filter(id => collections.some(c => c.id === id)))); return json({ collections: arranged() }); }
       case 'GetCollection': { const collection = collections.find(c => c.id === body.collectionId); return collection ? json({ collection }) : error('not_found', 'Workspace missing'); }
       case 'AddLocalRepository': {
         mutations.push({ method, body });
@@ -795,8 +825,10 @@ actions:
         let place='',cwd='',placeTitle='';
         if(body.repositoryHome){const home=homes.get(body.repositoryHome);if(!home)return error('failed_precondition','this repository has no home checkout yet: create one in Settings → Repositories');const member=collection.members.find(m=>m.spec.repositoryId===body.repositoryHome);place='repository-home';cwd=home.path;placeTitle=(member?.spec.name||body.repositoryHome)+' home';}
         else if(body.userHome){place='user-home';cwd='/fixture/home';placeTitle='~';}
-        const t={id:'terminal-'+(terminals.size+1),requestKey:body.requestKey,collectionId:collection.id,place,repositoryId:body.repositoryHome||'',cwd,directory:place?'':body.directory||'',title:place?placeTitle:collection.name+(body.directory?' / '+body.directory:''),cols:body.cols,rows:body.rows,createdAt:Date.now(),output:Buffer.alloc(0),line:'',input:[],resizes:[],done:false,clients:new Set()};
-        terminals.set(t.id,t);terminalOutput(t,`fixture shell in ${place?cwd:t.title}\r\n\x1b]133;D;0\x07$ `);return json(terminalStatus(t));
+        const t={id:'terminal-'+(terminals.size+1),requestKey:body.requestKey,collectionId:collection.id,place,repositoryId:body.repositoryHome||'',cwd,directory:place?'':body.directory||'',title:place?placeTitle:collection.name+(body.directory?' / '+body.directory:''),cols:body.cols,rows:body.rows,createdAt:Date.now(),output:Buffer.alloc(0),line:'',typeahead:'',ready:false,running:false,input:[],resizes:[],done:false,clients:new Set()};
+        terminals.set(t.id,t);terminalOutput(t,`fixture shell in ${place?cwd:t.title}\r\n`);
+        if(terminalStartDelayMs)setTimeout(()=>shellReady(t),terminalStartDelayMs);else shellReady(t);
+        return json(terminalStatus(t));
       }
       case 'ListTerminals': return json({terminals:[...terminals.values()].filter(t=>!body.collectionId||t.collectionId===body.collectionId).map(terminalStatus)});
       case 'WatchTerminal': {
@@ -808,8 +840,7 @@ actions:
       }
       case 'WriteTerminal': {
         const t=terminals.get(body.terminalId);if(!t||t.done)return error(t?'failed_precondition':'not_found','Terminal unavailable');
-        const text=Buffer.from(body.data||'','base64').toString();t.input.push(text);
-        for(const character of text){if(character==='\r'){const line=t.line;t.line='';if(line==='exit'){terminalOutput(t,'\r\nexit\r\n');t.done=true;for(const client of t.clients)client.end(Buffer.concat([frame({offset:String(t.output.length),status:terminalStatus(t)}),frame({},2)]));break;}const status=/^(?:false|exit [1-9])|\bfail/.test(line)?1:0;terminalOutput(t,`\r\nran: ${line}\r\n\x1b]133;D;${status}\x07$ `);}else{t.line+=character;terminalOutput(t,character);}}
+        const text=Buffer.from(body.data||'','base64').toString();t.input.push(text);terminalKeys(t,text);
         return json(terminalStatus(t));
       }
       case 'ResizeTerminal': {const t=terminals.get(body.terminalId);if(!t)return error('not_found','Terminal missing');Object.assign(t,{cols:body.cols,rows:body.rows});t.resizes.push([body.cols,body.rows]);return json(terminalStatus(t));}
@@ -1194,7 +1225,7 @@ actions:
   const endpoint = join(directory, 'endpoint.json');
   const publish = () => writeFile(endpoint, JSON.stringify({ url, token, runnerId: 'fixturerunneridentity' }), { mode: 0o600 });
   await publish();
-  return { claudeAuth, get runnerSettings() { return runnerSettings; }, freezeSession: id => frozenSessions.set(id, structuredClone(sessions.find(value => value.id === id))), thawSession: id => frozenSessions.delete(id), items, versionInfo, reviewBriefs, fileFinding, finishReview, authorFixed, resolveFinding, reopenFinding, exchange, power, config, extensions, browser, artifacts: artifactStore, themeFolder, remote, checkpoints, setCheckpoints, attachments, set telemetry(fn) { telemetry = fn; }, set attachmentReadDelayMs(value) { attachmentReadDelayMs = value; }, set tailReadDelayMs(value) { tailReadDelayMs = value; }, runner, missions, processes, processHosting, terminals, commands, runtimeCommands, runtimes, runtimeFor, finishSetup, runtimeTiming, previewPort, startRun, startTerminalRun, streamCommand, claimedShares, githubRepositories, preparationFailures, prepared, repositoryRequests, workspaceFiles, openEvents, reviews, reviewOf, diffs, workingFiles,
+  return { claudeAuth, arrangement, get runnerSettings() { return runnerSettings; }, freezeSession: id => frozenSessions.set(id, structuredClone(sessions.find(value => value.id === id))), thawSession: id => frozenSessions.delete(id), items, versionInfo, reviewBriefs, fileFinding, finishReview, authorFixed, resolveFinding, reopenFinding, exchange, power, config, extensions, browser, artifacts: artifactStore, themeFolder, remote, checkpoints, setCheckpoints, attachments, set telemetry(fn) { telemetry = fn; }, set attachmentReadDelayMs(value) { attachmentReadDelayMs = value; }, set terminalStartDelayMs(value) { terminalStartDelayMs = value; }, terminalOutput, set tailReadDelayMs(value) { tailReadDelayMs = value; }, runner, missions, processes, processHosting, terminals, commands, runtimeCommands, runtimes, runtimeFor, finishSetup, runtimeTiming, previewPort, startRun, startTerminalRun, streamCommand, claimedShares, githubRepositories, preparationFailures, prepared, repositoryRequests, workspaceFiles, openEvents, reviews, reviewOf, diffs, workingFiles,
     availability, acp, tracked,
     /** A conversation's open journal, without replacing it (openEvents starts a new one). */
     eventsOf: id => eventStreams.get(id),

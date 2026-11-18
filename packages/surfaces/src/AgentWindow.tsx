@@ -557,6 +557,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
                 onChangePermission: mode => void changePermission(mode), onRestartWithPermission: setRestartTo, onSwitchSubscription: () => setSwitchingSubscription(true), onGiveBrowser: () => void giveBrowser(),
                 onNewSession: newSession, onClose: () => void close(), onDelete: () => setDeleting(true), activity, models: slash.models, sessionID }), conversationHandoffItems(api, session, info))], { sessionId: sessionID })}
               onPickModel={session && !session.closed ? slash.models.pick : undefined}
+              onSwitchSubscription={session && !session.closed ? () => setSwitchingSubscription(true) : undefined}
               menu={<SessionMenu session={session} sessionID={sessionID} accountName={shownAccount} stream={stream} allowStart={allowStart}
                 onChangePermission={mode => void changePermission(mode)} onRestartWithPermission={setRestartTo}
                 onSwitchSubscription={() => setSwitchingSubscription(true)} onGiveBrowser={() => void giveBrowser()}

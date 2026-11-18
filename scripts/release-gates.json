@@ -35,6 +35,7 @@
     { "id": "chat-scroll", "scope": "ui", "script": "test:chat-scroll" },
     { "id": "sidebar-polish", "scope": "ui", "script": "test:sidebar-polish" },
     { "id": "workspace-hover", "scope": "ui", "script": "test:workspace-hover" },
+    { "id": "workspace-reorder", "scope": "ui", "script": "test:workspace-reorder" },
     { "id": "resume-continuity", "scope": "ui", "script": "test:resume-continuity" },
     { "id": "navigation-snippets", "scope": "ui", "script": "test:navigation-snippets" },
     { "id": "vim-editing", "scope": "ui", "script": "test:vim-editing" },
@@ -42,6 +43,7 @@
     { "id": "responsive-shell", "scope": "ui", "script": "test:responsive-shell" },
     { "id": "inbox", "scope": "ui", "script": "test:inbox" },
     { "id": "multi-runner", "scope": "ui", "script": "test:multi-runner" },
+    { "id": "remote-computers", "scope": "ui", "script": "test:remote-computers" },
     { "id": "command-palette", "scope": "ui", "script": "test:command-palette" },
     { "id": "pull-request", "scope": "ui", "script": "test:pull-request" },
     { "id": "pull-requests", "scope": "ui", "script": "test:pull-requests" },
@@ -62,6 +64,7 @@
     { "id": "chat-polish", "scope": "ui", "script": "test:chat-polish" },
     { "id": "transcript-polish", "scope": "ui", "script": "test:transcript-polish" },
     { "id": "chat-header", "scope": "ui", "script": "test:chat-header" },
+    { "id": "title-bar", "scope": "ui", "script": "test:title-bar" },
     { "id": "composer-info", "scope": "ui", "script": "test:composer-info" },
     { "id": "new-task", "scope": "ui", "script": "test:new-task" },
     { "id": "start-from-issue", "scope": "ui", "script": "test:start-from-issue" },
@@ -80,6 +83,7 @@
     { "id": "console-log", "scope": "ui", "script": "test:console-log" },
     { "id": "sidebar-width", "scope": "ui", "script": "test:sidebar-width" },
     { "id": "resizable", "scope": "ui", "script": "test:resizable" },
+    { "id": "resize-selection", "scope": "ui", "script": "test:resize-selection" },
     { "id": "editor-wrap", "scope": "ui", "script": "test:editor-wrap" },
     { "id": "turn-checkpoints", "scope": "ui", "script": "test:turn-checkpoints" },
     { "id": "workspace-runtime", "scope": "ui", "script": "test:workspace-runtime" },
@@ -122,7 +126,8 @@
     { "id": "scenarios", "scope": "ui", "script": "test:scenarios", "timeoutMs": 600000 }
   ],
   "external": [
-    { "script": "test:browser", "reason": "Requires an explicitly selected live Runner and provider authorization; not a deterministic fixture." }
+    { "script": "test:browser", "reason": "Requires an explicitly selected live Runner and provider authorization; not a deterministic fixture." },
+    { "script": "test:mobile-simulator", "reason": "Builds the iPhone app and drives the iOS Simulator with Maestro; needs Xcode, an iOS runtime and CocoaPods on a Mac, so it runs by hand (apps/mobile/README.md), not in CI." }
   ],
   "aliases": [
     { "script": "test:unified-repositories", "target": "test:repository-picker" }

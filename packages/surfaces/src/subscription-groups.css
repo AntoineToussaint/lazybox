@@ -1,0 +1,7 @@
+/* Subscriptions grouped by provider (SubscriptionGroups.tsx): a small header per group. */
+.provider-group{display:grid;gap:6px;min-width:0}
+.provider-group+.provider-group{margin-top:6px}
+.provider-group-heading{display:flex;align-items:center;gap:6px;min-width:0;font-size:calc(11px * var(--text-scale));font-weight:600;line-height:1.4;color:var(--text-muted)}
+.provider-group-heading svg{flex:none;color:var(--text-subtle)}
+.provider-group-heading span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.subscription-choice-group{display:grid;gap:6px}

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
+import { SubscriptionOptions } from './SubscriptionGroups';
 import type { RunnerClient } from '@lazybox/client-core';
 import type { InfoResponse } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
-import { accountLabel } from './agent-status';
 import { AgentPicker } from './AgentPicker';
 import { useRunnerSettings } from './RunnerSettings';
 import { readLaunchChoices, writeLaunchChoices } from './view-state';
@@ -106,7 +106,7 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
       <div className="setup-row">
         <AgentPicker value={provider} disabled={!info || opening} onChange={next => { setProvider(next); setProfile(''); setModel(''); setGateway(''); }}/>
         <label>Account profile<select value={selectedProfile} disabled={!profiles.length || opening} onChange={e => setProfile(e.target.value)}>
-          {profiles.map(p => <option key={p.id} value={p.id}>{p.label || p.id}{p.availability && p.availability.state !== 'available' && p.availability.state !== 'unknown' ? ` · ${accountLabel(p.availability.state)}` : ''}</option>)}
+          <SubscriptionOptions profiles={profiles}/>
         </select></label>
       </div>
       {info && !profiles.length && <div className="error">No {agentName} profile is configured on this Runner.</div>}

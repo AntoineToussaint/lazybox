@@ -202,3 +202,12 @@ test('the focused editor keeps its own chords: tabs with ⌥⌘← / ⌥⌘→, 
   assert.equal(ownedByFocus('Meta+Alt+ArrowLeft', inside()), false);
   assert.equal(ownedByFocus('Meta+Alt+ArrowLeft', null), false);
 });
+
+test('a focused sidebar row keeps ⌥⇧↑ / ⌥⇧↓ to move itself, off a Mac too (where they resize panels)', () => {
+  const inside = (...selectors: string[]) => ({ closest: (selector: string) => selectors.includes(selector) ? {} as Element : null });
+  assert.equal(ownedByFocus('Alt+Shift+ArrowUp', inside('[data-reorder-id]')), true);
+  assert.equal(ownedByFocus('Alt+Shift+ArrowDown', inside('[data-reorder-id]')), true);
+  assert.equal(ownedByFocus('Alt+Shift+ArrowLeft', inside('[data-reorder-id]')), false, 'left and right still resize');
+  assert.equal(ownedByFocus('Alt+Shift+ArrowUp', inside()), false, 'elsewhere they resize');
+  assert.equal(ownedByFocus('Ctrl+Meta+ArrowUp', inside('[data-reorder-id]')), false, 'the Mac\'s resize keys stay the layout\'s');
+});

@@ -164,7 +164,36 @@ export type RunnerListing = {
   /** Loopback origin and owner bearer, for a running Runner only. */
   url?: string;
   token?: string;
+  /**
+   * A Runner on another computer (REMOTE_RUNNERS.md): reached through a link
+   * agent on this computer, whose loopback origin and per-start token are
+   * `url` and `token`. Absent for a Runner on this computer.
+   */
+  remote?: RemoteRunner;
 };
+/** How a Runner on another computer is reached, and how its link is now. */
+export type RemoteRunner = {
+  /** The ssh destination it was added by ("build-box", "me@mini.lan"). */
+  host: string;
+  /** "ssh" today. */
+  route: string;
+  /** The computer's own name, for grouping. */
+  machine?: string;
+  /** "Linux", "Darwin". */
+  os?: string;
+  /** The pinned Runner key, as a person compares it. */
+  fingerprint?: string;
+  /** The link agent's state; "refused" with `code` "unknown-key" (revoked) or "wrong-runner". */
+  state?: 'connecting' | 'connected' | 'reconnecting' | 'refused' | 'stopped' | '';
+  code?: string;
+  problem?: string;
+  /** The last round trip to the Runner, in milliseconds. */
+  rttMs?: number;
+};
+/** A Host entry of the person's ~/.ssh/config, offered by Add a computer. */
+export type SshHost = { name: string; hostName?: string; user?: string; port?: string; source?: string; /** The name it was added under, when it was. */ added?: string };
+/** One step of Add a computer, as `lazybox remote add --progress json` reports it. */
+export type AddComputerStep = { step: 'connect' | 'probe' | 'install' | 'start' | 'enrol' | 'connected' | string; title: string; state: 'running' | 'done' | 'failed' | 'skipped'; detail?: string };
 export type RunnerDirectoryHost = {
   /** Every Runner the host can find now, the window's own included. */
   list(): Promise<RunnerListing[]>;
@@ -172,6 +201,16 @@ export type RunnerDirectoryHost = {
   add?(path: string): Promise<RunnerListing>;
   /** Forgets a Runner the person added (registered ones are the launchers'). */
   forget?(id: string): Promise<void>;
+  /** The person's ssh hosts, for Add a computer. */
+  sshHosts?(): Promise<SshHost[]>;
+  /**
+   * Adds a computer over SSH: probe, install, start, enrol this computer as
+   * an owner and pin the Runner's key (`lazybox remote add`). Each step is
+   * reported as it happens; rejects with the failure in plain words.
+   */
+  addComputer?(host: string, onStep: (step: AddComputerStep) => void, options?: { name?: string }): Promise<void>;
+  /** Forgets a computer here and revokes this computer's key on it (`lazybox remote rm`). */
+  removeComputer?(name: string): Promise<void>;
 };
 
 export type WorkspaceHost = AttentionHost & PowerHost & {
@@ -205,6 +244,37 @@ export type ViewStateStore = {
   setItem(key: string, value: string): void;
   /** Tells this host's other windows that an app-wide preference changed (they reread it). */
   share?(key: string, value: string): void;
+};
+/**
+ * The room a window's header leaves the native window controls drawn over
+ * its leading edge, and the height they are centred in. Screen points: the
+ * page divides them by its zoom.
+ */
+export type TitleBarInset = { inset: number; height: number };
+/**
+ * A window with no separate title bar (the desktop app on macOS): its own
+ * header is the title bar, with the system's close, minimize and zoom
+ * buttons over the header's leading edge. The page leaves them room, moves
+ * the window when an empty part of a header is dragged, and does what the
+ * system says for a double-click there. In full screen the buttons are
+ * hidden, and so is their room. A browser and the phone have none of this.
+ */
+export type TitleBarHost = {
+  /** This window's header. */
+  window: TitleBarInset;
+  /** The tab bar of a panel group this window pops out into a window of its own. */
+  popout: TitleBarInset;
+  fullScreen: boolean;
+  /** This window entered or left full screen; returns the unsubscribe. */
+  onFullScreen(listener: (fullScreen: boolean) => void): () => void;
+  /** The popped-out panel window in front entered or left full screen. */
+  onPopoutFullScreen?(listener: (fullScreen: boolean) => void): () => void;
+  /** A press on an empty part of a header: the window follows the pointer. `popout`: the popped-out window in front. */
+  startDragging(popout: boolean): Promise<void>;
+  /** A double-click on an empty part of a header: zoom, minimize or nothing, as the system setting says. */
+  doubleClick(popout: boolean): Promise<void>;
+  /** The UI zoom, which scales CSS pixels and not the buttons. */
+  zoom?: ZoomHost;
 };
 export type SurfaceHost = {
   saveTarget(target: SurfaceTarget): Promise<void>;

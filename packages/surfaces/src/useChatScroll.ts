@@ -1,8 +1,5 @@
 import {useCallback,useLayoutEffect,useRef,useState,type UIEvent} from 'react';
-import type {ConversationReader} from './transcript-cache';
-
-/** Messages mounted when a conversation opens, and added per step toward its start. */
-export const INITIAL_MESSAGES=40,EARLIER_MESSAGES=60;
+import {EARLIER_MESSAGES,type ConversationReader} from './transcript-cache';
 /** How close to the bottom a reader scrolling down picks up following again. */
 const FOLLOW_THRESHOLD=48;
 

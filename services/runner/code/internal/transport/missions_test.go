@@ -122,7 +122,14 @@ func TestMissionEvidenceAttachesAutomatically(t *testing.T) {
 	if task = taskOf(t, getMission(t, f, owner, missionID), taskID); len(task.Evidence) != 2 {
 		t.Fatalf("another workspace's run attached: %+v", task.Evidence[0])
 	}
-	// A commit through the PR loop attaches to the attempt's workspace.
+	// A commit through the PR loop attaches to the attempt's workspace. It
+	// needs an identity, never the machine's own: a CI runner or a fresh
+	// Linux host has none.
+	identity := filepath.Join(t.TempDir(), "gitconfig")
+	if err = os.WriteFile(identity, []byte("[user]\n\tname = Fixture\n\temail = fixture@example.invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", identity)
 	collection, err := f.bench.Collections.Get(f.mine.Id)
 	if err != nil {
 		t.Fatal(err)

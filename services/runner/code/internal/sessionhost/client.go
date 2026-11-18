@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -136,13 +137,46 @@ func Launch(ctx context.Context, root string, opts Options) (*Client, error) {
 			_ = os.RemoveAll(dir)
 		}
 	}()
-	binary, err := os.Executable()
+	token := rand.Text() + rand.Text()
+	label := opts.Label
+	if label == "" {
+		label = opts.Kind
+	}
+	description := strings.TrimSpace("Lazybox session host " + label)
+	record, err := startHost(ctx, dir, newLaunch(id, dir, token, opts), description, true)
+	if errors.Is(err, errScoped) {
+		// systemd-run passed the check but not this scope: the host is worth
+		// more than its scope, so it starts as it would without systemd, and
+		// the next hosts do too until the check is made again.
+		scopeFailed(err.Error())
+		record, err = startHost(ctx, dir, newLaunch(id, dir, token, opts), description, false)
+	}
 	if err != nil {
 		return nil, err
 	}
+	c, err := dial(ctx, dir, record, 0)
+	if err != nil {
+		_ = syscall.Kill(record.PID, syscall.SIGKILL)
+		return nil, err
+	}
+	started = true
+	return c, nil
+}
+
+// errScoped marks a host that failed to start in its own systemd scope.
+var errScoped = errors.New("in its systemd scope")
+
+// startHost starts the host process for cfg and waits for its record. With
+// scope, it starts in a transient systemd scope of its own where the system
+// offers one (scope_linux.go); a failure then wraps errScoped.
+func startHost(ctx context.Context, dir string, cfg launch, description string, scope bool) (Record, error) {
+	binary, err := os.Executable()
+	if err != nil {
+		return Record{}, err
+	}
 	logFile, err := os.OpenFile(filepath.Join(dir, "host.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
-		return nil, err
+		return Record{}, err
 	}
 	defer logFile.Close()
 	cmd := exec.Command(binary, helperArgument)
@@ -151,23 +185,30 @@ func Launch(ctx context.Context, root string, opts Options) (*Client, error) {
 	cmd.Stderr = logFile
 	// Its own session: no Runner signal, process-group kill or terminal hangup reaches it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// And on Linux its own cgroup: no service manager's stop of the Runner reaches it.
+	scoped := scope && inOwnScope(cmd, ScopeUnit(cfg.ID), description)
+	failed := func(err error) error {
+		if scoped {
+			return fmt.Errorf("session host startup failed %w: %w", errScoped, err)
+		}
+		return fmt.Errorf("session host startup failed: %w", err)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return Record{}, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return Record{}, err
 	}
 	if err = cmd.Start(); err != nil {
-		return nil, err
+		return Record{}, failed(err)
 	}
 	// The Runner never waits on its hosts; reap only if this one fails to start.
 	cleanup := func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }
-	token := rand.Text() + rand.Text()
-	if err = json.NewEncoder(stdin).Encode(newLaunch(id, dir, token, opts)); err != nil {
+	if err = json.NewEncoder(stdin).Encode(cfg); err != nil {
 		cleanup()
-		return nil, err
+		return Record{}, failed(err)
 	}
 	_ = stdin.Close()
 	ready := make(chan error, 1)
@@ -176,24 +217,20 @@ func Launch(ctx context.Context, root string, opts Options) (*Client, error) {
 	select {
 	case err = <-ready:
 	case <-ctx.Done():
-		err = ctx.Err()
+		// Not the scope's fault: no second attempt.
+		cleanup()
+		return Record{}, fmt.Errorf("session host startup failed: %w", ctx.Err())
 	case <-time.After(15 * time.Second):
 		err = errors.New("session host did not become ready")
 	}
-	if err != nil || record.ID != id || record.Token != token {
+	if err != nil || record.ID != cfg.ID || record.Token != cfg.Token {
 		cleanup()
-		return nil, fmt.Errorf("session host startup failed: %w", errors.Join(err, readLog(dir)))
+		return Record{}, failed(errors.Join(err, readLog(dir)))
 	}
 	// Release the child: the host outlives this process and must not stay a zombie
 	// of a long-lived Runner. Reaping happens in the background.
 	go func() { _ = cmd.Wait() }()
-	c, err := dial(ctx, dir, record, 0)
-	if err != nil {
-		_ = syscall.Kill(record.PID, syscall.SIGKILL)
-		return nil, err
-	}
-	started = true
-	return c, nil
+	return record, nil
 }
 
 func readLog(dir string) error {

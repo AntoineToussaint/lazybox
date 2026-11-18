@@ -95,13 +95,28 @@ fi
 // zshCommandEnd marks, in an interactive shell (a workspace terminal), where
 // each command line ended and with what status: OSC 133;D;<status>, the
 // semantic-prompt mark other terminals use. The window reads it to say that
-// a command it typed for the person (Run in … home) finished, and how. It
-// runs first among the prompt hooks so the status is the command's own; a
+// a command it ran for the person (Run in … home) finished, and how. It runs
+// first among the prompt hooks so the status is the command's own; a
 // terminal that does not know the mark ignores it.
+//
+// It also marks when the shell can take input. A precmd hook runs before the
+// prompt is drawn, while the terminal still echoes what arrives: input
+// written then shows twice (once echoed, once at the prompt). The line
+// editor's line-init hook runs once the prompt is up and the editor reads
+// keys, and says so: OSC 7 with the folder the shell is in, then OSC 133;B
+// (input starts here). OSC 133;C, before each command line runs, says the
+// shell is busy again. add-zle-hook-widget keeps the person's own line-init
+// widget running. It is registered first: without a line editor (input that
+// is not a terminal) it fails, and the status of these files' last command
+// is the first prompt's $?.
 const zshCommandEnd = `if [[ -o interactive ]]; then
   _lazybox_command_end() { local s=$?; print -rn -- $'\e]133;D;'$s$'\a'; return $s; }
-  typeset -ga precmd_functions
+  _lazybox_command_start() { print -rn -- $'\e]133;C\a'; }
+  _lazybox_prompt_ready() { print -rn -- $'\e]7;file://'"${HOST}${PWD//\%/%25}"$'\a\e]133;B\a'; }
+  autoload -Uz add-zle-hook-widget && { add-zle-hook-widget line-init _lazybox_prompt_ready } 2>/dev/null
+  typeset -ga precmd_functions preexec_functions
   precmd_functions=(_lazybox_command_end ${precmd_functions:#_lazybox_command_end})
+  preexec_functions=(${preexec_functions:#_lazybox_command_start} _lazybox_command_start)
 fi
 `
 

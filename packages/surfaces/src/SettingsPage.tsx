@@ -21,6 +21,8 @@ import { showToast } from './toasts';
 import { SettingsHeader, settingsError, useNow } from './settings-parts';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Icon } from './Icons';
+import { ProviderGroups } from './SubscriptionGroups';
+import { subscriptionGroups } from './subscription-groups';
 import './settings.css';
 import { RepositoryBrowser } from './RepositoryBrowser';
 import { RepositoryHomesSettings } from './home-checkouts';
@@ -370,12 +372,12 @@ export function SettingsPage({ app, zoom, viewState, openSignIn, copySignInCode,
       {pending && !adding && <div className="sign-in-banner"><span>{flow?.label || 'Subscription'} · sign-in pending</span><button onClick={() => setAdding(true)}>Continue sign-in</button></div>}
       {!info && <p className="settings-empty" role="status">Loading subscriptions…</p>}
       {info && !profiles.length && <div className="settings-empty"><h3>No subscriptions yet</h3><p>Add a Claude or Codex account so agents can run on it. Your CLI sign-ins keep working either way.</p></div>}
-      <div className="subscription-grid">{profiles.map(profile => <SubscriptionCard key={profile.id} profile={profile} now={now} refreshing={refreshing.has(profile.id)} error={refreshErrors[profile.id]} onRefresh={() => void updateUsage(profile)}
+      <ProviderGroups groups={subscriptionGroups(profiles, { now })} className="subscription-grid">{items => items.map(profile => <SubscriptionCard key={profile.id} profile={profile} now={now} refreshing={refreshing.has(profile.id)} error={refreshErrors[profile.id]} onRefresh={() => void updateUsage(profile)}
         footer={profile.tokenImported ? <span className="subscription-imported"><small className="subscription-gated" title="Lazybox no longer imports subscription tokens: Anthropic does not allow apps to store Claude.ai credentials. Sign in again, or use an API key.">Imported token; not recommended</small><button type="button" className="quiet" onClick={() => setRemoving(profile)}>Remove</button></span>
           : profile.provider === 'claude' && profile.isolation === 'environment' && runnerSettings && !runnerSettings.claudeSubscriptionSignIn
           ? <small className="subscription-gated" title="Claude sign-in in Lazybox is off (Settings → Agents & workspaces → Claude)">Not used: Claude sign-in in Lazybox is off</small>
           // Only an account policy switches by itself (Settings → Extensions); this leaves one account out of it.
-          : profile.isolation === 'environment' && runnerSettings?.automaticSwitchingProviders.includes(profile.provider) ? <label className="rotation-toggle" title={`When another ${profile.provider === 'codex' ? 'Codex' : 'Claude'} subscription hits a limit, its conversations can continue on this one. Applies to conversations started afterwards.`}><input type="checkbox" role="switch" checked={!excluded.includes(profile.id)} disabled={!runnerSettings || !!rotationSaving} onChange={event => void setRotation(profile, event.target.checked)}/><span>Automatic switching</span></label> : <small>{profile.isolation === 'inherited' ? 'Uses current CLI sign-in' : info?.sharedSubscriptions ? 'Shared subscription' : 'Saved on this Runner'}</small>}/>)}</div>
+          : profile.isolation === 'environment' && runnerSettings?.automaticSwitchingProviders.includes(profile.provider) ? <label className="rotation-toggle" title={`When another ${profile.provider === 'codex' ? 'Codex' : 'Claude'} subscription hits a limit, its conversations can continue on this one. Applies to conversations started afterwards.`}><input type="checkbox" role="switch" checked={!excluded.includes(profile.id)} disabled={!runnerSettings || !!rotationSaving} onChange={event => void setRotation(profile, event.target.checked)}/><span>Automatic switching</span></label> : <small>{profile.isolation === 'inherited' ? 'Uses current CLI sign-in' : info?.sharedSubscriptions ? 'Shared subscription' : 'Saved on this Runner'}</small>}/>)}</ProviderGroups>
       {profiles.length > 0 && <p className="usage-note">Usage is what each provider reports for the subscription. Lazybox never guesses a number it was not given.</p>}
       {removing && <ConfirmDialog title={`Remove ${subscriptionName(removing, removing.id)}?`} closeLabel="Keep it" cancelLabel="Keep it" confirm="Remove" working="Removing…" onClose={() => setRemoving(undefined)}
         onConfirm={async () => { try { await api.removeSubscription({ profileId: removing.id }, { timeoutMs: 10000 }); refresh(); setRemoving(undefined); } catch (e) { setError(settingsError(e)); setRemoving(undefined); } }}>

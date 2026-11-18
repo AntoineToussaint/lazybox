@@ -46,6 +46,9 @@ const set = (next: Open | null) => { clearTimeout(openTimer); clearTimeout(close
 
 /** Closes whichever card is open. */
 function closeWorkspaceHover() { set(null); }
+/** While a row is dragged to a new place (useListReorder), no card opens, and an open one closes. */
+let held = false;
+export function holdWorkspaceHover(on: boolean) { held = on; if (on) { clearTimeout(openTimer); set(null); } }
 const keep = () => clearTimeout(closeTimer);
 const leave = () => { clearTimeout(openTimer); clearTimeout(closeTimer); if (current) closeTimer = setTimeout(() => set(null), GRACE_MS); };
 
@@ -63,16 +66,17 @@ export function useWorkspaceHover(id: string) {
   const props = {
     'aria-keyshortcuts': 'Alt+ArrowDown',
     onPointerEnter(event: ReactPointerEvent<HTMLElement>) {
-      if (event.pointerType !== 'mouse' || suppressed === id) return;
+      if (event.pointerType !== 'mouse' || suppressed === id || held) return;
       clearTimeout(openTimer);
       if (current?.id === id) { keep(); return; }
       const anchor = rowOf(event.currentTarget);
-      openTimer = setTimeout(() => { if (anchor.isConnected) set({ id, anchor, via: 'pointer' }); }, current ? SWITCH_DELAY_MS : OPEN_DELAY_MS);
+      openTimer = setTimeout(() => { if (anchor.isConnected && !held) set({ id, anchor, via: 'pointer' }); }, current ? SWITCH_DELAY_MS : OPEN_DELAY_MS);
     },
     onPointerLeave() { if (suppressed === id) suppressed = ''; leave(); },
     onPointerDown() { suppressed = id; set(null); },
     onKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
-      if (event.altKey && event.key === 'ArrowDown' && !event.metaKey && !event.ctrlKey) {
+      // ⌥⇧↓ moves the workspace down (useListReorder): only ⌥↓ alone opens the card.
+      if (event.altKey && event.key === 'ArrowDown' && !event.metaKey && !event.ctrlKey && !event.shiftKey) {
         event.preventDefault(); event.stopPropagation();
         set({ id, anchor: rowOf(event.currentTarget), via: 'keyboard' });
         return;

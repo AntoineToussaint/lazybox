@@ -119,7 +119,17 @@ export type ContextMenuPlatform = {
 };
 let platform: ContextMenuPlatform = { development: !!import.meta.env?.DEV };
 export function configureContextMenus(change: Partial<ContextMenuPlatform>) { platform = { ...platform, ...change }; }
-export const contextMenuPlatform = () => platform;
+/**
+ * Whether the files the page shows are on this computer. A Runner on another
+ * computer (REMOTE_RUNNERS.md) has its worktrees there, so the actions that
+ * act on this computer's files (Reveal in Finder, Open in Finder or an
+ * editor) are not offered. The page sets it for the Runner it shows
+ * (Workspace.tsx); menus and hover cards read it when they open.
+ */
+let pageFilesHere = true;
+export function setPageFilesHere(here: boolean) { pageFilesHere = here; }
+export const pageFilesAreHere = () => pageFilesHere;
+export const contextMenuPlatform = (): ContextMenuPlatform => pageFilesHere ? platform : { ...platform, revealInFinder: undefined };
 
 // Contributions ---------------------------------------------------------------
 

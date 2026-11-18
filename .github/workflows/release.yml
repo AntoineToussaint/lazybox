@@ -5,8 +5,9 @@
 #   2. build    — `make release VERSION=<x.y.z>` on macOS: Runner, CLI,
 #                 Claude worker and pinned Node inside Lazybox.app; the DMG;
 #                 the updater archive and its signature; latest.json; the cask;
-#                 release notes from CHANGELOG.md; SHA256SUMS. Then a smoke
-#                 test of the built Runner and CLI.
+#                 release notes from CHANGELOG.md; the Linux Runner and CLI
+#                 tarballs (x64, arm64) with their .sha256; SHA256SUMS. Then a
+#                 smoke test of the built Runner and CLI.
 #   3. publish  — a GitHub release for the tag (never marked Latest, so V1's
 #                 cargo-dist releases stay the repository's latest), latest.json
 #                 on the rolling `v2-updates` release every installed app polls,
@@ -231,7 +232,9 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "$title" --notes-file dist/RELEASE_NOTES.md "${flags[@]}" \
             dist/Lazybox_*.dmg dist/Lazybox_*.app.tar.gz dist/Lazybox_*.app.tar.gz.sig \
-            dist/latest.json dist/lazybox-v2.rb dist/SHA256SUMS dist/release.json
+            dist/latest.json dist/lazybox-v2.rb dist/SHA256SUMS dist/release.json \
+            dist/lazybox-runner-*-linux-*.tar.gz dist/lazybox-runner-*-linux-*.tar.gz.sha256 \
+            dist/lazybox-cli-*-linux-*.tar.gz dist/lazybox-cli-*-linux-*.tar.gz.sha256
 
       - name: Point the update feed at this release
         # Installed apps read latest.json from the rolling v2-updates release

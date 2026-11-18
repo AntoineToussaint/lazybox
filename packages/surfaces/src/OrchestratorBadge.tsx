@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { subscriptionGroups } from './subscription-groups';
 import { createPortal } from 'react-dom';
 import { ConnectError } from '@lazybox/client-core';
 import type { Mission, Session } from '@lazybox/protocol';
@@ -146,7 +147,7 @@ export function GrantDialog({ session: given, onClose, missionId, candidates }: 
   const [draft, setDraft] = useState<GrantDraft>(() => defaultGrant(session));
   useEffect(() => { if (!given && session) setDraft(defaultGrant(session)); }, [given, session?.id]);
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
-  const profiles = (info?.profiles || []).filter(p => p.provider === 'claude' || p.provider === 'codex');
+  const profiles = subscriptionGroups((info?.profiles || []).filter(p => p.provider === 'claude' || p.provider === 'codex'), { currentId: session?.profileId }).flatMap(group => group.items);
   const choices = permissionChoices(session?.permission);
   const problem = (!session ? 'Choose the conversation that orchestrates' : undefined) || grantProblem(draft) || (chosen === 'new' && !title.trim() ? 'Name the mission: the outcome its agents work toward' : undefined);
   const agentName = !session ? 'a conversation' : session.provider === 'codex' ? 'Codex' : 'Claude';

@@ -47,6 +47,14 @@ and the conversation are what the page is for, so they stay; everything else
 docks around them. On a phone, panels show one at a time from the panel
 switcher.
 
+**Put your workspaces in your order.** Drag a workspace in the sidebar up or
+down: a line shows where it lands, the list scrolls when you hold it near its
+edge, and `Esc` puts it back. From the keyboard, `⌥⇧↑` / `⌥⇧↓` move the
+focused workspace one place (`⌥↓` alone still opens its card). Lazybox keeps
+the order on the Runner, so it is the same after a restart, in every window
+and on your phone; a new workspace comes in at the top. With several Runners
+in the sidebar, each Runner's workspaces move within its own section.
+
 ## Conversation tabs
 
 Conversations open as tabs, like files in an editor: keep several open, split

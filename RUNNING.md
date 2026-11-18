@@ -231,7 +231,9 @@ underlying text readable. Double-click the header to recenter, or focus the
 header and use arrow keys (Shift for larger steps) and Home. Dialogs stay within
 the window, adjust when it resizes and recenter when reopened. Form controls,
 focus trapping and Escape retain native dialog behavior. Native desktop windows
-move using their standard operating-system title bars. `make test-dialogs`
+have no separate title bar on macOS: each window's own header is it, with the
+window buttons at its left, and its empty parts move the window (a
+double-click does what System Settings says; `npm run test:title-bar`). `make test-dialogs`
 exercises the shared dialog interactions against a synthetic Runner.
 
 Open **Settings** from the main workspace, then **Subscriptions**. **Add

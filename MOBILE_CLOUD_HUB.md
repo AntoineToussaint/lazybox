@@ -82,9 +82,11 @@ It installs to the Home Screen. Details in [REMOTE.md](REMOTE.md).
 - **Shared TypeScript core:** `packages/client-core` (`RunnerLink`, `device.ts`)
   has no DOM/React dependency, but `device.ts` depends on WebCrypto
   non-extractable keys and the transport is `@connectrpc/connect-web` over
-  `fetch`. `apps/iphone` is a placeholder (`package.json` plus a README; no
-  Expo installed). C11 selected Expo/React Native for iPhone; no experiment has
-  validated it.
+  `fetch`. C11 selected Expo/React Native for iPhone. Since 2026-11-17,
+  `apps/mobile` is its first vertical slice (pair, Inbox, live conversation,
+  Allow/Deny/answer, Send now) on the simulator, and spikes S1 and S4 are run
+  ([§5](#spike-results-2026-11-17)): `device.ts` takes a `KeyProvider`, and the
+  DOM-free models are shared as `@lazybox/surfaces/models`.
 
 ### 1.4 Gaps against the state of the art
 
@@ -509,6 +511,73 @@ Spikes to run first, each a day or two, each able to change this plan:
 - **S4 Expo DOM components for the transcript.** Reuse the existing React DOM
   transcript inside the app and measure scrolling and keyboard behaviour on a
   long conversation against a native list.
+
+### Spike results (2026-11-17)
+
+S1 and S4 were run with the first vertical slice of the app
+([`apps/mobile`](apps/mobile/README.md)) on the iOS 27.2 Simulator (iPhone 18
+Pro, Xcode 27.2), Expo SDK 58 / React Native 0.88.1 / Hermes, against the
+fixture Runner's device gateway and against the Runner's real device gateway
+on loopback. S2 and S3 need a device and the paid Apple program; they are not run.
+
+**S1 Streaming on React Native: works through `expo/fetch`. Decision: keep
+Connect-ES and the shared `RunnerLink`; no Swift networking.**
+
+- `RunnerLink` already takes a `fetch`. The app hands it `expo/fetch`, whose
+  `Response.body` is a real `ReadableStream`, and Connect-ES's
+  `createConnectTransport` streams `WatchEvents` through it unchanged. No new
+  `Transport`, no polyfill, no fork. React Native's own `fetch` would buffer the
+  whole body and never deliver a live stream.
+- The shared `ConversationReader` (tail first with `ReadSessionTail`, then
+  `WatchEvents` from the cursor) runs as is. On the simulator the stream opens
+  after the tail (from cursor 6 and 19 in the fixture's conversations), text
+  arrives as it is written (batched every 32 ms), and Send now's stop, receipt
+  and next turn arrive on the same stream.
+- **Long-lived:** an idle stream stays the same stream for three minutes
+  (180 s), with only the Runner's 15 s heartbeats on it, then delivers the
+  next word. The
+  heartbeats matter: iOS's URL loading drops a request idle for 60 s
+  (`timeoutIntervalForRequest`), and the Runner's `watchHeartbeat` (15 s) keeps
+  well inside it.
+- **Cancellation:** leaving a conversation aborts its stream (the fixture saw
+  its client count go 1 → 0 within a poll). In the background the app stops
+  its streams and polls, as iOS would suspend the sockets anyway.
+- **Reconnect:** back in the foreground the stream reopens from its cursor
+  (it had read up to 19 and continues after 20, the word it saw before
+  leaving), 10 to 12 s after it closed across runs, 8 s of which the test spent in the
+  background. It shows what was written while the app was away, nothing twice.
+- **The real gateway:** pairing, sign-in, the 15-minute credential, the device
+  allowlist and Connect transcoding are the Runner's own code
+  (`internal/remote`, `TestSimulatorGateway`); the app pairs with its noble
+  P-256 key, Go's `ecdsa.Verify` accepts it (fingerprint B65F 23B7 EDB6 A8A4
+  in the run), and Allow goes through.
+- Reproduce: `npm run test:mobile-simulator -- --flow lifecycle` (and
+  `--flow gateway`); see [`apps/mobile/README.md`](apps/mobile/README.md).
+- Not measured: hours on a real iPhone, cellular hand-overs, and the relay
+  transport (WebSocket + Noise). The relay keeps its own custom `Transport`
+  (§3.4); `expo/fetch` settles the tailnet path.
+
+**S4 The transcript: native rows from the shared fold. Decision: share
+view-models, not DOM; no Expo DOM component and no WebView island for the
+transcript.**
+
+| | DOM island (`'use dom'` or WebView) with `MessageList` | Native rows from the shared fold (built) |
+| --- | --- | --- |
+| What ships | `MessageList` reaches 135 modules: Monaco (through `monaco-vim`), Mermaid, react-markdown, highlight.js, `@lazybox/platform`. Bundled alone it is 186 chunks, about 20 MB minified and 5 MB gzipped, with 283 kB gzipped in its entry chunk. The build stops on a Monaco path only the web app's config resolves. | The whole app is 3.9 MB of Hermes bytecode (1.7 MB gzipped), screens and shared models included. |
+| What it needs at run time | 30 of those modules reach the Runner through React context (sub-agent cards, inline runs, artifact actions, review cards). A WebView would need its own Runner client and credential, or a bridge for every call. | The app's one `RunnerLink`; the transcript is data. |
+| Data across the boundary | DOM components take props serialised as JSON: the transcript holds `bigint` cursors and protobuf messages, so every streamed delta re-serialises the list across the bridge. | None. |
+| Keyboard and scroll | The WebView scrolls itself; the composer must stay native for keyboard avoidance, so two scroll systems meet at the composer. | One inverted native list, interactive keyboard dismissal, the composer in the same `KeyboardAvoidingView`. |
+
+What is shared instead, in `@lazybox/surfaces/models` (a DOM-free entry,
+guarded by `scripts/surfaces-models.test.ts`): the transcript fold
+(`foldTranscript`), the reader (`ConversationReader`), attention (what needs
+you), row plans, the request model, the Inbox's sections, the queue merge and
+the theme tokens. The app maps the fold's messages to native rows
+(`apps/mobile/src/models/conversation.ts`), so a change to how a conversation
+reads lands in both. The DOM transcript stays the desktop's and the PWA's. A
+DOM island is still the right tool for something self-contained and rare, such
+as a diff or a Mermaid diagram opened full screen. It is not the right tool
+for the conversation, which streams.
 
 ## 6. Decisions for the user
 

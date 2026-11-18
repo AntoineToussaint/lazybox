@@ -27,3 +27,4 @@ export { layoutCommands, runLayoutCommand, type LayoutCommand } from './layout-c
 export { configureVoice } from './voice/voice-session';
 export { configureExternalTerminal, type ExternalTerminalHost } from './handoff';
 export { configureSystemSounds, type SystemSoundHost } from './sounds';
+export { configureTitleBar, DRAG_REGION } from './title-bar';

@@ -1,0 +1,4 @@
+/* While a handle is dragged (drag-gesture.ts): its cursor everywhere, no text
+   selectable anywhere, and pages in frames and web views do not take the pointer. */
+html.is-dragging,html.is-dragging *{cursor:var(--drag-cursor,grabbing)!important;user-select:none!important;-webkit-user-select:none!important}
+html.is-dragging iframe,html.is-dragging webview{pointer-events:none!important}

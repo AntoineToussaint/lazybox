@@ -133,6 +133,15 @@ try {
  const claude=page.getByRole('article',{name:'Personal subscription',exact:true});
  await expect(claude).toContainText('Usage not reported yet');await expect(claude.getByRole('progressbar')).toHaveCount(0);
  await claude.getByRole('button',{name:'Refresh usage',exact:true}).click();await expect(claude).toContainText('42% used');
+ // Subscriptions group by provider, Claude first, each under a small header; available ones lead, then by name.
+ const groups=page.locator('#subscriptions-panel .provider-group');
+ await expect(groups).toHaveCount(2);
+ await expect(groups.locator('.provider-group-heading')).toHaveText(['Claude','Codex']);
+ await expect(groups.nth(0).locator('.subscription-card h3')).toHaveText(['Personal']);
+ await expect(groups.nth(1).locator('.subscription-card h3')).toHaveText(['Saved Codex','Work']);
+ await expect(groups.nth(0)).toHaveAttribute('aria-label','Claude');
+ await page.screenshot({path:'.cache/settings-subscriptions-grouped.png',fullPage:true});
+ await page.emulateMedia({colorScheme:'dark'});await page.waitForTimeout(400);await page.screenshot({path:'.cache/settings-subscriptions-grouped-dark.png',fullPage:true});await page.emulateMedia({colorScheme:'light'});
  // Hold each refresh independently: refreshing one card must not disable its sibling.
  const held = new Map();
  const beforeRefreshes = fixture.calls.filter(call=>call.method==='RefreshSubscription').length;
@@ -223,7 +232,9 @@ try {
  const saved=fixture.profiles.find(profile=>profile.id==='codex-saved');
  for(let index=fixture.profiles.filter(profile=>profile.managed).length;index<10;index++) fixture.profiles.push({...structuredClone(saved),id:`density-${index}`,label:index===9?'A long subscription name for the engineering team':`Account ${index+1}`,availability:{...structuredClone(saved.availability),email:index===9?'long.account.identity@engineering.example.invalid':`account${index+1}@example.invalid`}});
  await page.reload();await page.getByRole('button',{name:'Settings',exact:true}).click();
- const cards=page.locator('.subscription-card');await expect(cards).toHaveCount(10);
+ await expect(page.locator('.subscription-card')).toHaveCount(10);
+ // The Codex group holds the added ones; it lays out like the whole list did.
+ const cards=page.locator('.provider-group[data-provider="codex"] .subscription-card');await expect(cards).not.toHaveCount(0);
  const first=await cards.nth(0).boundingBox(),third=await cards.nth(2).boundingBox();
  assert.equal(first.y,third.y,'wide Settings view should fit three accounts per row');
  assert.ok(first.height<=240,`two-window card too tall: ${first.height}`);
@@ -232,6 +243,6 @@ try {
  const narrowFirst=await cards.nth(0).boundingBox(),narrowSecond=await cards.nth(1).boundingBox();
  assert.ok(narrowSecond.y>narrowFirst.y,'narrow Settings view should use one column');
  assert.ok(await page.locator('.settings-page').evaluate(node=>node.scrollWidth<=node.clientWidth),'subscription identities cause horizontal overflow');
- await expect(cards.last().locator('.subscription-email')).toHaveText('long.account.identity@engineering.example.invalid');
- console.log('PASS: Settings enrollment (Codex browser sign-in, a code instead, device codes refused, a busy callback, cancel), per-account refresh, per-account automatic-switching opt-out, retained drafts, and compact ten-account layout with responsive wrapping. Fake authority only; no live login/inference.');
+ await expect(page.getByRole('article',{name:'A long subscription name for the engineering team subscription',exact:true}).locator('.subscription-email')).toHaveText('long.account.identity@engineering.example.invalid');
+ console.log('PASS: Settings enrollment (Codex browser sign-in, a code instead, device codes refused, a busy callback, cancel), per-account refresh, per-account automatic-switching opt-out, subscriptions grouped by provider, retained drafts, and compact ten-account layout with responsive wrapping. Fake authority only; no live login/inference.');
 } catch (error) {if(activePage){await activePage.screenshot({path:'.cache/settings-test-failure.png',fullPage:true});console.error(error);if(await activePage.locator('.subscription-dialog').count())console.error((await activePage.locator('.subscription-dialog').innerText()).slice(0,1500));}throw error;} finally {await browser?.close();await server.close();await fixture.close();}

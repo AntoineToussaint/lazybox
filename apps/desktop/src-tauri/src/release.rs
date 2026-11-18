@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl};
 
 /// The runtime inside this app bundle, when it is an installed release.
 #[derive(Clone, Debug)]
@@ -167,7 +167,8 @@ pub fn open_setup(app: &tauri::AppHandle) -> Result<(), String> {
         .product_name
         .clone()
         .unwrap_or_else(|| "Lazybox".into());
-    WebviewWindowBuilder::new(app, SETUP_LABEL, WebviewUrl::App("index.html".into()))
+    crate::title_bar::window(app, SETUP_LABEL, WebviewUrl::App("index.html".into()))
+        .map_err(|e| e.to_string())?
         .title(format!("Welcome to {name}"))
         .inner_size(600.0, 640.0)
         .min_inner_size(480.0, 520.0)

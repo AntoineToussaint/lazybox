@@ -133,8 +133,6 @@
 .dock-empty-state{text-align:center;max-width:360px}
 .dock-empty-state h3{font-size:calc(14px * var(--text-scale));color:var(--text-soft);margin-bottom:6px}
 
-html.dock-dragging,html.dock-dragging *{user-select:none!important;-webkit-user-select:none!important;cursor:grabbing}
-
 /* Header: the Panels and Layout menus. */
 /* Panels, Layout and Help sit together and look alike. */
 .workspace-shell .layout-menu>summary,.workspace-shell .panels-menu>summary,.workspace-shell .workspace-header-actions>.help-menu>summary{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:6px;color:var(--text-tertiary)}

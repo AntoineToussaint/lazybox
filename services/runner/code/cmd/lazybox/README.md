@@ -117,6 +117,25 @@ Working build says so and exits 6.
 | `link --remove-older [--yes] [--dry-run]` | Remove an older Lazybox installed by Homebrew that comes first on PATH: `<prefix>/bin/brew uninstall lazybox`, after asking (or `--yes`); refuses anything else |
 | `uninstall [--dry-run] [--remove-data [--yes]]` | Remove the service, links and completions it created; with `--remove-data`, also state, workspaces, logs and the app's window state, after typing `delete` |
 
+### Runners on other computers
+
+The owner link over SSH (`REMOTE_RUNNERS.md`, P0;
+`internal/link`). On this computer:
+
+| Verb | What |
+| --- | --- |
+| `remote add <ssh-host> [--name N] [--bundle FILE [--sha256 HEX]] [--service auto\|none] [--progress json]` | Probe the host over your own `ssh` and `~/.ssh/config`, upload and install the Runner when it has none (the host checks the SHA-256 before unpacking), start it, add this computer's key to its owners and pin its Runner key; then open one link to check it. `--progress json` prints one line per step (the app's *Add a computer*) |
+| `remote ls`, `remote rm <name> [--keep-on-host]`, `remote hosts` | The computers added, with the link's state and round trip; forget one (and revoke this computer's key there); the `Host` entries of `~/.ssh/config` |
+| `link connect <name>` | The link agent: keeps a link to that Runner (redialling after a drop, a sleep or a network change) and serves it on a loopback origin with a per-start token, in `~/.config/lazybox/remotes/<name>/endpoint.json`, which its locator names: `lazybox --runner <name> …` then works as for a local Runner. `SIGUSR1` makes it recheck the link at once |
+
+On the host, run by `ssh` as your own login:
+
+| Verb | What |
+| --- | --- |
+| `link serve --stdio` | The link endpoint on stdin and stdout: Noise IK with this Runner's key, an enrolled owner key and its identity signature, then the Runner's RPCs proxied to the loopback Runner with the bearer read here. Never a listener; refused from inside an agent, a workspace terminal or a hook |
+| `link owners [ls\|add\|revoke KEY-ID]` | The client keys with owner access (`<state>/owners.json`); a revoke ends that key's links within a second |
+| `link up [--service auto\|none]` | Make sure the Runner runs: the registered one, else the release's launchd service, else started detached for this login |
+
 `lazybox schema [actions|process|workspace|keys|settings|layout|theme] [--write DIR]` prints (or
 writes, for an editor) the JSON Schemas of the files a person writes. They
 ship with the CLI and are identified by `urn:lazybox:schema:…` ids, never a

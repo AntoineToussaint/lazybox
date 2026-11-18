@@ -180,11 +180,14 @@ a login) is offered, at most three, never one the agent says it ran or one for
 later. The command is kept exactly (`env -u VAR`, every argument; in a fenced
 `sh` block too), less a leading `cd` into another absolute folder (a temporary
 checkout the home replaces, whose name also picks the repository). A click
-opens a shell there in the Terminal panel (a real PTY: logins and browser
-sign-ins work, which an agent's commands, without a TTY, cannot do) and types
-the command at the prompt; it never runs by itself. The ⌄ beside it offers the
-other places, the person's own terminal app (`open` at the folder, the command
-copied) and Copy. A repository without a home gets one first ("Create api home
+runs it in a shell there in the Terminal panel (a real PTY: logins and browser
+sign-ins work, which an agent's commands, without a TTY, cannot do): the shell
+already open there when it is idle at its prompt, else a new one, once that
+shell can read input ([terminals](TERMINALS.md#run-a-command-for-you)). A
+script of several lines or a command with a placeholder is typed at the
+prompt instead, for the person to review and run with Return. The ⌄ beside it
+offers **Paste in terminal (don't run)**, the other places, the person's own
+terminal app (`open` at the folder, the command copied) and Copy. A repository without a home gets one first ("Create api home
 and run"). A global tool's login (`gcloud`, `aws`, `gh`…) goes to the home
 folder. When the shell's command-end mark arrives (`TerminalStatus.command_ends`,
 see [command output](COMMAND_OUTPUT.md)), the button says *Finished · exit N*
@@ -317,6 +320,24 @@ uncommitted work included, untracked files counted as files), running actions,
 processes and usage are read when the card opens, kept 30 seconds, and shown as
 placeholders until they answer. `WorkspaceHover.tsx` renders it;
 `workspace-hover-model.ts` is the pure half.
+
+**Your order.** Drag a workspace card up or down to put the list in your
+order: a press that moves a few pixels picks the row up (a click stays a
+click, ⌥-click still peeks, a right-click still opens its menu), a line shows
+where it lands, the list scrolls while the row is held near its edge, and Esc
+puts it back. The drag selects no text and opens no hover card, and the click
+it ends with selects nothing. `⌥⇧↑` / `⌥⇧↓` on a focused card move it one
+place and keep its focus, and a screen reader hears where it went (`⌥↓` alone
+is the hover card's; off a Mac, where `⌥⇧↑` / `⌥⇧↓` resize panels, a focused
+card keeps them, `ownedByFocus`). The order is the Runner's
+(`ArrangeWorkspaces`, kept in `.lazybox-collections/arrangement.json` beside
+the records): `ListCollections` answers in it, so it survives a reload and a
+restart and every window and a paired phone list alike. A workspace the order
+does not name yet (a new one) comes first, newest first; with no order kept
+the list is by ID, as before. With several Runners, each section reorders
+within its own Runner. The move shows at once and goes back if the Runner
+refuses it. `useListReorder.ts` is the gesture, `workspace-order.ts` the pure
+half, `collections/arrangement.go` the Runner's.
 
 **Peek.** Alt-click a peekable row, press Space on it (like Quick Look), or
 choose **Peek** in its context menu to see the item live over the current page

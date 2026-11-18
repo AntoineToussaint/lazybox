@@ -1,7 +1,10 @@
 # Runners on other computers
 
-**Status: proposal, 2026-11-17.** Nothing here is built or decided. It
-designs one generic way for Lazybox to work with a Runner on another computer:
+**Status: proposal, 2026-11-17; P0 built.** The owner link over SSH (P0b,
+[below](#p0b-the-owner-link-over-ssh-built)) and the Linux Runner (P0 steps
+1–3, [§5.2](#52-the-linux-runner)) are built and verified on Ubuntu 24.04 and
+in a container; the rest is a proposal, not built or decided.
+It designs one generic way for Lazybox to work with a Runner on another computer:
 a second Mac, a Linux VM, a cloud dev box (EC2, GCE, Hetzner, Fly), a
 devcontainer, or a home server. The goal is the **full Lazybox experience on that
 machine**: workspaces, chat, files, diffs and review, terminals, command
@@ -25,8 +28,84 @@ gateway allowlist), [Agents outlive the Runner](SESSION_HOSTS.md),
 | How does owner access work without copying the owner bearer? | Each client (a desktop app, a CLI install, a phone) gets its **own key pair**, enrolled on the Runner once over a channel that already proves you control that machine, for example an SSH login. Every connection then runs a **Noise IK** handshake that pins the Runner's key, and the client signs the handshake. The bearer never leaves its machine. [§2.4](#24-keys-and-the-owner-handshake) |
 | How does it connect? | Through one contract, `RunnerLink`, with interchangeable **routes**: SSH (bootstrap and tunnel, like VS Code Remote-SSH and Zed), the tailnet, the end-to-end-encrypted relay (self-hosted or the Hub's), and a local socket for containers. Every route ends in the same Runner handler with the same keys and allowlists. [§3](#3-runnerlink-one-contract-many-routes), [§4](#4-routes) |
 | Where does the Hub fit? | **It is one more implementation of the same contract**, not a separate system. It provides a relay route, a machine directory and a provisioner for managed VMs. It never holds a private key, never mints a credential and never sees plaintext. [§3.3](#33-who-implements-what) |
-| What blocks it today? | The Runner does not compile for Linux. Measured today with `GOOS=linux go vet ./...`, there are **two compile errors**: `syscall.Getsid` in `processguard` and `unix.MNT_RDONLY` in `installation`. With both patched locally, vet passes for linux/amd64 and linux/arm64. The real work is at run time: a systemd service manager, keeping session hosts outside the Runner's cgroup, Linux packaging and Linux CI. [§5.2](#52-the-linux-runner) |
+| What blocks it today? | Nothing for P0: the owner link over SSH ([P0b](#p0b-the-owner-link-over-ssh-built)) and the Linux Runner are built. The Linux Runner: it compiles and its Go suite passes on Linux (CI too), it runs as a systemd user service, its session hosts leave its cgroup in scopes of their own so agents outlive `systemctl --user restart`, and the release ships it as checksummed tarballs. [§5.2](#52-the-linux-runner) |
 | What first? | **P0: the Linux Runner plus an owner link over SSH to an existing host.** An agent can build and verify it against an OrbStack Linux machine on this Mac. Effort M: about 2–3 weeks, 7 PRs. [§10](#10-phased-plan) |
+
+## P0b: the owner link over SSH (built)
+
+Built 2026-11-17 on `feat/v2-runner-link`: items 4–6 of the [P0 plan](#10-phased-plan),
+the owner link without the Linux Runner (items 1–3, another branch). The
+person's guide is [docs/guides/remote-computers.md](docs/guides/remote-computers.md).
+
+| Piece | Where | As designed, or how it differs |
+| --- | --- | --- |
+| Noise IK channel | `internal/link/noise.go`, `handshake.go` | `Noise_IK_25519_ChaChaPoly_BLAKE2s`, `[u16 BE len][msg]` framing as V1's `e2e-channel`, prologue `lazybox-link-v1`. The client signs `SHA-256("lazybox-link-v1\0" ‖ Runner static key ‖ h)` with its P-256 identity key (the pinned key stands for `runnerId`). |
+| `link.Serve` | `internal/link/serve.go` | One entry point for every route. Admits only a channel key in `<state>/owners.json` whose identity signature verifies; rechecks the record every 250 ms, so a revoke ends live sessions within a second; 12 h session ceiling; `<state>/audit.jsonl` for sessions, refusals and owner changes. **Differs:** HTTP/2 inside the channel instead of yamux plus HTTP/1.1 per stream (`golang.org/x/net/http2`, already a dependency: multiplexing, per-stream flow control and pings for the RTT, no new library). The host-local list is `OpenRepositoryHome`; a request carrying its own `Authorization`, or a path outside the Runner's RPC service, is refused. |
+| The endpoint on the host | `lazybox link serve --stdio` (`cmd/lazybox/remote.go`) | **Differs:** the endpoint is a `lazybox` subcommand that sshd runs as the person's login and that proxies to the loopback Runner with the owner bearer it reads from `endpoint.json` on the host, rather than a `link.sock` the Runner owns. Same properties (no port, the bearer never leaves the host, Noise with pinned keys in front of everything) with no change to the Runner process; a `link.sock` (for the tailnet and relay routes, where no login runs a command) is P1. Refused from an agent's, terminal's or hook's environment. |
+| Owners | `internal/link/owners.go`; `lazybox link owners ls\|add\|revoke` on the host | `<state>/owners.json` (0600, flock-guarded, atomic). **Differs:** the verbs are `lazybox link owners …`, not `lazybox-runner owner …`. Pairing-link enrolment is P1. |
+| Client keys | `internal/link/keys.go`, `FileKeys` | `~/.config/lazybox/keys/link-client.json` (0600 in a 0700 directory), behind a `KeyProvider`. **Not yet:** Keychain and Secure Enclave (decision 10). |
+| SSH route | `internal/link/route.go` | System OpenSSH with the person's config, `BatchMode`, `ControlMaster` per host under `~/.config/lazybox/ssh/`, `ServerAliveInterval=15`. Host names are validated so one cannot be read as an option; remote words are quoted for sh, bash, zsh and fish alike. `SSH_ASKPASS` prompts are P1: a host that needs a prompt fails with *check that `ssh <host>` works in a terminal*. |
+| Bootstrap | `internal/link/bootstrap.go`, `scripts/probe.sh`, `scripts/install.sh`; `lazybox remote add` | Probe (POSIX `sh -s`, one JSON line, changes nothing); upload of a runtime `.tar.gz` (this Mac's runtime when the host is the same OS and CPU, else `--bundle FILE`); the host checks the SHA-256 before unpacking into `versions/<v>`, switches `current`, keeps the previous version; `lazybox link up` starts the Runner (registered one, the launchd service for a full release on a Mac, else detached for the login); `owners add` over the same SSH login answers the Runner key, which is pinned. |
+| Link agent | `internal/link/agent.go`; `lazybox link connect <name>` | Serves the remote Runner on `127.0.0.1:<port>` with a per-start token in `~/.config/lazybox/remotes/<name>/endpoint.json`, named by a locator in `runners/<name>.json` with a `remote` field, so `RunnerLink`, `RunnerScope` and `--runner NAME` work unchanged. Redials with backoff (250 ms doubling to 15 s), notices a wake by the wall clock and on `SIGUSR1`, measures the RTT by HTTP/2 ping, and writes `status.json` (connecting, connected, reconnecting, refused with *unknown-key* or *wrong-runner*). |
+| Desktop | `apps/desktop/src-tauri/src/links.rs`, `runners.rs` | One `lazybox link connect` per added computer, started from the Runner listing and stopped when the app quits (agents on the computer keep running). `remote_hosts`, `remote_add` (steps as events), `remote_remove`. A listing carries `remote: {host, route, machine, state, rttMs, …}`. |
+| UI | `AddComputerSheet.tsx`, `RunnersSettings.tsx`, `CollectionPanel.tsx`, `runner-directory.ts` | Settings → Runners → **Add a computer…** (filtered `~/.ssh/config` hosts or `user@host`, arrow keys and Return, one line per step with the exact error, closing does not cancel); the sidebar grouped by computer with the route, the RTT (on hover, or always above 300 ms) and *Reconnecting…* / *Access revoked*; a remote Runner is the full page; Reveal in Finder and the home checkout's Finder and editor actions are not offered on it; **Remove** forgets it and revokes the key there. |
+
+**Verified** (`go test ./internal/link ./cmd/lazybox`, `cargo test` in
+`apps/desktop/src-tauri`, `npm run test:remote-computers`):
+
+- the handshake: a wrong pinned key, a key never enrolled, a revoked key and a
+  copied channel key without its identity key are each refused before any
+  request reaches the Runner; a revoke ends a live session within a second;
+- the owner bearer never crosses the link (checked on the wire), is refused
+  if a client sends it, and no file on the client holds it;
+- streaming RPCs flow through both proxies as they are written;
+- the agent's token, loopback Host check and reconnection;
+- end to end through a **fake `ssh`** that runs each remote command with
+  `/bin/sh` in a second home on this Mac (Remote Login was off, and the Linux
+  Runner does not exist yet): `remote add` probes, uploads, verifies,
+  installs, starts a real Runner, enrols and pins; `link connect` serves it;
+  `lazybox --runner build-box ls` works through it; killing the host side of
+  ssh reconnects in about 0.1 s; `owners revoke` on the host refuses within
+  about 0.3 s; another Runner key behind the same name is refused as *wrong
+  runner*; `remote rm` revokes the key on the host;
+- the UI against fixture Runners (WebKit, dark and light);
+- **by hand, over the real system OpenSSH to a Linux Runner** (2026-11-18): a
+  throwaway OrbStack Ubuntu 24.04 arm64 machine, reached as
+  `lazybox-test-link@orb` through `~/.ssh/config`, with this branch merged
+  with `feat/v2-linux-runner` and cross-built for linux/arm64: `remote add`
+  probed, uploaded and verified, started the Runner, enrolled and pinned in
+  13 s; `lazybox --runner orbbox ls` worked through `link connect` (RTT 2 ms
+  over a reused ControlMaster); killing ssh reconnected in under a second;
+  `owners revoke` on the host refused within 0.3 s; a replaced Runner key
+  was refused as *wrong runner*; `remote rm` revoked the key on the host.
+  This run found that sshd's blocking stdio kept a revoked session alive
+  until the client's next ping (~10 s); `link serve` now makes its stdio
+  pollable, and the fake `ssh` of the Go test holds the command's stdio as
+  sshd does, so the test fails without the fix.
+
+**Not verified:** a real sleep and Wi-Fi change; host key and passphrase
+prompts (BatchMode refuses them: there is no askpass yet); the desktop app
+driving `lazybox link connect` (the Rust side is unit-tested; the Playwright
+suite drives the web client); `launchctl` over SSH on a Mac host.
+
+**With the Linux Runner** (`feat/v2-linux-runner`, 2026-11-18): `link up`
+installs the release's service on any platform (`lazybox service install`): a
+systemd user unit on Linux, the supervisor without systemd, launchd on a Mac;
+it starts the Runner detached only when that fails, and says why. The
+`start` step reports the manager and whether it starts at boot (lingering).
+The release's Linux tarballs are bundles `remote add --bundle` takes as they
+are. Verified by hand over the real system OpenSSH to an OrbStack Ubuntu
+24.04 arm64 machine (`lazybox-test-linux@orb`), from a clean host: `remote add
+--bundle lazybox-runner-0.1.0-pre.1-linux-arm64.tar.gz --sha256 …` installed,
+started the Runner *as a systemd user service; starts at boot (lingering is
+on)*, enrolled and connected in under 5 s; `lazybox --runner orbbox ls`
+through `link connect`; a fake ACP agent opened through the link and left
+mid-turn; `systemctl --user restart lazybox-runner` on the host (Runner PID
+99077 → 99194): the agent (PID 99167, in `lazybox-host-….scope`) kept running,
+was re-attached, its turn still busy, and `ls` through the same link showed it
+*working*. Turning lingering off with no session open stopped the user
+manager, and with it the Runner and the agent, as logging out does: the guide
+and `lazybox doctor` say so.
 
 ## 1. Where we are
 
@@ -37,9 +116,9 @@ gateway allowlist), [Agents outlive the Runner](SESSION_HOSTS.md),
 | Device identity | Built: non-extractable P-256 key, one-time pairing offer, 15-minute credentials, grants, revoke, a pinned allowlist. | [REMOTE.md](REMOTE.md), `internal/devices`, `internal/transport/device_auth.go` |
 | Listener rule | Built: `requireLoopbackListeners` (`services/runner/code/listen.go`) refuses any Runner listener that is not loopback. The device gateway is loopback too, and only `tailscale serve` publishes it. | `listen.go`, `internal/remote` |
 | Owner authority | `endpoint.json` (0600) holds a random bearer that is regenerated at every Runner start. It is accepted only on the loopback owner listener (`transport.LocalAuthority`), and refused by the gateway. | `work.go`, `internal/transport/auth.go` |
-| Agents outlive the Runner | Built on macOS: session hosts `setsid` out of the Runner's session. launchd is the supervisor. | [SESSION_HOSTS.md](SESSION_HOSTS.md) |
+| Agents outlive the Runner | Built on macOS and Linux: session hosts `setsid` out of the Runner's session, and on Linux each starts in a systemd scope of its own. launchd, a systemd user unit, or Lazybox's own supervisor (no systemd) keeps the Runner running. | [SESSION_HOSTS.md](SESSION_HOSTS.md#on-linux) |
 | The E2E relay | Designed (LBR/1: WSS, Noise IK, yamux, Connect over HTTP/1.1). V1 has a working Rust relay and Noise channel (`crates/relay`, `crates/e2e-channel`). | [MOBILE_CLOUD_HUB.md §3.4](MOBILE_CLOUD_HUB.md#34-recommended-architecture) |
-| Linux | Does not compile (two errors, above). Packaging, the service installer (`internal/installation`, launchd only) and the launchers (`scripts/environments.mjs`, `scripts/runner-service.mjs`) are macOS only. | [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) P02 |
+| Linux | Built (P0 steps 1–3): the Runner and CLI for x64 and arm64, `lazybox service install` as a systemd user unit (or the supervisor), `lazybox doctor`, the release tarballs, a Linux CI job. The Dev and Working launchers (`scripts/environments.mjs`, `scripts/runner-service.mjs`) stay macOS only. | [§5.2](#52-the-linux-runner), [install](docs/install.md#runner-on-a-linux-machine) |
 | UI connection | The TypeScript `RunnerLink` (`packages/client-core/src/index.ts`) holds `{baseUrl, token}`, renews from a locator, and retries a refused bearer once. The desktop's HTTP goes through `tauri-plugin-http` with a capability per origin. | `client-core`, `apps/desktop/src-tauri/src/runners.rs` |
 
 The [competitive audit](audits/2026-11-17-competitive/README.md) puts
@@ -546,6 +625,30 @@ that create machines come later (P2) and end in the same SSH or socket route.
 
 ### 5.2 The Linux Runner
 
+**Built, 2026-11-17** (`feat/v2-linux-runner`), as designed below, with these
+differences and findings:
+
+- **Service managers:** `Manager` in `internal/installation` with launchd,
+  systemd (`lazybox-runner.service`, `Restart=always`, `KillMode=process`,
+  the journal) and a third, **supervisor**: `lazybox-runner supervise`,
+  detached in its own session, for hosts without systemd. It names processes
+  by PID and start time (`/proc`), so a reused PID is never signalled.
+- **Scopes** as designed (`systemd-run --user --scope`), with a trial scope
+  and a fallback to today's `setsid` hosts ([SESSION_HOSTS.md](SESSION_HOSTS.md#on-linux)).
+- **Paths:** `${XDG_DATA_HOME:-~/.local/share}/lazybox` (state,
+  configuration, worktrees); the documented install puts releases in
+  `…/lazybox/runner/versions/<version>` with a `current` link.
+- **Node's Linux builds need `libatomic1`** besides glibc 2.28 and libstdc++;
+  a minimal Ubuntu image lacks it. `lazybox doctor` names the package.
+- **Verified** on Ubuntu 24.04 arm64 (OrbStack, systemd 255) and in an
+  Ubuntu 24.04 container without systemd: the Go suite; the installed
+  tarball; `lazybox doctor`; service install, restart, stop, start, logs
+  and uninstall; an agent mid-turn (the fake ACP agent), a managed command
+  and a terminal kept across a service update and a restart. Not verified:
+  x64 at run time (vet and build only), other distributions, a Runner
+  started from a real SSH session's scope (OrbStack's sessions are not
+  logind sessions), and GitHub's Linux runner starting scopes.
+
 **Compile.** `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go vet ./...` in
 `services/runner/code` fails on exactly two lines, checked 2026-11-17:
 
@@ -934,9 +1037,9 @@ yours to toggle. The OrbStack path avoids it.
 **P0, recommended and sized.** About 2–3 weeks of agent work in 7 PRs, each
 with its tests:
 
-1. The Linux compile fixes, a Linux CI job, and `ServiceManager` with systemd.
-2. Transient scopes for session hosts, with the systemd restart test.
-3. The Linux bundle in `scripts/release`.
+1. The Linux compile fixes, a Linux CI job, and `ServiceManager` with systemd. **Built.**
+2. Transient scopes for session hosts, with the systemd restart test. **Built.**
+3. The Linux bundle in `scripts/release`. **Built.**
 4. `link.Serve`, `owners.json`, the allowlist, the CLI verbs.
 5. `lazybox link serve` with the SSH route and `KeyProvider`.
 6. Desktop *Add a computer* and progress.
@@ -963,6 +1066,72 @@ real laptop sleeping.
 | 12 | The Hub's place | Separate system; **one more `Directory`, `Route` and `Provisioner`** | **One more implementation**, as the user asked. The relay protocol is open and self-hostable; the Hub sells operation, the directory, push and managed machines. |
 | 13 | First cloud provider (P2) | AWS, GCP, Hetzner, Fly, DigitalOcean | **The one you already use.** If none, Hetzner Cloud for a personal always-on box: cheapest, with a simple CLI. AWS for teams. Your account and costs in any case. |
 | 14 | Hub-provisioned first owner | Always confirm on an existing device; trust the Hub for VMs it created | **Trust the Hub only for VMs it created**, said in setup. Never for BYO machines. |
+
+## 12. Addendum: the Hub link (2026-11-17)
+
+**Status: design only on the Lazybox side.** A first Hub exists outside this
+repository, as C17 requires, in its own local repository `lazybox-hub`
+(unpublished). It is a Codefly workspace that composes the SaaS starter and
+adds a `hub` module. Its `HUB.md` holds the design, and its `lazybox.hub.v1`
+protos are the contract. Built and tested there:
+
+- enrolment tokens;
+- Runner enrolment with proof of possession;
+- signed heartbeats and derived presence;
+- the person's Runner listing;
+- device introductions that only the Runner's signed report can mark admitted.
+
+It stores public keys only.
+
+**How it fits §3.** The Hub is one more `Directory` and `Enroller`, later a
+relay `Route`:
+
+- `ListRunners` feeds a `Directory`. Entries merge by `runnerId`, and the Hub's
+  copy of the link key is shown as **unverified** (§2.5).
+- `IntroduceDevice` carries a new client's public keys to the Runner, which
+  admits them only after an owner confirms them on the Runner or on a trusted
+  device, as rule 3 of MOBILE_CLOUD_HUB requires.
+
+**Runner changes needed** (none built):
+
+1. **A Hub identity key.**
+   - `<state>/hub-identity.key`: Ed25519, 0600, made at the first enrolment.
+   - It is separate from the link key, which is X25519 and cannot sign.
+   - Every Runner call to the Hub is a statement signed with it: a serialized
+     `RunnerStatement`, signed over `"lazybox-hub-statement-v1\0"` and the
+     bytes.
+   - The statement carries an `issued_at` the Hub requires to be fresh and
+     increasing.
+2. **`lazybox hub enrol <token> [--hub <url>]`.**
+   - The person creates the one-time token in the Hub after signing in.
+   - The Runner signs an `Enrollment` with both public keys, `runnerId`, name,
+     machine, platform and version, and calls `RunnerService/Enroll`.
+   - It stores `{hub, runner_id, interval}` in `<state>/hub.json` (0600).
+   - `lazybox hub status` and `lazybox hub leave` complete the set.
+3. **The heartbeat.**
+   - While enrolled, the Runner calls `RunnerService/Heartbeat` every 30 s
+     (the Hub's `heartbeat_interval_seconds`), with jitter and backoff.
+   - It reports its version and routes: the tailnet origin when serving, the
+     relay when on.
+   - The Hub shows *asleep since* after 90 s without one.
+   - A `PermissionDenied` answer means the person removed the Runner. The
+     Runner stops and says so in Settings.
+   - The connection is outbound HTTPS only. No listener is opened, and the
+     listening rule (§8) is unchanged.
+4. **The `hub` entry in `RunnerLink`.**
+   - The link agent adds the Hub as a directory when the desktop is signed in.
+   - It calls the Hub's person face through the host's gateway, with the
+     person's own session; the Runner's credentials are never used.
+5. **Introductions.**
+   - When a heartbeat answers `pending_introductions > 0`, the Runner calls
+     `PendingIntroductions`.
+   - It shows each one in Settings → Devices and on trusted devices, with the
+     device fingerprint and the grants asked for.
+   - After an owner confirms, it writes `devices.json` (or `owners.json`) with
+     the grants the owner chose. Only then does it sign `RecordAdmission`.
+
+Paused by the user's priority on 2026-11-17: remote access and the iPhone
+first, the Hub after.
 
 ## Sources
 

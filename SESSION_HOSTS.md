@@ -192,7 +192,8 @@ notices in the conversation.
   exits. A host removes its directory when it exits.
 - `scripts/runner-command.mjs` sets `LAZYBOX_V2_KEEP_AGENTS=1` for Dev, Working
   and the Codefly service; an installed release's `lazybox-runner serve` keeps
-  agents by default, and its launchd job is the supervisor that offers Restart
+  agents by default, and its service (a launchd job; on Linux a systemd user
+  unit, or Lazybox's own supervisor without systemd) is the supervisor that offers Restart
   Runner (`--supervised`, [INSTALL.md](INSTALL.md)). Updating the app replaces
   the job (`lazybox service install`: bootout, then bootstrap of the new
   release's Runner); `TestReleaseServiceUpdateKeepsWhatRuns` checks a
@@ -275,6 +276,42 @@ existing hosts could receive bumps it. Terminal mode did not: its spec field and
 terminals launches, and agent and command frames are unchanged. Bumping would
 have cost a rollback its live agents: an older Runner cannot adopt a host of a
 newer version.
+
+## On Linux
+
+A host's own session is not enough under systemd: stopping or restarting a
+service kills every process in its cgroup, whatever its session or process
+group (`KillMode=control-group`, the default). So on Linux each host starts
+through `systemd-run --user --scope`, in a transient scope of its own,
+`lazybox-host-<id>.scope` under the user manager
+(`systemctl --user list-units 'lazybox-host-*'`). The host keeps its PID,
+pipes and session; only its cgroup changes. A tmux client that may start the
+private server runs in a scope too (`lazybox-tmux-<id>.scope`), so the server
+and its hosts leave the Runner's cgroup as well.
+
+- **Where it works:** whenever `systemd-run --user --scope true` does for the
+  Runner: under the installed `lazybox-runner.service`, and from a login
+  session. The Runner tries one trial scope at the first launch and
+  remembers the answer (a failure for a minute).
+- **Where it does not:** no systemd (a container, WSL without systemd), no
+  user manager (`su`, `sudo -u`). Hosts then start as on macOS. They outlive
+  a Runner restart, which is all a container has (Lazybox's own supervisor,
+  [INSTALL.md](docs/install.md#runner-on-a-linux-machine)), but not a restart
+  of the container: that is a reboot for them ([After a reboot](#after-a-reboot)).
+  A scope that fails after the trial passed makes that launch retry without
+  one: an agent never fails to start for want of a scope.
+- **Second line:** the installed unit has `KillMode=process`, so a stop
+  signals the Runner alone even for a host that got no scope.
+- **Logging out.** The scopes belong to the user manager, which runs while
+  the person has a session or lingering is on. Without lingering, the end of
+  the last session stops the user manager and everything under it: the
+  Runner and its hosts, as a reboot would. `lazybox doctor` says whether
+  lingering is on (verified on Ubuntu 24.04: lingering turned off with no
+  session stopped the agent; the next Runner ended its conversation).
+- `lazybox doctor` says which applies (**Agents outlive**).
+- In a container, give it an init that reaps orphans (`docker run --init`,
+  a devcontainer's `"init": true`): hosts outlive the Runner that started
+  them, and when they exit their parent is PID 1.
 
 ## Why there is no local daemon
 
@@ -407,7 +444,7 @@ backend never stops an agent from starting.
 
 ### Not verified
 
-- Linux (macOS with tmux 3.8 only).
+- Linux with another tmux than 3.4 (Ubuntu 24.04); macOS with tmux 3.8.
 - `kill-server` and a crashing tmux server are not tested separately: they take
   the same hang-up path as `kill-window`, which `TestClosingATmuxWindowStopsItsProgram`
   covers.
@@ -421,6 +458,8 @@ backend never stops an agent from starting.
 | --- | --- | --- |
 | `make test-outlive` | Every deterministic test below, with the race detector | none |
 | `make test` | The whole Go suite, which includes them | none |
+| `cd services/runner/code && go test ./internal/runner -run TestStoppingTheRunnersSystemdService ./internal/sessionhost -run TestAHostStartsInItsOwnScope` | Linux with a systemd user manager: the fixture Runner runs as a transient service with `KillMode=control-group`; stopping it leaves the agent, which the next Runner re-adopts and which finishes its turn; with no scope the same stop kills it (the control). Skipped where `systemd-run --user --scope` cannot run | none |
+| `LAZYBOX_V2_RELEASE_RUNTIME=<runtime> LAZYBOX_V2_RELEASE_SERVICE=1 go test ./cmd/lazybox -run TestReleaseService` | Installs a test service with the platform's manager (launchd, systemd, the supervisor) from a built release and keeps an agent mid-turn, a command and a terminal across an update and a restart | none |
 | `make test-reboot` | The reboot gate: everything a reboot kills is killed, and what must come back does ([After a reboot](#after-a-reboot)) | none |
 | `make test-real-outlive` | The live restart check with real agents | `claude` and `codex` logins; billable |
 | `cd services/runner/code && go test ./internal/sessionhost -run 'Tmux\|Launched\|LocalBackend'` | The backends: tmux keeps the delivery contract (replay, redelivery), shows the traffic in its window, takes a terminal's keys and follows its size; closing a window stops its program; a missing tmux fails clearly. Skipped without tmux | none |

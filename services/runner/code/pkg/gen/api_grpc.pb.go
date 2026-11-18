@@ -70,6 +70,7 @@ const (
 	RunnerService_AddCollectionRepositories_FullMethodName    = "/lazybox.bench.v1.RunnerService/AddCollectionRepositories"
 	RunnerService_GetCollection_FullMethodName                = "/lazybox.bench.v1.RunnerService/GetCollection"
 	RunnerService_ListCollections_FullMethodName              = "/lazybox.bench.v1.RunnerService/ListCollections"
+	RunnerService_ArrangeWorkspaces_FullMethodName            = "/lazybox.bench.v1.RunnerService/ArrangeWorkspaces"
 	RunnerService_ArchiveCollection_FullMethodName            = "/lazybox.bench.v1.RunnerService/ArchiveCollection"
 	RunnerService_ReconcileCollection_FullMethodName          = "/lazybox.bench.v1.RunnerService/ReconcileCollection"
 	RunnerService_OpenSession_FullMethodName                  = "/lazybox.bench.v1.RunnerService/OpenSession"
@@ -317,7 +318,12 @@ type RunnerServiceClient interface {
 	CreateCollection(ctx context.Context, in *CreateCollectionRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
 	AddCollectionRepositories(ctx context.Context, in *AddCollectionRepositoriesRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
 	GetCollection(ctx context.Context, in *CollectionRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
+	// The workspaces in the person's order (ArrangeWorkspaces).
 	ListCollections(ctx context.Context, in *ListCollectionsRequest, opts ...grpc.CallOption) (*ListCollectionsResponse, error)
+	// Puts the workspaces in the person's order: the one ListCollections
+	// answers in, so every window and a paired phone list them alike, across
+	// restarts. The owner's only. Answers the list in its new order.
+	ArrangeWorkspaces(ctx context.Context, in *ArrangeWorkspacesRequest, opts ...grpc.CallOption) (*ListCollectionsResponse, error)
 	ArchiveCollection(ctx context.Context, in *CollectionRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
 	ReconcileCollection(ctx context.Context, in *ReconcileCollectionRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
 	OpenSession(ctx context.Context, in *OpenSessionRequest, opts ...grpc.CallOption) (*SessionResponse, error)
@@ -1228,6 +1234,16 @@ func (c *runnerServiceClient) ListCollections(ctx context.Context, in *ListColle
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListCollectionsResponse)
 	err := c.cc.Invoke(ctx, RunnerService_ListCollections_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) ArrangeWorkspaces(ctx context.Context, in *ArrangeWorkspacesRequest, opts ...grpc.CallOption) (*ListCollectionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListCollectionsResponse)
+	err := c.cc.Invoke(ctx, RunnerService_ArrangeWorkspaces_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2937,7 +2953,12 @@ type RunnerServiceServer interface {
 	CreateCollection(context.Context, *CreateCollectionRequest) (*CollectionResponse, error)
 	AddCollectionRepositories(context.Context, *AddCollectionRepositoriesRequest) (*CollectionResponse, error)
 	GetCollection(context.Context, *CollectionRequest) (*CollectionResponse, error)
+	// The workspaces in the person's order (ArrangeWorkspaces).
 	ListCollections(context.Context, *ListCollectionsRequest) (*ListCollectionsResponse, error)
+	// Puts the workspaces in the person's order: the one ListCollections
+	// answers in, so every window and a paired phone list them alike, across
+	// restarts. The owner's only. Answers the list in its new order.
+	ArrangeWorkspaces(context.Context, *ArrangeWorkspacesRequest) (*ListCollectionsResponse, error)
 	ArchiveCollection(context.Context, *CollectionRequest) (*CollectionResponse, error)
 	ReconcileCollection(context.Context, *ReconcileCollectionRequest) (*CollectionResponse, error)
 	OpenSession(context.Context, *OpenSessionRequest) (*SessionResponse, error)
@@ -3494,6 +3515,9 @@ func (UnimplementedRunnerServiceServer) GetCollection(context.Context, *Collecti
 }
 func (UnimplementedRunnerServiceServer) ListCollections(context.Context, *ListCollectionsRequest) (*ListCollectionsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListCollections not implemented")
+}
+func (UnimplementedRunnerServiceServer) ArrangeWorkspaces(context.Context, *ArrangeWorkspacesRequest) (*ListCollectionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ArrangeWorkspaces not implemented")
 }
 func (UnimplementedRunnerServiceServer) ArchiveCollection(context.Context, *CollectionRequest) (*CollectionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ArchiveCollection not implemented")
@@ -4876,6 +4900,24 @@ func _RunnerService_ListCollections_Handler(srv interface{}, ctx context.Context
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).ListCollections(ctx, req.(*ListCollectionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_ArrangeWorkspaces_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ArrangeWorkspacesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ArrangeWorkspaces(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ArrangeWorkspaces_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ArrangeWorkspaces(ctx, req.(*ArrangeWorkspacesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -7873,6 +7915,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListCollections",
 			Handler:    _RunnerService_ListCollections_Handler,
+		},
+		{
+			MethodName: "ArrangeWorkspaces",
+			Handler:    _RunnerService_ArrangeWorkspaces_Handler,
 		},
 		{
 			MethodName: "ArchiveCollection",

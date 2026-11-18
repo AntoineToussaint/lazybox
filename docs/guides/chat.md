@@ -245,11 +245,15 @@ a [Web panel](run-your-app.md#browse-beside-your-work-the-web-panel).
 A shell block in the agent's answer (`bash`, `sh`, `zsh`, `console`…) has
 **Run** beside **Copy**:
 
-- **Run** opens a shell in the workspace's Terminal panel, in the
-  conversation's folder, with the command typed at the prompt: read it, edit
-  it if you like, and press Return. It is a real terminal, so a login can ask
-  for a password or open a browser sign-in. Nothing runs by itself, and
-  nothing goes to the agent. When the command ends, the block says
+- **Run** runs it in a shell of the workspace's Terminal panel, in the
+  conversation's folder: the shell already open there if it is idle at its
+  prompt, otherwise a new one, once the shell is ready. It is a real
+  terminal, so a login can ask for a password or open a browser sign-in, and
+  its sign-in link is clickable. A script of several lines, or a command with
+  something to fill in (`<your-project>`), is typed at the prompt instead:
+  read it, edit it, and press Return. **Paste in terminal (don't run)**, in
+  the ▾ menu, does that for any command. Nothing goes to the agent. When the
+  command ends, the block says
   *Finished · exit 0* and offers **Tell Claude it's done**, which sends
   *Done: `make seed` finished (exit 0).* so the agent can go on.
 - The **▾** next to Run (or the block's right-click menu) also runs it in a

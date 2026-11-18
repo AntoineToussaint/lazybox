@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -47,9 +48,12 @@ func (l Layout) Web() string        { return filepath.Join(l.Root, "web") }
 func (l Layout) Docs() string { return filepath.Join(l.Root, "docs") }
 
 // ClaudeBinary is the Claude Code executable the pinned SDK ships for this
-// platform, the one the worker runs when no other is configured.
+// platform, the one the worker runs when no other is configured. The Linux
+// bundle does not ship it (REMOTE_RUNNERS.md §5.3): there the person installs
+// Claude Code, and this path does not exist.
 func (l Layout) ClaudeBinary() string {
-	return filepath.Join(l.Root, "worker", "node_modules", "@anthropic-ai", "claude-agent-sdk-darwin-arm64", "claude")
+	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[runtime.GOARCH]
+	return filepath.Join(l.Root, "worker", "node_modules", "@anthropic-ai", "claude-agent-sdk-"+runtime.GOOS+"-"+arch, "claude")
 }
 
 // ReadVersion is the release version the runtime was built as.
@@ -140,7 +144,7 @@ func (l Layout) Unstable() string {
 	case strings.Contains(l.Root, "/AppTranslocation/"):
 		return "Lazybox is running from a temporary copy macOS made because it was opened from Downloads or a disk image. Move Lazybox to the Applications folder, then open it from there."
 	case readOnly(l.Root):
-		return "Lazybox is running from a disk image or another read-only location. Drag it to the Applications folder, eject the disk image, then open Lazybox from Applications."
+		return readOnlyAdvice
 	}
 	return ""
 }
@@ -151,5 +155,5 @@ var readOnly = func(path string) bool {
 	if unix.Statfs(path, &fs) != nil {
 		return false
 	}
-	return fs.Flags&unix.MNT_RDONLY != 0
+	return statfsReadOnly(&fs)
 }

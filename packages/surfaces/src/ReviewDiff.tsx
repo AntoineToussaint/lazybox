@@ -9,6 +9,7 @@ import { SplitRowView, type LineCells } from './SplitDiff';
 import { useWorkspaceReview } from './useWorkspaceReview';
 import './review.css';
 import { contextMenu, copyText } from './ContextMenu';
+import { beginDrag, preventMouseDown } from './drag-gesture';
 import './diff-view.css';
 
 type Range = { anchor: number; end: number };
@@ -97,6 +98,8 @@ export function ReviewDiff({ workspaceId, member, path, text, view, base, focus,
     event.preventDefault();
     if (event.shiftKey && range) { setRange({ anchor: range.anchor, end: index }); setComposing(true); return; }
     dragging.current = true; setComposing(false); setRange({ anchor: index, end: index });
+    // Dragged over the lines to choose several: a drag gesture, so the code under it is not selected. Escape drops the choice.
+    beginDrag('y', { pointerId: event.pointerId, cursor: 'pointer', onEnd: reason => { if (reason === 'escape') { dragging.current = false; cancel(); } } });
   };
   const extend = (index: number) => { if (dragging.current && range && rows[index]?.hunk === rows[range.anchor].hunk) setRange({ anchor: range.anchor, end: index }); };
   const keyboard = (index: number, shift: boolean) => { setRange(shift && range ? { anchor: range.anchor, end: index } : { anchor: index, end: index }); setComposing(true); };
@@ -119,7 +122,7 @@ export function ReviewDiff({ workspaceId, member, path, text, view, base, focus,
     if (!isLine(row)) return null;
     const number = row.type === 'del' ? row.oldLine : row.newLine, side = row.type === 'del' ? 'removed line' : 'line';
     return <button type="button" className="review-add" aria-label={`Comment on ${side} ${number}`} title="Comment on this line · drag or Shift-click to choose several"
-      onPointerDown={event => start(index, event)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); keyboard(index, event.shiftKey); } }}>+</button>;
+      onPointerDown={event => start(index, event)} onMouseDown={preventMouseDown} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); keyboard(index, event.shiftKey); } }}>+</button>;
   };
   // A line's context menu, the same in both views: comment on it (or the chosen range), copy it.
   const lineMenu = (index: number) => {

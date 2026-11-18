@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import { subscriptionGroups } from './subscription-groups';
 import type { ModelPrice, ReviewSettings, RunnerSettings } from '@lazybox/protocol';
 import { useRunner } from './RunnerContext';
 import { DraggableDialog, DialogHeader } from './DraggableDialog';
@@ -50,7 +51,7 @@ export function AgentSettings() {
   // A fixed reviewer: an agent (its best subscription), or one subscription; ACP agents have one each.
   const profiles = info?.profiles || [];
   const agents = [...new Set(profiles.map(p => p.provider).filter(p => p === 'claude' || p === 'codex' || isAcp(p)))].sort((a, b) => rank(a) - rank(b));
-  const subscriptions = profiles.filter(p => p.provider === 'claude' || p.provider === 'codex');
+  const subscriptions = subscriptionGroups(profiles.filter(p => p.provider === 'claude' || p.provider === 'codex')).flatMap(group => group.items);
   const mode = reviewerModeOf(review);
   const reviewerValue = mode === 'fixed' ? `fixed:${review.reviewer}` : mode;
   const pickReviewer = (value: string) => value.startsWith('fixed:') ? changeReview({ reviewerMode: 'fixed', reviewer: value.slice(6) }) : changeReview({ reviewerMode: value, reviewer: '', reviewerModel: '' });

@@ -292,14 +292,16 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 		c.once.Do(func() {})
 		m.items[state.ID] = c
 	}
-	go m.watchFollowers()
+	// The limits are read here, not in the goroutine: a test that shortens them
+	// for its own Manager would otherwise race with every earlier Manager's watcher.
+	go m.watchFollowers(followSilence, pipeIdle)
 	return m, nil
 }
 
 // watchFollowers ends a followed pipe whose `lazybox run` went silent: its
 // CLI was killed, or the machine slept through it.
-func (m *Manager) watchFollowers() {
-	tick := time.NewTicker(followSilence / 6)
+func (m *Manager) watchFollowers(silence time.Duration, idleLimits struct{ Never, After time.Duration }) {
+	tick := time.NewTicker(silence / 6)
 	defer tick.Stop()
 	for {
 		select {
@@ -311,13 +313,13 @@ func (m *Manager) watchFollowers() {
 		var silent, idle []*Command
 		for _, c := range m.items {
 			c.mu.Lock()
-			if c.status.Following && !c.status.Done && !c.detaching && time.Since(c.lastSeen) > followSilence {
+			if c.status.Following && !c.status.Done && !c.detaching && time.Since(c.lastSeen) > silence {
 				silent = append(silent, c)
 			}
 			if c.status.Mode == "pipe" && !c.status.Following && !c.status.Done && !c.detaching && !c.lastPublished.IsZero() {
-				limit := pipeIdle.After
+				limit := idleLimits.After
 				if c.status.Offset == 0 {
-					limit = pipeIdle.Never
+					limit = idleLimits.Never
 				}
 				if time.Since(c.lastPublished) > limit {
 					idle = append(idle, c)

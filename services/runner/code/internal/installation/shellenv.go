@@ -5,20 +5,49 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
 
-// launchd starts a job with PATH=/usr/bin:/bin:/usr/sbin:/sbin and no LANG.
-// Agents need the person's tools (git, gh, codex, their package managers),
+// launchd starts a job with PATH=/usr/bin:/bin:/usr/sbin:/sbin and no LANG,
+// and a systemd user unit gets the user manager's environment, not a login
+// shell's. Agents need the person's tools (git, gh, codex, their package managers),
 // so the service records the PATH and locale their login shell sets up,
 // read once at install time, plus the usual Homebrew and user directories in
 // case the shell could not be read. `lazybox service install` reads it again;
 // `lazybox doctor` shows it.
-var fallbackPath = []string{"/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"}
+var fallbackPath = platformPath(runtime.GOOS)
+
+func platformPath(goos string) []string {
+	if goos == "linux" {
+		return []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+	}
+	return []string{"/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"}
+}
 
 const marker = "__LAZYBOX_ENV__"
+
+// DefaultShell is the login shell to read when SHELL is unset: zsh on macOS;
+// on Linux the account's shell from the password database, else bash.
+func DefaultShell() string {
+	if runtime.GOOS == "darwin" {
+		return "/bin/zsh"
+	}
+	if u, err := user.Current(); err == nil {
+		if data, err := os.ReadFile("/etc/passwd"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				fields := strings.Split(line, ":")
+				if len(fields) == 7 && fields[2] == u.Uid && filepath.IsAbs(fields[6]) {
+					return fields[6]
+				}
+			}
+		}
+	}
+	return "/bin/bash"
+}
 
 // ShellEnvironment is what the person's login shell exports: PATH and LANG.
 type ShellEnvironment struct {
@@ -34,7 +63,7 @@ type ShellEnvironment struct {
 func ReadShellEnvironment(ctx context.Context, getenv func(string) string) ShellEnvironment {
 	shell := getenv("SHELL")
 	if shell == "" || !filepath.IsAbs(shell) {
-		shell = "/bin/zsh"
+		shell = DefaultShell()
 	}
 	env := ShellEnvironment{Shell: shell}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)

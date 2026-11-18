@@ -182,9 +182,17 @@ function Ticks({ text }: { text: string }) {
   return <>{text.split('`').map((part, i) => i % 2 ? <code key={i}>{part}</code> : part)}</>;
 }
 
+/**
+ * The window has no separate title bar (title_bar.rs): a strip as tall as one
+ * runs across its top, under the window buttons, and it and the header move
+ * the window when dragged (title-bar.ts).
+ */
 function Header({ version }: { version: string }) {
-  return <header className="first-run-header">
-    <img src={icon} alt="" width={64} height={64}/>
-    <div><h1>Welcome to Lazybox</h1>{version && <p className="first-run-muted">Version {version}</p>}</div>
-  </header>;
+  return <>
+    <div className="first-run-title-bar" data-window-drag-region="" aria-hidden="true"/>
+    <header className="first-run-header" data-window-drag-region="deep">
+      <img src={icon} alt="" width={64} height={64}/>
+      <div><h1>Welcome to Lazybox</h1>{version && <p className="first-run-muted">Version {version}</p>}</div>
+    </header>
+  </>;
 }

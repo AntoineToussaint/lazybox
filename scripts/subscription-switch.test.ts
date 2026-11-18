@@ -82,18 +82,19 @@ test('the header says what the conversation waits for, not "Needs attention"', (
   assert.equal(inbox.reason, 'Limit reached');
 });
 
-test('the best other subscription is the ready one; a picker lists the rest by reset', () => {
+test('the best other subscription is the ready one; a picker lists the current one first, then available, then by name', () => {
   const choices = subscriptionChoices(profiles, 'claude', 'work-2', noon);
-  assert.deepEqual(choices.map(c => c.id), ['work-1', 'claude-default', 'work-3', 'work-2']);
+  assert.deepEqual(choices.map(c => c.id), ['work-2', 'work-1', 'claude-default', 'work-3']);
   assert.equal(bestChoice(choices)?.id, 'work-1', 'known to be available first');
   assert.equal(choices.find(c => c.id === 'work-1')?.detail, 'Available · 37% used');
   assert.equal(choices.find(c => c.id === 'work-3')?.detail, `Limit reached · back at ${time(at(15))}`);
-  assert.equal(choices.at(-1)?.current, true);
+  assert.equal(choices[0].current, true);
+  assert.ok(choices.every(c => c.provider === 'claude'), 'only the conversation\'s own provider');
   assert.equal(subscriptionName(profiles[3], 'claude-default'), 'Claude CLI sign-in');
   const onlyLimited = subscriptionChoices(profiles.slice(1, 3), 'claude', 'work-2', noon);
   assert.equal(bestChoice(onlyLimited), undefined, 'nothing ready: no automatic best');
   // A reset that passed makes a subscription ready again.
-  assert.equal(subscriptionChoices(profiles.slice(1, 3), 'claude', 'work-2', at(16) * 1000)[0].ready, true);
+  assert.equal(subscriptionChoices(profiles.slice(1, 3), 'claude', 'work-2', at(16) * 1000).find(c => c.id === 'work-3')?.ready, true);
 });
 
 // Switching by itself is an extension's account policy (EXTENSIONS.md): by

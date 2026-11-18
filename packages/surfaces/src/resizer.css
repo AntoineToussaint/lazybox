@@ -21,8 +21,4 @@
 .resizer[data-collapsed]:focus-visible{box-shadow:inset 0 0 0 2px var(--focus)}
 /* The folded side keeps its place in the layout but shows nothing. */
 :is(:has(+ .resizer[data-side=start][data-collapsed]:not([data-off])),.resizer[data-side=end][data-collapsed]:not([data-off]) + *){visibility:hidden;overflow:hidden!important;min-width:0!important;min-height:0!important;padding:0!important;border:0!important}
-/* While one is dragged: its cursor everywhere, no text selection, and pages in frames do not take the pointer. */
-html.is-resizing,html.is-resizing *{cursor:col-resize!important;user-select:none!important;-webkit-user-select:none!important}
-html.is-resizing[data-resize-axis=y],html.is-resizing[data-resize-axis=y] *{cursor:row-resize!important}
-html.is-resizing iframe,html.is-resizing webview{pointer-events:none}
 @media (prefers-reduced-motion:reduce){.resizer::after{transition:none}}

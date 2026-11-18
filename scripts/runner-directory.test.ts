@@ -7,7 +7,7 @@ import { AgentEventSchema, SessionSchema, type Session } from '@lazybox/protocol
 import type { RunnerListing } from '@lazybox/platform';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { elsewhere, healthLabel, launchRunner, localTarget, mergeInboxes, orderRunners, OWN_RUNNER, parseRunnerPreferences, rowTarget, runnerChannel, runnerCounts, runnerHealth, runnerLabel, scopedKey, shortPath, splitKey, validRunnerId } from '../packages/surfaces/src/runner-directory.ts';
+import { elsewhere, groupByMachine, healthLabel, isRemote, launchRunner, linkStateText, routeLabel, rttText, runnerStateText, THIS_MACHINE, thisMachineLabel, localTarget, mergeInboxes, orderRunners, OWN_RUNNER, parseRunnerPreferences, rowTarget, runnerChannel, runnerCounts, runnerHealth, runnerLabel, scopedKey, shortPath, splitKey, validRunnerId } from '../packages/surfaces/src/runner-directory.ts';
 import { agentSections } from '../packages/surfaces/src/agents-model.ts';
 import { parsePeek, peekKey } from '../packages/surfaces/src/peek-model.ts';
 import { listingKey } from '../packages/surfaces/src/runner-locator.ts';
@@ -48,6 +48,7 @@ test('names: the launchers\' channels read as Dev, Working and Release; others k
   assert.equal(runnerLabel({ name: 'lazybox' }), 'Release');
   assert.equal(runnerLabel({ name: 'checkout-two' }), 'Checkout-two');
   assert.equal(runnerLabel({ name: ' ', product: 'Lazybox Lab' }), 'Lazybox Lab');
+  assert.equal(runnerLabel({ name: 'build-box', remote: { host: 'build-box', route: 'ssh' } }), 'build-box');
   assert.equal(runnerChannel({ name: 'dev' }), 'Dev');
   assert.equal(runnerChannel({ name: 'mine', channel: 'working' }), 'Working');
   assert.equal(runnerChannel({ name: 'mine' }), '');
@@ -140,4 +141,38 @@ test('peek: a conversation names its Runner, and one id on two Runners is two it
 test('a listing that says the same thing is the same value (no rerender on every poll)', () => {
   assert.equal(listingKey([listing('a')]), listingKey([{ ...listing('a') }]));
   assert.notEqual(listingKey([listing('a')]), listingKey([listing('a', { token: 'rotated' })]));
+  // A remote Runner's link changing state (or its round trip) is a new value.
+  const remote = (state: 'connected' | 'reconnecting', rttMs = 40) => listing('box', { remote: { host: 'build-box', route: 'ssh', machine: 'build-box', state, rttMs } });
+  assert.equal(listingKey([remote('connected')]), listingKey([remote('connected')]));
+  assert.notEqual(listingKey([remote('connected')]), listingKey([remote('reconnecting')]));
+  assert.notEqual(listingKey([remote('connected', 40)]), listingKey([remote('connected', 400)]));
+});
+
+test('Runners on other computers: the link in words, and the sidebar grouped by computer', () => {
+  const remote = (name: string, extra: Partial<NonNullable<RunnerListing['remote']>> = {}, state: RunnerListing['state'] = 'running') =>
+    listing(name, { state, remote: { host: name, route: 'ssh', machine: name, state: 'connected', rttMs: 30, ...extra } });
+  assert.equal(linkStateText(listing('dev')), '');
+  assert.equal(linkStateText(remote('box')), '');
+  assert.equal(linkStateText(remote('box', { state: 'reconnecting' })), 'Reconnecting…');
+  assert.equal(linkStateText(remote('box', { state: 'refused', code: 'unknown-key' })), 'Access revoked');
+  assert.equal(linkStateText(remote('box', { state: 'refused', code: 'wrong-runner' })), 'Not its Runner');
+  // The link agent is not serving yet: the app is starting it.
+  assert.equal(linkStateText(remote('box', {}, 'stopped')), 'Connecting…');
+  assert.equal(runnerStateText({ health: 'offline', listing: remote('box', { state: 'reconnecting' }) }), 'Reconnecting…');
+  assert.equal(runnerStateText({ health: 'offline', listing: listing('working') }), healthLabel.offline);
+  assert.equal(isRemote(remote('box')), true);
+  assert.equal(isRemote(listing('dev')), false);
+  assert.equal(rttText(41.6), '42 ms');
+  assert.equal(rttText(undefined), '');
+  assert.equal(routeLabel('ssh'), 'SSH');
+
+  const rows = [{ listing: listing('dev') }, { listing: remote('zeta', { machine: 'zeta' }) }, { listing: listing('working') }, { listing: remote('alpha-gpu', { machine: 'alpha', state: 'reconnecting', rttMs: 500 }) }];
+  const machines = groupByMachine(rows, 'This Mac');
+  assert.deepEqual(machines.map(m => [m.label, m.remote, m.rows.length]), [['This Mac', false, 2], ['alpha', true, 1], ['zeta', true, 1]]);
+  assert.deepEqual([machines[1].route, machines[1].rttMs, machines[1].state], ['ssh', 500, 'Reconnecting…']);
+  assert.equal(machines[0].id, THIS_MACHINE);
+  // Only remote ones: no empty "This Mac".
+  assert.deepEqual(groupByMachine([{ listing: remote('box') }]).map(m => m.label), ['box']);
+  assert.equal(thisMachineLabel('MacIntel'), 'This Mac');
+  assert.equal(thisMachineLabel('Linux x86_64'), 'This computer');
 });

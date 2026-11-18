@@ -8,6 +8,8 @@
 # | plan       | ubuntu-24.04 | reads the catalog; emits the UI shard matrix    |
 # | go         | macos-15     | core: fmt-check, go vet, `make test`, race run, |
 # |            |              | then the launcher's `make test-environments`    |
+# | go-linux   | ubuntu-24.04 | core on Linux: fmt-check, go vet, `make test`,  |
+# |            |              | race run (the Runner on a Linux machine)        |
 # | generated  | ubuntu-24.04 | core: `make check-generated` (Codefly + Buf)    |
 # | typescript | ubuntu-24.04 | core: `make check-workspaces`                   |
 # | desktop    | macos-15     | native: `make check-desktop`                    |
@@ -18,10 +20,10 @@
 # gate added there runs here with no edit to this file. Live/real-provider tests
 # are the catalog's `external` entries and are never selected.
 #
-# macOS only for what cannot run elsewhere: the Runner is macOS-only today
-# (`internal/processguard` calls `syscall.Getsid`, which Go defines only for
-# darwin/BSD, so `go vet` fails for GOOS=linux), the launcher refuses other
-# hosts, and the Tauri shell embeds WKWebView. The UI suites run on Linux: they
+# The Go suite runs on both: macOS, where the desktop's Runner runs, and Linux,
+# where a Runner for remote use runs (REMOTE_RUNNERS.md). macOS only for what
+# cannot run elsewhere: the launcher (Dev, Working) refuses other hosts, and
+# the Tauri shell embeds WKWebView. The UI suites run on Linux: they
 # drive Playwright against the fixture Runner, and their browsers make the page
 # report macOS (scripts/fixtures/playwright.mjs). Run `make stage` on a Mac
 # before a release: it runs every gate there, UI included.
@@ -118,6 +120,48 @@ jobs:
       - run: make test-environments
       - name: README and CONTRIBUTING name only what exists
         run: node scripts/export-check.mjs
+
+  # The Runner on a Linux machine: the same Go suite and race run as `go`, on
+  # Linux. The tests that need systemd (a service whose stop kills its cgroup,
+  # session hosts in scopes of their own) run when the runner's user manager
+  # can start scopes, and say why they skip when it cannot.
+  go-linux:
+    name: go linux (vet, test, race)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: services/runner/code/go.mod
+          cache-dependency-path: services/runner/code/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install tmux
+        run: command -v tmux || { sudo apt-get update && sudo apt-get install -y tmux; }
+      # A user manager for this account, as a Linux host running the Runner
+      # as a service has (lingering), so systemd-run --user --scope works.
+      - name: Start a systemd user manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          uid="$(id -u)"
+          for _ in $(seq 100); do test -S "/run/user/$uid/bus" && break; sleep 0.1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="/run/user/$uid" systemd-run --user --scope --quiet true \
+            && echo "systemd scopes: available" \
+            || echo "::warning::systemd-run --user --scope fails here; the scope tests will skip"
+      - name: Use every core for builds
+        run: echo "GO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
+      - name: Format and vet
+        run: make fmt-check check-go
+      - name: Test (GOMAXPROCS = cores)
+        run: make test GOMAXPROCS="$GO_BUILD_JOBS"
+      - name: Race-check the restart packages (GOMAXPROCS=1)
+        run: make test-outlive GOMAXPROCS=1
 
   generated:
     name: generated code (Codefly + Buf)
@@ -260,7 +304,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [plan, go, generated, typescript, desktop, ui, typos]
+    needs: [plan, go, go-linux, generated, typescript, desktop, ui, typos]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

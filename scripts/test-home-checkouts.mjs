@@ -3,10 +3,12 @@
 // dialog, updates it to the latest main, and opens a shell there in the
 // Terminal panel (a real terminal). What the agent hands back — a login that
 // needs a TTY, written as a fenced `sh` block with `env -u`, or "run in the
-// home checkout of api: `make playground`" — opens a shell there with the exact
-// command at the prompt, never run by itself and never sent to the agent; once
-// the person ran it, "Tell Claude it's done" sends how it ended. Everything is
-// reachable from the keyboard. Settings → Repositories lists the homes.
+// home checkout of api: `make playground`" — runs there, exactly as written,
+// in a shell already idle there or a new one, never sent to the agent; Paste
+// types it without running. A shell that starts slowly gets nothing before
+// its prompt: the command shows once and runs. Once it ended, "Tell Claude
+// it's done" sends how. Everything is reachable from the keyboard.
+// Settings → Repositories lists the homes.
 // WebKit by default (the desktop app's engine); TEST_CHROMIUM=1 runs Chromium.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
@@ -65,7 +67,7 @@ try {
  await expect(loginBlock.locator('.code-run-tag')).toHaveText('needs a terminal');
  await loginBlock.getByRole('button',{name:'More ways to run'}).click();
  const loginItems=await labels();
- assert.equal(loginItems[0],'Run in the terminal');
+ assert.deepEqual(loginItems.slice(0,2),['Run in the terminal','Paste in terminal (don’t run)']);
  assert.ok(loginItems.includes('Open in Terminal (your app)')&&loginItems.includes('Copy command'),`login menu: ${loginItems}`);
  assert.ok(!loginItems.some(l=>/Ask Claude|command output/.test(l)),`a login is never sent to the agent nor captured: ${loginItems}`);
  await page.keyboard.press('Escape');
@@ -130,25 +132,20 @@ try {
  const directories=await panel.getByLabel('Terminal directory').locator('option').allTextContents();
  assert.ok(directories.includes('api home')&&directories.includes('web home')&&directories.includes('Home folder (~)'),`directories: ${directories}`);
 
- // ── The login that needs a TTY: Run in api home opens a shell in the home with the exact command at the prompt.
+ // ── The login that needs a TTY: Run in api home runs it in the api home shell just opened, idle at its prompt: no second shell.
+ const first=[...fixture.terminals.values()].at(-1);
  const loginOffer=offers.locator('.home-run').nth(0);
  await expect(loginOffer).toHaveText(`Run in api home${login}`);
  await loginOffer.click();
- await expect.poll(()=>calls('OpenTerminal').length).toBe(2);
- assert.equal(calls('OpenTerminal')[1].body.repositoryHome,'backend');
- const second=[...fixture.terminals.values()].at(-1);
- // The temporary checkout's cd is gone (the home stands for it); env -u and every argument are kept; Return is the person's.
- await expect.poll(()=>second.input.join('')).toBe('env -u ACME_TOKEN ./bin/acme login staging');
- assert.equal(second.line,'env -u ACME_TOKEN ./bin/acme login staging','typed, not run');
+ // The temporary checkout's cd is gone (the home stands for it); env -u and every argument are kept; the prompt's line is cleared first.
+ await expect.poll(()=>first.input.join('')).toBe('\x15env -u ACME_TOKEN ./bin/acme login staging\r');
+ assert.equal(calls('OpenTerminal').length,1,'the idle shell in api home is reused');
+ await expect(screen).toContainText('ran: env -u ACME_TOKEN ./bin/acme login staging');
  assert.equal(applies().length,0,'nothing went to the agent');
  const loginStatus=offers.locator('.home-run-row').nth(0).getByRole('status').first();
- await expect(loginStatus).toHaveText('In the terminal (api home): press Return to run it');
+ await expect(loginStatus).toHaveText('Finished in api home · exit 0');
  await expect(screen.locator('textarea')).toBeFocused();
  await page.screenshot({path:`${shots}/home-checkouts-run.png`});
- // The person runs it in the terminal; the shell marks its end, and the offer says so.
- await page.keyboard.press('Enter');
- await expect(screen).toContainText('ran: env -u ACME_TOKEN ./bin/acme login staging');
- await expect(loginStatus).toHaveText('Finished in api home · exit 0');
  // Tell Claude it's done: the command and its exit, sent to the conversation.
  await offers.locator('.home-run-row').nth(0).getByRole('button',{name:'Tell Claude it’s done'}).click();
  await expect.poll(()=>applies().length).toBe(1);
@@ -156,44 +153,84 @@ try {
  await expect(offers.locator('.home-run-row').nth(0)).toContainText('Told Claude');
  await page.screenshot({path:`${shots}/home-checkouts-told.png`});
 
- // ── The offer's ⌄: another home, the person's own terminal, Copy.
+ // ── Paste (don't run): typed at the prompt of the same shell, waiting for the person's Return.
+ await offers.getByRole('button',{name:`Other ways to run ${login}`}).click();
+ await menu.getByRole('menuitem',{name:'Paste in terminal (don’t run)'}).click();
+ await expect.poll(()=>first.line).toBe('env -u ACME_TOKEN ./bin/acme login staging');
+ assert.equal(calls('OpenTerminal').length,1,'pasted into the idle shell');
+ await expect(loginStatus).toHaveText('Typed in the terminal (api home): review and press Return');
+ await page.waitForTimeout(400);
+ assert.equal(first.line,'env -u ACME_TOKEN ./bin/acme login staging','typed, not run');
+ // The person runs it in the terminal; the shell marks its end, and the offer says so.
+ await screen.click();await page.keyboard.press('Enter');
+ await expect(loginStatus).toHaveText('Finished in api home · exit 0');
+
+ // ── The offer's ⌄: paste, another home, the person's own terminal, Copy.
  await offers.getByRole('button',{name:'Other ways to run make playground'}).click();
  const other=await labels();
- assert.ok(other.includes('Run in web home')&&other.includes('Run in your home folder')&&other.includes('Open in Terminal (your app)')&&other.includes('Copy command'),`offer menu: ${other}`);
+ assert.ok(other.includes('Paste in terminal (don’t run)')&&other.includes('Run in web home')&&other.includes('Run in your home folder')&&other.includes('Open in Terminal (your app)')&&other.includes('Copy command'),`offer menu: ${other}`);
  await page.keyboard.press('Escape');
 
- // ── From the keyboard: ⌥Tab (WebKit) or Tab reaches the next offer, Enter opens the home folder's shell with it.
+ // ── From the keyboard: ⌥Tab (WebKit) or Tab reaches the next offer, Enter opens the home folder's shell and runs it there.
  const runLogin=offers.getByRole('button',{name:/^Run in your home folder /});
  await offers.locator('.home-run').nth(1).focus();
  const tab=process.env.TEST_CHROMIUM?'Tab':'Alt+Tab';
  await page.keyboard.press(tab);await page.keyboard.press(tab);
  await expect(runLogin).toBeFocused();
  await page.keyboard.press('Enter');
- await expect.poll(()=>calls('OpenTerminal').length).toBe(3);
- assert.equal(calls('OpenTerminal')[2].body.userHome,true);
- const third=[...fixture.terminals.values()].at(-1);
- await expect.poll(()=>third.input.join('')).toBe('gcloud auth application-default login');
+ await expect.poll(()=>calls('OpenTerminal').length).toBe(2);
+ assert.equal(calls('OpenTerminal')[1].body.userHome,true);
+ const homeShell=[...fixture.terminals.values()].at(-1);
+ await expect.poll(()=>homeShell.input.join('')).toBe('gcloud auth application-default login\r');
  await expect(panel.getByRole('tab',{name:'~',exact:true})).toHaveAttribute('aria-selected','true');
+ // Run again: the shell there is idle, so it is the one used; no third tab.
+ await expect(offers.locator('.home-run-row').nth(2).getByRole('status').first()).toHaveText('Finished in your home folder · exit 0');
+ await runLogin.click();
+ await expect.poll(()=>homeShell.input.join('')).toBe('gcloud auth application-default login\r\x15gcloud auth application-default login\r');
+ assert.equal(calls('OpenTerminal').length,2,'the second Run reuses the idle shell');
+ await expect(panel.getByRole('tab',{name:'~',exact:true})).toHaveCount(1);
 
- // ── Any code block's Run is the terminal, not the agent: the shell in the conversation's folder, the command at the prompt.
+ // ── A shell that starts slowly (a heavy .zshrc): Run waits for its prompt, so the command shows once, and runs.
+ fixture.terminalStartDelayMs=1500;
  push({turnId:'t2',type:'operation_accepted',text:'And the seed data?'});
- push({turnId:'t2',type:'message_delta',text:'Seed it yourself:\n\n```sh\nmake seed\n```\n'});
- const block=chat.locator('.code-block.is-runnable').last();
+ push({turnId:'t2',type:'message_delta',text:'Seed it yourself:\n\n```sh\nmake seed\n```\n\nOr keep the tests running:\n\n```sh\nwatch make test\n```\n'});
+ const block=chat.locator('.code-block.is-runnable').filter({hasText:'make seed'}).last();
+ const watcher=chat.locator('.code-block.is-runnable').filter({hasText:'watch make test'}).last();
  await expect(block).toContainText('make seed');
  await block.getByRole('button',{name:'More ways to run'}).click();
  const blockItems=await labels();
- assert.deepEqual(blockItems.slice(0,4),['Run in the terminal','Run in api home','Run in web home','Run in your home folder'],`block menu: ${blockItems}`);
+ assert.deepEqual(blockItems.slice(0,5),['Run in the terminal','Paste in terminal (don’t run)','Run in api home','Run in web home','Run in your home folder'],`block menu: ${blockItems}`);
  assert.ok(blockItems.includes('Ask Claude to run it (no terminal)')&&blockItems.includes('Run as command output (no terminal)…'),'asking the agent is there, last and labelled');
  await page.keyboard.press('Escape');
- await block.getByRole('button',{name:'Run: open a terminal with this command ready'}).click();
- await expect.poll(()=>calls('OpenTerminal').length).toBe(4);
- assert.deepEqual([calls('OpenTerminal')[3].body.repositoryHome,calls('OpenTerminal')[3].body.userHome],[undefined,undefined],'the workspace, not a home');
- const fourth=[...fixture.terminals.values()].at(-1);
- await expect.poll(()=>fourth.input.join('')).toBe('make seed');
+ await block.getByRole('button',{name:'Run in the terminal',exact:true}).click();
+ await expect.poll(()=>calls('OpenTerminal').length).toBe(3);
+ assert.deepEqual([calls('OpenTerminal')[2].body.repositoryHome,calls('OpenTerminal')[2].body.userHome],[undefined,undefined],'the workspace, not a home');
+ const slow=[...fixture.terminals.values()].at(-1);
+ await expect(block.locator('.code-run-chip').first()).toHaveText('Waiting for the shell (the workspace)…');
+ await page.waitForTimeout(800);
+ assert.deepEqual(slow.input,[],'nothing is written while the shell starts');
+ await expect.poll(()=>slow.input.join(''),{timeout:10000}).toBe('make seed\r');
+ const output=slow.output.toString();
+ const prompt=output.indexOf('\x1b]133;B');
+ assert.ok(prompt>=0&&output.indexOf('make seed')>prompt,'the command reached the prompt, not the starting terminal');
+ await expect(screen).toContainText('ran: make seed');
+ assert.equal((await screen.innerText()).split('make seed').length-1,2,'the command shows once, then its output');
+ await expect(block.locator('.code-run-chip').first()).toHaveText('Finished in the workspace · exit 0');
  assert.equal(applies().length,1,'Run sent nothing to the agent');
+ fixture.terminalStartDelayMs=0;
+
+ // ── A busy shell is never typed into: the watcher keeps the workspace shell running, so the next Run opens another.
+ await watcher.getByRole('button',{name:'Run in the terminal',exact:true}).click();
+ await expect.poll(()=>slow.input.join('')).toBe('make seed\r\x15watch make test\r');
+ assert.equal(calls('OpenTerminal').length,3,'the idle workspace shell runs the watcher');
+ await expect(watcher.locator('.code-run-chip').first()).toHaveText('Running in the terminal (the workspace)');
+ await block.getByRole('button',{name:'Run in the terminal',exact:true}).click();
+ await expect.poll(()=>calls('OpenTerminal').length).toBe(4);
+ await expect.poll(()=>[...fixture.terminals.values()].at(-1).input.join('')).toBe('make seed\r');
+ await page.screenshot({path:`${shots}/home-checkouts-slow-shell.png`});
  // The new last message takes the offers; the earlier one no longer shows them.
  await expect(chat.getByRole('group',{name:'Commands for you to run'})).toHaveCount(1);
- await expect(chat.getByRole('group',{name:'Commands for you to run'}).locator('.home-run')).toHaveText([/Run in api home\s*make seed/]);
+ await expect(chat.getByRole('group',{name:'Commands for you to run'}).locator('.home-run').first()).toHaveText(/Run in api home\s*make seed/);
 
  // ── Settings → Repositories lists every home with its state.
  await page.getByRole('button',{name:'Settings',exact:true}).click();
@@ -204,7 +241,7 @@ try {
  await settings.scrollIntoViewIfNeeded();
  await page.screenshot({path:`${shots}/home-checkouts-settings.png`});
  assert.deepEqual(errors,[],'no page errors');
- console.log('home checkouts: set and updated, opened in the shell, an agent\'s login typed exactly in its home (never sent to the agent), told done, keyboard reachable, listed in Settings');
+ console.log('home checkouts: set and updated, opened in the shell, an agent\'s login run exactly in its home (the idle shell reused, never sent to the agent), pasted without running, told done, a slow shell waited for (the command shown once, and run), a busy shell left alone, keyboard reachable, listed in Settings');
 } finally {
  await browser?.close();await server.close();await fixture.close();
 }

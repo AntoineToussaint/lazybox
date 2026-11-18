@@ -6,6 +6,8 @@ import { DraggableDialog, DialogHeader } from './DraggableDialog';
 import { readPreference, writePreference } from './view-state';
 import { useRunnerSettings } from './RunnerSettings';
 import { backWhen, bestChoice, limitHeadline, resetTime, sessionLimit, subscriptionChoices, subscriptionName, switchesItself, switchLabel, type SubscriptionChoice } from './subscription-model';
+import { groupByProvider } from './subscription-groups';
+import { ProviderGroups } from './SubscriptionGroups';
 import './subscription-switch.css';
 
 const askedKey = 'auto-switch-asked';
@@ -58,13 +60,18 @@ export function SubscriptionControls({ session, profiles, viewState, dialogOpen,
   </>;
 }
 
+/**
+ * Subscriptions to choose from, in the one order (subscription-groups.ts): by
+ * provider under a small header when there is more than one, the current one
+ * first. Arrow keys move through every choice, across groups.
+ */
 function ChoiceList({ choices, value, onChange, name, disabled }: { choices: SubscriptionChoice[]; value: string; onChange(id: string): void; name: string; disabled?: boolean }) {
   return <div className="subscription-choices" role="radiogroup" aria-label="Subscriptions">
-    {choices.map(choice => <label key={choice.id} className="subscription-choice" data-ready={choice.ready} data-current={choice.current || undefined}>
+    <ProviderGroups groups={groupByProvider(choices, choice => choice.provider)} className="subscription-choice-group">{items => items.map(choice => <label key={choice.id} className="subscription-choice" data-ready={choice.ready} data-current={choice.current || undefined}>
       <input type="radio" name={name} value={choice.id} checked={value === choice.id} disabled={disabled || choice.current} onChange={() => onChange(choice.id)}/>
       <span className="subscription-choice-name">{choice.name}{choice.current && <small> · current</small>}</span>
       <small className="subscription-choice-detail">{choice.detail}</small>
-    </label>)}
+    </label>)}</ProviderGroups>
   </div>;
 }
 
@@ -137,8 +144,8 @@ function SwitchDialog({ session, profiles, provider, automatic, onClose, onSessi
   const { api, refresh } = useRunner();
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { dialog.current?.showModal(); }, []);
-  // Where the conversation is now comes first, then where it can go.
-  const choices = useMemo(() => { const all = subscriptionChoices(profiles, provider, session.profileId); return [...all.filter(c => c.current), ...all.filter(c => !c.current)]; }, [profiles, provider, session.profileId]);
+  // Where the conversation is now comes first, then where it can go (subscriptionChoices).
+  const choices = useMemo(() => subscriptionChoices(profiles, provider, session.profileId), [profiles, provider, session.profileId]);
   const others = choices.filter(c => !c.current);
   const [choice, setChoice] = useState(() => (bestChoice(choices) || others[0])?.id || '');
   const target = others.find(c => c.id === choice);

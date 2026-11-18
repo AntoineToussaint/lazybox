@@ -15,8 +15,8 @@
  *
  * The command is kept exactly as written, environment changes included
  * (`env -u VAR ./bin/tool login prod`). Nothing here runs anything: the
- * window types it at a shell prompt for the person to read, edit and run
- * (Return) themselves, in a real terminal, so logins can prompt. Only a
+ * window runs it in a shell of the Terminal panel (or types it at the
+ * prompt for review, `shell-input.ts`), a real terminal, so logins can prompt. Only a
  * leading `cd` into another absolute folder (`cd /tmp/api-main && …`, a
  * temporary checkout) is left out: the home checkout is what it stood for.
  */

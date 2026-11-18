@@ -2,11 +2,13 @@
  * Run what the agent wrote. A shell code block in an agent's message gets a
  * Run split button beside Copy:
  *
- * - **Run** asks the conversation's agent to run it ("Run this and tell me
- *   the result:" and the block): the agent runs it with `lazybox run`, sees a
- *   failure and reacts. Sent at once, or queued behind the turn in progress.
- *   The block then says how it went, from the agent's matching tool call.
- * - **Run myself…** opens a confirm card under the block (the script,
+ * - **Run** runs it in a shell of the workspace's Terminal panel (below);
+ *   its ▾ also pastes it there without running, or asks the conversation's
+ *   agent to run it ("Run this and tell me the result:" and the block): the
+ *   agent runs it with `lazybox run`, sees a failure and reacts. Sent at
+ *   once, or queued behind the turn in progress. The block then says how it
+ *   went, from the agent's matching tool call.
+ * - **Run as command output…** opens a confirm card under the block (the script,
  *   editable; the folder; Run/Cancel), then runs it as a command of this
  *   conversation in the Command output console. The block shows the outcome,
  *   and a failure offers to hand the end of its output to the agent.
@@ -18,8 +20,10 @@
  * A command the agent hands back to the person (a login, a dev server to try
  * by hand) also runs in a home checkout: the menus offer "Run in <repo> home"
  * and the conversation's last message, once its turn is over, shows one
- * button per such command (`home-run.ts`, `HomeRuns`). It opens a shell in
- * the workspace's Terminal panel there and types the command.
+ * button per such command (`home-run.ts`, `HomeRuns`). It runs the command
+ * in a shell of the workspace's Terminal panel there (`home-shell.ts`): at
+ * once when it is one line with nothing to fill in, else typed at the prompt
+ * for the person to review and run with Return.
  */
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import type { RunnerClient } from '@lazybox/client-core';
@@ -35,6 +39,7 @@ import './code-run.css';
 import { doneMessage, homeOffers, inHome, needsTerminal, placeFor, placeLabel, type HomeOffer, type HomePlace, type HomeRepository } from './home-run';
 import { homesChanged, libraryOf, subscribeLibrary } from './home-checkouts';
 import { openHomeShell, type ShellPlace } from './home-shell';
+import { runsAtOnce } from './shell-input';
 import { hasTerminalHost, openInTerminal } from './handoff';
 import { cdCommand } from './handoff-model';
 
@@ -50,8 +55,9 @@ export type RunActions = {
 type AgentRecord = { messageId: string; script: string; inline: boolean; queued: boolean; sawQueue: boolean; at: number; start?: boolean };
 /** action: the workspace action (key) Run myself started instead of the script. */
 type SelfRecord = { messageId: string; script: string; inline: boolean; commandId: string; cwd: string; action?: string };
-/** A command typed in a shell of the Terminal panel: waiting at the prompt, then finished (the shell's mark), then told to the agent. */
-type TerminalRecord = { messageId: string; script: string; typed: string; where: string; state: 'ready' | 'finished'; exitCode?: number; told?: boolean };
+/** A command in a shell of the Terminal panel: waiting for the shell, then running (or typed, waiting for Return), then finished (the shell's mark), then told to the agent. */
+type TerminalState = 'starting' | 'running' | 'typed' | 'finished';
+type TerminalRecord = { messageId: string; script: string; typed: string; where: string; state: TerminalState; exitCode?: number; told?: boolean };
 type Memory = { agent: AgentRecord[]; self: SelfRecord[]; terminal: TerminalRecord[] };
 /** What was run from each conversation, kept while the app runs so a remounted chat still shows it. */
 const memory = new Map<string, Memory>();
@@ -64,8 +70,8 @@ export type RunPlace = HomePlace | { kind: 'here' };
 export type AgentRunView = { state: 'queued' | 'sent' | 'running' | 'ok' | 'failed' | 'background'; exitCode?: number; start?: boolean; port?: number };
 /** server: it keeps running (a server or a watcher), with its port and address once it listens; action: the workspace action it is. */
 export type SelfRunView = { commandId: string; state: 'running' | 'ok' | 'failed' | 'stopped'; exitCode?: number; signal?: string; folder: string; server?: boolean; port?: number; url?: string; action?: string };
-/** A run in the Terminal panel: where, and whether the command line the person ran there ended (and how). */
-export type TerminalRunView = { where: string; state: 'ready' | 'finished'; exitCode?: number; told?: boolean };
+/** A run in the Terminal panel: where, whether it runs or waits for Return, and whether it ended (and how). */
+export type TerminalRunView = { where: string; state: TerminalState; exitCode?: number; told?: boolean };
 export type RunView = { agent?: AgentRunView; self?: SelfRunView; terminal?: TerminalRunView; confirming: boolean };
 export type Folder = { label: string; path: string };
 
@@ -287,12 +293,14 @@ export class CodeRuns {
   }
   /**
    * Run: a shell of the Terminal panel (a real terminal, so a login can
-   * prompt), in `place`, with the command typed at its prompt for the person
-   * to check, edit and run with Return. Nothing runs by itself. In a home,
-   * a leading `cd` into a temporary checkout is left out (the home stands
-   * for it). A repository without a home gets one first.
+   * prompt), in `place`: one already open there and idle, else a new one.
+   * Once the shell is ready, a one-line command with nothing to fill in
+   * runs; a longer script, a placeholder, or `paste` is typed at the prompt
+   * for the person to review and run with Return. In a home, a leading `cd`
+   * into a temporary checkout is left out (the home stands for it). A
+   * repository without a home gets one first.
    */
-  async runIn(messageId: string, script: string, place: RunPlace) {
+  async runIn(messageId: string, script: string, place: RunPlace, mode: 'run' | 'paste' = 'run') {
     const workspace = this.workspaceId();
     if (place.kind === 'unknown') return;
     let shell: ShellPlace, typed = script;
@@ -311,11 +319,15 @@ export class CodeRuns {
       shell = { repositoryId: repository.repositoryId, label: `${repository.name} home` };
       typed = inHome(script).command;
     }
-    const record: TerminalRecord = { messageId, script, typed, where: this.placeName(place), state: 'ready' };
-    const opened = await openHomeShell(this.api, workspace, shell, typed, status => { record.state = 'finished'; record.exitCode = status; this.emit(); });
-    if (opened.error) return;
+    const record: TerminalRecord = { messageId, script, typed, where: this.placeName(place), state: 'starting' };
     this.memory.terminal = [...this.memory.terminal.filter(run => run.messageId !== messageId || run.script !== script), record];
     this.emit();
+    const opened = await openHomeShell(this.api, workspace, shell, typed, {
+      mode,
+      onTyped: how => { record.state = how === 'run' ? 'running' : 'typed'; this.emit(); },
+      onEnd: status => { record.state = 'finished'; record.exitCode = status; this.emit(); },
+    });
+    if (opened.error) { this.memory.terminal = this.memory.terminal.filter(run => run !== record); this.emit(); }
   }
   private terminalView(messageId: string, script: string): TerminalRunView | undefined {
     const run = this.memory.terminal.find(entry => entry.messageId === messageId && entry.script === script);
@@ -477,8 +489,9 @@ export function useRunScope(): { host: CodeRuns; messageId: string } | undefined
 
 /**
  * The ways to run a command an agent wrote, best first. Run opens the
- * Terminal panel's shell (a real terminal) with the command at its prompt;
- * then each home, the person's own terminal app, Copy. Asking the agent or
+ * Terminal panel's shell (a real terminal) and runs the command there (a
+ * script or a placeholder is typed for review); Paste types it without
+ * running; then each home, the person's own terminal app, Copy. Asking the agent or
  * running it as captured output come last, marked "no terminal", and are
  * not offered at all for a command that needs one (a login, a sign-in).
  */
@@ -488,6 +501,7 @@ function runItems(host: CodeRuns, messageId: string, script: string, { inline, l
   return [
     { label: inline ? `Run \`${clip(script)}\` in the terminal` : 'Run in the terminal', icon: 'terminal', shortcut: inline ? undefined : 'Enter',
       disabled: here ? undefined : 'The terminal opens in a workspace: copy it instead', run: () => void host.runIn(messageId, script, { kind: 'here' }) },
+    { label: PASTE_LABEL, icon: 'paste', disabled: here ? undefined : 'The terminal opens in a workspace: copy it instead', run: () => void host.runIn(messageId, script, { kind: 'here' }, 'paste') },
     ...host.homePlaces().map(place => ({ label: placeLabel(place), icon: 'home', run: () => void host.runIn(messageId, script, place) })),
     { label: 'Open in Terminal (your app)', icon: 'external', run: () => void host.openOwnTerminal(script, { kind: 'here' }) },
     { label: 'Copy command', icon: 'copy', run: () => void copyText(script, 'Copied the command') },
@@ -501,6 +515,12 @@ export function inlineRunItems(host: CodeRuns, messageId: string, command: strin
   return runItems(host, messageId, command, { inline: true });
 }
 const clip = (text: string) => text.length > 48 ? text.slice(0, 47) + '…' : text;
+/** Types the command at the prompt without Return: to edit it before it runs. */
+const PASTE_LABEL = 'Paste in terminal (don’t run)';
+/** What Run does with a command, in words for its tooltip. */
+const terminalRunTitle = (script: string, where: string) => runsAtOnce(script)
+  ? `Runs this in a shell of the Terminal panel (${where}): one already open there when it is idle, else a new one`
+  : `Types this in a shell of the Terminal panel (${where}): review it, then press Return`;
 const NEEDS_TERMINAL = 'It signs in or asks for input: only a real terminal can answer, so it runs in the Terminal panel or your own terminal, never through the agent';
 
 /**
@@ -522,14 +542,14 @@ export function useRunnableBlock(text: string, language: string, runnable: boole
   if (!host || !script) return undefined;
   const view = JSON.parse(signature) as RunView;
   const terminalOnly = needsTerminal(script);
-  // Run is the person's: a shell of the Terminal panel with the command at its prompt, never a message to the agent.
+  // Run is the person's: a shell of the Terminal panel runs it (or holds it at the prompt for review), never a message to the agent.
   const run = () => void host.runIn(messageId, script, { kind: 'here' });
   const myself = () => { const why = terminalOnly ? 'This needs a terminal: Run opens one' : host.whyNotRunMyself(); if (why) showMenuNotice(why); else host.openConfirm(messageId, script); };
   const menu = (): MenuItem[] => runItems(host, messageId, script, { inline: false, language });
   const header = <span className="code-run" role="group" aria-label="Run">
     {terminalOnly && <small className="code-run-tag" title={NEEDS_TERMINAL}>needs a terminal</small>}
-    <button type="button" className="code-run-main" title={`Opens a shell in the Terminal panel (${host.placeName({ kind: 'here' })}) with this at the prompt: check it, then press Return`}
-      aria-label="Run: open a terminal with this command ready" onClick={run}><Icon name="terminal" size={10}/>Run</button>
+    <button type="button" className="code-run-main" title={terminalRunTitle(script, host.placeName({ kind: 'here' }))}
+      aria-label="Run in the terminal" onClick={run}><Icon name="terminal" size={10}/>Run</button>
     <button type="button" className="code-run-more" title="More ways to run" aria-label="More ways to run" aria-haspopup="menu"
       onClick={event => { const box = event.currentTarget.getBoundingClientRect(); openContextMenu({ x: box.left, y: box.bottom + 4 }, menu(), { keyboard: event.detail === 0, target: event.currentTarget, label: 'Run' }); }}><Icon name="chevron" size={10}/></button>
   </span>;
@@ -559,9 +579,9 @@ export function InlineRuns({ messageId }: { messageId: string }) {
 /**
  * Under the conversation's last message, once its turn is over: one button
  * per command it hands back to the person ("run in the home checkout of api:
- * `make playground`", a login). A click opens a shell there with the command
- * at the prompt; the ⌄ beside it runs it elsewhere, opens the person's own
- * terminal, or copies it. Once it ran, "Tell Claude it's done".
+ * `make playground`", a login). A click runs it in a shell there (or types
+ * it at the prompt for review); the ⌄ beside it pastes it without running,
+ * runs it elsewhere, opens the person's own terminal, or copies it. Once it ran, "Tell Claude it's done".
  */
 function HomeRuns({ host, messageId }: { host: CodeRuns; messageId: string }) {
   const signature = useSyncExternalStore(host.subscribe, () => host.homeSignature(messageId));
@@ -577,6 +597,7 @@ function HomeRun({ host, messageId, offer, place }: { host: CodeRuns; messageId:
   const name = place.kind === 'repository' ? place.repository.name : '';
   const label = setup ? `Create ${name} home and run` : placeLabel(place);
   const others = (): MenuItem[] => [
+    { label: PASTE_LABEL, icon: 'paste', run: () => void host.runIn(messageId, offer.command, place, 'paste') },
     ...host.homePlaces().filter(other => placeLabel(other) !== placeLabel(place)).map(other => ({ label: placeLabel(other), icon: 'home', run: () => void host.runIn(messageId, offer.command, other) })),
     { label: 'Open in Terminal (your app)', icon: 'external', run: () => void host.openOwnTerminal(offer.command, place) },
     { label: 'Copy command', icon: 'copy', run: () => void copyText(place.kind === 'repository' ? inHome(offer.command).command : offer.command, 'Copied the command') },
@@ -584,22 +605,28 @@ function HomeRun({ host, messageId, offer, place }: { host: CodeRuns; messageId:
   return <span className="home-run-row">
     <span className="home-run-split" role="group" aria-label={`${label}: ${offer.command}`}>
       <button type="button" className={'home-run' + (setup ? ' is-setup' : '')}
-        title={setup ? `Clone ${name}’s home checkout (your own copy, outside the workspace), then open a shell there with this at the prompt` : 'Opens a shell there, in the Terminal panel, with this at the prompt: check it, then press Return'}
+        title={setup ? `Clone ${name}’s home checkout (your own copy, outside the workspace), then ${runsAtOnce(offer.command) ? 'run this in a shell there' : 'type this in a shell there for you to review'}` : terminalRunTitle(offer.command, host.placeName(place))}
         onClick={() => void host.runIn(messageId, offer.command, place)}>
         <Icon name="home" size={12}/><span>{label}</span><code>{offer.command.split('\n')[0]}{offer.command.includes('\n') ? ' …' : ''}</code>
       </button>
-      <button type="button" className="home-run-more" aria-label={`Other ways to run ${offer.command.split('\n')[0]}`} aria-haspopup="menu" title="Another home, your own terminal, or copy it"
+      <button type="button" className="home-run-more" aria-label={`Other ways to run ${offer.command.split('\n')[0]}`} aria-haspopup="menu" title="Paste it without running, another home, your own terminal, or copy it"
         onClick={event => { const box = event.currentTarget.getBoundingClientRect(); openContextMenu({ x: box.left, y: box.bottom + 4 }, others(), { keyboard: event.detail === 0, target: event.currentTarget, label: 'Run' }); }}><Icon name="chevron" size={10}/></button>
     </span>
     {view.terminal && <TerminalStatus host={host} messageId={messageId} script={offer.command} run={view.terminal}/>}
   </span>;
 }
-/** A run in the Terminal panel: waiting for Return, then how it ended, and "Tell Claude it's done". */
+const terminalText: Record<TerminalState, (run: TerminalRunView) => string> = {
+  starting: run => `Waiting for the shell (${run.where})…`,
+  running: run => `Running in the terminal (${run.where})`,
+  typed: run => `Typed in the terminal (${run.where}): review and press Return`,
+  finished: run => `Finished in ${run.where} · exit ${run.exitCode}`,
+};
+/** A run in the Terminal panel: waiting for the shell, running or waiting for Return, then how it ended, and "Tell Claude it's done". */
 function TerminalStatus({ host, messageId, script, run }: { host: CodeRuns; messageId: string; script: string; run: TerminalRunView }) {
-  const text = run.state === 'ready' ? `In the terminal (${run.where}): press Return to run it` : `Finished in ${run.where} · exit ${run.exitCode}`;
-  const tone = run.state === 'ready' ? 'running' : run.exitCode === 0 ? 'ok' : 'failed';
+  const finished = run.state === 'finished';
+  const tone = !finished ? 'running' : run.exitCode === 0 ? 'ok' : 'failed';
   return <span className="code-run-terminal">
-    <span className={`code-run-chip tone-${tone}`} role="status">{run.state === 'ready' ? <span className="code-run-dot" aria-hidden/> : <Icon name="terminal" size={10}/>}{text}</span>
+    <span className={`code-run-chip tone-${tone}`} role="status">{!finished ? <span className="code-run-dot" aria-hidden/> : <Icon name="terminal" size={10}/>}{terminalText[run.state](run)}</span>
     {run.told ? <span className="code-run-chip" role="status"><Icon name="send" size={10}/>Told {host.agentName}</span>
       : <button type="button" className="code-run-link" title={`Sends “${doneMessage(script, run.exitCode).split('\n')[0]}” to ${host.agentName}`} onClick={() => void host.tellDone(messageId, script)}><Icon name="send" size={10}/>Tell {host.agentName} it’s done</button>}
   </span>;

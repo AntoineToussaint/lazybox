@@ -19,7 +19,9 @@ import (
 )
 
 // An installed release runs the Runner without Codefly: `lazybox-runner
-// serve`, started by its launchd job (internal/installation). Codefly's
+// serve`, started by its service manager (internal/installation: a launchd
+// job on macOS, a systemd user unit on Linux, or `lazybox-runner supervise`
+// where there is no systemd). Codefly's
 // generated main stays the launch path for Dev, Working and `make run`;
 // both reach the same configureRunnerAt, with the same state, loopback-only
 // listeners, endpoint.json and agent/terminal credentials.
@@ -34,6 +36,18 @@ func init() {
 	case "serve":
 		if err := serve(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Lazybox Runner: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	case installation.SuperviseArgument:
+		// `lazybox-runner supervise <service.json> <supervisor.json>`: the
+		// service manager where there is none (installation.Supervisor).
+		if len(os.Args) != 4 {
+			fmt.Fprintln(os.Stderr, "usage: lazybox-runner supervise <service.json> <supervisor.json>")
+			os.Exit(2)
+		}
+		if err := installation.Supervise(os.Args[2], os.Args[3]); err != nil {
+			fmt.Fprintf(os.Stderr, "Lazybox supervisor: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -92,7 +106,7 @@ func parseStandalone(args []string, getenv func(string) string, runtime *install
 	flags.StringVar(&o.cliDir, "cli-dir", pick("LAZYBOX_V2_CLI_DIR", cliDir), "directory of the lazybox CLI agents and hooks run")
 	flags.StringVar(&o.claude, "claude", pick("LAZYBOX_V2_CLAUDE_BINARY", claude), "Claude Code executable (default: the one the SDK ships)")
 	flags.StringVar(&o.docs, "docs", pick("LAZYBOX_V2_DOCS_DIR", docs), "Lazybox documentation the help assistant reads (default: the release's)")
-	flags.BoolVar(&o.supervised, "supervised", false, "launchd starts this Runner again whenever it exits: offer Restart Runner")
+	flags.BoolVar(&o.supervised, "supervised", false, "a service manager (launchd, systemd, the supervisor) starts this Runner again whenever it exits: offer Restart Runner")
 	flags.BoolVar(&o.keepAgents, "keep-agents", true, "leave agents, commands and terminals running across a Runner restart")
 	if err := flags.Parse(args); err != nil {
 		return o, err
@@ -159,8 +173,8 @@ func serve(args []string) error {
 	} else if !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	// launchd starts the next Runner whatever the reason for an exit, so a
-	// request left by an earlier one means nothing now.
+	// The service manager starts the next Runner whatever the reason for an
+	// exit, so a request left by an earlier one means nothing now.
 	if o.supervised {
 		_ = os.Remove(o.restartRequest)
 	}
@@ -211,8 +225,8 @@ func serve(args []string) error {
 // loopbackPort is a port free on localhost now. The generated listeners take
 // a port number, not a bound listener, so this is the same allocation Codefly's
 // --temporary-ports makes for Dev and Working: a port another process takes
-// in between makes the listener fail, the Runner exit, and launchd start it
-// again on another one. (Accepting a bound net.Listener belongs in the
+// in between makes the listener fail, the Runner exit, and its service
+// manager start it again on another one. (Accepting a bound net.Listener belongs in the
 // generated adapters, which are Codefly's go-grpc agent's to change.)
 func loopbackPort() (uint16, error) {
 	l, err := net.Listen("tcp", "localhost:0")

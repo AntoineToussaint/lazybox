@@ -5,11 +5,26 @@
  * storage holds no reusable secret. The Runner only ever learns the public
  * key. Every access credential is obtained by signing a fresh single-use
  * challenge with that key and lasts fifteen minutes.
+ *
+ * Who holds the key is the host's choice (a `KeyProvider`): WebCrypto in a
+ * browser, the Keychain in the iPhone app (apps/mobile). The algorithm and
+ * the signed messages are the same, so the Runner's pairing does not change.
  */
 
 export type DeviceRecord = { id: string; name: string; grants: string[]; fingerprint: string };
-/** What the phone keeps: its record and its key pair (the private key non-extractable). */
-export type StoredDevice = { device: DeviceRecord; keys: CryptoKeyPair; publicKey: string };
+/**
+ * A device key that signs without handing out its private half: ECDSA P-256
+ * over SHA-256, the signature raw r‖s (64 bytes, WebCrypto's form, which the
+ * Runner verifies). A holder whose native API returns DER (Apple's SecKey)
+ * converts before returning.
+ */
+export type DeviceSigner = { sign(message: Uint8Array): Promise<Uint8Array> };
+/** A WebCrypto key pair (browser, desktop) or another holder of the key (the iPhone app). */
+export type DeviceKeys = CryptoKeyPair | DeviceSigner;
+/** Creates this device's key: its holder, and its public key as base64url SPKI. */
+export type KeyProvider = () => Promise<{ keys: DeviceKeys; publicKey: string }>;
+/** What the phone keeps: its record and its key (the private key never readable by script). */
+export type StoredDevice = { device: DeviceRecord; keys: DeviceKeys; publicKey: string };
 export type DeviceSession = { token: string; expiresAt: number; device: DeviceRecord };
 
 export interface DeviceStore {
@@ -41,6 +56,20 @@ export function parsePairingFragment(hash: string): PairingOffer | undefined {
   return { pairing, secret, grants };
 }
 
+/**
+ * Read a pairing QR code's whole link (`https://<host>:8443/?view=remote#pair=…&grants=…`):
+ * the device gateway it names (scheme, host and port) and its offer. A native
+ * app scans or is handed the link the computer shows; a browser reads only
+ * its fragment (`parsePairingFragment`). Parsed by hand: React Native's `URL`
+ * is partial.
+ */
+export function parsePairingLink(link: string): { baseUrl: string; offer: PairingOffer } | undefined {
+  const match = /^(https?:\/\/[^/?#\s]+)[^#\s]*(#\S+)$/i.exec(link.trim());
+  if (!match) return undefined;
+  const offer = parsePairingFragment(match[2]);
+  return offer && { baseUrl: match[1], offer };
+}
+
 export function base64url(bytes: ArrayBuffer | Uint8Array): string {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let text = '';
@@ -49,9 +78,17 @@ export function base64url(bytes: ArrayBuffer | Uint8Array): string {
 }
 
 const encoder = new TextEncoder();
-async function sign(keys: CryptoKeyPair, message: string): Promise<string> {
-  return base64url(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys.privateKey, encoder.encode(message)));
+async function sign(keys: DeviceKeys, message: string): Promise<string> {
+  const bytes = encoder.encode(message);
+  if ('sign' in keys) return base64url(await keys.sign(bytes));
+  return base64url(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys.privateKey, bytes));
 }
+
+/** A non-extractable WebCrypto key, kept by the browser (IndexedDB stores the CryptoKey itself). */
+export const webCryptoKeys: KeyProvider = async () => {
+  const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']) as CryptoKeyPair;
+  return { keys, publicKey: base64url(await crypto.subtle.exportKey('spki', keys.publicKey)) };
+};
 
 type Fetch = typeof globalThis.fetch;
 async function post<T>(fetcher: Fetch, baseUrl: string, path: string, body: unknown): Promise<T> {
@@ -71,9 +108,8 @@ async function post<T>(fetcher: Fetch, baseUrl: string, path: string, body: unkn
  * Complete a pairing offer: generate this phone's key, prove possession of it,
  * and keep it. Replaces any earlier pairing stored on this phone.
  */
-export async function pairDevice({ baseUrl, offer, name, store, fetch: fetcher = globalThis.fetch.bind(globalThis) }: { baseUrl: string; offer: PairingOffer; name: string; store: DeviceStore; fetch?: Fetch }): Promise<StoredDevice> {
-  const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']) as CryptoKeyPair;
-  const publicKey = base64url(await crypto.subtle.exportKey('spki', keys.publicKey));
+export async function pairDevice({ baseUrl, offer, name, store, fetch: fetcher = globalThis.fetch.bind(globalThis), keyProvider = webCryptoKeys }: { baseUrl: string; offer: PairingOffer; name: string; store: DeviceStore; fetch?: Fetch; keyProvider?: KeyProvider }): Promise<StoredDevice> {
+  const { keys, publicKey } = await keyProvider();
   const signature = await sign(keys, `lazybox-device-pair-v1\0${offer.pairing}\0${publicKey}`);
   const { device } = await post<{ device: DeviceRecord }>(fetcher, baseUrl, 'pair', { pairing: offer.pairing, secret: offer.secret, name, publicKey, signature });
   const stored = { device, keys, publicKey };
@@ -108,7 +144,7 @@ export function indexedDBDeviceStore(database = 'lazybox-remote'): DeviceStore {
     } finally { db.close(); }
   };
   return {
-    async load() { const value = await run<StoredDevice | undefined>('readonly', store => store.get('current')); return value?.device?.id && value.keys?.privateKey ? value : undefined; },
+    async load() { const value = await run<StoredDevice | undefined>('readonly', store => store.get('current')); return value?.device?.id && value.keys && 'privateKey' in value.keys ? value : undefined; },
     async save(value) { await run('readwrite', store => store.put(value, 'current')); },
     async clear() { await run('readwrite', store => store.delete('current')); },
   };

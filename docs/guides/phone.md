@@ -4,6 +4,14 @@
 > your Tailscale network, and be notified when one needs you. There is no
 > native app yet; the phone uses a web page you can add to its Home Screen.
 
+## iPhone app (in progress)
+
+A native iPhone app is being built beside this web page. It pairs the same
+way, from the same code, and shows the same Inbox, conversations, approvals,
+answers and Send now. It is not on the App Store or TestFlight yet; developers
+can build it from source onto their own iPhone (`apps/mobile/README.md`).
+Until it ships, the web page below is the way to use Lazybox on a phone.
+
 ## What you need
 
 - [Tailscale](https://tailscale.com) on the Mac running Lazybox and on your

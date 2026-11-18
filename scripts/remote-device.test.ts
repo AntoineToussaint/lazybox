@@ -4,7 +4,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createPublicKey, verify, randomBytes } from 'node:crypto';
-import { DeviceRequestError, DeviceRevoked, memoryDeviceStore, openDeviceSession, pairDevice, parsePairingFragment } from '../packages/client-core/src/device.ts';
+import { DeviceRequestError, DeviceRevoked, memoryDeviceStore, openDeviceSession, pairDevice, parsePairingFragment, parsePairingLink } from '../packages/client-core/src/device.ts';
+import { P256Key, p256Keys } from '../apps/mobile/src/runner/p256.ts';
 
 function fakeGateway() {
   const gateway = { secret: 'one-time-secret', used: false, devices: new Map<string, string>(), challenges: new Map<string, string>(), requests: [] as { path: string; body: any }[] };
@@ -50,6 +51,7 @@ test('a phone pairs with a key it cannot export, then signs in with it', async (
   const stored = await pairDevice({ baseUrl: 'https://laptop.example.ts.net:8443/', offer: { pairing: 'offer', secret: 'one-time-secret', grants: ['read'] }, name: 'iPhone', store, fetch });
   assert.equal(stored.device.id, 'device-1');
   assert.equal((await store.load())?.device.id, 'device-1');
+  assert.ok('privateKey' in stored.keys);
   assert.equal(stored.keys.privateKey.extractable, false, 'the private key cannot be read out of the phone');
   await assert.rejects(crypto.subtle.exportKey('pkcs8', stored.keys.privateKey));
   assert.ok(!JSON.stringify(gateway.requests).includes('PRIVATE'), 'only the public key is sent');
@@ -79,4 +81,27 @@ test('a wrong secret pairs nothing and stores nothing', async () => {
 test('an unreachable computer is explained, not a raw fetch error', async () => {
   const stored = await pairDevice({ baseUrl: 'https://x', offer: { pairing: 'offer', secret: 'one-time-secret', grants: [] }, name: 'x', store: memoryDeviceStore(), fetch: fakeGateway().fetch });
   await assert.rejects(openDeviceSession({ baseUrl: 'https://x', stored, fetch: async () => { throw new TypeError('Load failed'); } }), (error: unknown) => error instanceof DeviceRequestError && /could not be reached/.test(error.message));
+});
+
+test('a whole QR link names its gateway and its offer (the iPhone app scans or is handed it)', () => {
+  assert.deepEqual(parsePairingLink('https://mac.tail1234.ts.net:8443/?view=remote#pair=offer.secret-value&grants=read%2Crespond'),
+    { baseUrl: 'https://mac.tail1234.ts.net:8443', offer: { pairing: 'offer', secret: 'secret-value', grants: ['read', 'respond'] } });
+  assert.equal(parsePairingLink('  http://127.0.0.1:60319/#pair=o.s\n')?.baseUrl, 'http://127.0.0.1:60319', 'pasted with spaces; the loopback fixture');
+  for (const bad of ['', 'mac.ts.net/#pair=o.s', 'https://mac.ts.net/?view=remote', 'https://mac.ts.net/#grants=read', 'javascript:alert(1)#pair=o.s', 'https://mac ts.net/#pair=o.s']) assert.equal(parsePairingLink(bad), undefined, bad);
+});
+
+test('the iPhone app pairs with its own P-256 key and the gateway verifies it unchanged', async () => {
+  const { gateway, fetch } = fakeGateway();
+  const store = memoryDeviceStore();
+  const stored = await pairDevice({ baseUrl: 'https://laptop.example.ts.net:8443', offer: { pairing: 'offer', secret: 'one-time-secret', grants: ['read'] }, name: 'iPhone', store, fetch, keyProvider: p256Keys(length => new Uint8Array(randomBytes(length))) });
+  assert.ok(stored.keys instanceof P256Key);
+  // The same SPKI the browser exports, and WebCrypto's raw r‖s: the strict fake gateway (and the Runner) accept it.
+  assert.equal(createPublicKey({ key: Buffer.from(stored.publicKey, 'base64url'), format: 'der', type: 'spki' }).asymmetricKeyDetails?.namedCurve, 'prime256v1');
+  const session = await openDeviceSession({ baseUrl: 'https://laptop.example.ts.net:8443', stored, fetch });
+  assert.match(session.token, /^lbx-device\./);
+  assert.ok(!JSON.stringify(gateway.requests).includes(stored.keys.exportSecret()), 'the secret never leaves the phone');
+  // Kept in the Keychain as its secret alone; the same key comes back.
+  const again = P256Key.fromSecret(stored.keys.exportSecret());
+  assert.equal(again?.publicKey, stored.publicKey);
+  for (const bad of ['', 'zz', '00'.repeat(32), 'ff'.repeat(32)]) assert.equal(P256Key.fromSecret(bad), undefined, `not a key: ${bad.slice(0, 8)}`);
 });

@@ -70,7 +70,8 @@ export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, f
   useActionRevision();
   const keysOf = (id: 'task.new' | 'conversation.new') => { const first = bindings(keymap[id])[0]; return first ? displayBinding(first).join('') : ''; };
   const taskKeys = fixedWorkspace ? undefined : keysOf('task.new'), conversationKeys = keysOf('conversation.new');
-  return <header className="workspace-header">
+  // The window's title bar in the desktop app (title-bar.ts): its empty parts move the window.
+  return <header className="workspace-header" data-window-drag-region="deep">
     <button className="mobile-navigation-button icon-button" aria-label="Open workspace navigator" aria-expanded={navigatorOpen} onClick={onOpenNavigator}><Icon name="sidebar"/></button>
     <div className="workspace-brand"><span className="brand-mark">l<span>↗</span></span><strong>lazybox</strong></div>
     <nav aria-label="Pages">

@@ -154,7 +154,8 @@ func TestClaudeBashToolCommandReachesTheCLI(t *testing.T) {
 		}
 	}
 	// Without the env file, the snapshot's PATH wins: the case it covers.
-	plain := "source '" + snapshot + "' 2>/dev/null || true && eval 'lazybox'"
+	// `.`, not `source`: /bin/sh is dash on Debian and Ubuntu.
+	plain := ". '" + snapshot + "' 2>/dev/null || true && eval 'lazybox'"
 	if got := h.run(t, env, "/bin/sh", "-c", plain); got != "v1" {
 		t.Fatalf("snapshot PATH did not shadow the CLI (%s): the test proves nothing", got)
 	}

@@ -1,9 +1,9 @@
 # Several Runners in one window
 
 > **Preview.** One window can show every Runner on your Mac — Dev and Working,
-> the installed app's, a standalone Runner, another checkout. Runners on other
-> machines are not shown yet; your phone reaches them (see
-> [Pair your phone](phone.md)).
+> the installed app's, a standalone Runner, another checkout — and the Runners
+> of your other computers, added over SSH (see
+> [Runners on your other computers](remote-computers.md)).
 
 A *Runner* is the service that runs your agents. Each has its own workspaces,
 conversations and settings. When the window finds more than one, it shows them

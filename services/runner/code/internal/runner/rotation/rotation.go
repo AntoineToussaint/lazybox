@@ -20,6 +20,9 @@ import (
 type Adapter struct {
 	Native   agent.Adapter
 	Profiles []accounts.Profile
+	// Current lists the subscriptions signed in now, so a person can switch a
+	// running conversation to one added after it started; nil uses Profiles.
+	Current  func() []accounts.Profile
 	Eligible []string
 	State    *accounts.State
 	Resolve  func(accounts.Profile, agent.Open) (agent.Open, error)
@@ -30,6 +33,17 @@ type Adapter struct {
 	// switches (SwitchProfile).
 	Switching func() bool
 }
+
+// profiles are the subscriptions signed in now when Current is set, so a
+// subscription added after the conversation started can be switched to, by
+// the person or automatically; otherwise the list taken at start.
+func (a Adapter) profiles() []accounts.Profile {
+	if a.Current != nil {
+		return a.Current()
+	}
+	return a.Profiles
+}
+
 type session struct {
 	attempt       uint64
 	mu            sync.Mutex
@@ -112,7 +126,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 		if resumed.Profile != profile.ID {
 			// The live native process belongs to a profile rotated to earlier.
 			profile = accounts.Profile{}
-			for _, p := range a.Profiles {
+			for _, p := range a.profiles() {
 				if p.ID == resumed.Profile {
 					profile = p
 				}
@@ -399,8 +413,9 @@ func (s *session) rotate(reason string) error {
 	defer s.mu.Unlock()
 	tried := map[string]bool{s.profile.ID: true}
 	candidates := []accounts.Profile{}
+	current := s.adapter.profiles()
 	for _, id := range s.adapter.Eligible {
-		for _, p := range s.adapter.Profiles {
+		for _, p := range current {
 			if p.ID == id && !tried[id] && s.adapter.State.Eligible(id, time.Now()) {
 				tried[id] = true
 				candidates = append(candidates, p)
@@ -429,7 +444,7 @@ func (s *session) SwitchProfile(id string, continueTurn bool) error {
 		}
 		return s.retryLocked()
 	}
-	for _, p := range s.adapter.Profiles {
+	for _, p := range s.adapter.profiles() {
 		if p.ID == id {
 			if p.Provider != s.profile.Provider {
 				return errors.New("a conversation can only switch to a subscription of its own provider")
@@ -444,7 +459,7 @@ func (s *session) SwitchProfile(id string, continueTurn bool) error {
 func (s *session) SetRotation(ids []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := validPool(s.adapter.Profiles, s.profile.Provider, ids); err != nil {
+	if err := validPool(s.adapter.profiles(), s.profile.Provider, ids); err != nil {
 		return err
 	}
 	s.adapter.Eligible = append([]string(nil), ids...)

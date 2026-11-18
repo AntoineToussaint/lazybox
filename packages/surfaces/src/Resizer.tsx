@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import type { ViewStateStore } from '@lazybox/platform';
+import { beginDrag, preventMouseDown } from './drag-gesture';
 import { Icon } from './Icons';
 import { DEFAULT_SPLIT, dragSplit, keySplit, readSplit, splitCss, splitMax, writeSplit, type SplitSpec, type SplitState } from './resizable-model';
 import './resizer.css';
@@ -118,26 +119,25 @@ export function Resizer({ split, label, store: given }: { split: SplitSpec; /** 
     const origin = axis === 'x' ? event.clientX : event.clientY;
     let moved = false;
     node.focus({ preventScroll: true });
-    node.setPointerCapture(event.pointerId);
     node.setAttribute('data-dragging', '');
-    const root = document.documentElement;
-    root.classList.add('is-resizing'); root.dataset.resizeAxis = axis;
-    const move = (next: PointerEvent) => {
-      const delta = (axis === 'x' ? next.clientX : next.clientY) - origin;
-      if (!moved && Math.abs(delta) < 3) return;
-      moved = true;
-      state.current = dragSplit(split, from, start, delta, available);
-      layout();
-    };
-    const up = () => {
-      node.removeEventListener('pointermove', move); node.removeEventListener('pointerup', up); node.removeEventListener('pointercancel', up);
-      node.removeAttribute('data-dragging');
-      root.classList.remove('is-resizing'); delete root.dataset.resizeAxis;
-      // A click on the rail unfolds it; a drag keeps where it ended.
-      if (!moved) { if (from.collapsed) commit({ ...from, collapsed: false }); return; }
-      commit(state.current);
-    };
-    node.addEventListener('pointermove', move); node.addEventListener('pointerup', up); node.addEventListener('pointercancel', up);
+    beginDrag(axis, {
+      pointerId: event.pointerId, capture: node,
+      onMove: next => {
+        const delta = (axis === 'x' ? next.clientX : next.clientY) - origin;
+        if (!moved && Math.abs(delta) < 3) return;
+        moved = true;
+        state.current = dragSplit(split, from, start, delta, available);
+        layout();
+      },
+      onEnd: reason => {
+        node.removeAttribute('data-dragging');
+        // Escape puts it back where it was.
+        if (reason === 'escape') { state.current = from; layout(); return; }
+        // A click on the rail unfolds it; a drag keeps where it ended.
+        if (!moved) { if (from.collapsed && reason === 'release') commit({ ...from, collapsed: false }); return; }
+        commit(state.current);
+      },
+    });
   };
   const keys = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.altKey || event.metaKey || event.ctrlKey) return;
@@ -149,7 +149,7 @@ export function Resizer({ split, label, store: given }: { split: SplitSpec; /** 
   };
   return <div ref={handle} className="resizer" role="separator" tabIndex={0} data-side={split.side} data-axis={axis} data-off=""
     aria-orientation={axis === 'x' ? 'vertical' : 'horizontal'} aria-label={`Resize the ${label}`} aria-valuemin={split.min}
-    onPointerDown={down} onDoubleClick={() => commit({ ...DEFAULT_SPLIT })} onKeyDown={keys}>
+    onPointerDown={down} onMouseDown={preventMouseDown} onDoubleClick={() => commit({ ...DEFAULT_SPLIT })} onKeyDown={keys}>
     <Icon name="chevronRight" size={12}/>
   </div>;
 }

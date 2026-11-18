@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -73,6 +74,7 @@ func (f *fakeLaunchd) launchd() Launchd {
 }
 
 func TestPlistIsAValidLaunchdJobThatKeepsTheRunnerAlive(t *testing.T) {
+	macOS(t)
 	s := Service{Label: "ai.lazybox.runner", Program: "/Applications/Lazybox.app/Contents/Resources/runtime/bin/lazybox-runner",
 		Arguments:   []string{"serve", "--supervised", "--state", "/Users/me/Library/Application Support/Lazybox/state"},
 		Environment: map[string]string{"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "LANG": "en_US.UTF-8", "ODD": `a&b<c>"d'`},
@@ -118,21 +120,29 @@ func TestPlistIsAValidLaunchdJobThatKeepsTheRunnerAlive(t *testing.T) {
 	}
 }
 
+// macOS skips a test that needs macOS's own tools (plutil, launchctl).
+func macOS(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		t.Skip("needs macOS (plutil)")
+	}
+}
+
 func TestUserPathsFollowHomeAndKeepATestServiceApart(t *testing.T) {
-	p, err := UserPaths(env(map[string]string{"HOME": "/Users/me"}))
+	p, err := PathsFor("darwin", env(map[string]string{"HOME": "/Users/me"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.State != "/Users/me/Library/Application Support/Lazybox/state" || p.Plist != "/Users/me/Library/LaunchAgents/ai.lazybox.runner.plist" ||
+	if p.State != "/Users/me/Library/Application Support/Lazybox/state" || p.Definition != "/Users/me/Library/LaunchAgents/ai.lazybox.runner.plist" ||
 		p.Endpoint() != "/Users/me/Library/Application Support/Lazybox/state/endpoint.json" || p.Log() != "/Users/me/Library/Logs/Lazybox/runner.log" ||
 		p.Locator() != "/Users/me/.config/lazybox/runners/lazybox.json" || p.ActionsFile() != "/Users/me/.config/lazybox/actions.yaml" {
 		t.Fatalf("%+v", p)
 	}
-	q, err := UserPaths(env(map[string]string{"HOME": "/Users/me", LabelEnvironment: "ai.lazybox.runner.test-1", "XDG_CONFIG_HOME": "/cfg"}))
+	q, err := PathsFor("darwin", env(map[string]string{"HOME": "/Users/me", LabelEnvironment: "ai.lazybox.runner.test-1", "XDG_CONFIG_HOME": "/cfg"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if q.State == p.State || q.Logs == p.Logs || q.Plist == p.Plist || q.Locator() != "/cfg/lazybox/runners/ai.lazybox.runner.test-1.json" {
+	if q.State == p.State || q.Logs == p.Logs || q.Definition == p.Definition || q.Locator() != "/cfg/lazybox/runners/ai.lazybox.runner.test-1.json" {
 		t.Fatalf("a test service shares the real one's paths: %+v", q)
 	}
 	if _, err = UserPaths(env(map[string]string{"HOME": "/Users/me", LabelEnvironment: "../escape"})); err == nil {
@@ -140,14 +150,40 @@ func TestUserPathsFollowHomeAndKeepATestServiceApart(t *testing.T) {
 	}
 }
 
+// On Linux everything follows the XDG base directories, and the service is
+// a systemd user unit named after the product rather than the label.
+func TestLinuxPathsFollowTheXDGBaseDirectories(t *testing.T) {
+	p, err := PathsFor("linux", env(map[string]string{"HOME": "/home/me"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Support != "/home/me/.local/share/lazybox" || p.State != "/home/me/.local/share/lazybox/state" || p.Config != "/home/me/.local/share/lazybox/runner.config.json" ||
+		p.Logs != "/home/me/.local/state/lazybox" || p.Definition != "/home/me/.config/systemd/user/lazybox-runner.service" || p.Unit() != "lazybox-runner.service" ||
+		p.Locator() != "/home/me/.config/lazybox/runners/lazybox.json" || p.Endpoint() != "/home/me/.local/share/lazybox/state/endpoint.json" {
+		t.Fatalf("%+v", p)
+	}
+	q, err := PathsFor("linux", env(map[string]string{"HOME": "/home/me", "XDG_DATA_HOME": "/data", "XDG_STATE_HOME": "/st", "XDG_CONFIG_HOME": "/cfg", LabelEnvironment: "ai.lazybox.runner.test-1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Support != "/data/lazybox/services/ai.lazybox.runner.test-1" || q.Logs != "/st/lazybox/ai.lazybox.runner.test-1" || q.Definition != "/cfg/systemd/user/ai.lazybox.runner.test-1.service" || q.ConfigDir != "/cfg/lazybox" {
+		t.Fatalf("%+v", q)
+	}
+	// A relative XDG directory is ignored, as the specification says.
+	if r, _ := PathsFor("linux", env(map[string]string{"HOME": "/home/me", "XDG_DATA_HOME": "data"})); r.Support != p.Support {
+		t.Fatalf("a relative XDG_DATA_HOME was used: %s", r.Support)
+	}
+}
+
 func TestInstallUpdatesAndUninstallTheService(t *testing.T) {
+	macOS(t)
 	home := t.TempDir()
 	paths, err := UserPaths(env(map[string]string{"HOME": home}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	fake := &fakeLaunchd{}
-	in := Installer{Paths: paths, Layout: fakeRuntime(t, filepath.Join(t.TempDir(), "runtime"), "0.1.0"), Launchd: fake.launchd(),
+	in := Installer{Paths: paths, Layout: fakeRuntime(t, filepath.Join(t.TempDir(), "runtime"), "0.1.0"), Manager: fake.launchd(),
 		Shell: func(context.Context) ShellEnvironment {
 			return ShellEnvironment{Path: "/Users/me/.cargo/bin:/usr/bin", Lang: "fr_FR.UTF-8"}
 		}}
@@ -157,10 +193,10 @@ func TestInstallUpdatesAndUninstallTheService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.Started || first.Restarted || first.Previous != nil || !fake.loaded || !slices.Equal(fake.loads, []string{paths.Plist}) {
+	if !first.Started || first.Restarted || first.Previous != nil || !fake.loaded || !slices.Equal(fake.loads, []string{paths.Definition}) {
 		t.Fatalf("first install: %+v, launchd %+v", first, fake)
 	}
-	installed, err := ReadPlist(ctx, paths.Plist)
+	installed, err := ReadPlist(ctx, paths.Definition)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +226,7 @@ func TestInstallUpdatesAndUninstallTheService(t *testing.T) {
 	if !second.Restarted || second.Previous == nil || second.Previous.Version != "0.1.0" || !slices.Equal(fake.calls, []string{"print", "bootout", "bootstrap"}) {
 		t.Fatalf("update: %+v, calls %v", second, fake.calls)
 	}
-	if installed, _ = ReadPlist(ctx, paths.Plist); installed.Program != in.Layout.Runner() || installed.Version != "0.2.0" {
+	if installed, _ = ReadPlist(ctx, paths.Definition); installed.Program != in.Layout.Runner() || installed.Version != "0.2.0" {
 		t.Fatalf("the update did not point the job at the new release: %+v", installed)
 	}
 	if data, _ = os.ReadFile(paths.Config); !strings.Contains(string(data), "mine") {
@@ -209,7 +245,7 @@ func TestInstallUpdatesAndUninstallTheService(t *testing.T) {
 	if fake.loaded || len(removed) != 2 {
 		t.Fatalf("uninstall left %v loaded=%v", removed, fake.loaded)
 	}
-	for _, gone := range []string{paths.Plist, paths.Locator()} {
+	for _, gone := range []string{paths.Definition, paths.Locator()} {
 		if _, err = os.Stat(gone); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s survived uninstall", gone)
 		}
@@ -226,7 +262,7 @@ func TestInstallUpdatesAndUninstallTheService(t *testing.T) {
 func TestInstallWithoutStartDoesNotLoad(t *testing.T) {
 	paths, _ := UserPaths(env(map[string]string{"HOME": t.TempDir()}))
 	fake := &fakeLaunchd{}
-	in := Installer{Paths: paths, Layout: fakeRuntime(t, filepath.Join(t.TempDir(), "runtime"), "1.0.0"), Launchd: fake.launchd()}
+	in := Installer{Paths: paths, Layout: fakeRuntime(t, filepath.Join(t.TempDir(), "runtime"), "1.0.0"), Manager: fake.launchd()}
 	result, err := in.Install(context.Background(), false)
 	if err != nil || result.Started || fake.loaded {
 		t.Fatalf("%+v %v loaded=%v", result, err, fake.loaded)
@@ -236,7 +272,7 @@ func TestInstallWithoutStartDoesNotLoad(t *testing.T) {
 func TestATranslocatedOrIncompleteReleaseIsRefused(t *testing.T) {
 	paths, _ := UserPaths(env(map[string]string{"HOME": t.TempDir()}))
 	root := filepath.Join(t.TempDir(), "private", "var", "folders", "AppTranslocation", "X", "d", "Lazybox.app", "Contents", "Resources", "runtime")
-	in := Installer{Paths: paths, Layout: fakeRuntime(t, root, "1.0.0"), Launchd: (&fakeLaunchd{}).launchd()}
+	in := Installer{Paths: paths, Layout: fakeRuntime(t, root, "1.0.0"), Manager: (&fakeLaunchd{}).launchd()}
 	if _, err := in.Install(context.Background(), true); err == nil || !strings.Contains(err.Error(), "Applications") {
 		t.Fatalf("a translocated app installed a service: %v", err)
 	}
@@ -277,6 +313,9 @@ func TestFromExecutableFollowsTheLinkOnPath(t *testing.T) {
 func TestServicePathKeepsTheShellsOrderAndAddsTheUsualDirectories(t *testing.T) {
 	got := ServicePath("/Users/me/.nvm/bin:relative:/usr/bin::/Users/me/.nvm/bin", "/Users/me")
 	want := "/Users/me/.nvm/bin:/usr/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/bin:/usr/sbin:/sbin:/Users/me/.local/bin"
+	if runtime.GOOS == "linux" {
+		want = "/Users/me/.nvm/bin:/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin:/Users/me/.local/bin"
+	}
 	if got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}

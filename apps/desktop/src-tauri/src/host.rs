@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{
-    Emitter, Manager, State, Webview, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    Emitter, Manager, State, Webview, WebviewUrl, WindowEvent,
     ipc::CapabilityBuilder,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
 };
@@ -454,7 +454,15 @@ pub fn open(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     } else {
         "Console"
     };
-    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+    // No separate title bar: the page's header is it (title_bar.rs).
+    let builder = match crate::title_bar::window(app, label, WebviewUrl::App("index.html".into())) {
+        Ok(builder) => builder,
+        Err(error) => {
+            let _ = mutate(app, |layout| layout.close(label));
+            return Err(error.to_string());
+        }
+    };
+    let builder = builder
         // Route file drops to the shared chat attachment flow (HTML5 File API).
         .disable_drag_drop_handler()
         .title(format!("{name} — {kind}"))
@@ -946,17 +954,27 @@ fn popout_window(
         return tauri::webview::NewWindowResponse::Deny;
     }
     let label = format!("popout-{}", NEXT.fetch_add(1, Ordering::SeqCst));
-    let built = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url.clone()))
-        .window_features(features)
-        .disable_drag_drop_handler()
-        .zoom_hotkeys_enabled(true)
-        .title(title)
-        .min_inner_size(320.0, 200.0)
-        .build();
+    let built = crate::title_bar::window(app, &label, WebviewUrl::External(url.clone()))
+        .map(|builder| builder.window_features(features))
+        .and_then(|builder| {
+            builder
+                .disable_drag_drop_handler()
+                .zoom_hotkeys_enabled(true)
+                .title(title)
+                .min_inner_size(320.0, 200.0)
+                .build()
+        });
     match built {
         Ok(window) => {
             if let Ok(mut openers) = POPOUT_OPENERS.lock() {
                 openers.insert(label, opener.to_string());
+            }
+            // At the zoom every other window has, as `open` does: its tab bar
+            // leaves the window buttons room by that zoom (title_bar.rs).
+            if let Some(zoom) = app.try_state::<crate::appearance::Zoom>()
+                && let Err(error) = window.set_zoom(zoom.level())
+            {
+                report(app, format!("Could not zoom the panel's window: {error}"));
             }
             tauri::webview::NewWindowResponse::Create { window }
         }
@@ -971,6 +989,14 @@ fn popout_window(
 /// menu's **Put Back in Main Window** for a popout in front runs there.
 static POPOUT_OPENERS: Mutex<std::collections::BTreeMap<String, String>> =
     Mutex::new(std::collections::BTreeMap::new());
+
+/// The workspace window that draws a popped-out panel window, by its label.
+pub fn popout_opener(label: &str) -> Option<String> {
+    if !label.starts_with("popout-") {
+        return None;
+    }
+    POPOUT_OPENERS.lock().ok()?.get(label).cloned()
+}
 
 /// The window a menu action runs in: the one in front, or for a popped-out
 /// panel window (which runs no script) the workspace window that draws it.
@@ -1088,6 +1114,7 @@ fn is_workspace_window(label: &str) -> bool {
 }
 
 pub fn window_event(window: &tauri::Window, event: &WindowEvent) {
+    crate::title_bar::window_event(window, event);
     // Popped-out panel windows belong to their opener, not to the window layout.
     if window.label().starts_with("popout-") {
         if matches!(event, WindowEvent::Destroyed)

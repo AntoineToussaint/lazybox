@@ -1,11 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
+import { SubscriptionOptions } from './SubscriptionGroups';
 import type { RunnerClient } from '@lazybox/client-core';
 import type { InfoResponse } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
 import { actionEnabled, bindings, displayBinding, runAction, useAction, useActionRevision } from './actions';
 import { useKeymap } from './keyboard';
 import { AgentPicker } from './AgentPicker';
-import { accountLabel } from './agent-status';
 import { composeInConversation } from './compose';
 import { DialogHeader, DraggableDialog } from './DraggableDialog';
 import { Icon } from './Icons';
@@ -366,7 +366,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
         <div className="new-task-controls">
           <AgentPicker value={draft.provider} disabled={!info || busy} onChange={provider => change({ provider, profile: '' })}/>
           {profiles.length > 1 && <select aria-label="Account" value={profileId} disabled={busy} onChange={event => change({ profile: event.target.value })}>
-            {profiles.map(p => <option key={p.id} value={p.id}>{p.label || p.id}{p.availability && !['available', 'unknown'].includes(p.availability.state) ? ` · ${accountLabel(p.availability.state)}` : ''}</option>)}
+            <SubscriptionOptions profiles={profiles}/>
           </select>}
         </div>
       </div>

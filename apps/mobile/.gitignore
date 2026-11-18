@@ -1,0 +1,5 @@
+# Continuous Native Generation: `expo prebuild` writes these from app.json.
+ios/
+android/
+.expo/
+expo-env.d.ts

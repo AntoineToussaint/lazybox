@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { SubscriptionOptions } from './SubscriptionGroups';
 import { Icon } from './Icons';
 import { CardHead, editable, Kbd, useChatKeys, useInitialFocus } from './request-parts';
 import type { RequestCardProps } from './RequestCards';
@@ -127,7 +128,7 @@ export function ConversationRequestCard({ request, api, session, onError, positi
       <label>Brief<textarea name="brief" rows={5} value={draft.brief} placeholder={view.artifact ? `The artifact “${view.artifact.title}” is the brief` : 'What to do, done when, boundaries'} onChange={e => setDraft({ ...draft, brief: e.target.value })}/></label>
       <div className="start-edit-row">
         <label>Agent<select name="profile" value={draft.profile} onChange={e => { const next = editProfiles.find(p => p.id === e.target.value); setDraft({ ...draft, profile: e.target.value, model: next?.provider === view.provider ? view.model : '' }); }}>
-          {editProfiles.map(p => <option key={p.id} value={p.id}>{agentTitle(p.provider, profiles, p.id)}{p.label ? ` · ${p.label}` : ''}</option>)}
+          <SubscriptionOptions profiles={editProfiles} label={(p, _, grouped) => grouped ? p.label || agentTitle(p.provider, profiles, p.id) : `${agentTitle(p.provider, profiles, p.id)}${p.label ? ` · ${p.label}` : ''}`}/>
         </select></label>
         <label>Model<input name="model" value={draft.model} placeholder="Its default" autoComplete="off" onChange={e => setDraft({ ...draft, model: e.target.value })}/></label>
       </div>

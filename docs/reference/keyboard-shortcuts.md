@@ -201,6 +201,6 @@ These work while the panel or card has focus, never while you type in a text fie
 | Review comment | `⌘↵` saves · `Esc` cancels · `Tab` to a line's **+** then `Enter` starts a comment (`Shift+Enter` extends the range) |
 | Inbox | `j` / `k` move · `Enter` opens · `m` marks seen |
 | Any row you can peek | `⌥`-click or `Space` peeks it · in the peek `←` / `→` step through rows, `⌘↵` opens it, `Space` or `Esc` closes |
-| Sidebar workspace row | `F2` renames |
+| Sidebar workspace row | `F2` renames · `⌥↓` opens its card · `⌥⇧↑` / `⌥⇧↓` move it up or down (or drag it; `Esc` puts it back) |
 | File editor | `⌥Z` toggles word wrap · with Vim editing on: `:w`, `:q`, `:wq` |
 | Desktop window | `⌘=` / `⌘-` / `⌘0` zoom in, out, reset |

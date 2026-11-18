@@ -29,7 +29,7 @@ func (b *Bench) sessionAdapter(e *Execution, selected accounts.Profile, options 
 	id, collectionID, cwd := e.ID, e.CollectionID, e.Cwd
 	native := telemetry.Adapter{Native: b.adapter(selected.Provider), Store: b.Telemetry, Prices: b.Prices, Gateway: b.Meter, Scope: telemetry.Scope{Workspace: collectionID, Conversation: conversationID, Execution: id, Provider: selected.Provider}}
 	provider := selected.Provider
-	return rotation.Adapter{Native: native, Profiles: b.Profiles(), Eligible: options.RotationProfiles, State: b.Accounts,
+	return rotation.Adapter{Native: native, Profiles: b.Profiles(), Current: b.Profiles, Eligible: options.RotationProfiles, State: b.Accounts,
 		// Switching by itself at a limit needs an account policy now, not only
 		// when the conversation started (account_policy.go).
 		Switching: func() bool { _, ok := b.AccountPolicy(provider); return ok },

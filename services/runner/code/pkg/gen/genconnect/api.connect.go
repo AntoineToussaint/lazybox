@@ -181,6 +181,9 @@ const (
 	// RunnerServiceListCollectionsProcedure is the fully-qualified name of the RunnerService's
 	// ListCollections RPC.
 	RunnerServiceListCollectionsProcedure = "/lazybox.bench.v1.RunnerService/ListCollections"
+	// RunnerServiceArrangeWorkspacesProcedure is the fully-qualified name of the RunnerService's
+	// ArrangeWorkspaces RPC.
+	RunnerServiceArrangeWorkspacesProcedure = "/lazybox.bench.v1.RunnerService/ArrangeWorkspaces"
 	// RunnerServiceArchiveCollectionProcedure is the fully-qualified name of the RunnerService's
 	// ArchiveCollection RPC.
 	RunnerServiceArchiveCollectionProcedure = "/lazybox.bench.v1.RunnerService/ArchiveCollection"
@@ -734,7 +737,12 @@ type RunnerServiceClient interface {
 	CreateCollection(context.Context, *connect.Request[gen.CreateCollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	AddCollectionRepositories(context.Context, *connect.Request[gen.AddCollectionRepositoriesRequest]) (*connect.Response[gen.CollectionResponse], error)
 	GetCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
+	// The workspaces in the person's order (ArrangeWorkspaces).
 	ListCollections(context.Context, *connect.Request[gen.ListCollectionsRequest]) (*connect.Response[gen.ListCollectionsResponse], error)
+	// Puts the workspaces in the person's order: the one ListCollections
+	// answers in, so every window and a paired phone list them alike, across
+	// restarts. The owner's only. Answers the list in its new order.
+	ArrangeWorkspaces(context.Context, *connect.Request[gen.ArrangeWorkspacesRequest]) (*connect.Response[gen.ListCollectionsResponse], error)
 	ArchiveCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	ReconcileCollection(context.Context, *connect.Request[gen.ReconcileCollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	OpenSession(context.Context, *connect.Request[gen.OpenSessionRequest]) (*connect.Response[gen.SessionResponse], error)
@@ -1443,6 +1451,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceListCollectionsProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("ListCollections")),
+			connect.WithClientOptions(opts...),
+		),
+		arrangeWorkspaces: connect.NewClient[gen.ArrangeWorkspacesRequest, gen.ListCollectionsResponse](
+			httpClient,
+			baseURL+RunnerServiceArrangeWorkspacesProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("ArrangeWorkspaces")),
 			connect.WithClientOptions(opts...),
 		),
 		archiveCollection: connect.NewClient[gen.CollectionRequest, gen.CollectionResponse](
@@ -2442,6 +2456,7 @@ type runnerServiceClient struct {
 	addCollectionRepositories    *connect.Client[gen.AddCollectionRepositoriesRequest, gen.CollectionResponse]
 	getCollection                *connect.Client[gen.CollectionRequest, gen.CollectionResponse]
 	listCollections              *connect.Client[gen.ListCollectionsRequest, gen.ListCollectionsResponse]
+	arrangeWorkspaces            *connect.Client[gen.ArrangeWorkspacesRequest, gen.ListCollectionsResponse]
 	archiveCollection            *connect.Client[gen.CollectionRequest, gen.CollectionResponse]
 	reconcileCollection          *connect.Client[gen.ReconcileCollectionRequest, gen.CollectionResponse]
 	openSession                  *connect.Client[gen.OpenSessionRequest, gen.SessionResponse]
@@ -2849,6 +2864,11 @@ func (c *runnerServiceClient) GetCollection(ctx context.Context, req *connect.Re
 // ListCollections calls lazybox.bench.v1.RunnerService.ListCollections.
 func (c *runnerServiceClient) ListCollections(ctx context.Context, req *connect.Request[gen.ListCollectionsRequest]) (*connect.Response[gen.ListCollectionsResponse], error) {
 	return c.listCollections.CallUnary(ctx, req)
+}
+
+// ArrangeWorkspaces calls lazybox.bench.v1.RunnerService.ArrangeWorkspaces.
+func (c *runnerServiceClient) ArrangeWorkspaces(ctx context.Context, req *connect.Request[gen.ArrangeWorkspacesRequest]) (*connect.Response[gen.ListCollectionsResponse], error) {
+	return c.arrangeWorkspaces.CallUnary(ctx, req)
 }
 
 // ArchiveCollection calls lazybox.bench.v1.RunnerService.ArchiveCollection.
@@ -3722,7 +3742,12 @@ type RunnerServiceHandler interface {
 	CreateCollection(context.Context, *connect.Request[gen.CreateCollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	AddCollectionRepositories(context.Context, *connect.Request[gen.AddCollectionRepositoriesRequest]) (*connect.Response[gen.CollectionResponse], error)
 	GetCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
+	// The workspaces in the person's order (ArrangeWorkspaces).
 	ListCollections(context.Context, *connect.Request[gen.ListCollectionsRequest]) (*connect.Response[gen.ListCollectionsResponse], error)
+	// Puts the workspaces in the person's order: the one ListCollections
+	// answers in, so every window and a paired phone list them alike, across
+	// restarts. The owner's only. Answers the list in its new order.
+	ArrangeWorkspaces(context.Context, *connect.Request[gen.ArrangeWorkspacesRequest]) (*connect.Response[gen.ListCollectionsResponse], error)
 	ArchiveCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	ReconcileCollection(context.Context, *connect.Request[gen.ReconcileCollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	OpenSession(context.Context, *connect.Request[gen.OpenSessionRequest]) (*connect.Response[gen.SessionResponse], error)
@@ -4427,6 +4452,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceListCollectionsProcedure,
 		svc.ListCollections,
 		connect.WithSchema(runnerServiceMethods.ByName("ListCollections")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceArrangeWorkspacesHandler := connect.NewUnaryHandler(
+		RunnerServiceArrangeWorkspacesProcedure,
+		svc.ArrangeWorkspaces,
+		connect.WithSchema(runnerServiceMethods.ByName("ArrangeWorkspaces")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceArchiveCollectionHandler := connect.NewUnaryHandler(
@@ -5473,6 +5504,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceGetCollectionHandler.ServeHTTP(w, r)
 		case RunnerServiceListCollectionsProcedure:
 			runnerServiceListCollectionsHandler.ServeHTTP(w, r)
+		case RunnerServiceArrangeWorkspacesProcedure:
+			runnerServiceArrangeWorkspacesHandler.ServeHTTP(w, r)
 		case RunnerServiceArchiveCollectionProcedure:
 			runnerServiceArchiveCollectionHandler.ServeHTTP(w, r)
 		case RunnerServiceReconcileCollectionProcedure:
@@ -5994,6 +6027,10 @@ func (UnimplementedRunnerServiceHandler) GetCollection(context.Context, *connect
 
 func (UnimplementedRunnerServiceHandler) ListCollections(context.Context, *connect.Request[gen.ListCollectionsRequest]) (*connect.Response[gen.ListCollectionsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ListCollections is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) ArrangeWorkspaces(context.Context, *connect.Request[gen.ArrangeWorkspacesRequest]) (*connect.Response[gen.ListCollectionsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ArrangeWorkspaces is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) ArchiveCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error) {

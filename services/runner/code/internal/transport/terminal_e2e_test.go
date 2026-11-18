@@ -86,6 +86,27 @@ func TestAPipeInAWorkspaceTerminalReachesTheWorkspaceConsole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The window types only once the shell says its prompt reads input, and
+	// reuses a shell the list calls idle: both come over the API.
+	if !opened.PromptMarks {
+		t.Fatal("zsh with the shell integration says when its prompt is ready")
+	}
+	for {
+		listed, err := s.ListTerminals(ctx, &pb.ListTerminalsRequest{CollectionId: created.Collection.Id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w := listed.Terminals[0]; w.PromptsReady > 0 {
+			if !w.Idle {
+				t.Fatalf("at its first prompt, in its folder, the shell is idle: %+v", w)
+			}
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("the shell never said its prompt was ready")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	script := `print -r -- "[which:$(command -v lazybox)|zshrc:$FROM_ZSHRC]"; printf 'ok   example.com/lexer 0.1s\n--- FAIL: TestParse (0.00s)\n    parser_test.go:42: want 3, got 4\n' | lazybox log --title 'go test ./...'` + "\n"
 	if err = shell.Write([]byte(script)); err != nil {
 		t.Fatal(err)

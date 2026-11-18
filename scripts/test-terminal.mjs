@@ -53,6 +53,43 @@ try {
  await expect(screen).toContainText('ran: ls -la');
  assert.equal(first.input.join(''),'ls -la\r','keystrokes reach the shell in order');
 
+ // ── Links: a sign-in URL that wraps across rows is one link, underlined with a pointer on hover; a click on any
+ // part of it opens the whole address; a drag selects text and opens nothing; the right-click menu offers it.
+ const signIn='https://accounts.example.com/o/oauth2/auth?response_type=code&client_id=32555940559.apps.example.com&redirect_uri=https%3A%2F%2Fsdk.example.com%2Fauthcode.html&scope=openid+https%3A%2F%2Fwww.example.com%2Fauth%2Fuserinfo.email+https%3A%2F%2Fwww.example.com%2Fauth%2Fcloud-platform+https%3A%2F%2Fwww.example.com%2Fauth%2Fappengine.admin+https%3A%2F%2Fwww.example.com%2Fauth%2Fsqlservice.login+https%3A%2F%2Fwww.example.com%2Fauth%2Fcompute+https%3A%2F%2Fwww.example.com%2Fauth%2Faccounts.reauth&state=Qx7fZk2bH0wLm4&prompt=consent&token_usage=remote&access_type=offline&code_challenge=AbCdEf0123456789_-AbCdEf0123456789_-AbCdEf0&code_challenge_method=S256';
+ assert.ok(signIn.length>3*first.cols,`the address spans at least three rows of ${first.cols}`);
+ await page.evaluate(()=>{window.__opened=[];window.open=url=>{window.__opened.push(String(url));return null;};});
+ const linksOpened=()=>page.evaluate(()=>window.__opened);
+ fixture.terminalOutput(first,`Go to the following link in your browser, and complete the sign-in prompts:\r\n\r\n    ${signIn}\r\n\r\nOnce finished, enter the verification code provided in your browser: `);
+ await expect(screen).toContainText('enter the verification code');
+ const rows=screen.locator('.xterm-rows > div');
+ const at=(await rows.allTextContents()).findIndex(text=>text.includes('https://accounts'));
+ assert.ok(at>=0,'the address is on screen');
+ // The middle of the second row: the address's continuation, not its start.
+ const row=await rows.nth(at+1).boundingBox();
+ const middle={x:row.x+row.width/2,y:row.y+row.height/2};
+ await page.mouse.move(middle.x,middle.y-30);await page.mouse.move(middle.x,middle.y,{steps:3});
+ await expect(screen.locator('.xterm-screen')).toHaveClass(/xterm-cursor-pointer/);
+ await expect(rows.nth(at).locator('span[style*="underline"]').first()).toContainText('https://accounts');
+ await expect(rows.nth(at+2).locator('span[style*="underline"]').first()).toBeVisible();
+ await page.mouse.down();await page.mouse.up();
+ await expect.poll(linksOpened).toEqual([signIn]);
+ // A drag across the address selects it and opens nothing.
+ await page.mouse.move(row.x+20,middle.y);await page.mouse.down();await page.mouse.move(row.x+row.width/2,middle.y,{steps:6});await page.mouse.up();
+ await page.waitForTimeout(200);
+ assert.deepEqual(await linksOpened(),[signIn],'a drag does not open the link');
+ // Right-click: open in the browser or the Web panel, or copy the link; the right-click itself opens nothing.
+ await page.mouse.move(middle.x,middle.y);
+ await expect(screen.locator('.xterm-screen')).toHaveClass(/xterm-cursor-pointer/);
+ await page.mouse.click(middle.x,middle.y,{button:'right'});
+ const linkMenu=page.locator('.context-menu[data-depth="0"]');
+ const linkItems=await linkMenu.locator('.context-menu-label').allTextContents();
+ assert.deepEqual(linkItems.slice(0,4),['Open in your browser','Open in Lazybox','Open in a new Lazybox panel','Copy link'],`link menu: ${linkItems}`);
+ assert.ok(linkItems.includes('Copy')&&linkItems.includes('Send selection to agent'),'the terminal items follow');
+ await linkMenu.getByRole('menuitem',{name:'Open in your browser'}).click();
+ await expect.poll(linksOpened).toEqual([signIn,signIn]);
+ await page.screenshot({path:'/tmp/lazybox-terminal-link.png'});
+ await screen.click();
+
  await panel.getByLabel('Terminal directory').selectOption('api');
  await panel.getByRole('button',{name:'New terminal',exact:true}).click();
  await expect(panel.getByRole('tab',{name:'api',exact:true})).toHaveAttribute('aria-selected','true');
@@ -158,5 +195,5 @@ try {
  await expect(page.locator('.panel-terminal')).toHaveCount(0);
  await expect(page.locator('.panel-chat')).toBeVisible();
  assert.deepEqual(errors,[]);
- console.log('PASS terminal: exit closes the tab and panel, header opens a shell docked right, focuses rather than duplicates, fitted size, ordered input, member directory, close, re-attach after reload, × close and reopen, dock via menu and keyboard, layout survives reload, remembered dock side, drag a tab below the chat with a drop preview, neighbours stay mounted, reopen from Panels, phone close.');
+ console.log('PASS terminal: a wrapped sign-in URL is one link (pointer and underline on hover, a click opens the whole address, a drag does not, the right-click menu offers it), exit closes the tab and panel, header opens a shell docked right, focuses rather than duplicates, fitted size, ordered input, member directory, close, re-attach after reload, × close and reopen, dock via menu and keyboard, layout survives reload, remembered dock side, drag a tab below the chat with a drop preview, neighbours stay mounted, reopen from Panels, phone close.');
 } finally {await browser?.close();await server.close();await fixture.close();}

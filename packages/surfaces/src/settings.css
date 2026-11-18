@@ -101,6 +101,9 @@ p.settings-empty[role=status]{border-style:solid;border-color:transparent;text-a
 
 /* Subscriptions. */
 .subscription-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,272px),1fr));gap:12px;align-items:start}
+#subscriptions-panel .provider-group{gap:8px}
+#subscriptions-panel .provider-group+.provider-group{margin-top:18px}
+#subscriptions-panel .provider-group-heading{font-size:calc(12px * var(--text-scale))}
 .subscription-card{display:flex;flex-direction:column;min-width:0;background:var(--s-surface,var(--surface-raised));border:1px solid var(--s-line,var(--line));border-radius:var(--s-radius,8px);overflow:hidden}
 .subscription-card>header{display:flex;align-items:flex-start;gap:10px;padding:14px 14px 10px}
 .subscription-identity{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}

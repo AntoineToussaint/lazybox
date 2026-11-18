@@ -28,7 +28,7 @@ export function WebWindow({ id, url, viewState, webViews, applicationName = 'Laz
   return <WebViewsContext.Provider value={webViews}>
     <main className="workspace-shell web-window">
       {error && <div className="error" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
-      <WebViewer id={`window-${id}`} label="Web page" frameTitle={entry?.title || 'Web page'} history={history} setHistory={setHistory} zoom={zoom} onZoom={setZoom} engine={engine} focusAddress={entry ? 0 : 1}
+      <WebViewer id={`window-${id}`} titleBar label="Web page" frameTitle={entry?.title || 'Web page'} history={history} setHistory={setHistory} zoom={zoom} onZoom={setZoom} engine={engine} focusAddress={entry ? 0 : 1}
         menu={onDock && <button type="button" disabled={!entry} onClick={() => void onDock(entry!.url).catch(e => setError(String(e)))}><Icon name="dock-right"/><span>Move back to the workspace</span></button>}/>
     </main>
   </WebViewsContext.Provider>;

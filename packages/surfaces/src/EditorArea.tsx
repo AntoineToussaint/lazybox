@@ -2,6 +2,7 @@ import { Suspense, useEffect, useMemo, useRef, useState, type DragEvent, type Ke
 import type { ViewStateStore } from '@lazybox/platform';
 import { ActionMenu } from './ActionMenu';
 import { FileIcon } from './DirectoryListing';
+import { beginDrag, preventMouseDown } from './drag-gesture';
 import { Icon } from './Icons';
 import { RichContent } from './RichContent';
 import { CodeEditor, EditorSkeleton, preloadEditor } from './editor-loader';
@@ -86,14 +87,18 @@ function SplitHandle({ node, onResize }: { node: Extract<EditorNode, { type: 'sp
   const start = first.getBoundingClientRect(), end = second.getBoundingClientRect();
   const from = row ? start.left : start.top, span = (row ? end.right : end.bottom) - from;
   if (span <= 0) return;
-  event.preventDefault(); handle.setPointerCapture(event.pointerId); handle.dataset.dragging = 'true';
+  event.preventDefault(); handle.focus({ preventScroll: true }); handle.dataset.dragging = 'true';
   let ratio = node.ratio;
-  const move = (next: PointerEvent) => { ratio = Math.min(0.85, Math.max(0.15, ((row ? next.clientX : next.clientY) - from) / span)); first.style.flex = `${ratio} 1 0`; second.style.flex = `${1 - ratio} 1 0`; };
-  const stop = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', stop); handle.removeEventListener('pointercancel', stop); delete handle.dataset.dragging; onResize(ratio); };
-  handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', stop); handle.addEventListener('pointercancel', stop);
+  const place = (value: number) => { first.style.flex = `${value} 1 0`; second.style.flex = `${1 - value} 1 0`; };
+  beginDrag(row ? 'x' : 'y', {
+   pointerId: event.pointerId, capture: handle,
+   onMove: next => { ratio = Math.min(0.85, Math.max(0.15, ((row ? next.clientX : next.clientY) - from) / span)); place(ratio); },
+   // Escape puts the groups back as they were.
+   onEnd: reason => { delete handle.dataset.dragging; if (reason === 'escape') place(node.ratio); else onResize(ratio); },
+  });
  };
  const key = (event: ReactKeyboardEvent) => { const step = { ArrowLeft: -0.05, ArrowUp: -0.05, ArrowRight: 0.05, ArrowDown: 0.05 }[event.key]; if (step === undefined) return; event.preventDefault(); onResize(node.ratio + step); };
- return <div className="editor-split-handle" role="separator" tabIndex={0} aria-orientation={row ? 'vertical' : 'horizontal'} aria-label="Resize editor groups" aria-valuemin={15} aria-valuemax={85} aria-valuenow={Math.round(node.ratio * 100)} onPointerDown={down} onKeyDown={key}/>;
+ return <div className="editor-split-handle" role="separator" tabIndex={0} aria-orientation={row ? 'vertical' : 'horizontal'} aria-label="Resize editor groups" aria-valuemin={15} aria-valuemax={85} aria-valuenow={Math.round(node.ratio * 100)} onPointerDown={down} onMouseDown={preventMouseDown} onKeyDown={key}/>;
 }
 
 function Group({ workbench, state, group, vim, index, numbered }: { workbench: Workbench; state: WorkbenchState; group: EditorGroup; vim: boolean; index: number; numbered: boolean }) {

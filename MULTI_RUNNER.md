@@ -1,7 +1,8 @@
 # Several Runners in one window
 
 Status: step 1 shipped (2026-11-16); step 2 shipped (2026-11-17, audit brief
-R8); step 3 designed below, not built. herdr shows the spaces and agents of
+R8); step 3's owner level built (2026-11-18, over SSH: [REMOTE_RUNNERS P0b](REMOTE_RUNNERS.md#p0b-the-owner-link-over-ssh-built)),
+its device level designed below, not built. herdr shows the spaces and agents of
 several machines in one sidebar, grouped by machine
 ([audit P2-2](audits/2026-11-16/herdr-gui.md#p2--later-or-strategic)).
 Lazybox's equivalent is one window that lists several Runners — Dev and
@@ -110,12 +111,33 @@ notification click carrying a Runner through macOS, and the owner-only
 check against a real Runner state directory. The Playwright suite runs the web
 client against fake Runners.
 
-## Step 3: Runners on other machines (designed, not built)
+## Step 3: Runners on other machines (owner level built over SSH; device level designed)
 
-> **Superseded in scope by [Runners on other computers](REMOTE_RUNNERS.md)**
-> (proposal, 2026-11-17): owner access to your own remote machines over SSH,
-> the tailnet, a relay or the Hub, with per-client keys. The see-and-answer
-> mode below becomes its *device* access level.
+> **Superseded in scope by [Runners on other computers](REMOTE_RUNNERS.md)**:
+> owner access to your own remote machines over SSH, the tailnet, a relay or
+> the Hub, with per-client keys. The see-and-answer mode below becomes its
+> *device* access level (P1).
+
+**Built: the owner level over SSH** ([REMOTE_RUNNERS P0b](REMOTE_RUNNERS.md#p0b-the-owner-link-over-ssh-built),
+guide [docs/guides/remote-computers.md](docs/guides/remote-computers.md)).
+A computer added with Settings → Runners → *Add a computer* (or `lazybox
+remote add <host>`) gets a locator in `~/.config/lazybox/runners/<name>.json`
+with a `remote` field; its endpoint file is the link agent's loopback origin
+and per-start token (`lazybox link connect <name>`, which the desktop keeps
+running, `links.rs`). So everything in step 2 applies unchanged: its own
+`RunnerLink` and renewal, `RunnerScope`, the merged inbox, notifications,
+⌘K and ⌘N, and **it can be the page**, because owner access is the same as
+local. What differs: the sidebar groups Runners by computer (route, RTT,
+*Reconnecting…*, *Access revoked*); actions on this computer's own files
+(Reveal in Finder, a home checkout's Finder and editor) are not offered on its
+page, and the host refuses `OpenRepositoryHome` over a link; a folder picked
+on this computer is not offered as a repository for it; Settings → Runners
+shows its route, RTT and pinned key, and **Remove** revokes this computer's
+key there. Its owner bearer never leaves it: the link authenticates this
+computer's own key, and the host adds the bearer locally.
+
+**Still designed, below:** a desktop at *device* level (see and answer) on a
+Runner it does not own, through the device gateway.
 
 A remote Runner is reached through **its device gateway**, as a phone reaches
 it — never with its owner bearer, which must not leave its machine.

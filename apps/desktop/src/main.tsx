@@ -4,9 +4,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { fetch as nativeFetch } from '@tauri-apps/plugin-http';
-import { AgentWindow, ArtifactWindow, PREFERENCE_EVENT, WebWindow, WindowControls, WindowErrorBoundary, Workspace, configureContextMenus, configureExternalTerminal, configureSystemSounds, configureVoice, installLinkRouting, openInViewer, runMenuAction, useNativeActionMenu, useRunnerLocator, type NativeMenuItem } from '@lazybox/surfaces';
-import type { RunnerDirectoryHost, RunnerListing } from '@lazybox/platform';
-import type { AppHost, AppInfo, ChatReturn, AttentionDestination, AttentionHost, AvailableUpdate, FeedbackDiagnostics, NativeWebViews, RecognitionEvent, RecognizerLanguage, RecognizerStatus, SpeechVoice, SurfaceHost, SurfaceTarget, ViewStateStore, UpdateError, UpdateErrorKind, UpdateProgress, VoiceHost, WebViewEvent, WorkspaceHost, ZoomHost } from '@lazybox/platform';
+import { AgentWindow, ArtifactWindow, PREFERENCE_EVENT, WebWindow, WindowControls, WindowErrorBoundary, Workspace, configureContextMenus, configureExternalTerminal, configureSystemSounds, configureTitleBar, configureVoice, installLinkRouting, openInViewer, runMenuAction, useNativeActionMenu, useRunnerLocator, type NativeMenuItem } from '@lazybox/surfaces';
+import type { AddComputerStep, RunnerDirectoryHost, RunnerListing, SshHost } from '@lazybox/platform';
+import type { AppHost, AppInfo, ChatReturn, AttentionDestination, AttentionHost, AvailableUpdate, FeedbackDiagnostics, NativeWebViews, RecognitionEvent, RecognizerLanguage, RecognizerStatus, SpeechVoice, SurfaceHost, SurfaceTarget, TitleBarInset, ViewStateStore, UpdateError, UpdateErrorKind, UpdateProgress, VoiceHost, WebViewEvent, WorkspaceHost, ZoomHost } from '@lazybox/platform';
 import { FirstRun } from './FirstRun';
 
 type Bootstrap = { url: string; token: string; workingDirectory: string; target: SurfaceTarget; viewKey: string; viewScope: string; viewRoot: string; applicationName: string; fixedWorkspaceId: string; kind: 'workspace' | 'chat' | 'console' | 'artifact' | 'web'; notice: string; viewState: Record<string,string> };
@@ -162,6 +162,16 @@ const desktopRunners: RunnerDirectoryHost = {
   list: () => invoke<RunnerListing[]>('runner_list'),
   add: path => invoke<RunnerListing>('runner_add', { path }),
   forget: id => invoke<void>('runner_forget', { id }),
+  // Runners on other computers (src-tauri/src/links.rs): the bundled CLI's
+  // `lazybox remote …`; the app keeps one link agent per computer added.
+  sshHosts: () => invoke<SshHost[]>('remote_hosts'),
+  async addComputer(host, onStep, options) {
+    const id = Math.random().toString(36).slice(2);
+    const unlisten = await listen<{ id: string; event: AddComputerStep }>('remote-add-progress', event => { if (event.payload.id === id) onStep(event.payload.event); });
+    try { await invoke('remote_add', { id, host, name: options?.name || null }); }
+    finally { unlisten(); }
+  },
+  removeComputer: async name => { await invoke('remote_remove', { name }); },
 };
 
 type Renew = () => Promise<{ baseUrl: string; token: string } | undefined>;
@@ -316,4 +326,30 @@ configureExternalTerminal({
 configureSystemSounds({ play: (name, level) => invoke<void>('play_system_sound', { name, level }) });
 // An installed release's first run opens the setup window instead (release.rs).
 const firstRun = getCurrentWebview().label === 'setup';
-createRoot(document.getElementById('root')!).render(<React.StrictMode><WindowErrorBoundary development={import.meta.env.DEV}>{firstRun ? <FirstRun/> : <DesktopApp/>}</WindowErrorBoundary></React.StrictMode>);
+/** An event the host sends this window's page alone; returns the unsubscribe. */
+function listenHere<T>(event: string, listener: (payload: T) => void) {
+  let disposed = false, stop: (() => void) | undefined;
+  // The setup window holds no capability, so it cannot listen: it keeps the room in full screen.
+  getCurrentWebview().listen<T>(event, value => listener(value.payload)).then(unlisten => { if (disposed) unlisten(); else stop = unlisten; }, () => {});
+  return () => { disposed = true; stop?.(); };
+}
+/**
+ * No separate title bar on macOS (src-tauri/src/title_bar.rs): the window's
+ * header is it, with room for the window buttons, before the page first draws.
+ * Elsewhere the host answers null and headers stay as they are.
+ */
+async function configureWindowTitleBar() {
+  // The zoom too, so the room is right on the first draw (the buttons are not zoomed).
+  const [titleBar, zoom] = await Promise.all([
+    invoke<{ window: TitleBarInset; popout: TitleBarInset; fullScreen: boolean } | null>('title_bar').catch(() => null),
+    firstRun ? Promise.resolve(1) : desktopZoom.get().catch(() => 1),
+  ]);
+  if (!titleBar) return;
+  configureTitleBar({ ...titleBar,
+    onFullScreen: listener => listenHere('title-bar-full-screen', listener),
+    onPopoutFullScreen: listener => listenHere('title-bar-popout-full-screen', listener),
+    startDragging: popout => invoke<void>('title_bar_drag', { popout }),
+    doubleClick: popout => invoke<void>('title_bar_double_click', { popout }),
+    ...(firstRun ? {} : { zoom: { ...desktopZoom, get: async () => zoom } }) });
+}
+void configureWindowTitleBar().finally(() => createRoot(document.getElementById('root')!).render(<React.StrictMode><WindowErrorBoundary development={import.meta.env.DEV}>{firstRun ? <FirstRun/> : <DesktopApp/>}</WindowErrorBoundary></React.StrictMode>));

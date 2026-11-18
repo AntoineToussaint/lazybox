@@ -9,7 +9,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Code, ConnectError, type RunnerClient } from '@lazybox/client-core';
 import type { Collection, Repository, RepositoryHome } from '@lazybox/protocol';
-import { copyText, openContextMenu, showMenuNotice } from './ContextMenu';
+import { copyText, openContextMenu, pageFilesAreHere, showMenuNotice } from './ContextMenu';
 import type { MenuItem } from './context-menu-model';
 import { openHomeShell } from './home-shell';
 import { Icon } from './Icons';
@@ -77,10 +77,12 @@ const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform
 
 /** One home's actions: a shell here (in this workspace's Terminal panel), Finder, the editor, its path. */
 export function homeItems(api: RunnerClient, workspaceId: string, home: { repositoryId: string; name: string; path: string }, shell?: () => void): MenuItem[] {
+  // On another computer's Runner the home is there: Finder and the editor would open on that computer's screen.
+  const here = pageFilesAreHere();
   return [
     { label: 'Open in terminal', icon: 'terminal', disabled: !workspaceId ? 'Open a workspace: the shell runs in its Terminal panel' : undefined, run: shell || (() => void openHomeShell(api, workspaceId, { repositoryId: home.repositoryId, label: `${home.name} home` })) },
-    { label: isMac ? 'Open in Finder' : 'Open in file manager', icon: 'folder', run: () => void openIn(api, home.repositoryId, 'finder', isMac ? 'Finder' : 'the file manager') },
-    { label: `Open in ${editorLabel()}`, icon: 'pencil', run: () => void openIn(api, home.repositoryId, homeEditor(), editorLabel()) },
+    here && { label: isMac ? 'Open in Finder' : 'Open in file manager', icon: 'folder', run: () => void openIn(api, home.repositoryId, 'finder', isMac ? 'Finder' : 'the file manager') },
+    here && { label: `Open in ${editorLabel()}`, icon: 'pencil', run: () => void openIn(api, home.repositoryId, homeEditor(), editorLabel()) },
     'separator',
     { label: 'Copy path', icon: 'copy', run: () => void copyText(home.path, 'Copied the home checkout’s path') },
   ];
@@ -171,7 +173,7 @@ function HomeRow({ home, label = home.name, workspaceId, chooseFolder, onChanged
         {/* The shell runs in a workspace's Terminal panel; without one (Settings), the folder opens instead. */}
         {workspaceId
           ? <button type="button" title={`A shell in ${shortPath(home.path)}, in this workspace’s Terminal panel`} onClick={shell}><Icon name="terminal" size={13}/>Open in terminal</button>
-          : <button type="button" title={home.path} onClick={() => void openIn(api, home.repositoryId, 'finder', isMac ? 'Finder' : 'the file manager')}><Icon name="folder" size={13}/>{isMac ? 'Open in Finder' : 'Open folder'}</button>}
+          : pageFilesAreHere() && <button type="button" title={home.path} onClick={() => void openIn(api, home.repositoryId, 'finder', isMac ? 'Finder' : 'the file manager')}><Icon name="folder" size={13}/>{isMac ? 'Open in Finder' : 'Open folder'}</button>}
         {home.behind > 0 && <button type="button" disabled={!!busy} title={`Fetch, then move ${home.defaultBranch} to origin/${home.defaultBranch} if it is checked out and clean; nothing is discarded`}
           onClick={() => void update()}><Icon name="refresh" size={13}/>{busy === 'update' ? 'Updating…' : `Update to latest ${home.defaultBranch}`}</button>}
         <button type="button" aria-label={`More for ${short} home`} aria-haspopup="menu" title="Finder, editor, path, another folder"

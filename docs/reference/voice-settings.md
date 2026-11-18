@@ -22,7 +22,7 @@ Shortcuts). The two voice keys are part of your shortcuts.
 | --- | --- | --- |
 | Dictate | `Right ⌥` or `⌥Space` | Hold to dictate into the message box you are working in. **Change…** records a new key (press a chord, or press and release `Right ⌥` or `Right ⌘` alone); **Reset** goes back to the default. If `⌥Space` does nothing, another app (ChatGPT, Raycast, Alfred) may use it: pick another key. |
 | Say a command | `⌥⇧Space` | Hold to open the command palette and say what to run. |
-| How the key works | Hold to talk, tap to keep listening | *Hold to talk*: listening stops when you release. *Press to start, press again to send*: press again to finish dictation and send. Say "stop" to keep the draft or press `Esc` to cancel. With `Right ⌥` alone, tap twice to start and once to send. |
+| How the key works | Hold to talk, tap to keep listening | *Hold to talk*: listening stops when you release. *Press to start, press again to stop*: press again to keep the draft. With `Right ⌥` alone, tap twice to start and once to stop. Press `Esc` to cancel. |
 
 A voice key must be one key held with `⌥`, `⌃` or `⌘` (`Ctrl+Alt+M`), a
 function key (`F5`), or `Right ⌥` or `Right ⌘` alone (`AltRight`, `MetaRight`
@@ -59,7 +59,7 @@ Emptying a list restores its defaults.
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Agent replies | Off | *First paragraph* or *Whole reply*, read when a turn ends in a conversation you have open (once, even with it open in two windows). History is never read. |
-| Conversations that need you | Off | Reads the "needs you" notification (a question, an approval, a failure) from the main window. |
+| Conversations that need you | Off | Reads fresh questions, pending approvals, and blocking failures from the main window. Waits until dictation ends and skips resolved requests. |
 | Voice | System default | Any voice your system has. |
 | Speed | 1.0× | 0.5× to 2×. **Play a sample** reads a sentence in the chosen voice. |
 
@@ -74,4 +74,6 @@ command palette, and never happens while you dictate.
 | Send message | `↵`, also while listening (the last words settle first); while the agent works it queues | — |
 | Send now | `⌘↵`, also while listening: while the agent works it stops and sends now, otherwise it sends | *Send now* |
 | Say a command | `⌥⇧Space` (held) | *Say a command* |
+| Read latest reply | — | *Read latest reply* in the current conversation |
+| Repeat or open an announcement | — | *Repeat last announcement* or *Open that announcement* |
 | Stop reading aloud | — | *Stop reading aloud*, while something is read |

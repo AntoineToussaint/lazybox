@@ -3,7 +3,6 @@ import type { Attention, AttentionNotice, NotificationPreferences } from './atte
 import { noticeFor } from './attention';
 import { playAlert } from './sounds';
 import { showToast } from './toasts';
-import { announceAttention } from './voice/voice-session';
 
 const wanted: Record<AttentionNotice['kind'], keyof NotificationPreferences> = { 'needs-input': 'needsInput', failed: 'failed', review: 'review' };
 const everything: NotificationPreferences = { needsInput: true, failed: true, review: true, badge: true, soundNeedsYou: true, soundDone: true };
@@ -33,7 +32,6 @@ export function deliverAttention(notices: readonly AttentionNotice[], preference
   if (sound) playAlert(sound);
   const shown = notices.filter(notice => preferences[wanted[notice.kind]]);
   if (!shown.length) return;
-  announceAttention(shown);
   if (focused) {
     for (const notice of shown.slice(-3)) showToast({
       id: `attention:${notice.key}`, tone: notice.kind, title: notice.title, body: notice.body,

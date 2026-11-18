@@ -15,7 +15,9 @@ import { LiveIndicator, useLiveStatus } from '../LiveIndicator';
 import { Icon } from '../Icons';
 import { useComposerDictation } from '../voice/ComposerDictation';
 import { VoicePill } from '../voice/VoiceLayer';
-import { useVoiceState } from '../voice/voice-session';
+import { readAloud, stopReading, synthesizer, useVoiceState } from '../voice/voice-session';
+import { speakableText } from '../voice/voice-model';
+import { latestAgentReply } from '../voice/useReadAloudReplies';
 import { grantLabels } from '../DevicesSettings';
 import { parseRoute, useRoute, type Route } from './route';
 import { localPinStore, runnerPinStore, type PinStore } from './pins';
@@ -262,11 +264,17 @@ function PhoneConversation({ sessionId, commandId, device, collections, go }: { 
   const status = useLiveStatus(session, transcript.recent);
   // The phone asks before allowing what the computer flags; the computer shows the same flags.
   const confirmAllow = useCallback((approval: Approval) => new Promise<boolean>(resolve => setConfirming({ approval, resolve })), []);
+  const voice = useVoiceState();
+  const latestReply = latestAgentReply(transcript.messages);
+  const readingAvailable = !!latestReply && !!synthesizer();
+  const recording = voice.phase === 'starting' || voice.phase === 'listening' || voice.phase === 'stopping';
   if (commandId) return <PhoneCommand commandId={commandId} commands={commands} onBack={() => go({ session: sessionId })}/>;
   return <main className="remote-conversation" aria-label={conversationName(session, 'Conversation')}>
     <header className="remote-bar">
       <button className="remote-icon-button" aria-label="Back to inbox" onClick={() => go({})}><Icon name="back" size={20}/></button>
       <div className="remote-bar-title"><h1>{conversationName(session, 'Conversation')}</h1><span>{[workspace, sessionStatus(session)].filter(Boolean).join(' · ')}</span></div>
+      {readingAvailable && <button type="button" className="remote-icon-button" aria-label={voice.reading ? 'Stop reading reply' : 'Read latest reply'} disabled={recording}
+        onClick={() => { if (voice.reading) void stopReading(); else void readAloud(speakableText(latestReply, 'full')); }}><Icon name={voice.reading ? 'stop' : 'speaker'} size={20}/></button>}
     </header>
     <CommandStrip commands={commands} onOpen={command => go({ session: sessionId, command })}/>
     <div className="remote-transcript">
@@ -286,7 +294,7 @@ function PhoneConversation({ sessionId, commandId, device, collections, go }: { 
       <div ref={end}/>
     </div>
     {error && session && <p className="remote-error remote-floating" role="alert">{error}<button aria-label="Dismiss" onClick={() => setError('')}>×</button></p>}
-    {session && <PhoneComposer session={session} respond={respond} start={start} onError={setError}/>}
+    {session && <PhoneComposer key={session.id} session={session} respond={respond} start={start} onError={setError}/>}
     {confirming && <ConfirmSheet title="Allow this?" tone="primary" confirm="Allow"
       detail={<><code className="remote-sheet-code">{confirming.approval.command || confirming.approval.file || confirming.approval.description || confirming.approval.tool}</code><ul className="remote-risks">{confirming.approval.risks.map(risk => <li key={risk.kind}><Icon name="alert" size={12}/>{risk.text}</li>)}{confirming.approval.defaultToNo && !confirming.approval.risks.length && <li><Icon name="alert" size={12}/>{agentName} suggests saying no unless you are sure</li>}</ul></>}
       onConfirm={() => confirming.resolve(true)} onClose={() => { confirming.resolve(false); setConfirming(undefined); }}/>}
@@ -306,13 +314,17 @@ function PhoneComposer({ session, respond, start, onError }: { session: Session;
   const [sending, setSending] = useState(false);
   const attempt = useRef('');
   const box = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => { try { if (text) sessionStorage.setItem(key, text); else sessionStorage.removeItem(key); } catch { /* Private mode: the draft lives in memory. */ } }, [key, text]);
+  const commit = (value: string) => {
+    setText(value);
+    attempt.current = '';
+    try { if (value) sessionStorage.setItem(key, value); else sessionStorage.removeItem(key); } catch { /* The draft lives in memory. */ }
+  };
   useEffect(() => { const node = box.current; if (node) { node.style.height = 'auto'; node.style.height = `${Math.min(node.scrollHeight, 160)}px`; } }, [text]);
   // Dictation with the browser's speech recognition (Web Speech). Where the
   // browser has none (iOS Safari without Siri), the keyboard's own microphone
   // dictates into the box instead, so no button is shown.
   const formRef = useRef<HTMLFormElement>(null);
-  const dictation = useComposerDictation({ textarea: box, value: text, enabled: respond && !sending, onPreview: setText, onCommit: value => { setText(value); attempt.current = ''; }, onSend: () => formRef.current?.requestSubmit() });
+  const dictation = useComposerDictation({ textarea: box, destination: conversationName(session), value: text, enabled: respond && !sending, onPreview: setText, onCommit: commit, onSend: () => formRef.current?.requestSubmit() });
   if (!respond) return <footer className="remote-composer remote-readonly">This phone can read conversations only. Pair it again to reply.</footer>;
   if (session.closed && !start) return <footer className="remote-composer remote-readonly">This conversation ended. Continue it on your computer.</footer>;
   const send = async (event?: FormEvent) => {
@@ -330,7 +342,7 @@ function PhoneComposer({ session, respond, start, onError }: { session: Session;
         target = resumed.session.id;
       }
       await api.apply({ sessionId: target, operationId: attempt.current, operation: { case: 'message', value: { text: message, attachments: [] } } }, { timeoutMs: 30000 });
-      attempt.current = ''; setText(''); refresh();
+      commit(''); refresh();
     } catch (error) { onError(`Not sent: ${ConnectError.from(error).rawMessage || String(error)}. Your message is kept; try again.`); }
     finally { setSending(false); }
   };
@@ -338,11 +350,15 @@ function PhoneComposer({ session, respond, start, onError }: { session: Session;
     try { await api.apply({ sessionId: session.id, operationId: crypto.randomUUID(), operation: { case: 'interrupt', value: {} } }, { timeoutMs: 15000 }); }
     catch (error) { onError(ConnectError.from(error).rawMessage || String(error)); }
   };
-  const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void send(); };
-  return <form ref={formRef} className="remote-composer" onSubmit={event => { dictation.takeOver(); void send(event); }}>
+  const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
+    event.preventDefault();
+    formRef.current?.requestSubmit();
+  };
+  return <form ref={formRef} className="remote-composer" onSubmit={event => { if (dictation.finishAndSend()) { event.preventDefault(); return; } void send(event); }}>
     {session.busy && !session.closed && <button type="button" className="remote-interrupt" onClick={() => void interrupt()}>Interrupt</button>}
-    <textarea ref={box} rows={1} aria-label="Message" placeholder={session.closed ? 'Continue this conversation…' : session.busy ? 'Queue a follow-up…' : 'Reply…'} value={text} onChange={event => { dictation.takeOver(); setText(event.target.value); attempt.current = ''; }} onKeyDown={keyDown} enterKeyHint="send"/>
-    {dictation.supported && <button type="button" className={'remote-mic' + (dictation.active ? ' is-active' : '')} aria-label={dictation.active ? 'Send dictation' : 'Dictate'} disabled={sending} onClick={dictation.active ? dictation.finishAndSend : dictation.start}><Icon name={dictation.active ? 'send' : 'mic'} size={18}/></button>}
+    <textarea ref={box} rows={1} aria-label="Message" placeholder={session.closed ? 'Continue this conversation…' : session.busy ? 'Queue a follow-up…' : 'Reply…'} value={text} onChange={event => { dictation.takeOver(); commit(event.target.value); }} onKeyDown={keyDown} enterKeyHint="send"/>
+    {dictation.supported && <button type="button" className={'remote-mic' + (dictation.active ? ' is-active' : '')} aria-label={dictation.active ? 'Stop dictation' : 'Dictate'} disabled={sending} onClick={dictation.active ? dictation.stop : dictation.start}><Icon name={dictation.active ? 'stop' : 'mic'} size={18}/></button>}
     <button className="primary remote-send" aria-label={sending ? 'Sending…' : 'Send message'} disabled={sending || !text.trim()}><Icon name="send" size={18}/></button>
   </form>;
 }

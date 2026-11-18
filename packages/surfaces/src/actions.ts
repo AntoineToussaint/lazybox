@@ -182,6 +182,9 @@ const tail = [
   // Voice (VOICE.md): dictation and spoken commands, held or toggled.
   { id: 'voice.dictate', title: 'Dictate', group: 'Voice', icon: 'mic', keys: 'AltRight or Alt+Space', scope: 'global', hold: true, keywords: 'voice speech speak talk microphone dictation push to talk dictée micro parler' },
   { id: 'voice.command', title: 'Say a command', group: 'Voice', icon: 'mic', keys: 'Alt+Shift+Space', scope: 'global', hold: true, overDialogs: true, keywords: 'voice speech command palette speak talk microphone commande vocale' },
+  { id: 'voice.read-latest', title: 'Read latest reply', group: 'Voice', icon: 'play', keys: '', scope: 'global', keywords: 'voice speech read aloud' },
+  { id: 'voice.repeat', title: 'Repeat last announcement', group: 'Voice', icon: 'play', keys: '', scope: 'global', keywords: 'voice speech say again' },
+  { id: 'voice.open-announcement', title: 'Open that announcement', group: 'Voice', icon: 'ask', keys: '', scope: 'global', keywords: 'open that voice question approval' },
   { id: 'voice.stop-reading', title: 'Stop reading aloud', group: 'Voice', icon: 'stop', keys: '', scope: 'global', keywords: 'voice speech read aloud text to speech silence quiet lecture' },
   { id: 'navigation.next', title: 'Next entry', group: 'Sidebar', icon: 'chevron', keys: 'j', scope: 'navigation', palette: false },
   { id: 'navigation.previous', title: 'Previous entry', group: 'Sidebar', icon: 'up', keys: 'k', scope: 'navigation', palette: false },

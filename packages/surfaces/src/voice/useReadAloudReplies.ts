@@ -7,8 +7,12 @@ import { readReply } from './voice-session';
 export function replyOfTurn(messages: readonly TranscriptMessage[], turnId: string): string {
   const said = messages.filter(m => m.type === 'message_delta' && !m.agentId && (!turnId || m.turnId === turnId));
   if (said.length) return said.map(m => m.text).join('\n\n');
-  const last = [...messages].reverse().find(m => m.type === 'message_delta' && !m.agentId);
-  return last?.text || '';
+  return '';
+}
+
+export function latestAgentReply(messages: readonly TranscriptMessage[]): string {
+  const last = messages.findLast(message => message.type === 'message_delta' && !message.agentId && message.text.trim());
+  return last?.turnId ? replyOfTurn(messages, last.turnId) : (last?.text || '');
 }
 
 /** How old an ending may be and still count as news (a journal replayed on opening is history). */

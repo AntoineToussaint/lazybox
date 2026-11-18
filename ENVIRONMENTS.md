@@ -200,6 +200,10 @@ while stopped. Use a separate test environment for native lifecycle qualificatio
 
 ## Isolation
 
+If a terminal launcher starts from inside a Lazybox agent, it strips the
+parent agent's provider authentication overrides before spawning its Runner.
+The Runner then selects accounts from its own subscription configuration.
+
 The default environment root is `.cache/environments`. Override it with
 `LAZYBOX_V2_ENVIRONMENTS=/absolute/path` consistently for all commands. A custom root must be outside source or inside
 an excluded state/build directory, so a snapshot cannot include itself.

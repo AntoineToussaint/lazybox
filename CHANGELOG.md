@@ -148,6 +148,7 @@ leave out.
 
 ### Runner reliability
 
+- **Resume Codex after restarting Dev** A Runner launched from an agent shell ignores that agent's sign-in overrides when it selects its own accounts.
 - **Slow Runners have their own status** Lazybox retries a late Runner response or history refresh and reconnects automatically.
 - **Agents outlive the Runner** Restarting or updating the Runner leaves agents, commands and terminals running; the new Runner picks them back up within seconds, and an approval that was waiting stays waiting.
 - **Back after your Mac restarts** A conversation whose agent was running keeps its checkpoints, commands and queued messages, and resumes the agent's own session with your next message.

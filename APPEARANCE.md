@@ -44,6 +44,15 @@ written there when you zoom (the View menu, `⌘=` `⌘−` `⌘0`, Settings). A
 browser tab neither reads nor changes it: use the browser's own zoom, and the
 file's `zoom` stays as the desktop app left it.
 
+### Information detail
+
+**Focused** keeps the sidebar quieter and summarizes each agent turn.
+**Standard** shows repository and Git details with grouped tool activity.
+**Power user** shows each tool call and keeps reply times visible. Choose a
+preset in Settings → Appearance, then adjust sidebar details there, or tool
+activity and timestamps in Settings → Chat. Per-conversation activity
+overrides still apply.
+
 ### Your own themes
 
 Use **New theme from current** to start an editable copy. **Delete** beside a

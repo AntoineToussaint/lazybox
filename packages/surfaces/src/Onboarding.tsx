@@ -1,3 +1,7 @@
+import { BehaviorOptions, BEHAVIOR_PROFILES, readDefaultBehavior, saveDefaultBehavior } from './BehaviorProfile';
+import { DISPLAY_PRESETS, useDisplayDetail } from './display-detail';
+import { DisplayPresetPicker } from './DisplayPresetPicker';
+import { writeActivityDefault } from './activity-detail';
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import type { Collection } from '@lazybox/protocol';
 import type { ViewStateStore, WorkspaceHost } from '@lazybox/platform';
@@ -45,8 +49,12 @@ const write = (store: ViewStateStore | undefined, name: string, value: string) =
  * (Send feedback among them). Mounted once per main window; `automatic` is
  * false in a workspace window, which only answers Help.
  */
-export function Onboarding({ viewState, collections, collectionsLoaded, automatic, onOpenSettings, host, sessionId }: { viewState?: ViewStateStore; collections: readonly Collection[]; collectionsLoaded: boolean; automatic: boolean; onOpenSettings(tab: SettingsTab): void; /** The window's host: the app (updates, diagnostics) and its screenshot. */ host?: WorkspaceHost; /** The conversation in front, which a feedback report may name. */ sessionId?: string }) {
+export function Onboarding({ viewState, collections, collectionsLoaded, automatic, settingsOpen, onOpenSettings, onWorkspace, host, sessionId }: { viewState?: ViewStateStore; collections: readonly Collection[]; collectionsLoaded: boolean; automatic: boolean; settingsOpen?: boolean; onOpenSettings(tab: SettingsTab): void; onWorkspace?(id: string): void; /** The window's host: the app (updates, diagnostics) and its screenshot. */ host?: WorkspaceHost; /** The conversation in front, which a feedback report may name. */ sessionId?: string }) {
   const [welcome, setWelcome] = useState(false);
+  const [setupInSettings, setSetupInSettings] = useState(false);
+  useEffect(() => {
+    if (setupInSettings && !settingsOpen) { setSetupInSettings(false); setWelcome(true); }
+  }, [setupInSettings, settingsOpen]);
   const [decided, setDecided] = useState(() => !automatic || read(viewState, WELCOME_PREFERENCE) !== null);
   const [whatsNew, setWhatsNew] = useState<{ releases: readonly Release[]; asked: boolean; updated?: string; failed?: { version: string; current: string } }>();
   // The page the documentation opens at; '' while it is closed.
@@ -103,16 +111,23 @@ export function Onboarding({ viewState, collections, collectionsLoaded, automati
     'help.updates': openUpdates,
   });
   const closeWelcome = () => { write(viewState, WELCOME_PREFERENCE, 'seen'); setWelcome(false); };
+  const setupSettings = (tab: SettingsTab) => {
+    closeWelcome();
+    if (settingsOpen !== undefined) setSetupInSettings(true);
+    onOpenSettings(tab);
+  };
   const dismissWhatsNew = () => { if (releaseNotes[0]) write(viewState, WHATS_NEW_PREFERENCE, releaseNotes[0].id); setWhatsNew(undefined); };
   return <>
     {!decided && <FirstRun collections={collections} collectionsLoaded={collectionsLoaded} onDecision={show => {
       setDecided(true);
       if (show) setWelcome(true); else write(viewState, WELCOME_PREFERENCE, 'existing');
     }}/>}
-    {welcome && <Welcome viewState={viewState} onClose={closeWelcome}
-      onSubscription={() => { closeWelcome(); onOpenSettings('subscriptions'); }}
-      onClaude={() => { closeWelcome(); onOpenSettings('agents'); requestAnimationFrame(() => document.getElementById('claude-settings')?.scrollIntoView?.({ block: 'start' })); }}
-      onTask={() => { closeWelcome(); requestAnimationFrame(() => invokeAction('task.new')); }}/>}
+    {welcome && <Welcome viewState={viewState} collections={collections} onClose={closeWelcome}
+      onRunners={() => setupSettings('runners')}
+      onSubscription={() => setupSettings('subscriptions')}
+      onClaude={() => { setupSettings('agents'); requestAnimationFrame(() => document.getElementById('claude-settings')?.scrollIntoView?.({ block: 'start' })); }}
+      onTask={() => { closeWelcome(); requestAnimationFrame(() => invokeAction('task.new')); }}
+      onWorkspace={onWorkspace ? id => { closeWelcome(); onWorkspace(id); } : undefined}/>}
     {whatsNew && <WhatsNew releases={whatsNew.releases} focus={whatsNew.asked} updated={whatsNew.updated} failed={whatsNew.failed} onDismiss={dismissWhatsNew} onUpdates={() => { setWhatsNew(undefined); openUpdates(); }}/>}
     {docs && <Suspense fallback={null}><DocsViewer key={docs} initial={docs} onClose={() => setDocs('')}/></Suspense>}
     {feedback && <Suspense fallback={null}><FeedbackDialog host={host} shot={feedback} sessionId={sessionId} onClose={() => setFeedback(undefined)}/></Suspense>}
@@ -133,8 +148,17 @@ function Keys({ keys }: { keys: string[] }) {
   return <span className="onboarding-keys">{keys.map((key, i) => <kbd key={i}>{key}</kbd>)}</span>;
 }
 
-function Welcome({ viewState, onClose, onSubscription, onClaude, onTask }: { viewState?: ViewStateStore; onClose(): void; onSubscription(): void; onClaude(): void; onTask(): void }) {
+function Welcome({ viewState, collections, onClose, onRunners, onSubscription, onClaude, onTask, onWorkspace }: {
+  viewState?: ViewStateStore; collections: readonly Collection[]; onClose(): void; onRunners(): void;
+  onSubscription(): void; onClaude(): void; onTask(): void; onWorkspace?(id: string): void;
+}) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const runner = useRunner();
+  const display = useDisplayDetail(viewState);
+  const [behavior, setBehavior] = useState(() => readDefaultBehavior(viewState));
+  const example = BEHAVIOR_PROFILES.find(profile => profile.id === behavior)?.example;
+  const [preferenceError, setPreferenceError] = useState('');
+  const availableWorkspaces = collections.filter(collection => collection.state === 'ready');
   const lessons = useMemo(() => essentialKeys(readKeymap(viewState), shortcut('Mod+P'), binding => displayBinding(binding)), [viewState]);
   useEffect(() => { const node = dialog.current; if (node && !node.open) node.showModal(); node?.querySelector<HTMLElement>('[data-autofocus]')?.focus(); }, []);
   return <DraggableDialog ref={dialog} className="onboarding-welcome" aria-labelledby="onboarding-welcome-title" onCancel={event => { event.preventDefault(); onClose(); }}>
@@ -145,16 +169,50 @@ function Welcome({ viewState, onClose, onSubscription, onClaude, onTask }: { vie
     <p className="onboarding-lede">Agents work in workspaces: your repositories, each on its own branch. They run on this machine with your own subscription, and come back to you when they need you.</p>
     <ol className="onboarding-steps">
       <li>
+        <span className="onboarding-step-icon" aria-hidden="true"><Icon name="processes" size={16}/></span>
+        <div><h3>Connect a Runner</h3>
+          <p role="status">{runner.error ? 'Disconnected. Open Runners to check the connection and retry.' : runner.info ? 'Runner connected and ready.' : 'Waiting for the Runner…'}</p>
+        </div>
+        <button type="button" onClick={onRunners}>Manage Runners</button>
+      </li>
+      <li>
         <span className="onboarding-step-icon" aria-hidden="true"><Icon name="card" size={16}/></span>
         <div><h3>Connect your agents</h3>
           <p><strong>Claude:</strong> add an Anthropic API key. It is the way Anthropic documents for apps built on its Agent SDK, like Lazybox; your own Claude Code sign-in also works, but Anthropic has not confirmed it for such apps. <strong>Codex:</strong> sign in with your ChatGPT plan.</p>
           <AgentReadiness/></div>
         <div className="onboarding-step-actions"><button className="primary" onClick={onClaude}>Add an API key</button><button onClick={onSubscription}>Sign in to Codex</button></div>
       </li>
+      <li className="onboarding-choice">
+        <span className="onboarding-step-icon" aria-hidden="true"><Icon name="sliders" size={16}/></span>
+        <div><DisplayPresetPicker value={display.preset} onChange={preset => {
+          try {
+            display.save({ preset });
+            writeActivityDefault(viewState, DISPLAY_PRESETS.find(choice => choice.id === preset)!.activity);
+            setPreferenceError('');
+          } catch { setPreferenceError('Could not save your display choice. Try again in Settings → Appearance.'); }
+        }}/></div>
+      </li>
+      <li className="onboarding-choice">
+        <span className="onboarding-step-icon" aria-hidden="true"><Icon name="agent" size={16}/></span>
+        <div><label className="setup-choice">Agent personality
+          <select value={behavior} onChange={event => {
+            const next = event.target.value;
+            try { saveDefaultBehavior(viewState, next); setBehavior(next); setPreferenceError(''); }
+            catch { setPreferenceError('Could not save your personality choice. You can choose it when starting a conversation.'); }
+          }}><BehaviorOptions/></select></label>
+          <div className="display-preview" aria-label="Personality preview"><p><strong>You</strong> · Fix the failing test.</p><div><strong>Agent</strong> · {example}</div></div>
+          <p>Change this when you start a task or conversation.</p>
+        </div>
+      </li>
       <li>
         <span className="onboarding-step-icon" aria-hidden="true"><Icon name="repository" size={16}/></span>
         <div><h3>Start a task</h3><p>Pick one or more repositories, an agent and what to do. Lazybox makes the task its workspace, on its own branches, never your checkout.</p></div>
-        <button onClick={onTask}>New task</button>
+        <div className="onboarding-step-actions"><button onClick={onTask} disabled={!runner.info || !!runner.error}>New task</button>
+          {onWorkspace && availableWorkspaces.length > 0 && <label className="setup-choice">Open a workspace<select value="" onChange={event => { if (event.target.value) onWorkspace(event.target.value); }}>
+            <option value="">Choose a workspace…</option>
+            {availableWorkspaces.map(collection => <option value={collection.id} key={collection.id}>{collection.name}</option>)}
+          </select></label>}
+        </div>
       </li>
       <li className="onboarding-keys-step">
         <span className="onboarding-step-icon" aria-hidden="true"><Icon name="keyboard" size={16}/></span>
@@ -169,9 +227,10 @@ function Welcome({ viewState, onClose, onSubscription, onClaude, onTask }: { vie
         </div>
       </li>
     </ol>
+    {preferenceError && <p role="alert">{preferenceError}</p>}
     <footer>
       <button type="button" className="onboarding-docs" onClick={() => openOnboarding('docs')}>Read the documentation <Icon name="notes" size={12}/></button>
-      <small>Reopen this from Help (?) in the header.</small>
+      <small>Skip any optional step and return from Help.</small>
       <button className="primary" data-autofocus onClick={onClose}>Get started</button>
     </footer>
   </DraggableDialog>;
@@ -182,8 +241,9 @@ function Welcome({ viewState, onClose, onSubscription, onClaude, onTask }: { vie
  * uses: "Claude Code 2.1.311 installed · signed in", "Codex not installed".
  */
 function AgentReadiness() {
-  const { report } = useProviderAvailability();
-  if (!report) return null;
+  const { report, error, checking, refresh } = useProviderAvailability();
+  if (error) return <p className="onboarding-provider-check">Could not check agent readiness. <button type="button" onClick={refresh} disabled={checking}>Retry check</button></p>;
+  if (!report) return <p role="status" className="onboarding-provider-check">Checking agent readiness…</p>;
   return <ul className="onboarding-agents" aria-label="Agents on this computer">
     {report.providers.filter(p => !isAcp(p.provider) || p.installed).map(p => <li key={p.provider} className={p.state === 'ready' ? 'ready' : 'missing'}>
       <Icon name={p.state === 'ready' ? 'check' : p.installed ? 'alert' : 'skip'} size={12}/><span>{providerLine(p)}</span>

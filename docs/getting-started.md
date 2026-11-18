@@ -85,6 +85,14 @@ running even then, and the next Runner picks them up again.
 
 ## First launch
 
+The welcome checks your Runner and agent readiness, shows where to connect
+accounts, and takes you to an existing workspace or a new task. Preview
+**Focused**, **Standard**, or **Power user** to choose how much detail the app
+shows. Preview agent personalities against the same example prompt and pick
+the default for new tasks and conversations. Both choices can be changed
+later. Optional steps can be skipped and reopened from Help.
+
+
 **The installed app sets up its Runner first.** The first time it opens, a
 small *Welcome to Lazybox* window explains the Runner, the background service
 your agents run in (it starts when you log in, so agents keep working when the

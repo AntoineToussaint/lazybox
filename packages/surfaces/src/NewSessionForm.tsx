@@ -1,3 +1,4 @@
+import { BehaviorOptions, behaviorForProvider, CHECK_IN_FIRST, readDefaultBehavior, saveDefaultBehavior } from './BehaviorProfile';
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
 import { SubscriptionOptions } from './SubscriptionGroups';
 import type { RunnerClient } from '@lazybox/client-core';
@@ -43,14 +44,11 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
   const [model, setModel] = useState(remembered.model || '');
   const [gateway, setGateway] = useState(remembered.gateway || '');
   const [instructions, setInstructions] = useState('');
-  const [behaviorProfile, setBehaviorProfile] = useState(() => {
-    const saved = readLaunchChoices(viewState).behaviorProfile || '';
-    return saved === 'check-in-first-v1' && provider !== 'claude' && provider !== 'codex' ? '' : saved;
-  });
+  const [behaviorProfile, setBehaviorProfile] = useState(() => behaviorForProvider(readDefaultBehavior(viewState), provider));
   const quickStarted = useRef(false);
   const [permission, setPermission] = useState('');
   const [workflow, setWorkflow] = useState('execute');
-  const checkInFirst = behaviorProfile === 'check-in-first-v1';
+  const checkInFirst = behaviorProfile === CHECK_IN_FIRST;
   const [opening, setOpening] = useState(false);
   const openingRef = useRef(false);
 
@@ -67,7 +65,7 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
       const options = { model, permission: checkInFirst ? 'read-only' : permission, workflow, gatewayId: gateway, rotationProfileIds: [], noRotation: !rotate, instructions, behaviorProfile: assistant ? '' : behaviorProfile };
       const result = assistant ? await api.openAssistant({ profileId: selectedProfile, purpose, context: assistantContext, collectionId, options }, { signal }) : await api.openSession({ profileId: selectedProfile, cwd: collectionId || emptyWorkspace ? '' : cwd, collectionId, emptyWorkspace, options }, { signal });
       if (!result.session) throw new Error('Runner did not return a session');
-      if (!signal.aborted) { try { writeLaunchChoices(viewState, { provider, profile: selectedProfile, model, gateway, behaviorProfile }); } catch { /* Session remains usable if local preferences cannot be saved. */ } onStarted(result.session.id); }
+      if (!signal.aborted) { try { writeLaunchChoices(viewState, { provider, profile: selectedProfile, model, gateway, behaviorProfile }); if (!assistant) saveDefaultBehavior(viewState, behaviorProfile); } catch { /* Session remains usable if local preferences cannot be saved. */ } onStarted(result.session.id); }
     } catch (e) { if (!signal.aborted) onError(String(e)); }
     finally { if (!signal.aborted) { openingRef.current = false; setOpening(false); } }
   };
@@ -109,7 +107,7 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
     <p>{assistant ? `${purposeLabel(purpose)}. This conversation runs on the Runner.` : emptyWorkspace ? 'Start a conversation with room to create files. No repository needed.' : 'Connect to your project and start working.'}</p>
     <form onSubmit={open} className="open-form">
       <div className="setup-row">
-        <AgentPicker value={provider} disabled={!info || opening} onChange={next => { setProvider(next); setProfile(''); setModel(''); setGateway(''); if (checkInFirst && next !== 'claude' && next !== 'codex') setBehaviorProfile(''); }}/>
+        <AgentPicker value={provider} disabled={!info || opening} onChange={next => { setProvider(next); setProfile(''); setModel(''); setGateway(''); setBehaviorProfile(behaviorForProvider(behaviorProfile, next)); }}/>
         <label>Account profile<select value={selectedProfile} disabled={!profiles.length || opening} onChange={e => setProfile(e.target.value)}>
           <SubscriptionOptions profiles={profiles}/>
         </select></label>
@@ -131,10 +129,7 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
       </select></label>
       {(permission === 'yolo' || (!permission && runnerSettings?.permission === 'yolo')) && !assistant && !checkInFirst && <small>Full tool access for this session. Existing conversations keep their original permissions.</small>}
       {!assistant && <label>Behavior profile<select disabled={opening} value={behaviorProfile} onChange={event => setBehaviorProfile(event.target.value)}>
-        <option value="">Default behavior</option>
-        <option value="balanced-v2">Balanced · inspect, then act when clear</option>
-        <option value="hands-on-v2">Hands-on · proceed through reversible choices</option>
-        {(provider === 'codex' || provider === 'claude') && <option value="check-in-first-v1">Check in first · review a plan before edits</option>}
+        <BehaviorOptions provider={provider}/>
       </select></label>}
       {checkInFirst && <small>Starts read only. Approve the plan when you’re ready. Use the session menu to change permissions if it stays read only.</small>}
       <details className="session-options">

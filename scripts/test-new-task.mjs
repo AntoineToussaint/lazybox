@@ -121,6 +121,7 @@ try {
       await page.screenshot({ path: '.cache/new-sheet-page-dark.png' });
 
       // Enter in the message: the workspace, then the conversation, then the message — once each.
+      await sheet.getByLabel('Personality').selectOption('hands-on-v2');
       const before = { prepare: since('PrepareWorkspace').length, open: since('OpenSession').length, apply: since('Apply').length };
       await prompt.focus(); await page.keyboard.press('Enter');
       await expect(sheet).toHaveCount(0);
@@ -128,6 +129,7 @@ try {
       assert.equal(since('PrepareWorkspace').length, before.prepare + 1);
       assert.equal(since('OpenSession').length, before.open + 1);
       const prepare = since('PrepareWorkspace').at(-1).body, open = since('OpenSession').at(-1).body, apply = since('Apply').at(-1).body;
+      assert.equal(open.options.behaviorProfile, 'hands-on-v2');
       assert.equal(prepare.name, 'Add a response cache to the API');
       assert.deepEqual(prepare.repositoryIdentities, ['github:fixture-team/api', 'github:fixture-team/web']);
       assert.equal(prepare.branch, 'feature/response-cache');

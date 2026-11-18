@@ -1,3 +1,4 @@
+import { useDisplayDetail } from './display-detail';
 import { agentIcon, agentTitle } from './providers';
 import { conversationProvider, conversationTitle } from './conversation-model';
 import { LeaderMenu } from './LeaderMenu';
@@ -205,6 +206,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const [repositoryWorkspace, setRepositoryWorkspace] = useState<Collection>();
   const [navigatorOpen, setNavigatorOpen] = useState(false);
   const [mobilePanelId, setMobilePanelId] = useState('');
+  const display = useDisplayDetail(viewState);
   const [settings, setSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('subscriptions');
   const [newSession, setNewSession] = useState(false);
@@ -978,7 +980,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     shown={narrow ? panel.id === mobilePanel?.id : frontPanels.has(panel.id)}/>;
   const kindsShown = new Map<string, 'shown' | 'window'>([...detachedPanels.map(panel => [panel.kind, 'window'] as const), ...page.popouts.flatMap(group => group.panels.map(panel => [panel.kind, 'window'] as const)), ...shown.filter(panel => !page.popouts.some(group => group.panels.includes(panel)) && !panel.detached).map(panel => [panel.kind, 'shown'] as const)]);
 
-  return <WorkbenchContext.Provider value={workbench}><main className="workspace-shell">
+  return <WorkbenchContext.Provider value={workbench}><main className="workspace-shell" data-workspace-details={display.workspaceDetails}>
     <LeaderMenu hint={keyboardHint}/>
     <CommandCenter viewState={viewState} navigator={navigator}/>
     <WorkspaceHeader app={fixedWorkspaceId ? undefined : host?.app} pages={layout.pages} selectedPage={page.id} settings={settings} pending={!!pending} fixedWorkspace={!!fixedWorkspaceId} navigatorOpen={navigatorOpen}
@@ -1077,7 +1079,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       </>}
     <PeekHost navigation={{ showSession, showModule: kind => void showModule(kind), showTerminal, openArtifact: (collectionId, artifactId) => { if (!openArtifact({ collectionId, artifactId })) showModule('artifacts'); },
       openFile: (collectionId, path, line) => { if (!workbench || collectionId !== workspaceID) return false; workbench.open(path, { line, focus: true }); return true; } }}/>
-    <Onboarding viewState={viewState} collections={collections} collectionsLoaded={catalogLoaded} automatic={!fixedWorkspaceId} host={host} sessionId={page.selection.sessionId} onOpenSettings={tab => { if (fixedWorkspaceId) return; setSettingsTab(tab); setSettings(true); }}/>
+    <Onboarding viewState={viewState} collections={collections} collectionsLoaded={catalogLoaded} settingsOpen={settings} onWorkspace={id => select({ collectionId: id, sessionId: '', commandId: '' })} automatic={!fixedWorkspaceId} host={host} sessionId={page.selection.sessionId} onOpenSettings={tab => { if (fixedWorkspaceId) return; setSettingsTab(tab); setSettings(true); }}/>
     {quickOpen && workbench && <QuickOpen key={workbench.workspaceId} workbench={workbench} onClose={() => setQuickOpen(false)}/>}
     {quickLook && workspaceID && <FilePreview key={`${workspaceID}:${quickLook.path}`} workspaceId={workspaceID} reference={quickLook} viewState={viewState} onClose={() => setQuickLook(undefined)}/>}
     {workspaceID && <ReviewActions workspaceId={workspaceID} sessionId={page.selection.collectionId === workspaceID ? page.selection.sessionId : ''}/>}

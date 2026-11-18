@@ -1,0 +1,8 @@
+.display-presets{display:flex;flex-wrap:wrap;gap:6px 16px;margin:0;padding:0;border:0}
+.display-presets legend{font-weight:600;margin-bottom:6px}
+.display-presets label{display:inline-flex;align-items:center;gap:5px;cursor:pointer}
+.display-preview{margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-sunken);color:var(--text-muted);line-height:1.5}
+.display-preview p{margin:0 0 6px}
+.display-preview strong{color:var(--text)}
+.workspace-shell[data-workspace-details="false"] .workspace-label>.workspace-repo-names:not(.is-empty),
+.workspace-shell[data-workspace-details="false"] .workspace-label>.workspace-git:not(.has-problem){display:none}

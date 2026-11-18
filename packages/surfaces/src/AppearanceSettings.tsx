@@ -1,3 +1,6 @@
+import { DISPLAY_PRESETS, useDisplayDetail } from './display-detail';
+import { DisplayPresetPicker } from './DisplayPresetPicker';
+import { writeActivityDefault } from './activity-detail';
 import { useEffect, useMemo, useState } from 'react';
 import type { ViewStateStore, ZoomHost } from '@lazybox/platform';
 import { SettingsGroup, SettingsHeader, SettingsRow, settingsError } from './settings-parts';
@@ -73,6 +76,7 @@ export function AppearanceSettings({ store, zoom }: { store?: ViewStateStore; zo
   const { theme: shown, system } = useAppearance();
   const { api } = useRunner();
   const user = useUserThemes(true);
+  const display = useDisplayDetail(store);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState('');
@@ -148,6 +152,15 @@ export function AppearanceSettings({ store, zoom }: { store?: ViewStateStore; zo
     {error && <p className="settings-error" role="alert">{error}</p>}
     <p className="appearance-status" role="status">{status}</p>
 
+    <SettingsGroup title="Information detail" description="Choose a starting point for the workspace sidebar and conversations. Tool activity can still be customized in Settings → Chat.">
+      <DisplayPresetPicker value={display.preset} onChange={preset => {
+        display.save({ preset });
+        writeActivityDefault(store, DISPLAY_PRESETS.find(choice => choice.id === preset)!.activity);
+      }}/>
+      <label className="settings-row"><span className="settings-row-label">Show repository and Git details in the sidebar</span>
+        <input type="checkbox" role="switch" checked={display.workspaceDetails} onChange={event => display.customize({ workspaceDetails: event.target.checked })}/>
+      </label>
+    </SettingsGroup>
     <SettingsGroup title="Theme" description="System follows your computer's light or dark appearance, using the theme you pick for each.">
       <SettingsRow label="Appearance" description={preferences.mode === 'system' ? `Following the system: ${system} now.` : undefined}>
         <Segmented<Mode> label="Appearance" value={preferences.mode} onChange={mode => set({ mode })} options={[{ id: 'system', label: 'System' }, { id: 'light', label: 'Light' }, { id: 'dark', label: 'Dark' }]}/>

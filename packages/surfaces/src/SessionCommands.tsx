@@ -1,3 +1,4 @@
+import { exactTime, relativeTime, useActivityClock, validActivityTime } from './ActivityTime';
 import { useState, type FormEvent, type ReactNode } from 'react';
 import type { FileLink } from './file-reference';
 import type { OpenModifiers } from './file-links';
@@ -22,6 +23,7 @@ export function SessionCommands({ api, session, sessionID, commands, currentComm
   onSendToAgent?(text: string): string;
   onOpenViewer?(sessionId: string, commandId: string): void | Promise<void>;
 }) {
+  const now = useActivityClock();
   const [shell, setShell] = useState('');
   const startCommand = async (event: FormEvent) => {
     event.preventDefault();
@@ -36,7 +38,14 @@ export function SessionCommands({ api, session, sessionID, commands, currentComm
       <button disabled={!session || session.closed}>Run</button>
     </form>
     <div className="command-tabs">
-      {commands.map(c => <button key={c.id} className={currentCommand === c.id ? 'selected' : ''} onClick={() => onSelect(c.id)}>{c.done ? '◦' : '●'} {c.title.slice(0, 28)}</button>)}
+      {commands.map(command => {
+        const at = Number(command.startedAtUnixMillis);
+        const exact = validActivityTime(at) ? exactTime(at) : '';
+        return <button key={command.id} className={currentCommand === command.id ? 'selected' : ''} title={exact || undefined}
+          aria-label={exact ? `${command.title}, started ${exact}` : command.title} onClick={() => onSelect(command.id)}>
+          {command.done ? '◦' : '●'} {command.title.slice(0, 28)}{exact && <time dateTime={new Date(at).toISOString()}> · {relativeTime(at, now)}</time>}
+        </button>;
+      })}
     </div>
     {currentCommand && <>
       <Console key={currentCommand} api={api} command={currentCommand} viewState={viewState} onError={onError} onSendToAgent={onSendToAgent}

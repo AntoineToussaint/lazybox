@@ -235,6 +235,7 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
     // Thinking is one quiet line ("Thinking…", then "Thought for 4s"); what
     // the agent thought is private and never shown.
     const at = Date.parse(record.capturedAt);
+    const when = Number.isFinite(at) ? { at } : {};
     if (event.type === 'activity' && event.status === 'thinking') {
       startThinking(messages ?? state.messages, replaceAt, add, owned, event.turnId, record.cursor.toString(), Number.isFinite(at) ? at : undefined);
       next.appendToLast = false;
@@ -318,7 +319,7 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
       const data = providerData(event.providerDataJson);
       const origin = messageOrigin(data.origin) ?? legacyOrigin(event.operationId);
       if (origin) {
-        accept({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, origin, ...(event.operationId ? { operationId: event.operationId } : {}), ...(Array.isArray(data.files) && data.files.length ? { files: data.files } : {}) });
+        accept({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, ...when, origin, ...(event.operationId ? { operationId: event.operationId } : {}), ...(Array.isArray(data.files) && data.files.length ? { files: data.files } : {}) });
         continue;
       }
     }
@@ -334,12 +335,13 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
     const files = event.type === 'operation_accepted' ? providerData(event.providerDataJson).files as TranscriptMessage['files'] : undefined;
     if (event.type === 'message_delta' && event.text) {
       if (next.appendToLast && last?.type === 'message_delta' && last.turnId === event.turnId) {
-        if (owned.has(last)) last.text += event.text;
-        else replaceLast({ ...last, text: last.text + event.text });
-      } else add({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId });
+        const firstKnownTime = last.at === undefined ? when : {};
+        if (owned.has(last)) { last.text += event.text; Object.assign(last, firstKnownTime); }
+        else replaceLast({ ...last, text: last.text + event.text, ...firstKnownTime });
+      } else add({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, ...when });
       next.appendToLast = true;
     } else if (event.type === 'operation_accepted' && (event.text || files?.length)) {
-      accept({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, files, ...(event.operationId ? { operationId: event.operationId } : {}), ...(ranCommand(event.text, next.catalog) ? { command: true } : {}) });
+      accept({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, files, ...when, ...(event.operationId ? { operationId: event.operationId } : {}), ...(ranCommand(event.text, next.catalog) ? { command: true } : {}) });
     } else if (event.type === 'failure' && (event.text || files?.length)) {
       const sentence = failureSentence(event.status, event.text);
       add({ id: record.cursor.toString(), type: event.type, text: sentence, turnId: event.turnId, files, ...(event.text.trim() && sentence !== event.text.trim() ? { detail: event.text.trim() } : {}) });

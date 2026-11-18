@@ -21,6 +21,8 @@ none of it is ever saved.
 
 `⌥Space` works too, held or tapped, as before. Pausing to think is fine: what
 you said before the pause stays, and the words after it follow.
+When a browser yields an empty speech result during a pause, Lazybox keeps
+the words it already heard.
 
 `Right ⌥` with any other key is still an ordinary `⌥`: `⌥e` for an accent or
 `⌥←` to move by word starts nothing, and a quick tap does nothing either.

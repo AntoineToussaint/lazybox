@@ -69,8 +69,8 @@ const (
 // on the device: they are not preferences a person types.
 var AppearanceFields = []appearanceField{
 	{Name: "mode", App: "mode", Kind: fieldEnum, Enum: []string{"system", "light", "dark"}, Description: "system follows the computer's light or dark appearance"},
-	{Name: "dark-theme", App: "darkTheme", Kind: fieldTheme, Description: "the theme in dark mode: dark, dark-high-contrast, or user:<file name> for one of your themes"},
-	{Name: "light-theme", App: "lightTheme", Kind: fieldTheme, Description: "the theme in light mode: light, solarized-light, or user:<file name> for one of your themes"},
+	{Name: "dark-theme", App: "darkTheme", Kind: fieldTheme, Description: "a built-in dark theme ID or user:<file name> for one of your themes"},
+	{Name: "light-theme", App: "lightTheme", Kind: fieldTheme, Description: "a built-in light theme ID or user:<file name> for one of your themes"},
 	{Name: "accent", App: "accent", Kind: fieldColor, Description: "buttons, selection, focus and links: #rgb, #rrggbb, #rrggbbaa, rgb() or hsl(); leave out for the theme's"},
 	{Name: "min-contrast", App: "minContrast", Kind: fieldNumber, Min: 0, Max: 21, Description: "0 (off), 3, 4.5 (WCAG AA, the default) or 7"},
 	{Name: "motion", App: "motion", Kind: fieldEnum, Enum: []string{"system", "reduce", "full"}, Description: "reduce turns off animations and smooth scrolling"},
@@ -88,7 +88,14 @@ var AppearanceFields = []appearanceField{
 }
 
 // builtinThemes are the app's themes and their appearance (appearance/themes.ts).
-var builtinThemes = map[string]string{"dark": "dark", "light": "light", "dark-high-contrast": "dark", "solarized-light": "light"}
+var builtinThemes = map[string]string{
+	"dark": "dark", "dark-high-contrast": "dark", "midnight-blue": "dark", "pine": "dark",
+	"ember": "dark", "aubergine": "dark", "graphite": "dark", "deep-ocean": "dark",
+	"rosewood": "dark", "ink": "dark",
+	"light": "light", "solarized-light": "light", "paper": "light", "glacier": "light",
+	"sage": "light", "rose-quartz": "light", "lavender-mist": "light", "sand": "light",
+	"sea-glass": "light", "light-high-contrast": "light",
+}
 
 var (
 	fontPattern  = regexp.MustCompile(`^[\w\s,'"\-.]{0,200}$`)
@@ -290,8 +297,8 @@ func appearanceStarter() string {
 	return fmt.Sprintf(`#
 # appearance:                # Settings → Appearance and → Chat write here too
 #   mode: system             # system, light or dark
-#   dark-theme: dark         # dark, dark-high-contrast, or user:<file> (your themes folder)
-#   light-theme: light       # light, solarized-light, or user:<file>
+#   dark-theme: dark         # a built-in dark theme ID or user:<file>
+#   light-theme: light       # a built-in light theme ID or user:<file>
 #   accent: "#7fb0f0"        # quoted: YAML reads an unquoted # as a comment
 #   density: comfortable     # compact, comfortable or relaxed
 #   interface-font: Inter

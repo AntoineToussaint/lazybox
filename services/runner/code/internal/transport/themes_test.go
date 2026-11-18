@@ -63,7 +63,7 @@ func TestThemeRPCsListAndCreateInTheStateThemesFolder(t *testing.T) {
 
 // Themes are the owner's: no scoped credential may read or write them.
 func TestThemeRPCsAreOwnerOnly(t *testing.T) {
-	for _, method := range []string{pb.RunnerService_ListThemes_FullMethodName, pb.RunnerService_CreateTheme_FullMethodName} {
+	for _, method := range []string{pb.RunnerService_ListThemes_FullMethodName, pb.RunnerService_CreateTheme_FullMethodName, pb.RunnerService_DeleteTheme_FullMethodName} {
 		_, agent := agentRPCs[method]
 		_, terminal := terminalRPCs[method]
 		_, device := deviceRPCs[method]

@@ -92,7 +92,7 @@ function ToolGroup({ item }: { item: Exclude<ToolItem, { kind: 'call' }> }) {
   const [open, setOpen] = useState(detail === 'verbose' && item.kind === 'edits' && item.entries.length <= OPEN_EDITS);
   const { text, meta, running } = describeGroup(item, root);
   return <div className="tool-line tool-group" role="listitem" data-state={running ? 'running' : 'completed'}>
-    <button type="button" className="tool-line-row" aria-expanded={open} onClick={() => setOpen(!open)}>
+    <button type="button" className="tool-line-row" aria-expanded={open} onClick={event => { if (event.detail <= 1) setOpen(value => !value); }}>
       <Chevron open={open}/><StateIcon kind={item.kind === 'edits' ? 'edit' : 'read'} state={running ? 'running' : 'completed'}/>
       <span className="tool-line-title" onPointerEnter={titleWhenTruncated(text)}><span className="tool-verb">{text}</span></span>
       <Meta meta={meta}/>
@@ -126,7 +126,7 @@ function TurnLine({ entries, latestPlan }: { entries: readonly ToolEntry[]; late
 
 function Summary({ className, open, onToggle, running, icon, failed, text, meta, calls, live }: { className: string; open: boolean; onToggle(): void; running: boolean; icon: string; failed?: boolean; text: string; meta: string[]; calls?: ToolEntry[]; live?: ToolEntry }) {
   return <div className={`tool-line tool-summary ${className}`} role="listitem" data-state={running ? 'running' : failed ? 'failed' : 'completed'}>
-    <button type="button" className="tool-line-row" aria-expanded={open} aria-label={`${text}${running ? '…' : ''}${meta.length ? ' · ' + meta.join(' · ') : ''}`} onClick={onToggle}>
+    <button type="button" className="tool-line-row" aria-expanded={open} aria-label={`${text}${running ? '…' : ''}${meta.length ? ' · ' + meta.join(' · ') : ''}`} onClick={event => { if (event.detail <= 1) onToggle(); }}>
       <Chevron open={open}/><span className="tool-icon" data-state={failed ? 'failed' : undefined} aria-hidden="true"><Icon name={icon} size={13}/></span>
       <span className="tool-line-title" onPointerEnter={titleWhenTruncated(text)}><span className="tool-verb">{text}{running ? '…' : ''}</span></span>
       <Meta meta={meta}/>
@@ -150,7 +150,7 @@ export const ToolLine = memo(function ToolLine({ entry }: { entry: ToolEntry }) 
   </div>;
   return <div className="tool-line" role="listitem" data-state={entry.status} data-kind={kind} data-tool-id={entry.id}>
     {/* No tooltip repeating the line: it would cover the next one. The whole line on hover only when it is cut. */}
-    <button type="button" className="tool-line-row" aria-expanded={open} aria-label={`${label}${title.meta.length ? ' · ' + title.meta.join(' · ') : ''} · ${stateLabel(entry)}`} onClick={() => setOpen(!open)}>
+    <button type="button" className="tool-line-row" aria-expanded={open} aria-label={`${label}${title.meta.length ? ' · ' + title.meta.join(' · ') : ''} · ${stateLabel(entry)}`} onClick={event => { if (event.detail <= 1) setOpen(value => !value); }}>
       <Chevron open={open}/><StateIcon kind={kind} state={entry.status}/>
       <span className="tool-line-title" onPointerEnter={titleWhenTruncated(label)}><span className="tool-verb">{title.verb}</span>{title.target && <> {title.code ? <code className={title.aside ? 'tool-target tool-aside' : 'tool-target'}>{title.target}</code> : <span className="tool-target">{title.target}</span>}</>}</span>
       <Meta meta={title.meta} failed={entry.status === 'failed'}/>

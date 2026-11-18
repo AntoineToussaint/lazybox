@@ -281,12 +281,23 @@ try{
  assert.ok(wide.rail>0&&wide.rail<=200,`a ${wide.rail}px outline`);
  await expect(reportPage.getByRole('navigation',{name:'On this page'})).toBeVisible();
  await expect(reportPage.locator('.doc-contents-menu')).toBeHidden();
+ const sideOutline = reportPage.getByRole('navigation', {name:'On this page'});
+ await sideOutline.locator('summary').click();
+ await expect(sideOutline.getByRole('link')).toHaveCount(0);
+ await sideOutline.locator('summary').click();
+ await expect(sideOutline.getByRole('link').first()).toBeVisible();
+ await reader.setViewportSize({width:1500,height:800});
+ const widths = await reportPage.evaluate(article => ({
+   prose: article.querySelector('.doc-body > p').getBoundingClientRect().width,
+   wide: article.querySelector('.doc-body > .mermaid-block, .doc-body > .doc-table, .doc-body > .code-block')?.getBoundingClientRect().width,
+ }));
+ assert.ok(widths.wide > widths.prose, 'wide blocks use space beyond the prose measure');
  // Below 900 px of reader the outline is a toggle, and the text takes its room.
  await reader.setViewportSize({width:820,height:800});
  await expect(reportPage.getByRole('navigation',{name:'On this page'})).toBeHidden();
  const narrow=await layout();
  assert.equal(narrow.rail,0);
- assert.ok(narrow.text>=820-2*36-2&&narrow.text>wide.text,`the text column grows to ${narrow.text}px without the outline (${wide.text}px beside it)`);
+ assert.ok(narrow.text>=820-2*36-2,`the text column is ${narrow.text}px without the outline (${wide.text}px beside it)`);
  await reportPage.locator('.doc-contents-menu > summary').click();
  const outline=reader.getByRole('group',{name:'On this page menu'});
  await expect(outline.getByRole('button')).toHaveCount(7);

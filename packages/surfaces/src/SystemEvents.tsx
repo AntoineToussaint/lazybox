@@ -56,7 +56,7 @@ export function SystemEvent({ message: m, agentName, onOpenFile, onContextMenu }
 const NOTICE_LINES: Record<RunnerNotice, string> = {
   'delivery-unknown': 'Runner restarted before a message was confirmed · resend it if it is still needed',
   'outcome-unknown': 'Runner restarted during a command · its outcome is unknown; the agent was told to check',
-  'agent-lost': 'Lazybox restarted after this agent stopped · send a message to resume its session',
+  'agent-lost': 'Lazybox restarted after this agent stopped',
   reverted: '',
   cli: '',
   'pull-request': '',

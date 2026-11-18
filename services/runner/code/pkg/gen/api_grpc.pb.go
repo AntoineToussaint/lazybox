@@ -233,6 +233,7 @@ const (
 	RunnerService_SaveBrowserSettings_FullMethodName          = "/lazybox.bench.v1.RunnerService/SaveBrowserSettings"
 	RunnerService_ClearBrowserData_FullMethodName             = "/lazybox.bench.v1.RunnerService/ClearBrowserData"
 	RunnerService_InstallBrowser_FullMethodName               = "/lazybox.bench.v1.RunnerService/InstallBrowser"
+	RunnerService_DeleteTheme_FullMethodName                  = "/lazybox.bench.v1.RunnerService/DeleteTheme"
 )
 
 // RunnerServiceClient is the client API for RunnerService service.
@@ -751,6 +752,7 @@ type RunnerServiceClient interface {
 	// output Settings → Browser shows. One at a time: a second call returns the
 	// install already running.
 	InstallBrowser(ctx context.Context, in *InfoRequest, opts ...grpc.CallOption) (*CommandStatus, error)
+	DeleteTheme(ctx context.Context, in *DeleteThemeRequest, opts ...grpc.CallOption) (*ThemeFolder, error)
 }
 
 type runnerServiceClient struct {
@@ -2945,6 +2947,16 @@ func (c *runnerServiceClient) InstallBrowser(ctx context.Context, in *InfoReques
 	return out, nil
 }
 
+func (c *runnerServiceClient) DeleteTheme(ctx context.Context, in *DeleteThemeRequest, opts ...grpc.CallOption) (*ThemeFolder, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ThemeFolder)
+	err := c.cc.Invoke(ctx, RunnerService_DeleteTheme_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunnerServiceServer is the server API for RunnerService service.
 // All implementations must embed UnimplementedRunnerServiceServer
 // for forward compatibility.
@@ -3461,6 +3473,7 @@ type RunnerServiceServer interface {
 	// output Settings → Browser shows. One at a time: a second call returns the
 	// install already running.
 	InstallBrowser(context.Context, *InfoRequest) (*CommandStatus, error)
+	DeleteTheme(context.Context, *DeleteThemeRequest) (*ThemeFolder, error)
 	mustEmbedUnimplementedRunnerServiceServer()
 }
 
@@ -4109,6 +4122,9 @@ func (UnimplementedRunnerServiceServer) ClearBrowserData(context.Context, *Clear
 }
 func (UnimplementedRunnerServiceServer) InstallBrowser(context.Context, *InfoRequest) (*CommandStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method InstallBrowser not implemented")
+}
+func (UnimplementedRunnerServiceServer) DeleteTheme(context.Context, *DeleteThemeRequest) (*ThemeFolder, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteTheme not implemented")
 }
 func (UnimplementedRunnerServiceServer) mustEmbedUnimplementedRunnerServiceServer() {}
 func (UnimplementedRunnerServiceServer) testEmbeddedByValue()                       {}
@@ -7923,6 +7939,24 @@ func _RunnerService_InstallBrowser_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_DeleteTheme_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteThemeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).DeleteTheme(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_DeleteTheme_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).DeleteTheme(ctx, req.(*DeleteThemeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunnerService_ServiceDesc is the grpc.ServiceDesc for RunnerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -8757,6 +8791,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InstallBrowser",
 			Handler:    _RunnerService_InstallBrowser_Handler,
+		},
+		{
+			MethodName: "DeleteTheme",
+			Handler:    _RunnerService_DeleteTheme_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

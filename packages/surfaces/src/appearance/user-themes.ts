@@ -77,7 +77,7 @@ function editDistance(a: string, b: string): number {
 }
 
 /** A starting file for a new theme: TOML, every base token, the rest listed as comments. */
-export function themeTemplate(name: string, scheme: 'dark' | 'light', values: Record<string, string>): string {
+export function themeTemplate(name: string, scheme: 'dark' | 'light', values: Record<string, string>, baseTheme: string = scheme): string {
   const base = TOKENS.filter(t => t.base), rest = TOKENS.filter(t => !t.base);
   const line = (n: string) => `${n.includes('-') ? `"${n}"` : n} = "${values[n]}"`;
   return [
@@ -85,7 +85,7 @@ export function themeTemplate(name: string, scheme: 'dark' | 'light', values: Re
     `# Every token is in Settings → Appearance → Token reference.`,
     `name = "${name.replaceAll('"', "'")}"`,
     `appearance = "${scheme}"`,
-    `extends = "${scheme}"`,
+    `extends = "${baseTheme}"`,
     ``,
     `[tokens]`,
     `# The base colours: everything else derives from these.`,

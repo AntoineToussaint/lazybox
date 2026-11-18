@@ -663,6 +663,11 @@ actions:
         if(!body.remove)runnerSettings.prices.push({...body.price,version:'custom-fixture',custom:true});runnerSettings.revision=String(Number(runnerSettings.revision)+1);return json(runnerSettings);
       }
       case 'ListThemes': return json(themeReply());
+      case 'DeleteTheme': {
+        mutations.push({method,body});
+        themeFolder.files = themeFolder.files.filter(file => file.name !== body.file);
+        return json(themeReply());
+      }
       case 'CreateTheme': {
         const name=body.name||'';if(!/^[A-Za-z0-9 ._-]{1,64}$/.test(name)||name.startsWith('.'))return error('invalid_argument','theme name: 1-64 letters, digits, spaces, ".", "_" or "-", not starting with "."');
         const file=name+'.toml';if(themeFolder.files.some(f=>f.name.toLowerCase()===file.toLowerCase()))return error('already_exists',`theme ${file} already exists`);

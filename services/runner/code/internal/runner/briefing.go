@@ -66,6 +66,7 @@ var builtinBriefings = []builtinBriefing{
 		{version: 1, since: "lazybox artifact put", note: "Publish plans, specs and reports you write for the person as Lazybox artifacts: `lazybox artifact put <file|-> --title \"…\" --kind plan|spec|report|notes|other`, and each revision as a new version with `--id ID`."},
 		{version: 2, since: "## Documents you write for the person", note: "Keep those documents in Lazybox, in GitHub-flavoured Markdown: never in an external document tool or connector unless the person names it."},
 		{version: 3, since: "--supersedes", note: "Keep one artifact per topic: merge overlapping ones with `lazybox artifact put <file|-> --title \"…\" --supersedes ID,ID`, or retire one with `lazybox artifact retire ID`; do not leave pointer stubs."},
+		{version: 4, since: "Prefer Mermaid for workflows", note: "Prefer Mermaid for workflows, state transitions and service interactions. Show entry points, decisions and relevant failure paths. Use tables for comparisons and checklists for procedures; link to the source and document assumptions and unverified work."},
 	}},
 	{id: "conversations", text: conversationBriefing, changes: []briefingChange{
 		{version: 1, since: "lazybox conversation new", note: "To start another conversation when the person asks, run `lazybox conversation new --title \"…\" --brief \"…\"` (or `--brief-artifact ID`): the person approves it in one click."},
@@ -117,6 +118,8 @@ func (b *Bench) briefingSections(provider, purpose, workspace string, browser bo
 		for _, s := range builtinBriefings {
 			out = append(out, briefingSection{id: s.id, text: b.cliText(s.text), version: strconv.Itoa(s.version()), changes: s.changes})
 		}
+	} else {
+		dynamic(briefingSection{id: "document-style", heading: "## How to present workflows and decisions", text: documentStyle})
 	}
 	dynamic(briefingSection{id: "browser", text: b.browserBriefing(provider, purpose, workspace, browser)})
 	return out

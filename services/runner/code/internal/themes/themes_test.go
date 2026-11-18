@@ -242,3 +242,30 @@ func TestNormalizeKeepsLocalTimesLocal(t *testing.T) {
 		t.Fatalf("%s\nwant %s", f.JSON, want)
 	}
 }
+
+func TestThemeDeleteRemovesOnlyRegularThemeFiles(t *testing.T) {
+	dir := t.TempDir()
+	name, _, err := Create(dir, "copy", "name = 'Copy'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{"../copy.toml", "copy.txt", ".private.toml"} {
+		if err := Delete(dir, file); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("%s: %v", file, err)
+		}
+	}
+	if err := os.Symlink(name, filepath.Join(dir, "link.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := Delete(dir, "link.toml"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("symlink accepted: %v", err)
+	}
+	for range 2 {
+		if err := Delete(dir, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("theme still present: %v", err)
+	}
+}

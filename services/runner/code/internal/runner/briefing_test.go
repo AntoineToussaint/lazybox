@@ -27,7 +27,7 @@ func TestEachBuiltinSectionTextIsPinnedToItsVersion(t *testing.T) {
 	}{
 		"workspace":     {5, "0da12c2ae8ec8cb0"},
 		"run":           {3, "5e6c4cdceaa73f01"},
-		"documents":     {3, "68862d591a24041e"},
+		"documents":     {4, "44325355139f999d"},
 		"conversations": {2, "9eef1f6b082a54f4"},
 	}
 	if len(pins) != len(builtinBriefings) {
@@ -46,6 +46,20 @@ func TestEachBuiltinSectionTextIsPinnedToItsVersion(t *testing.T) {
 			if len(c.note) > 400 {
 				t.Errorf("%s v%d: a note is one short line (%d bytes)", s.id, c.version, len(c.note))
 			}
+		}
+	}
+}
+
+func TestDocumentStyleIsAvailableToAssistantsAndCodingAgents(t *testing.T) {
+	b, err := New(Config{State: t.TempDir(), CLIDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	for _, purpose := range []string{"coding", "planning"} {
+		sections := b.briefingSections("codex", purpose, "", false)
+		if text := sectionText(sections, "documents") + sectionText(sections, "document-style"); !strings.Contains(text, "Prefer Mermaid") {
+			t.Fatalf("%s agent did not get writing guidance", purpose)
 		}
 	}
 }

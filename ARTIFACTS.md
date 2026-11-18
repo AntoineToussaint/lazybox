@@ -442,3 +442,7 @@ on the artifact side:
   it is a small handler of its own. When the app-wide context menu lands,
   its items move there with one registration under the `message` extension
   point.
+
+
+The reader limits paragraph width on large displays and gives diagrams, code
+blocks and tables more room. The outline beside the document can collapse.

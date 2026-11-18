@@ -30,7 +30,8 @@ export function ResumeBar({ session, canResumeOnSend, onResume, onError }: {
     {session.resumeBlocked
       ? <p>{session.resumeBlocked}</p>
       : canResumeOnSend
-        ? <small>Send a message to continue with this conversation’s saved account and permissions.</small>
+        ? <><small>{session.status === 'interrupted' ? 'The previous agent stopped. Resume to reconnect before sending.' : 'Continue with this conversation’s saved account and permissions.'}</small>
+          <button type="button" disabled={resuming} onClick={() => void resume()}>{resuming ? 'Resuming…' : 'Resume conversation'}</button></>
         : recovery
           ? <OwnershipPanel key={session.id} target={{ sessionId: session.id }} what="Resuming this conversation waits" autoFocus={false} onSettled={() => { setSettled(session.id); refresh(); }}/>
           : <button disabled={resuming || !session.providerReference || !session.capabilities?.resume} onClick={() => void resume()}>{resuming ? 'Resuming…' : 'Resume conversation'}</button>}

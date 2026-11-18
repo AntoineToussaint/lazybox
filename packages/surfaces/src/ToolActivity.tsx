@@ -23,7 +23,7 @@ export function CallRow({call,now,nested=false,focused=false}:{call:ToolCall;now
  const input=call.input&&typeof call.input==='object'?call.input as Record<string,unknown>:undefined;
  const command=typeof input?.command==='string'?input.command:undefined;
  return <details ref={row} className="tool-call" open={expanded||undefined} onToggle={event=>setExpanded(event.currentTarget.open)}>
-  <summary>
+  <summary onClick={event => { if (event.detail > 1) event.preventDefault(); }}>
    <span className={`tool-state ${state}`} role="img" aria-label={call.status==='Result not reported'?'Completion unknown':call.status} title={call.status==='Result not reported'?'No saved completion event':call.status}>{state==='completed'?'✓':state==='failed'?'!':state==='running'?'◌':'○'}</span>
    <span className="tool-call-heading"><strong onPointerEnter={titleWhenTruncated(title)}>{title}</strong><small>{call.name}{call.agent!=='root'&&!nested?' · Sub-agent':''}{state==='running'?' · Running':''}{state==='failed'?' · Failed':''}</small></span>
    <time className="tool-time" dateTime={observed===undefined?undefined:new Date(observed).toISOString()} title={observed===undefined?'Timestamp unavailable':`${call.startedAt===undefined?'Result':'Call'} observed ${new Date(observed).toLocaleString()}`}>{observed===undefined?'—':new Date(observed).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})}</time>

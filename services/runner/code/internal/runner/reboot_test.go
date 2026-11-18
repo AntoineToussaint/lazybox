@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/engine"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sessionhost"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 )
@@ -35,12 +37,13 @@ import (
 
 // rebootFixture is what the fixture Runner set up before the "reboot".
 type rebootFixture struct {
-	Execution    string `json:"execution"`
-	Conversation string `json:"conversation"`
-	Finished     string `json:"finished"`
-	Running      string `json:"running"`
-	Mission      string `json:"mission"`
-	Task         string `json:"task"`
+	Execution     string `json:"execution"`
+	IdleExecution string `json:"idleExecution"`
+	Conversation  string `json:"conversation"`
+	Finished      string `json:"finished"`
+	Running       string `json:"running"`
+	Mission       string `json:"mission"`
+	Task          string `json:"task"`
 }
 
 // fixtureRebootRunner leaves a conversation as a person's day would before
@@ -104,7 +107,15 @@ func fixtureRebootRunner() {
 	if _, _, err = b.Work.Assign(mission.ID, task, work.Human, "assign", work.AttemptPayload{Conversation: conversationOf(e), Execution: e.ID}); err != nil {
 		fail(err)
 	}
-	data, _ := json.Marshal(rebootFixture{Execution: e.ID, Conversation: conversationOf(e), Finished: finished.Status().ID, Running: running.Status().ID, Mission: mission.ID, Task: task})
+	idle, err := b.Open("claude-default", os.Getenv("RUNNER_REPO"), "", accounts.Options{}, "direct", "", "")
+	if err != nil {
+		fail(err)
+	}
+	until("idle provider ready", func() bool {
+		record, err := b.History.Get(ctx, idle.ID)
+		return err == nil && canAutoResume(record.Snapshot, engine.Attachment{})
+	})
+	data, _ := json.Marshal(rebootFixture{Execution: e.ID, IdleExecution: idle.ID, Conversation: conversationOf(e), Finished: finished.Status().ID, Running: running.Status().ID, Mission: mission.ID, Task: task})
 	fmt.Println(string(data))
 	select {}
 }
@@ -189,6 +200,14 @@ func TestRebootBringsBackEverythingAndResumesTheAgent(t *testing.T) {
 		t.Fatalf("a reboot is not a failure to report: %v", err)
 	}
 
+	idle, err := b.History.Successor(ctx, before.IdleExecution)
+	if err != nil || idle.Previous != before.IdleExecution || idle.Snapshot.Closed {
+		t.Fatalf("idle conversation did not resume automatically: %+v, %v", idle, err)
+	}
+	if _, err := b.History.Successor(ctx, before.Execution); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("interrupted turn was resumed without an explicit request: %v", err)
+	}
+
 	// The conversation: whole, ended, and continuable by sending a message.
 	e, err := b.Get(before.Execution)
 	if err != nil {
@@ -223,7 +242,7 @@ func TestRebootBringsBackEverythingAndResumesTheAgent(t *testing.T) {
 			t.Errorf("transcript lost %q: %+v", want, events)
 		}
 	}
-	if !strings.Contains(notice, "restarted") || !strings.Contains(notice, "send a message") {
+	if !strings.Contains(notice, "restarted") || !strings.Contains(notice, "The turn in progress stopped") {
 		t.Fatalf("no notice says what happened and what to do: %q", notice)
 	}
 	// The message queued behind the interrupted turn is still waiting, and says so.

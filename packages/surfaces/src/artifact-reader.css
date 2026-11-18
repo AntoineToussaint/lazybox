@@ -15,16 +15,16 @@ html[data-scheme=light] .artifact-page,html[data-scheme=light] .doc-diff{--reade
    to a readable measure; the outline sits beside it once the reader is wide
    enough to spare it 200 px (900 px), and is the title block's "On this page"
    menu below that. Narrow, the gutters shrink to 16 px. */
-.doc-layout{--measure:76ch;--gutter:clamp(16px,4cqi,36px);display:grid;grid-template-columns:minmax(0,var(--measure));justify-content:center;column-gap:clamp(28px,3.5cqi,48px);padding:24px var(--gutter) 96px;font-family:var(--font-reading);font-size:var(--reading-size)}
+.doc-layout{--measure:76ch;--gutter:clamp(16px,4cqi,36px);display:grid;grid-template-columns:minmax(0,1fr);justify-content:center;column-gap:clamp(16px,2.5cqi,32px);padding:14px var(--gutter) 96px;font-family:var(--font-reading);font-size:var(--reading-size)}
 .doc-column{min-width:0;font-size:var(--reading-size)}
 .doc-toc-rail{display:none}
 @container artifact-reader (min-width:900px){
-  .doc-layout.has-toc{grid-template-columns:minmax(0,var(--measure)) minmax(150px,200px)}
+  .doc-layout.has-toc{grid-template-columns:minmax(0,1fr) minmax(110px,150px)}
   .doc-toc-rail{display:block;min-width:0}
   .doc-meta .doc-contents-menu{display:none}
 }
 @container artifact-reader (max-width:640px){
-  .doc-layout{padding:16px 16px 80px}
+  .doc-layout{padding:12px 16px 80px}
   .doc-body h2{font-size:1.3em}
   .doc-anchor{display:none}
 }
@@ -32,7 +32,7 @@ html[data-scheme=light] .artifact-page,html[data-scheme=light] .doc-diff{--reade
 /* The title block: the title, then one quiet line of who wrote it and when,
    the version, reading time. The kind is the toolbar's; a document's own
    opening h1 that repeats the title is hidden (withoutRepeatedTitle). */
-.doc-title-block{margin:0 0 1.6em;padding-bottom:1em;border-bottom:1px solid var(--line-subtle)}
+.doc-title-block{margin:0 0 1em;padding-bottom:.75em;border-bottom:1px solid var(--line-subtle)}
 .doc-eyebrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:.7em;min-width:0}
 .artifact-page .doc-version select{appearance:none;-webkit-appearance:none;position:absolute;inset:0;width:100%;height:100%;min-width:0;border:0;border-radius:0;padding:0;margin:0;background:transparent;box-shadow:none;opacity:0;font:inherit;cursor:pointer}
 /* 24 px narrow to 34 px wide, following the reader's width and the text size. */
@@ -54,6 +54,8 @@ html[data-scheme=light] .artifact-page,html[data-scheme=light] .doc-diff{--reade
 
 /* Body text. */
 .doc-body{font-family:var(--font-reading);font-size:1em;line-height:1.72;color:var(--reader-text);letter-spacing:-.003em;font-feature-settings:'cv11','ss03';overflow-wrap:break-word;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}
+.doc-layout .doc-title-block,.doc-layout .doc-body>*:not(.mermaid-block,.doc-table,.code-block){max-inline-size:var(--measure);margin-inline:auto}
+.doc-layout .doc-body>.mermaid-block,.doc-layout .doc-body>.doc-table,.doc-layout .doc-body>.code-block{max-inline-size:110ch;margin-inline:auto}
 .doc-body>:first-child{margin-top:0}
 .doc-body p{margin:0 0 1.15em}
 .doc-body strong{font-weight:620;color:var(--reader-heading)}
@@ -210,3 +212,6 @@ html[data-motion=reduce] .doc-anchor,html[data-motion=reduce] .doc-toc li a{tran
 .doc-diff .doc-table th,.doc-diff .doc-table td{padding:.55em .7em;min-width:0}
 .doc-diff .doc-table tr>:first-child{min-width:9ch}
 .doc-diff .doc-table td code{white-space:normal;overflow-wrap:anywhere}
+
+.doc-toc details>summary{cursor:pointer}
+.doc-toc details>summary::marker{color:var(--text-muted)}

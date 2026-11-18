@@ -44,6 +44,10 @@ try{
  await expect(out).toContainText('CHECK_TAIL_LINE');
  await expect(out).not.toContainText('[32m');
  assert.equal((await out.textContent()).split('\n').length,3,'three lines until more is asked for');
+ await bar.locator('.live-bar-code').dblclick();
+ await expect(bar.getByRole('button',{name:'Less output'})).toHaveAttribute('aria-expanded','true');
+ await bar.locator('.live-bar-code').dblclick();
+ await expect(bar.getByRole('button',{name:'More output'})).toHaveAttribute('aria-expanded','false');
  await bar.getByRole('button',{name:'More output'}).click();
  await expect(out).toContainText('check step 1');
  await expect(bar.getByRole('button',{name:'Less output'})).toHaveAttribute('aria-expanded','true');

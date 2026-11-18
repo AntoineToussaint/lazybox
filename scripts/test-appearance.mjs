@@ -175,7 +175,7 @@ try {
   await panel.getByRole('button', { name: 'Reset all' }).click();
   await panel.getByLabel('Minimum contrast').selectOption('4.5');
   await expect(panel).toContainText('/fixture/state/themes');
-  const midnight = panel.getByRole('radio', { name: /^Midnight/ });
+  const midnight = panel.getByRole('radio', { name: /^Midnight midnight\.toml/ });
   await expect(midnight).toBeVisible();
   await expect(panel.locator('.theme-problems', { hasText: 'typo.json' })).toContainText('tokens.acent: there is no such token (did you mean "accent"?)');
   await expect(panel.locator('.theme-problems', { hasText: 'broken.toml' })).toContainText('line 3, column 9');
@@ -202,6 +202,12 @@ try {
   const created = fixture.mutations.find(m => m.method === 'CreateTheme');
   assert.match(created.body.content, /^name = "My dark theme"$/m);
   assert.match(created.body.content, /^accent = "#22c4a1"$/m);
+
+  await panel.getByRole('button', { name: 'Delete theme midnight.toml' }).click();
+  await page.getByRole('dialog', { name: 'Delete theme?' }).getByRole('button', { name: 'Delete theme', exact: true }).click();
+  await expect(midnight).toHaveCount(0);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  assert.equal(fixture.mutations.find(m => m.method === 'DeleteTheme').body.file, 'midnight.toml');
 
   // The token reference lists every token with its current value.
   await panel.getByRole('button', { name: /Token reference/ }).click();

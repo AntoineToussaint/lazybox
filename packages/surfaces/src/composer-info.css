@@ -4,22 +4,28 @@
 .composer-info>.composer-info-model,.composer-info>.composer-info-context{display:inline-flex;align-items:center;gap:6px;height:24px;min-height:0;margin:0;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--text-muted);font-size:calc(11px * var(--text-scale));font-weight:400;line-height:1;white-space:nowrap;font-variant-numeric:tabular-nums}
 .composer-info>button:hover{background:var(--surface-active);color:var(--text)}
 .composer-info>button:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
-.composer-info>.composer-info-model{display:inline-block;line-height:24px}
+.composer-info>.composer-info-model{display:inline-flex;line-height:24px}
 .composer-info-model[data-requested]{font-style:italic}
 .composer-info-meter{width:24px;flex:none}
 .composer-info-context[data-level=warn] .composer-info-percent{color:var(--warn)}
 .composer-info-context[data-level=danger] .composer-info-percent{color:var(--danger)}
 
-/* A narrow box: the model goes first, then all but the meter (its tooltip has the number). */
-@container (max-width:480px){
-  .composer-info-model-name{display:none}
+/* Keep the model picker and context reading visible when space is tight. */
+.composer-notices{display:flex;align-items:center;gap:6px;margin-top:4px}
+.composer-send-actions{display:flex;align-items:center;gap:5px;margin-left:auto;flex:none}
+.composer-info-model-name{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.composer-info-model svg{flex:none}
+@container (max-width:540px){
+  .embedded-chat .composer .keyboard-hint,.composer-info-meter{display:none}
+  .composer-info-model-name{max-width:9ch}
 }
 @container (max-width:360px){
-  .composer-info>.composer-info-model,.composer-info-percent{display:none}
+  .composer-info-agent:has(+.composer-info-model-name){display:none}
+  .embedded-chat .composer .row{column-gap:4px}
+  .composer-info>.composer-info-model,.composer-info>.composer-info-context{padding-inline:3px;gap:3px}
 }
-/* A phone: the percentage alone, a finger's size; the meter is too small to read there. */
+
 @media(max-width:760px){
-  .workspace-shell .embedded-chat .composer-info>.composer-info-model,.workspace-shell .embedded-chat .composer-info-meter{display:none}
-  .workspace-shell .embedded-chat .composer-info .composer-info-percent{display:inline}
-  .workspace-shell .embedded-chat .composer-info>.composer-info-context{height:32px;padding:0 8px}
+  .workspace-shell .embedded-chat .composer-info-meter{display:none}
+  .workspace-shell .embedded-chat .composer-info>.composer-info-context{height:32px;padding:0 5px}
 }

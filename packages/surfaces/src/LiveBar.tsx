@@ -169,7 +169,10 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
     managed && !!tail && { label: 'Copy output', icon: 'copy', run: () => copyText(stripAnsi(tail), 'Copied output') },
   ], { sessionId: sessionID, commandId: managed?.id || '' }, 'Running turn actions');
   return <section className="live-bar" aria-label="What the agent is doing" onContextMenu={menu}>
-    <div className="live-bar-row">
+    <div className="live-bar-row" onDoubleClick={event => {
+      if (!managed || tailHidden || (event.target instanceof Element && event.target.closest('button, a'))) return;
+      setExpanded(value => !value);
+    }}>
       <LiveIndicator tone="busy"/>
       {/* The step and its time, as the status line says them. */}
       <span className="live-activity" data-tone="busy" aria-hidden="true">{detail.code ? live.label : detail.words || live.label}{startedAt !== undefined && now >= startedAt ? ` · ${elapsedLabel(now - startedAt)}` : live.text.slice(live.label.length) || '…'}</span>
@@ -193,6 +196,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
     </div>
     {managed && !tailHidden && <div className="live-bar-output-frame">
       <pre id={outputId} className="live-bar-output" data-expanded={expanded || undefined} aria-label={`Latest output of ${managed.title || 'the command'}`} tabIndex={expanded ? 0 : -1} data-link-routing="own"
+        onDoubleClick={event => { if (event.target instanceof Element && !event.target.closest('a, button')) setExpanded(value => !value); }}
         onKeyDown={event => { if (event.key === 'Escape' && expanded) { event.stopPropagation(); setExpanded(false); } }}>{lines.length ? <LogTail text={tail} count={expanded ? 40 : 3} actions={tailActions}/> : <span className="live-bar-quiet">No output yet.</span>}</pre>
       <button type="button" className="icon-button live-bar-hide" aria-label="Hide output" title="Hide the output here. The command keeps running; Show output brings it back." onClick={() => showOutput(false)}><Icon name="close" size={12}/></button>
     </div>}

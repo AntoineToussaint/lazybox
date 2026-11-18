@@ -155,17 +155,21 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
       onPaste={paste}/>
     <DictationOverlay textarea={textarea} text={message} range={dictation.live}/>
     {permissionPrompt}
+    {(vim.mode || (session?.instructionsPending && !session.closed)) && <div className="composer-notices">
+        {vim.mode && <span className="vim-mode-chip" data-mode={vim.mode} role="status" aria-label={`Vim ${vim.mode} mode`} title="Vim editing: Esc for normal mode, i to type, Enter in normal mode sends. Turn it off in Settings → Shortcuts.">{vim.status}</span>}
+        {session?.instructionsPending && !session.closed && <span className="composer-chip" role="status" title="What Lazybox tells agents changed since this conversation started. Only what changed goes to the agent, with your next message that starts a turn.">Instructions updated</span>}
+    </div>}
     <div className="row">
       {info}
-      {vim.mode && <span className="vim-mode-chip" data-mode={vim.mode} role="status" aria-label={`Vim ${vim.mode} mode`} title="Vim editing: Esc for normal mode, i to type, Enter in normal mode sends. Turn it off in Settings → Shortcuts.">{vim.status}</span>}
-      {session?.instructionsPending && !session.closed && <span className="composer-chip" role="status" title="What Lazybox tells agents changed since this conversation started. Only what changed goes to the agent, with your next message that starts a turn.">Instructions updated</span>}
-      {dictation.supported && <button type="button" className={'icon-button composer-mic' + (dictation.active ? ' is-active' : '')} aria-label={dictation.active ? 'Stop dictation' : 'Dictate'} title={dictation.active ? 'Stop and keep the draft' : dictateHint} disabled={!canCompose || sending} onClick={dictation.active ? dictation.stop : dictation.start}><Icon name={dictation.active ? 'stop' : 'mic'}/></button>}
       <button type="button" className="icon-button" aria-label="Snippets" title={`Snippets · ${keymap['snippets.open']}`} disabled={!canCompose || sending} onClick={onOpenSnippets}><Icon name="snippets"/></button>
       <button type="button" className="attachment" aria-label={embedded ? 'Attach files' : undefined} disabled={!canAttach} onClick={() => fileInput.current?.click()}>{embedded ? <><Icon name="attach"/> <span className="attachment-label">Attach</span></> : '+ Attach files'}</button>
       <input ref={fileInput} hidden aria-label="Attach files" type="file" multiple onChange={e => { onSelectFiles(e.target.files); e.target.value = ''; }}/>
       <small className="composer-hint keyboard-hint">{vim.mode === 'insert' ? `${busyHint || `${sendKey} to send`} · Esc for normal mode` : vim.mode ? vim.hint : busyHint || `${sendKey} to send · Shift+Enter for a new line`}</small>
       {!interruptInBar && (!embedded || session?.busy) && <button type="button" onClick={onInterrupt} disabled={!session?.busy || session.closed}>Interrupt</button>}
-      <button className="primary send-button" aria-label={sendLabel} disabled={!canSend}>{embedded ? <Icon name="send" size={18}/> : sendLabel}</button>
+      <div className="composer-send-actions">
+        {dictation.supported && <button type="button" className={'icon-button composer-mic' + (dictation.active ? ' is-active' : '')} aria-label={dictation.active ? 'Stop dictation' : 'Dictate'} title={dictation.active ? 'Stop and keep the draft' : dictateHint} disabled={!canCompose || sending} onClick={dictation.active ? dictation.stop : dictation.start}><Icon name={dictation.active ? 'stop' : 'mic'}/></button>}
+        <button className="primary send-button" aria-label={sendLabel} disabled={!canSend}>{embedded ? <Icon name="send" size={18}/> : sendLabel}</button>
+      </div>
     </div>
   </form>;
 }

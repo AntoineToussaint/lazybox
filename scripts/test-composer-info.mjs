@@ -18,8 +18,8 @@ const f = await startRunnerFixture();
 const session = f.sessions[0];
 Object.assign(session, { title: 'Composer info', provider: 'claude', model: 'claude-opus-5-5', modelReported: true, status: 'done', busy: false,
   agents: [{ id: 'root', status: 'done', turnStartedAtUnixMillis: String(Date.now() - 90_000), turnEndedAtUnixMillis: String(Date.now() - 30_000), lastTurnStatus: 'completed' }] });
-// Beta waits for its first message: nothing to say about it yet.
-Object.assign(f.sessions[1], { provider: 'claude', model: 'claude-opus-5-5', modelReported: true, status: 'ready', busy: false, agents: [] });
+// The Codex conversation waits for its first message and has no usage sample.
+Object.assign(f.sessions[1], { provider: 'codex', profileId: 'codex-default', model: 'gpt-5.4', modelReported: true, status: 'ready', busy: false, agents: [] });
 {
   const channel = f.openEvents(session.id);
   let at = Date.now() - 120_000;
@@ -56,8 +56,8 @@ try {
     // Leaving a page cuts its in-flight polls, which WebKit reports as page errors ("access control checks") on the page being left: not failures. Anything else is.
     const errors = []; let leaving = 0; page.on('pageerror', e => { const text = String(e); if (leaving && /access control checks/.test(text)) return; errors.push(text); });
     const leave = async to => { leaving++; try { await page.goto(to); } finally { leaving--; } };
-    let reads = 0;
-    await page.route('**/GetTelemetry', route => { reads++; return route.fulfill({ json: telemetry() }); });
+    let reads = 0, usageAvailable = true;
+    await page.route('**/GetTelemetry', route => { reads++; return route.fulfill({ json: usageAvailable ? telemetry() : { contexts: [], groups: [], recent: [] } }); });
     await page.goto(url(session.id));
     const chat = page.locator('.panel-chat'), header = chat.locator('.chat-heading'), composer = chat.locator('form.composer'), info = composer.locator('.composer-info');
     const row = composer.locator('.row'), contextButton = info.locator('.composer-info-context'), modelButton = info.locator('.composer-info-model');
@@ -135,13 +135,14 @@ try {
     await page.keyboard.press('Escape');
     await expect(message).toHaveValue('');
 
-    // A narrow box drops the model name, then all but the meter.
+    // Narrow boxes keep the model picker and percentage visible.
     assert.deepEqual(await shown(info), { agent: true, 'model-name': true, meter: true, percent: true });
     await narrow(composer, 430);
-    await expect.poll(() => shown(info)).toEqual({ agent: true, 'model-name': false, meter: true, percent: true });
+    await expect.poll(() => shown(info)).toEqual({ agent: true, 'model-name': true, meter: false, percent: true });
     await composer.screenshot({ path: `.cache/composer-info-narrow-${scheme}.png` });
     await narrow(composer, 360);
-    await expect.poll(() => shown(info)).toEqual({ agent: false, 'model-name': false, meter: true, percent: false });
+    await expect(modelButton).toBeVisible();
+    await expect(contextButton).toContainText('91.2%');
     await composer.screenshot({ path: `.cache/composer-info-slim-${scheme}.png` });
     {
       const r = await row.boundingBox(), send = await composer.locator('.send-button').boundingBox();
@@ -152,7 +153,8 @@ try {
     await page.setViewportSize({ width: 390, height: 844 });
     await leave(url(session.id));
     await expect(contextButton).toHaveText('91.2%');
-    await expect.poll(() => shown(info)).toEqual({ agent: false, 'model-name': false, meter: false, percent: true });
+    await expect(modelButton).toBeVisible();
+    await expect(contextButton.locator('.composer-info-meter')).toBeHidden();
     await composer.screenshot({ path: `.cache/composer-info-phone-${scheme}.png` });
     {
       // One row on a phone, even with a notice chip: the percentage takes Attach's word, never Send's place.
@@ -161,11 +163,13 @@ try {
       assert.ok(i.height >= 32, 'a finger-sized target');
     }
 
-    // A conversation that has not started has nothing to say yet.
+    // A first turn can pick a model. The context slot explains why usage is unavailable.
     await page.setViewportSize({ width: 1440, height: 900 });
+    usageAvailable = false;
     await leave(url('beta-session'));
     await expect(page.locator('.panel-chat form.composer')).toBeVisible();
-    await expect(page.locator('.panel-chat .composer-info')).toHaveCount(0);
+    await expect(page.locator('.panel-chat').getByRole('button', {name: /Codex.*change model/})).toBeVisible();
+    await expect(page.locator('.panel-chat .composer-info-context')).toHaveText('Context —');
     assert.deepEqual(errors, []);
     await context.close();
   }

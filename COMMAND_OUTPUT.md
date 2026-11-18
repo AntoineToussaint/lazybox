@@ -301,6 +301,10 @@ source; the Runner briefs agents only when the binary exists.
 
 ### The briefing, and what running conversations hear when it changes
 
+The shared documents guidance asks agents to prefer Mermaid for workflows,
+state transitions and service interactions, use tables and checklists where
+they help, and record sources, assumptions and verification.
+
 An agent's briefing is a list of sections, each with an ID and a version
 (`runner/briefing.go`): the person's Settings → Agents text (`settings`) and
 its provider part (`provider`), the Runner's own sections (`workspace`, `run`,

@@ -516,6 +516,7 @@ service RunnerService {
   // output Settings → Browser shows. One at a time: a second call returns the
   // install already running.
   rpc InstallBrowser(InfoRequest) returns (CommandStatus);
+  rpc DeleteTheme(DeleteThemeRequest) returns (ThemeFolder);
 }
 
 message InfoRequest {}
@@ -4220,3 +4221,5 @@ message ExtensionPanelSession {
   string digest = 6;
   uint32 protocol = 7;
 }
+
+message DeleteThemeRequest { string file = 1; }

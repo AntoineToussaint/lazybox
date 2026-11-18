@@ -12,7 +12,7 @@ motion. Everything applies at once, in every window, and is kept.
 | Setting | What it does | Kept where |
 |---|---|---|
 | Appearance | *System* follows the computer's light or dark mode; *Light* and *Dark* fix it. | settings.yaml |
-| Dark / light theme | The theme used for each mode: Dark, Dark high contrast, Light, Solarized light, and your own (below). | settings.yaml |
+| Dark / light theme | The theme used for each mode: 20 built-in palettes across both modes, and your own (below). | settings.yaml |
 | Accent colour | Buttons, selection, focus, links. The whole accent family (tints, borders, solid fills) follows it. | settings.yaml |
 | Minimum contrast | Off, 3:1, 4.5:1 (default, WCAG AA) or 7:1. Text too faint against its background is moved just far enough in lightness to reach it, keeping its hue. Surfaces and fills never change. | settings.yaml |
 | Colour overrides | Any token, on top of every theme. | This device |
@@ -45,6 +45,10 @@ browser tab neither reads nor changes it: use the browser's own zoom, and the
 file's `zoom` stays as the desktop app left it.
 
 ### Your own themes
+
+Use **New theme from current** to start an editable copy. **Delete** beside a
+theme file removes it from the Runner. If it was selected, Lazybox switches
+that mode to its base theme or the default when no base is configured.
 
 A theme is a `.toml` or `.json` file in the Runner's themes folder,
 `<Runner state>/themes` (set `themeDirectory` in the Runner configuration to

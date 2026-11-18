@@ -157,6 +157,7 @@ func (b *Bench) Adopt(ctx context.Context) error {
 		err    error
 	}
 	var failed []unadopted
+	var idleLost []string
 	for offset := 0; ; offset += 100 {
 		records, err := b.History.List(ctx, 100, offset)
 		if err != nil {
@@ -177,7 +178,11 @@ func (b *Bench) Adopt(ctx context.Context) error {
 				// restarted, or the host ended while no Runner ran. Nothing is
 				// left to re-attach; the conversation resumes natively.
 				if sessionhost.Gone(err) && !b.agentAnswers(ctx, r.ID) {
+					attachment, loadErr := b.loadAttachment(r.ID)
 					err = b.agentLost(ctx, r)
+					if err == nil && loadErr == nil && canAutoResume(r.Snapshot, attachment) {
+						idleLost = append(idleLost, r.ID)
+					}
 				} else if err != nil {
 					failed = append(failed, unadopted{r, err})
 				}
@@ -190,7 +195,8 @@ func (b *Bench) Adopt(ctx context.Context) error {
 			break
 		}
 	}
-	errs = append(errs, b.stopOrphanHosts(ctx))
+	sweepErr := b.stopOrphanHosts(ctx)
+	errs = append(errs, sweepErr)
 	// The sweep stopped the agents nothing re-attached: their conversations
 	// end as interrupted and resumable, not left open forever.
 	for _, f := range failed {
@@ -198,7 +204,32 @@ func (b *Bench) Adopt(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("execution %s not ended after its agent was stopped: %w", f.record.ID, err))
 		}
 	}
+	// Resume only lost hosts whose last durable state was idle. Resume still
+	// verifies the profile, workspace lease, provider capability and commands.
+	if sweepErr == nil {
+		for _, id := range idleLost {
+			if _, err := b.Resume(ctx, id, false); err != nil {
+				log.Printf("restart: idle conversation %s needs manual resume: %v", id, err)
+			}
+		}
+	}
 	return errors.Join(errs...)
+}
+
+func canAutoResume(snapshot engine.Snapshot, attachment engine.Attachment) bool {
+	if snapshot.Closed || snapshot.Busy || snapshot.Fault != "" || snapshot.Queued != 0 ||
+		len(snapshot.Pending) != 0 || len(attachment.Queue) != 0 ||
+		snapshot.Reference == "" || !snapshot.Capabilities.Resume ||
+		(snapshot.Status != agent.Ready && snapshot.Status != agent.Done) {
+		return false
+	}
+	for _, activity := range snapshot.Agents {
+		switch activity.Status {
+		case agent.Starting, agent.Running, agent.WaitingInput, agent.WaitingApproval:
+			return false
+		}
+	}
+	return true
 }
 
 func (b *Bench) adopt(r sessionstore.Record) error {
@@ -558,7 +589,7 @@ func lostNotice(s engine.Snapshot, queued int, why string) string {
 	default:
 		fmt.Fprintf(&text, "The %d messages you queued were not sent yet; they go first when you continue. ", queued)
 	}
-	text.WriteString("The conversation, its checkpoints and commands are saved: send a message to resume the agent's session.")
+	text.WriteString("The conversation, its checkpoints and commands are saved.")
 	return text.String()
 }
 

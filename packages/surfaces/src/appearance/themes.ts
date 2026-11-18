@@ -63,6 +63,10 @@ const lightTokens: Record<string, string> = {
   'shadow': '#16161f', 'shadow-strength': '0.35',
 };
 
+function palette(id: string, name: string, scheme: Scheme, bg: string, surface: string, text: string, accent: string): ThemeDefinition {
+  return { id, name, scheme, tokens: { bg, surface, text, accent } };
+}
+
 export const BUILTIN_THEMES: ThemeDefinition[] = [
   { id: 'dark', name: 'Dark', scheme: 'dark', tokens: darkTokens },
   { id: 'light', name: 'Light', scheme: 'light', tokens: lightTokens },
@@ -80,6 +84,22 @@ export const BUILTIN_THEMES: ThemeDefinition[] = [
       'code-bg': '#f5efdc', 'syntax-keyword': '#5c6f00', 'syntax-string': '#1b7d75', 'syntax-number': '#b02a6d', 'syntax-comment': '#7a8b8c', 'syntax-type': '#8a6800', 'syntax-attr': '#1e6fa8', 'syntax-function': '#5b5fb8',
     },
   },
+  palette('midnight-blue', 'Midnight blue', 'dark', '#0e1524', '#18253a', '#e4edf9', '#85b9ff'),
+  palette('pine', 'Pine', 'dark', '#0f1916', '#182823', '#e2efe8', '#7cd9b2'),
+  palette('ember', 'Ember', 'dark', '#1c1311', '#2c1f1c', '#f7e9e1', '#f5ad84'),
+  palette('aubergine', 'Aubergine', 'dark', '#1b1422', '#2a2033', '#f4e8f9', '#eab0fa'),
+  palette('graphite', 'Graphite', 'dark', '#141515', '#222424', '#ededed', '#b7cece'),
+  palette('deep-ocean', 'Deep ocean', 'dark', '#091b21', '#102a32', '#dcf1f6', '#66d9e0'),
+  palette('rosewood', 'Rosewood', 'dark', '#1c1116', '#2f2027', '#f7e8ef', '#f0a7c3'),
+  palette('ink', 'Ink', 'dark', '#090d17', '#131725', '#e4e9fa', '#aaaafa'),
+  palette('paper', 'Paper', 'light', '#ede8e0', '#fffcf5', '#312a24', '#925025'),
+  palette('glacier', 'Glacier', 'light', '#e2ecf7', '#f7fbff', '#20344a', '#235fa4'),
+  palette('sage', 'Sage', 'light', '#e4ece2', '#f8fcf4', '#263826', '#3d6a43'),
+  palette('rose-quartz', 'Rose quartz', 'light', '#f4e6e9', '#fff8fa', '#442c36', '#a13c65'),
+  palette('lavender-mist', 'Lavender mist', 'light', '#ebe5f5', '#fcf9ff', '#332844', '#6948a7'),
+  palette('sand', 'Sand', 'light', '#f0e4cf', '#fffaf0', '#423421', '#8a5419'),
+  palette('sea-glass', 'Sea glass', 'light', '#dfefee', '#f4fcfa', '#233b39', '#1b706a'),
+  palette('light-high-contrast', 'Light high contrast', 'light', '#e7e7e7', '#ffffff', '#101010', '#243488'),
 ];
 export const BUILTIN_BY_ID = new Map(BUILTIN_THEMES.map(theme => [theme.id, theme]));
 for (const theme of BUILTIN_THEMES) theme.source = { kind: 'builtin' };

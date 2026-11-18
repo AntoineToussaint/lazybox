@@ -16,10 +16,12 @@
 }
 @container (max-width:360px){
   .composer-info>.composer-info-model,.composer-info-percent{display:none}
+  .composer-info:not(:has(.composer-info-context)){display:none}
 }
 /* A phone: the percentage alone, a finger's size; the meter is too small to read there. */
 @media(max-width:760px){
   .workspace-shell .embedded-chat .composer-info>.composer-info-model,.workspace-shell .embedded-chat .composer-info-meter{display:none}
+  .workspace-shell .embedded-chat .composer-info:not(:has(.composer-info-context)){display:none}
   .workspace-shell .embedded-chat .composer-info .composer-info-percent{display:inline}
   .workspace-shell .embedded-chat .composer-info>.composer-info-context{height:32px;padding:0 8px}
 }

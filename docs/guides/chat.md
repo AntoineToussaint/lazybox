@@ -364,8 +364,9 @@ decide which controls to offer.
 
 ## What it costs
 
-The left of the message box's controls shows who answers, the agent and model
-(*Claude · Opus 5.5*), and how full its context is: a small meter and a
+On desktop, the left of the message box's controls shows the agent and model
+before the first message, for Claude and Codex alike. Once the agent reports
+context usage, it also shows a small meter and a
 percentage, amber from 60% and red from 85%, the same reading as the chat
 header's. If the agent reports the number of tokens used before it reports
 the window capacity, both show the token count. Click the agent

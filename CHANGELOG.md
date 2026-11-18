@@ -84,6 +84,7 @@ leave out.
 
 ### Chat and Send now
 
+- **See the model before your first message** Both Claude and Codex show model controls in the message box as soon as the conversation opens.
 - **Send now** While the agent works, ↵ queues your message and ⌘↵ sends it now: the current step stops and your message is the next turn. A queued message shows once, above the message box.
 - **Who answers, and how full the context is** Under your message: the agent and model, and a context meter that turns amber at 60% and red at 85%. /model lists the models you can switch to.
 - **The ⋯ menu shows what is current** A conversation's permission mode and model are shown selected, like Activity detail: YOLO no longer looks unavailable when it is the mode in use, and only a mode the agent cannot take (YOLO in plan mode) is greyed, with why. A conversation on its agent's default model shows Default as current, a Codex conversation names its model from the start, and a long list of models shows the first few, then More.

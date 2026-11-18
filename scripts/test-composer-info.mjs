@@ -3,7 +3,7 @@
 // the same context reading, no second poll of usage), colour at 60% and 85%,
 // open the model picker and the header's context popover, and give way in a
 // narrow box (the model name, then all but the meter) and on a phone (the
-// percentage alone). A conversation that has not started shows none of it.
+// percentage alone). A new conversation shows its model before usage arrives.
 // Screenshots in .cache/composer-info-*.png. WebKit, the desktop app's engine.
 import { testViteCache } from './fixtures/vite-cache.mjs';
 import { createServer } from 'vite';
@@ -18,8 +18,7 @@ const f = await startRunnerFixture();
 const session = f.sessions[0];
 Object.assign(session, { title: 'Composer info', provider: 'claude', model: 'claude-opus-5-5', modelReported: true, status: 'done', busy: false,
   agents: [{ id: 'root', status: 'done', turnStartedAtUnixMillis: String(Date.now() - 90_000), turnEndedAtUnixMillis: String(Date.now() - 30_000), lastTurnStatus: 'completed' }] });
-// Beta waits for its first message: nothing to say about it yet.
-Object.assign(f.sessions[1], { provider: 'claude', model: 'claude-opus-5-5', modelReported: true, status: 'ready', busy: false, agents: [] });
+// Beta waits for its first message. Exercise the same layout with both providers.
 {
   const channel = f.openEvents(session.id);
   let at = Date.now() - 120_000;
@@ -57,7 +56,8 @@ try {
     const errors = []; let leaving = 0; page.on('pageerror', e => { const text = String(e); if (leaving && /access control checks/.test(text)) return; errors.push(text); });
     const leave = async to => { leaving++; try { await page.goto(to); } finally { leaving--; } };
     let reads = 0;
-    await page.route('**/GetTelemetry', route => { reads++; return route.fulfill({ json: telemetry() }); });
+    let reportsUsage = true;
+    await page.route('**/GetTelemetry', route => { reads++; return route.fulfill({ json: reportsUsage ? telemetry() : { groups: [], contexts: [], recent: [] } }); });
     await page.goto(url(session.id));
     const chat = page.locator('.panel-chat'), header = chat.locator('.chat-heading'), composer = chat.locator('form.composer'), info = composer.locator('.composer-info');
     const row = composer.locator('.row'), contextButton = info.locator('.composer-info-context'), modelButton = info.locator('.composer-info-model');
@@ -161,11 +161,18 @@ try {
       assert.ok(i.height >= 32, 'a finger-sized target');
     }
 
-    // A conversation that has not started has nothing to say yet.
+    // The model is useful before the first message, with either provider.
     await page.setViewportSize({ width: 1440, height: 900 });
-    await leave(url('beta-session'));
-    await expect(page.locator('.panel-chat form.composer')).toBeVisible();
-    await expect(page.locator('.panel-chat .composer-info')).toHaveCount(0);
+    reportsUsage = false;
+    for (const [provider, model, label] of [['claude', 'claude-opus-5-5', 'Claude'], ['codex', 'gpt-5.4', 'Codex']]) {
+      Object.assign(f.sessions[1], { provider, profileId: `${provider}-default`, model, modelReported: true, status: 'ready', busy: false, agents: [] });
+      await leave(url('beta-session'));
+      await expect(modelButton).toBeVisible();
+      await expect(modelButton).toHaveText(new RegExp(`^${label} · `));
+      await expect(modelButton).toHaveAccessibleName(/change model$/);
+      await expect(contextButton).toHaveCount(0);
+      await composer.screenshot({ path: `.cache/composer-info-new-${provider}-${scheme}.png` });
+    }
     assert.deepEqual(errors, []);
     await context.close();
   }

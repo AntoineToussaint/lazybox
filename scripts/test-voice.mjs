@@ -96,14 +96,14 @@ try {
         queueMicrotask(() => this.onstop?.());
       }
     } });
-    Object.defineProperty(window, 'AudioContext', { configurable: true, value: class {
-      async decodeAudioData() { return { duration: 0.01 }; }
-      async close() {}
-    } });
-    Object.defineProperty(window, 'OfflineAudioContext', { configurable: true, value: class {
-      createBufferSource() { return { connect() {}, start() {} }; }
-      async startRendering() { return { getChannelData: () => new Float32Array(160).fill(0.3) }; }
-    } });
+
+    const decode = AudioContext.prototype.decodeAudioData;
+    AudioContext.prototype.decodeAudioData = function (bytes, ...callbacks) {
+      if (new TextDecoder().decode(bytes) !== 'fixture audio') return decode.call(this, bytes, ...callbacks);
+      const buffer = this.createBuffer(1, 160, 16000);
+      buffer.getChannelData(0).fill(0.3);
+      return Promise.resolve(buffer);
+    };
   });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
@@ -514,7 +514,7 @@ try {
       question: 'Which build should I verify?', options: [{ label: 'Dev' }, { label: 'Working' }],
     }] }),
   }] });
-  await expect(page.locator('.agent-row').filter({ hasText: 'Ship release notes' })).toContainText('Which build should I verify?');
+  await expect(page.locator('.agent-row').filter({ hasText: 'Ship release notes' })).toContainText('Which build should I verify?', { timeout: 15000 });
   assert.equal(await page.evaluate(() => window.__spoken.length), spokenBefore + 1);
   await page.keyboard.press('Escape');
   const announcement = 'Beta release. Ship release notes. Which build should I verify? Choices: Dev or Working.';

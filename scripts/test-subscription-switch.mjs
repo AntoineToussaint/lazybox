@@ -175,6 +175,26 @@ try{
  await expect(auto).toBeVisible();
  await page.screenshot({path:'.cache/subscription-switch-dialog-policy.png'});
  await dialog.getByRole('button',{name:'Cancel'}).click();
+
+ // When every Claude account is limited, the card offers a fresh Codex
+ // conversation in the same workspace, with text ready to review.
+ for (const profile of f.profiles.filter(p=>p.provider==='claude')) profile.availability={state:'exhausted',resetAt:String(reset)};
+ const limited=f.sessions.find(s=>s.id==='delta-session');
+ Object.assign(limited,{status:'failed',fault:'exhausted',account:{state:'exhausted',resetAt:String(reset)}});
+ await expect(deltaCard).toContainText('No other Claude subscription is available right now.');
+ await expect(deltaCard.getByRole('radio')).toHaveCount(0);
+ await expect(deltaCard.getByRole('button',{name:/Switch to/})).toHaveCount(0);
+ const fallback=deltaCard.getByRole('button',{name:'Continue in a new Codex conversation'});
+ await page.screenshot({path:'.cache/subscription-codex-fallback-light.png'});
+ await page.emulateMedia({colorScheme:'dark'});
+ await page.waitForTimeout(400);
+ await page.screenshot({path:'.cache/subscription-codex-fallback-dark.png'});
+ const writes=f.mutations.filter(m=>m.method==='Apply').length;
+ await fallback.focus();
+ await page.keyboard.press('Enter');
+ await expect.poll(()=>f.mutations.findLast(m=>m.method==='OpenSession')?.body).toMatchObject({collectionId:'delta',profileId:'codex-work'});
+ await expect(chat.getByRole('textbox',{name:'Message',exact:true})).toHaveValue('Draft the notes');
+ assert.equal(f.mutations.filter(m=>m.method==='Apply').length,writes,'the draft waits for the person to send');
  assert.deepEqual(errors,[]);
  console.log('PASS automatic switch line, one limit card in words (Switch to the best subscription, picker of the same provider in order, wait), the header chip opens Switch subscription, nothing switches by itself without an account policy, a message sent while limited goes once, wait-for-reset resumes once, ⋯ Switch subscription; with Subscription rotation allowed: Always switch automatically and the everywhere question. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

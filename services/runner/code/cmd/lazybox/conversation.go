@@ -94,6 +94,9 @@ func (c *cli) conversationNew(args []string) error {
 func (c *cli) askToStart(cl *client, ask *pb.RequestConversationStartRequest, wait time.Duration, noWait bool) error {
 	r, err := got(cl.RequestConversationStart(c.ctx, connect.NewRequest(ask)))
 	if err != nil {
+		if connect.CodeOf(err) == connect.CodeUnimplemented {
+			return fail(exitUnavailable, "this Runner did not recognize the conversation request; check that the CLI and Runner are running the same Lazybox release")
+		}
 		return err
 	}
 	if r.State != "pending" {

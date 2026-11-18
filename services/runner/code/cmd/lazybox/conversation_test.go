@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -130,5 +134,20 @@ func TestConversationNewUnderAGrantStartsAnAgentOfTheMission(t *testing.T) {
 	}
 	if _, brief := r.nextBrief(t); !strings.Contains(brief, "An index.") || !strings.Contains(brief, "from your orchestrator") {
 		t.Fatalf("child brief: %s", brief)
+	}
+}
+
+func TestConversationStartOnRunnerWithoutRequestEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	endpoint := filepath.Join(t.TempDir(), "endpoint.json")
+	if err := os.WriteFile(endpoint, []byte(`{"url":"`+server.URL+`","token":"t"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := runPower(context.Background(), t, t.TempDir(), map[string]string{
+		"LAZYBOX_V2_ENDPOINT": endpoint, "LAZYBOX_V2_SESSION_ID": "fixture",
+	}, "", "conversation", "new", "--title", "TODO", "--brief", "Maintain the workspace TODO list.", "--no-wait")
+	if out.code != exitUnavailable || !strings.Contains(out.err.Error(), "same Lazybox release") {
+		t.Fatalf("unavailable request endpoint: %+v", out)
 	}
 }

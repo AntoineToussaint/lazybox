@@ -181,7 +181,6 @@ try{
  for (const profile of f.profiles.filter(p=>p.provider==='claude')) profile.availability={state:'exhausted',resetAt:String(reset)};
  const limited=f.sessions.find(s=>s.id==='delta-session');
  Object.assign(limited,{status:'failed',fault:'exhausted',account:{state:'exhausted',resetAt:String(reset)}});
- await page.reload();
  await expect(deltaCard).toContainText('No other Claude subscription is available right now.');
  await expect(deltaCard.getByRole('radio')).toHaveCount(0);
  await expect(deltaCard.getByRole('button',{name:/Switch to/})).toHaveCount(0);

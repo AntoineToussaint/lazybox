@@ -401,6 +401,9 @@ func Control(rv *Review, runID, action, mode string, maxRounds int, now int64) e
 		}
 		r.stop(now, StopTakenOver, "You took over: the loop stopped; the conversations are yours.")
 	case ControlLoop:
+		if r.TemplateID != "" {
+			return errors.New("review templates run one pass per captured snapshot")
+		}
 		m, err := LoopMode(mode)
 		if err != nil {
 			return err

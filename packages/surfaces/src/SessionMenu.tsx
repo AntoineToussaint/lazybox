@@ -112,13 +112,15 @@ export function SessionMenu({ session, sessionID, accountName, stream, allowStar
   useHandoffMenus();
   const { api, info } = useRunner();
   const handoff = conversationHandoffItems(api, session, info);
+  const behavior = session?.behaviorProfile === 'balanced-v1' ? 'Balanced' : session?.behaviorProfile === 'hands-on-v1' ? 'Hands-on' : session?.behaviorProfile;
   const gateway = session?.gatewayId && session.gatewayId !== 'direct' ? session.gatewayId : '';
   return <ActionMenu className="session-menu" label="Session actions">
     <strong>Session{live ? '' : <span className="session-connection" role="status"><span aria-hidden="true"/>{streamLabel(stream)}</span>}</strong>
     {/* Only facts worth reading: a subscription Lazybox can name, and a gateway other than the direct one. */}
-    {(accountName || gateway) && <dl className="session-facts">
+    {(accountName || gateway || behavior) && <dl className="session-facts">
       {accountName && <div><dt>Subscription</dt><dd>{accountName}</dd></div>}
       {gateway && <div><dt>Gateway</dt><dd>{gateway}</dd></div>}
+      {behavior && <div><dt>Behavior</dt><dd>{behavior}</dd></div>}
     </dl>}
     {takesPermissions(session) && <div className="session-permission" role="group" aria-label="Permissions">
       <strong>Permissions{session.permission ? '' : ' · CLI settings'}{session.capabilities?.livePermission ? '' : ' · restart needed'}</strong>

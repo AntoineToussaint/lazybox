@@ -44,6 +44,7 @@ const (
 )
 
 type Options struct {
+	BehaviorProfile  string   `json:"behaviorProfile,omitempty"`
 	Instructions     string   `json:"instructions,omitempty"`
 	RotationProfiles []string `json:"rotationProfiles,omitempty"`
 	// NoRotation keeps the conversation on its selected subscription.
@@ -55,6 +56,9 @@ type Options struct {
 }
 
 func (o Options) Validate() error {
+	if o.BehaviorProfile != "" && o.BehaviorInstructions() == "" {
+		return errors.New("unknown behavior profile")
+	}
 	if len(o.Instructions) > 32<<10 {
 		return errors.New("session instructions exceed 32 KiB")
 	}

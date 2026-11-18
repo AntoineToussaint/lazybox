@@ -97,7 +97,7 @@ const tail = [
   { id: 'conversation.new', title: 'New conversation', group: 'Workspace', icon: 'chat', keys: 'Mod+Shift+n or ] ] c', scope: 'global', keywords: 'start agent session chat in this workspace', menu: { section: 'File', title: 'New Conversation…' } },
   { id: 'changes.show', title: 'Review changes', group: 'Workspace', icon: 'branch', keys: '] ] d', scope: 'global', safe: true, keywords: 'diff git commit pull request' },
   // Another agent reviews the workspace's changes, read-only (ReviewActions.tsx): the default reviewer, or one named.
-  { id: 'review.start', title: 'Review this workspace’s changes', group: 'Workspace', icon: 'review', keys: '] ] Shift+r', scope: 'global', keywords: 'agent cross review findings second opinion codex claude default reviewer /review' },
+  { id: 'review.start', title: 'Review this workspace’s changes', group: 'Workspace', icon: 'review', keys: '] ] Shift+r', scope: 'global', keywords: 'code review conversation template agent cross review findings second opinion codex claude default reviewer /review' },
   { id: 'review.codex', title: 'Review changes with Codex', group: 'Workspace', icon: 'review', keys: '', scope: 'global', keywords: 'agent cross review findings second opinion codex' },
   { id: 'review.claude', title: 'Review changes with Claude', group: 'Workspace', icon: 'review', keys: '', scope: 'global', keywords: 'agent cross review findings second opinion claude' },
   // The review under way stops: its reviewer interrupted and ended, no further round; its findings kept (ReviewCancel.tsx).

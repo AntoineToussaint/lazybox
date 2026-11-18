@@ -43,6 +43,7 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
   const [model, setModel] = useState(remembered.model || '');
   const [gateway, setGateway] = useState(remembered.gateway || '');
   const [instructions, setInstructions] = useState('');
+  const [behaviorProfile, setBehaviorProfile] = useState('');
   const quickStarted = useRef(false);
   const [permission, setPermission] = useState('');
   const [workflow, setWorkflow] = useState('execute');
@@ -59,7 +60,7 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
     openingRef.current = true; setOpening(true); onError('');
     const signal = lifetime.current!.signal;
     try {
-      const options = { model, permission, workflow, gatewayId: gateway, rotationProfileIds: [], noRotation: !rotate, instructions };
+      const options = { model, permission, workflow, gatewayId: gateway, rotationProfileIds: [], noRotation: !rotate, instructions, behaviorProfile: assistant ? '' : behaviorProfile };
       const result = assistant ? await api.openAssistant({ profileId: selectedProfile, purpose, context: assistantContext, collectionId, options }, { signal }) : await api.openSession({ profileId: selectedProfile, cwd: collectionId || emptyWorkspace ? '' : cwd, collectionId, emptyWorkspace, options }, { signal });
       if (!result.session) throw new Error('Runner did not return a session');
       if (!signal.aborted) { try { writeLaunchChoices(viewState, { provider, profile: selectedProfile, model, gateway }); } catch { /* Session remains usable if local preferences cannot be saved. */ } onStarted(result.session.id); }
@@ -79,7 +80,7 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
 
   return {
     runnerSettings, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway,
-    instructions, setInstructions, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open,
+    instructions, setInstructions, behaviorProfile, setBehaviorProfile, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open,
   };
 }
 
@@ -96,7 +97,7 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
   collectionId: string;
   agentName: string;
 }) {
-  const { runnerSettings, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway, instructions, setInstructions, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open } = launcher;
+  const { runnerSettings, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway, instructions, setInstructions, behaviorProfile, setBehaviorProfile, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open } = launcher;
   const assistant = purpose !== 'coding';
   return <section className="session-setup">
     <div className="eyebrow">New conversation</div>
@@ -125,6 +126,11 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
         <option value="yolo" disabled={workflow === 'plan'}>YOLO · full access, no approval prompts</option>
       </select></label>
       {(permission === 'yolo' || (!permission && runnerSettings?.permission === 'yolo')) && !assistant && <small>Full tool access for this session. Existing conversations keep their original permissions.</small>}
+      {!assistant && <label>Behavior profile<select disabled={opening} value={behaviorProfile} onChange={event => setBehaviorProfile(event.target.value)}>
+        <option value="">Default behavior</option>
+        <option value="balanced-v1">Balanced · inspect, then act when clear</option>
+        <option value="hands-on-v1">Hands-on · proceed through reversible choices</option>
+      </select></label>}
       <details className="session-options">
         <summary>Model & context</summary>
         <div className="options-grid">

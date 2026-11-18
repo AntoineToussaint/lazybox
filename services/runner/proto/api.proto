@@ -866,6 +866,8 @@ message RunnerOptions {
   string instructions = 6;
   // Keep this conversation on the selected subscription: no automatic switching.
   bool no_rotation = 7;
+  // A versioned behavior profile for a new coding conversation.
+  string behavior_profile = 8;
 }
 message OpenSessionRequest {
   string profile_id = 1;
@@ -1370,6 +1372,7 @@ message Session {
   // the browser fixes that); "off" (off in Settings → Browser); empty where
   // the browser does not apply (no service, assistants, ACP agents, ended).
   string browser_access = 41;
+  string behavior_profile = 42;
 }
 // PermissionGrant is one "always allow" of a conversation.
 message PermissionGrant {
@@ -2529,6 +2532,8 @@ message ReviewRun {
   // pr: the workspace repository whose pull request is reviewed, so the
   // same review can be started again.
   string member = 39;
+  string template_id = 40;
+  string result_artifact_id = 41;
 }
 message WorkspaceReview {
   repeated ReviewComment comments = 1;
@@ -2562,6 +2567,8 @@ message StartReviewRequest {
   // The model the reviewer runs on; "" is the setting's (fixed), else its
   // agent's default.
   string model = 10;
+  // A built-in review template. Empty preserves the legacy review entry points.
+  string template_id = 11;
 }
 message StartReviewResponse {
   ReviewRun run = 1;
@@ -3470,6 +3477,7 @@ message ArtifactVersion {
   // sha256 of the content, hex.
   string digest = 5;
   uint64 size = 6;
+  string schema = 7;
 }
 message Artifact {
   string id = 1;

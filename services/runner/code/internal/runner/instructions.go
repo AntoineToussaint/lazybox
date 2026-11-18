@@ -11,7 +11,7 @@ import (
 // SetPermission changes a running session's permission mode and remembers it,
 // so a resume or a subscription rotation keeps the new mode.
 func (b *Bench) SetPermission(ctx context.Context, e *Execution, operationID, mode string) (agent.Receipt, error) {
-	if err := permissionAllowed(e, mode); err != nil {
+	if err := b.permissionAllowed(e, mode); err != nil {
 		return agent.Receipt{}, err
 	}
 	r, err := e.Engine.Apply(ctx, agent.Operation{ID: operationID, Kind: agent.Permission, Permission: mode})
@@ -26,12 +26,17 @@ func (b *Bench) SetPermission(ctx context.Context, e *Execution, operationID, mo
 	return r, nil
 }
 
-func permissionAllowed(e *Execution, mode string) error {
+func (b *Bench) permissionAllowed(e *Execution, mode string) error {
 	if !agent.PermissionModes[mode] {
 		return errors.New("permission must be ask, read-only or yolo")
 	}
 	if agent.IsAssistant(e.Purpose) {
 		return errors.New("assistant conversations are read-only")
+	}
+	if mode != "read-only" && b.Reviews != nil {
+		if match, ok := b.Reviews.ReviewerRun(e.ID, conversationOf(e)); ok && match.Run.TemplateID != "" {
+			return errors.New("this review template requires read-only permissions")
+		}
 	}
 	if mode == "yolo" && e.Options.Workflow == "plan" {
 		return errors.New("YOLO is incompatible with plan mode")
@@ -54,7 +59,7 @@ func (b *Bench) remember(ctx context.Context, e *Execution, mode string) error {
 // live permission changes: the agent is ended between turns and the same
 // provider conversation resumes in a new agent started in that mode.
 func (b *Bench) RestartWithPermission(ctx context.Context, e *Execution, mode string) (*Execution, error) {
-	if err := permissionAllowed(e, mode); err != nil {
+	if err := b.permissionAllowed(e, mode); err != nil {
 		return nil, err
 	}
 	if err := restartable(e); err != nil {

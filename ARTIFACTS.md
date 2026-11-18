@@ -446,3 +446,11 @@ on the artifact side:
 
 The reader limits paragraph width on large displays and gives diagrams, code
 blocks and tables more room. The outline beside the document can collapse.
+
+## Review findings reports
+
+The Code review and Security review conversation templates publish a report
+when the reviewer reports its coverage. The version carries the
+`lazybox.review-findings/v1` schema identifier. Its Markdown includes a JSON
+block with the captured Git revisions, coverage, and findings with stable IDs
+and source locations. The review card opens the original result version.

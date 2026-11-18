@@ -3589,9 +3589,11 @@ type RunnerOptions struct {
 	RotationProfileIds []string               `protobuf:"bytes,5,rep,name=rotation_profile_ids,json=rotationProfileIds,proto3" json:"rotation_profile_ids,omitempty"`
 	Instructions       string                 `protobuf:"bytes,6,opt,name=instructions,proto3" json:"instructions,omitempty"`
 	// Keep this conversation on the selected subscription: no automatic switching.
-	NoRotation    bool `protobuf:"varint,7,opt,name=no_rotation,json=noRotation,proto3" json:"no_rotation,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	NoRotation bool `protobuf:"varint,7,opt,name=no_rotation,json=noRotation,proto3" json:"no_rotation,omitempty"`
+	// A versioned behavior profile for a new coding conversation.
+	BehaviorProfile string `protobuf:"bytes,8,opt,name=behavior_profile,json=behaviorProfile,proto3" json:"behavior_profile,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RunnerOptions) Reset() {
@@ -3671,6 +3673,13 @@ func (x *RunnerOptions) GetNoRotation() bool {
 		return x.NoRotation
 	}
 	return false
+}
+
+func (x *RunnerOptions) GetBehaviorProfile() string {
+	if x != nil {
+		return x.BehaviorProfile
+	}
+	return ""
 }
 
 type OpenSessionRequest struct {
@@ -8410,9 +8419,10 @@ type Session struct {
 	// (it started without it, or the browser is off for its workspace: Give
 	// the browser fixes that); "off" (off in Settings → Browser); empty where
 	// the browser does not apply (no service, assistants, ACP agents, ended).
-	BrowserAccess string `protobuf:"bytes,41,opt,name=browser_access,json=browserAccess,proto3" json:"browser_access,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	BrowserAccess   string `protobuf:"bytes,41,opt,name=browser_access,json=browserAccess,proto3" json:"browser_access,omitempty"`
+	BehaviorProfile string `protobuf:"bytes,42,opt,name=behavior_profile,json=behaviorProfile,proto3" json:"behavior_profile,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Session) Reset() {
@@ -8728,6 +8738,13 @@ func (x *Session) GetPermissionGrants() []*PermissionGrant {
 func (x *Session) GetBrowserAccess() string {
 	if x != nil {
 		return x.BrowserAccess
+	}
+	return ""
+}
+
+func (x *Session) GetBehaviorProfile() string {
+	if x != nil {
+		return x.BehaviorProfile
 	}
 	return ""
 }
@@ -19708,9 +19725,11 @@ type ReviewRun struct {
 	StoppedAtUnix int64  `protobuf:"varint,38,opt,name=stopped_at_unix,json=stoppedAtUnix,proto3" json:"stopped_at_unix,omitempty"`
 	// pr: the workspace repository whose pull request is reviewed, so the
 	// same review can be started again.
-	Member        string `protobuf:"bytes,39,opt,name=member,proto3" json:"member,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Member           string `protobuf:"bytes,39,opt,name=member,proto3" json:"member,omitempty"`
+	TemplateId       string `protobuf:"bytes,40,opt,name=template_id,json=templateId,proto3" json:"template_id,omitempty"`
+	ResultArtifactId string `protobuf:"bytes,41,opt,name=result_artifact_id,json=resultArtifactId,proto3" json:"result_artifact_id,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ReviewRun) Reset() {
@@ -20016,6 +20035,20 @@ func (x *ReviewRun) GetMember() string {
 	return ""
 }
 
+func (x *ReviewRun) GetTemplateId() string {
+	if x != nil {
+		return x.TemplateId
+	}
+	return ""
+}
+
+func (x *ReviewRun) GetResultArtifactId() string {
+	if x != nil {
+		return x.ResultArtifactId
+	}
+	return ""
+}
+
 type WorkspaceReview struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Comments []*ReviewComment       `protobuf:"bytes,1,rep,name=comments,proto3" json:"comments,omitempty"`
@@ -20110,7 +20143,9 @@ type StartReviewRequest struct {
 	Focus string `protobuf:"bytes,9,opt,name=focus,proto3" json:"focus,omitempty"`
 	// The model the reviewer runs on; "" is the setting's (fixed), else its
 	// agent's default.
-	Model         string `protobuf:"bytes,10,opt,name=model,proto3" json:"model,omitempty"`
+	Model string `protobuf:"bytes,10,opt,name=model,proto3" json:"model,omitempty"`
+	// A built-in review template. Empty preserves the legacy review entry points.
+	TemplateId    string `protobuf:"bytes,11,opt,name=template_id,json=templateId,proto3" json:"template_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -20211,6 +20246,13 @@ func (x *StartReviewRequest) GetFocus() string {
 func (x *StartReviewRequest) GetModel() string {
 	if x != nil {
 		return x.Model
+	}
+	return ""
+}
+
+func (x *StartReviewRequest) GetTemplateId() string {
+	if x != nil {
+		return x.TemplateId
 	}
 	return ""
 }
@@ -29394,6 +29436,7 @@ type ArtifactVersion struct {
 	// sha256 of the content, hex.
 	Digest        string `protobuf:"bytes,5,opt,name=digest,proto3" json:"digest,omitempty"`
 	Size          uint64 `protobuf:"varint,6,opt,name=size,proto3" json:"size,omitempty"`
+	Schema        string `protobuf:"bytes,7,opt,name=schema,proto3" json:"schema,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -29468,6 +29511,13 @@ func (x *ArtifactVersion) GetSize() uint64 {
 		return x.Size
 	}
 	return 0
+}
+
+func (x *ArtifactVersion) GetSchema() string {
+	if x != nil {
+		return x.Schema
+	}
+	return ""
 }
 
 type Artifact struct {
@@ -35861,7 +35911,7 @@ const file_api_proto_rawDesc = "" +
 	"\x10AttachmentLimits\x12\x1b\n" +
 	"\tmax_files\x18\x01 \x01(\rR\bmaxFiles\x12$\n" +
 	"\x0emax_file_bytes\x18\x02 \x01(\x04R\fmaxFileBytes\x12*\n" +
-	"\x11max_message_bytes\x18\x03 \x01(\x04R\x0fmaxMessageBytes\"\xf7\x01\n" +
+	"\x11max_message_bytes\x18\x03 \x01(\x04R\x0fmaxMessageBytes\"\xa2\x02\n" +
 	"\rRunnerOptions\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12\x1e\n" +
 	"\n" +
@@ -35873,7 +35923,8 @@ const file_api_proto_rawDesc = "" +
 	"\x14rotation_profile_ids\x18\x05 \x03(\tR\x12rotationProfileIds\x12\"\n" +
 	"\finstructions\x18\x06 \x01(\tR\finstructions\x12\x1f\n" +
 	"\vno_rotation\x18\a \x01(\bR\n" +
-	"noRotation\"\xf9\x01\n" +
+	"noRotation\x12)\n" +
+	"\x10behavior_profile\x18\b \x01(\tR\x0fbehaviorProfile\"\xf9\x01\n" +
 	"\x12OpenSessionRequest\x12\x1d\n" +
 	"\n" +
 	"profile_id\x18\x01 \x01(\tR\tprofileId\x12\x10\n" +
@@ -36276,7 +36327,7 @@ const file_api_proto_rawDesc = "" +
 	"\n" +
 	"agent_kind\x18\f \x01(\tR\tagentKind\x12\x1b\n" +
 	"\tnative_id\x18\r \x01(\tR\bnativeId\x12>\n" +
-	"\aaccount\x18\x0e \x01(\v2$.lazybox.bench.v1.AccountObservationR\aaccount\"\xb1\r\n" +
+	"\aaccount\x18\x0e \x01(\v2$.lazybox.bench.v1.AccountObservationR\aaccount\"\xdc\r\n" +
 	"\aSession\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -36325,7 +36376,8 @@ const file_api_proto_rawDesc = "" +
 	"\x17archived_at_unix_millis\x18& \x01(\x03R\x14archivedAtUnixMillis\x12:\n" +
 	"\alineage\x18' \x01(\v2 .lazybox.bench.v1.SessionLineageR\alineage\x12N\n" +
 	"\x11permission_grants\x18( \x03(\v2!.lazybox.bench.v1.PermissionGrantR\x10permissionGrants\x12%\n" +
-	"\x0ebrowser_access\x18) \x01(\tR\rbrowserAccess\"\x80\x01\n" +
+	"\x0ebrowser_access\x18) \x01(\tR\rbrowserAccess\x12)\n" +
+	"\x10behavior_profile\x18* \x01(\tR\x0fbehaviorProfile\"\x80\x01\n" +
 	"\x0fPermissionGrant\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05label\x18\x02 \x01(\tR\x05label\x12\x12\n" +
@@ -37220,7 +37272,8 @@ const file_api_proto_rawDesc = "" +
 	"\x04text\x18\x04 \x01(\tR\x04text\x12\x1d\n" +
 	"\n" +
 	"finding_id\x18\x05 \x01(\tR\tfindingId\x12\x14\n" +
-	"\x05round\x18\x06 \x01(\rR\x05round\"\xfe\t\n" +
+	"\x05round\x18\x06 \x01(\rR\x05round\"\xcd\n" +
+	"\n" +
 	"\tReviewRun\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12#\n" +
 	"\rcollection_id\x18\x02 \x01(\tR\fcollectionId\x12.\n" +
@@ -37266,12 +37319,15 @@ const file_api_proto_rawDesc = "" +
 	"\n" +
 	"stopped_by\x18% \x01(\tR\tstoppedBy\x12&\n" +
 	"\x0fstopped_at_unix\x18& \x01(\x03R\rstoppedAtUnix\x12\x16\n" +
-	"\x06member\x18' \x01(\tR\x06member\"\xbd\x01\n" +
+	"\x06member\x18' \x01(\tR\x06member\x12\x1f\n" +
+	"\vtemplate_id\x18( \x01(\tR\n" +
+	"templateId\x12,\n" +
+	"\x12result_artifact_id\x18) \x01(\tR\x10resultArtifactId\"\xbd\x01\n" +
 	"\x0fWorkspaceReview\x12;\n" +
 	"\bcomments\x18\x01 \x03(\v2\x1f.lazybox.bench.v1.ReviewCommentR\bcomments\x12!\n" +
 	"\fauto_resolve\x18\x02 \x01(\bR\vautoResolve\x12\x19\n" +
 	"\badded_id\x18\x03 \x01(\tR\aaddedId\x12/\n" +
-	"\x04runs\x18\x04 \x03(\v2\x1b.lazybox.bench.v1.ReviewRunR\x04runs\"\xa8\x02\n" +
+	"\x04runs\x18\x04 \x03(\v2\x1b.lazybox.bench.v1.ReviewRunR\x04runs\"\xc9\x02\n" +
 	"\x12StartReviewRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12*\n" +
 	"\x11source_session_id\x18\x02 \x01(\tR\x0fsourceSessionId\x12\x14\n" +
@@ -37284,7 +37340,9 @@ const file_api_proto_rawDesc = "" +
 	"\bprovider\x18\b \x01(\tR\bprovider\x12\x14\n" +
 	"\x05focus\x18\t \x01(\tR\x05focus\x12\x14\n" +
 	"\x05model\x18\n" +
-	" \x01(\tR\x05model\"y\n" +
+	" \x01(\tR\x05model\x12\x1f\n" +
+	"\vtemplate_id\x18\v \x01(\tR\n" +
+	"templateId\"y\n" +
 	"\x13StartReviewResponse\x12-\n" +
 	"\x03run\x18\x01 \x01(\v2\x1b.lazybox.bench.v1.ReviewRunR\x03run\x123\n" +
 	"\asession\x18\x02 \x01(\v2\x19.lazybox.bench.v1.SessionR\asession\"\xde\x01\n" +
@@ -38100,14 +38158,15 @@ const file_api_proto_rawDesc = "" +
 	"\fArtifactLink\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\x12\x12\n" +
-	"\x04role\x18\x03 \x01(\tR\x04role\"\xfe\x01\n" +
+	"\x04role\x18\x03 \x01(\tR\x04role\"\x96\x02\n" +
 	"\x0fArtifactVersion\x12\x16\n" +
 	"\x06number\x18\x01 \x01(\rR\x06number\x123\n" +
 	"\x16created_at_unix_millis\x18\x02 \x01(\x03R\x13createdAtUnixMillis\x128\n" +
 	"\x06author\x18\x03 \x01(\v2 .lazybox.bench.v1.ArtifactAuthorR\x06author\x128\n" +
 	"\x06source\x18\x04 \x01(\v2 .lazybox.bench.v1.ArtifactSourceR\x06source\x12\x16\n" +
 	"\x06digest\x18\x05 \x01(\tR\x06digest\x12\x12\n" +
-	"\x04size\x18\x06 \x01(\x04R\x04size\"\x93\x05\n" +
+	"\x04size\x18\x06 \x01(\x04R\x04size\x12\x16\n" +
+	"\x06schema\x18\a \x01(\tR\x06schema\"\x93\x05\n" +
 	"\bArtifact\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12#\n" +
 	"\rcollection_id\x18\x02 \x01(\tR\fcollectionId\x12\x14\n" +

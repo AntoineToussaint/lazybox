@@ -403,3 +403,30 @@ or focus it and press `Space`, and it opens live in an overlay over the page:
 a conversation's latest messages with a message box, a command's output, a
 file's content. `←` / `→` step through the neighbouring rows, `⌘↵` opens it for
 real, `Space` or `Esc` closes it.
+
+## Conversation templates and behavior profiles
+
+In a workspace tab bar, open **+ → Conversation templates** to start **Code
+review** or **Security review** beside the workspace conversation. Both open a
+fresh read-only Claude or Codex reviewer and capture a Git snapshot of the workspace changes
+before sending the brief. The snapshot includes committed and untracked files
+and uses the working-tree version where it differs from the staging area.
+Security review asks for defensive inspection of
+trust boundaries, authorization, data exposure, input handling and secrets.
+Review findings stay in the Review tray. The finished review card links to a
+versioned findings report with the captured revisions, coverage and structured
+findings. If the reviewer omits its coverage line, the card reports the missing
+result and the tray keeps the findings already filed.
+
+In the Review tray, accept the findings you want to address, then choose
+**Address selected findings in a new conversation**. Lazybox opens a sibling
+with a draft that references the findings artifact and the selected IDs.
+Review and send the draft. **Review again** on the template's card captures
+the updated workspace for another read-only pass.
+
+Choose **Balanced** or **Hands-on** when starting a coding conversation to
+include reusable guidance on when to act and when to ask. The session menu
+shows the selected profile. The permission selector controls tool access.
+
+Runner administrators can set `defaults.behaviorProfile` in Runner configuration
+to `balanced-v1` or `hands-on-v1`. Existing conversations keep their profile.

@@ -235,6 +235,40 @@ try{
  assert.equal(cancels().length,4,'ending it is not a cancel');
  await page.screenshot({path:'.cache/review-stopped-card.png'});
 
+ // Code review is also available as a template in the workspace's New tab menu.
+ await page.close();
+ page=await open();
+ await page.locator('.dv-groupview').filter({has:tabs().filter({hasText:'Harden the handler'})})
+  .getByLabel(/^New tab in the .* group$/).first().click();
+ const template=page.getByRole('button',{name:'Code review Workspace changes'});
+ await expect(template).toBeVisible();
+ await template.click();
+ await expect.poll(()=>starts().length).toBe(10);
+ assert.equal(starts()[9].sourceSessionId,author.id);
+ assert.equal(starts()[9].templateId,'code-review-v1');
+ assert.deepEqual(pick(starts()[9]),{provider:'',profileId:'',focus:'',scope:'changes',compare:''});
+ await expect(lastCard()).toContainText('Codex is reviewing changes');
+ assert.notEqual(newest().reviewerSessionId,author.id);
+
+ await page.locator('.dv-groupview').filter({has:tabs().filter({hasText:'Harden the handler'})})
+  .getByLabel(/^New tab in the .* group$/).first().click();
+ await page.getByRole('button',{name:'Security review Workspace changes'}).click();
+ await expect.poll(()=>starts().length).toBe(11);
+ assert.equal(starts()[10].templateId,'security-review-v1');
+ await expect(tabs().filter({hasText:'Security review · Codex'})).toBeVisible();
+ const security=newest();
+ const selected=fixture.fileFinding(security.id,{path:'src/handler.go',startLine:3,snippet:['x'],severity:'major',title:'Validate the caller'});
+ fixture.finishReview(security.id);
+ await expect(lastCard().getByRole('button',{name:'Open findings artifact'})).toBeVisible();
+ await lastCard().getByRole('button',{name:'Open review',exact:true}).click();
+ const tray=page.getByRole('complementary',{name:'Review',exact:true});
+ await tray.getByRole('group',{name:'Triage “Validate the caller”'}).getByRole('button',{name:'Accept',exact:true}).click();
+ await tray.getByRole('button',{name:'Address selected findings in a new conversation'}).click();
+ await expect(box()).toHaveValue(new RegExp('findings artifact '+security.id+' v1.*'+selected.id,'s'));
+ const opens=fixture.mutations.filter(m=>m.method==='OpenSession');
+ assert.equal(opens.at(-1).body.options.permission,'ask');
+ assert.equal(fixture.mutations.filter(m=>m.method==='Apply'&&m.body?.message?.text?.includes(selected.id)).length,0);
+
  assert.deepEqual(errors,[]);
  console.log('Review from the chat: the header button, /review <focus> and ⌘K; the other agent by default, the fallback said; a background tab with its findings; the sidebar row focuses it; cancelled from the card, Esc, the reviewer’s menu and ⌘K; stopped when its reviewer is ended.');
 }finally{await browser?.close();await server.close();await fixture.close();}

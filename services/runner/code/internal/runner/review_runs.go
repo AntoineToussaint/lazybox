@@ -14,6 +14,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitinspect"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/codecheckpoints"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/preferences"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/reviews"
@@ -38,6 +39,7 @@ const PromptSourceReview = "review"
 
 // ReviewRequest is what the person asked to review, and by whom.
 type ReviewRequest struct {
+	TemplateID string
 	// Workspace may be empty: the source conversation's.
 	Workspace string
 	// Source is the conversation (an execution of it) whose work is reviewed.
@@ -226,6 +228,7 @@ func (b *Bench) reviewerProfile(source *Execution, req ReviewRequest) (reviewer,
 // reviewScope is what the brief says about the scope.
 type reviewScope struct {
 	label, diff string
+	input       []reviews.ReviewInput
 	files       []string
 }
 
@@ -539,18 +542,42 @@ func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution,
 	if req.Scope != reviews.ScopeChanges && req.Scope != reviews.ScopeTurn && req.Scope != reviews.ScopePR {
 		return nil, reviews.Run{}, errors.New(`the scope is "changes", "turn" or "pr"`)
 	}
+	preset, err := reviews.TemplateFor(req.TemplateID)
+	if err != nil {
+		return nil, reviews.Run{}, err
+	}
 	chosen, err := b.reviewerProfile(source, req)
 	if err != nil {
 		return nil, reviews.Run{}, err
 	}
 	profile, fallback := chosen.profile, chosen.fallback
+	if req.TemplateID != "" && profile.Provider != "claude" && profile.Provider != "codex" {
+		return nil, reviews.Run{}, errors.New("review templates require a Claude or Codex reviewer with read-only controls")
+	}
 	focus := strings.TrimSpace(req.Focus)
 	if len(focus) > reviews.FocusLimit {
 		return nil, reviews.Run{}, fmt.Errorf("a review's focus is limited to %d bytes", reviews.FocusLimit)
 	}
-	scope, err := b.scopeOf(ctx, source, workspace, req)
+	if req.TemplateID != "" && (req.Scope != reviews.ScopeChanges || b.Checkpoints == nil) {
+		return nil, reviews.Run{}, errors.New("review templates need workspace changes and code checkpoints")
+	}
+	var scope reviewScope
+	if req.TemplateID == "" {
+		scope, err = b.scopeOf(ctx, source, workspace, req)
+		if err != nil {
+			return nil, reviews.Run{}, err
+		}
+	}
+	e, err := b.OpenCollection(profile.ID, workspace.ID, "", accounts.Options{Permission: "read-only", Model: chosen.model}, "", "")
 	if err != nil {
 		return nil, reviews.Run{}, err
+	}
+	if req.TemplateID != "" {
+		scope, err = b.captureReviewInput(ctx, conversationOf(e), workspace, req.Compare)
+		if err != nil {
+			_ = e.Engine.Close()
+			return nil, reviews.Run{}, err
+		}
 	}
 	label, authorLabel := agentLabel(profile), agentLabel(source.Profile)
 	sourceTitle := b.executionTitle(ctx, source)
@@ -559,17 +586,12 @@ func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution,
 		template = b.Preferences.Snapshot().Review.Template
 	}
 	brief := reviews.Brief(reviews.BriefInput{Reviewer: label, Author: authorLabel, Conversation: sourceTitle, Goal: b.reviewGoal(source), Plan: b.reviewPlan(workspace.ID),
-		Scope: scope.label, Diff: scope.diff, Files: scope.files, Evidence: b.reviewEvidence(source), Template: template, Focus: focus})
-
-	e, err := b.OpenCollection(profile.ID, workspace.ID, "", accounts.Options{Permission: "read-only", Model: chosen.model}, "", "")
-	if err != nil {
-		return nil, reviews.Run{}, err
-	}
-	title := "Review · " + scope.label + " · " + label
+		Scope: scope.label, Diff: scope.diff, Files: scope.files, Evidence: b.reviewEvidence(source), Template: template, Focus: focus, Guidance: preset.Guidance + reviewCompletionInstructions(req.TemplateID)})
+	title := preset.Title + " · " + scope.label + " · " + label
 	if b.History != nil {
 		_ = b.History.Rename(ctx, e.ID, title)
 	}
-	run := reviews.Run{ReviewerSession: e.ID, ReviewerConversation: conversationOf(e), ReviewerTitle: title, ReviewerLabel: label, ReviewerProvider: profile.Provider, ReviewerProfile: profile.ID,
+	run := reviews.Run{TemplateID: req.TemplateID, Input: scope.input, ReviewerSession: e.ID, ReviewerConversation: conversationOf(e), ReviewerTitle: title, ReviewerLabel: label, ReviewerProvider: profile.Provider, ReviewerProfile: profile.ID,
 		SourceSession: source.ID, SourceConversation: conversationOf(source), SourceTitle: sourceTitle, SourceLabel: authorLabel, SourceProvider: source.Profile.Provider,
 		Scope: req.Scope, ScopeLabel: scope.label, Turn: req.Turn, Compare: req.Compare, Member: req.Member, State: reviews.RunRunning,
 		Detail: label + " is reviewing " + strings.ToLower(scope.label[:1]) + scope.label[1:] + "."}
@@ -598,10 +620,16 @@ func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution,
 		}
 		rounds = prefs.MaxRounds
 	}
+	if req.TemplateID != "" {
+		mode = reviews.LoopOff
+	}
 	reviews.StartLoop(&run, mode, rounds, time.Now().Unix())
 	run, err = b.Reviews.CreateRun(workspace.ID, run)
 	if err != nil {
 		_ = e.Engine.Close()
+		if req.TemplateID != "" {
+			_ = b.Checkpoints.Delete(ctx, conversationOf(e))
+		}
 		return nil, reviews.Run{}, err
 	}
 	origin := &agent.Origin{Kind: agent.OriginReviewBrief, Summary: fmt.Sprintf("Asked %s to review %s's work", label, authorLabel), Detail: scope.label}
@@ -711,8 +739,8 @@ func (b *Bench) recordReviewEvidence(run reviews.Run, counts reviews.Counts, fin
 	if finished {
 		ev.Detail = counts.Summary()
 		ev.Outcome = work.OutcomePass
-		if run.State == reviews.RunCancelled || run.State == reviews.RunStopped {
-			// Ended by hand before it finished: no verdict, unless a blocker was filed.
+		if run.State == reviews.RunCancelled || run.State == reviews.RunStopped || run.State == reviews.RunFailed {
+			// No completed verdict, unless a blocker was filed.
 			ev.Detail, ev.Outcome = run.State+" · "+counts.Summary(), work.OutcomeUnknown
 		}
 		if counts.Blockers > 0 {
@@ -737,7 +765,7 @@ func (b *Bench) reviewTurnEnded(e *Execution, operation string) {
 	}
 	for _, m := range matches {
 		if m.Role == reviews.RoleReviewer {
-			b.reviewerTurnEnded(m)
+			b.reviewerTurnEnded(m, operation, e.Engine.Snapshot().LastMessage)
 			return
 		}
 	}
@@ -746,7 +774,10 @@ func (b *Bench) reviewTurnEnded(e *Execution, operation string) {
 }
 
 // reviewerTurnEnded records what a reviewer's turn found.
-func (b *Bench) reviewerTurnEnded(m reviews.Match) {
+func (b *Bench) reviewerTurnEnded(m reviews.Match, operation, reply string) {
+	if m.Run.TemplateID != "" && operation != m.Run.BriefOperation {
+		return
+	}
 	review, err := b.Reviews.Load(m.Workspace)
 	if err != nil {
 		return
@@ -775,6 +806,15 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match) {
 		for i := range rv.Runs {
 			if r := &rv.Runs[i]; r.ID == m.Run.ID {
 				r.State, r.UpdatedAt = reviews.RunDone, time.Now().Unix()
+				if r.TemplateID != "" {
+					if err := b.publishReviewResult(m.Workspace, *r, rv.Comments, reviewCoverage(reply)); err != nil {
+						r.State, r.Detail = reviews.RunFailed, "Could not publish review result: "+err.Error()
+						action = reviews.Action{}
+						run = *r
+						break
+					}
+					r.ResultArtifact = r.ID
+				}
 				if r.StopReason == "" {
 					r.Detail = r.ReviewerLabel + " reviewed " + lowerFirst(r.ScopeLabel) + " · " + counts.Summary() + "."
 				}
@@ -878,7 +918,21 @@ func (b *Bench) AddReviewFinding(ctx context.Context, session string, req Findin
 	if err != nil {
 		return reviews.Comment{}, false, m.Run, err
 	}
-	content, exists, err := gitinspect.ReadWorking(member.Path, path)
+	var content []byte
+	var exists bool
+	var head string
+	if len(m.Run.Input) > 0 {
+		index := slices.IndexFunc(m.Run.Input, func(input reviews.ReviewInput) bool { return input.Member == member.Name })
+		if index < 0 {
+			return reviews.Comment{}, false, m.Run, errors.New("the file is outside the captured review input")
+		}
+		input := m.Run.Input[index]
+		content, err = codecheckpoints.ReviewFile(ctx, codecheckpoints.RepoPoint{Path: member.Path, Commit: input.Commit}, path)
+		exists, head = err == nil, input.Head
+	} else {
+		content, exists, err = gitinspect.ReadWorking(member.Path, path)
+		head, _ = gitinspect.Git{}.Head(ctx, member.Path)
+	}
 	if err != nil {
 		return reviews.Comment{}, false, m.Run, err
 	}
@@ -896,7 +950,6 @@ func (b *Bench) AddReviewFinding(ctx context.Context, session string, req Findin
 		return reviews.Comment{}, false, m.Run, fmt.Errorf("%s/%s has %d lines; line %d is not in it", member.Name, path, len(lines), req.StartLine)
 	}
 	req.EndLine = min(req.EndLine, len(lines), req.StartLine+59)
-	head, _ := gitinspect.Git{}.Head(ctx, member.Path)
 	c, updated, err := b.Reviews.AddFinding(m.Workspace, reviews.Comment{Member: member.Name, Path: path, StartLine: req.StartLine, Snippet: lines[req.StartLine-1 : req.EndLine],
 		FileHash: reviews.FileHash(content), Head: head, View: "uncommitted", Body: req.Body, Author: reviews.AuthorAgent, AuthorLabel: m.Run.ReviewerLabel, AuthorSession: e.ID,
 		Severity: req.Severity, Title: req.Title, ReviewID: m.Run.ID, Key: req.Key})

@@ -30,7 +30,13 @@ export function ReviewActions({ workspaceId, sessionId }: { workspaceId: string;
   const cancelling = useCancelReview(workspaceId);
   useActions({
     // The default reviewer (Settings → Review by another agent): the other agent, by default.
-    'review.start': { run: () => { const c = launcher.choices[0]; if (!c) return; showMenuNotice(`Starting ${c.label}’s review…`); void launcher.start({ scope: 'changes' }, c); }, enabled: () => !launcher.unavailable && !launcher.busy && launcher.choices.length > 0 },
+    'review.start': !launcher.unavailable && !launcher.busy && launcher.choices.length > 0 && {
+      run: template => {
+        const reviewer = launcher.choices[0];
+        showMenuNotice(`Starting ${reviewer.label}’s review…`);
+        void launcher.start({ scope: 'changes' }, reviewer, '', typeof template === 'string' ? template : '');
+      },
+    },
     'review.codex': handler('codex'), 'review.claude': handler('claude'),
     'review.cancel': { run: () => { if (underWay) cancelling.request(underWay); }, enabled: () => !!underWay },
   });

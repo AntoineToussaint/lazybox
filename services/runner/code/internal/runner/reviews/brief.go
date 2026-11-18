@@ -59,6 +59,7 @@ When you are done, end your turn with a short summary: what you checked, your fi
 
 // BriefInput is what a brief is made of.
 type BriefInput struct {
+	Guidance                       string
 	Reviewer, Author, Conversation string
 	// Goal is the source conversation's first prompt; Plan the workspace's
 	// latest plan artifact, if any.
@@ -111,6 +112,9 @@ func Brief(in BriefInput) string {
 	if template == "" {
 		template = DefaultTemplate
 	}
+	if in.Guidance != "" && !strings.Contains(template, "{{diff}}") {
+		template += "\n\n{{diff}}"
+	}
 	if !strings.Contains(template, "{{report}}") {
 		template += "\n\n{{report}}"
 	}
@@ -153,6 +157,9 @@ func Brief(in BriefInput) string {
 		"{{goal}}", goal, "{{plan}}", plan, "{{scope}}", in.Scope, "{{diff}}", strings.TrimSpace(in.Diff),
 		"{{files}}", files, "{{evidence}}", evidence, "{{focus}}", focus, "{{report}}", ReportInstructions)
 	out := replacer.Replace(template)
+	if in.Guidance != "" {
+		out = in.Guidance + "\n\n" + out
+	}
 	// An empty section leaves blank lines behind; keep at most one.
 	for strings.Contains(out, "\n\n\n") {
 		out = strings.ReplaceAll(out, "\n\n\n", "\n\n")

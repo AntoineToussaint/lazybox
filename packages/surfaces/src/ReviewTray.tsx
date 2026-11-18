@@ -7,6 +7,7 @@ import { Icon } from './Icons';
 import { LiveIndicator } from './LiveIndicator';
 import { composeInConversation } from './compose';
 import { showConversation } from './review-client';
+import { openRelatedConversation } from './conversation-requests';
 import { endedByHand, loopActive, loopLine, loopModes, loopNeedsYou } from './review-model';
 import { authorLabel, dispositionLabel, freshnessLabel, groupByFile, isFinding, isPending, isProposed, linesLabel, location, matchesFilter, matchesQuery, reviewAuthors, reviewExcerpt, reviewMessage, runSummary, severities, severityLabel, trayFilters, type ReviewQuery, type TrayFilter } from './review-model';
 import type { WorkspaceReviewState } from './useWorkspaceReview';
@@ -140,6 +141,8 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
   const hadProposed = useRef(proposed > 0);
   useEffect(() => { if (proposed && !hadProposed.current && query.filter === 'pending' && !review.comments.some(isPending)) setQuery(q => ({ ...q, filter: 'proposed' })); hadProposed.current = proposed > 0; }, [proposed]);
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  const { api } = useRunner();
+  const handingOff = useRef(false);
   const [target, setTarget] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const counts = useMemo(() => Object.fromEntries(trayFilters.map(f => [f.value, review.comments.filter(c => matchesFilter(c, f.value)).length])) as Record<TrayFilter, number>, [review.comments]);
   const authors = useMemo(() => reviewAuthors(review.comments), [review.comments]);
@@ -157,6 +160,34 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
       onSend(reviewMessage(chosen), to);
       await review.setDisposition(chosen.map(c => c.id), 'sent', { sessionId: to.id, sessionTitle: conversationName(to, '') });
     } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
+  };
+  const templateRun = runs.find(run => run.id === focusRun && run.resultArtifactId);
+  const selectedFindings = chosen.filter(finding => finding.reviewId === templateRun?.id);
+  const authorSession = conversations.find(session => session.id === templateRun?.sourceSessionId);
+  const startFixConversation = async () => {
+    if (!templateRun || !authorSession || !selectedFindings.length || handingOff.current || busy) return;
+    handingOff.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      const opened = await api.openSession({ collectionId: workspaceId, profileId: authorSession.profileId, options: { permission: 'ask' } });
+      if (!opened.session) throw new Error('Runner did not return a conversation');
+      const sessionId = opened.session.id;
+      const draft = [
+        'Verify these selected findings against the current workspace, then address the issues that still apply.',
+        `Source: findings artifact ${templateRun.resultArtifactId} v1. Finding IDs: ${selectedFindings.map(finding => finding.id).join(', ')}.`,
+        reviewMessage(selectedFindings),
+      ].join('\n\n');
+      composeInConversation({ sessionId, text: draft, api });
+      const openedBeside = openRelatedConversation({ collectionId: workspaceId, sessionId: authorSession.id, commandId: '' },
+        { collectionId: workspaceId, sessionId, commandId: '' }, { background: false });
+      if (!openedBeside) showConversation({ collectionId: workspaceId, sessionId });
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      handingOff.current = false;
+      setBusy(false);
+    }
   };
   const summary = counts.all ? [counts.proposed && `${counts.proposed} to triage`, counts.pending && `${counts.pending} pending`, counts.sent && `${counts.sent} sent`, counts.settled && `${counts.settled} done`].filter(Boolean).join(' · ') : runs.some(r => r.state === 'running') ? 'Waiting for findings…' : 'No comments yet';
   const empty = () => {
@@ -216,6 +247,9 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
       {conversations.length > 1 && <label className="review-target">Send to<select value={to?.id || ''} onChange={event => setTarget(event.target.value)} aria-label="Conversation">
         {conversations.map(s => <option key={s.id} value={s.id}>{conversationName(s, 'Untitled conversation')}{s.id === author ? ' (author)' : s.id === conversation?.id ? ' (current)' : ''}</option>)}
       </select></label>}
+      {templateRun && authorSession && <button type="button" className="review-send" disabled={!selectedFindings.length || busy} onClick={() => void startFixConversation()}>
+        <Icon name="chat" size={14}/>Address selected findings in a new conversation
+      </button>}
       <button className="primary review-send" disabled={!chosen.length || !to || busy} onClick={() => void send()}>
         <Icon name="send" size={14}/>{chosen.length ? `Send ${plural(chosen.length, 'comment')} to the agent` : 'Send review to the agent'}
       </button>

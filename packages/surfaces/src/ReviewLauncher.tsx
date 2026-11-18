@@ -7,6 +7,7 @@ import { LiveIndicator } from './LiveIndicator';
 import type { MenuItem } from './context-menu-model';
 import { showConversation, showReview, useReviewLauncher, type ReviewLauncher, type ReviewScope } from './review-client';
 import { countsSummary, endedByHand, isPending, isProposed, loopLine, loopNeedsYou, reviewAgain, reviewInProgress, reviewMessage, runSummary } from './review-model';
+import { openArtifact } from './artifact-events';
 import { useCancelReview } from './ReviewCancel';
 import { composeInConversation } from './compose';
 import { errorText } from './PullRequestFlow';
@@ -86,7 +87,7 @@ export function ReviewCard({ data }: { data: ReviewCardData }) {
   // Under way, it can be cancelled (Cancel review, or Esc on the card); once cancelled or stopped, started again.
   const canCancel = !!live && reviewInProgress(live);
   const cancelling = useCancelReview(data.workspace);
-  const again = ended && live ? reviewAgain(live) : undefined;
+  const again = live && (ended || (!!live.templateId && !running)) ? reviewAgain(live) : undefined;
   const launcher = useReviewLauncher(data.workspace, again && live ? { id: live.sourceSessionId, profileId: '', provider: live.sourceProvider } : undefined);
   useEffect(() => { if (launcher.error) { showMenuNotice(`Could not start the review: ${launcher.error}`); launcher.setError(''); } }, [launcher.error]);
   const onKeyDown = (event: ReactKeyboardEvent) => {
@@ -122,8 +123,9 @@ export function ReviewCard({ data }: { data: ReviewCardData }) {
       {run.nits > 0 && <span className="review-severity sev-nit">{run.nits}</span>}
     </span>}
     <span className="review-card-actions">
+      {live?.resultArtifactId && <button type="button" onClick={() => openArtifact({ collectionId: data.workspace, artifactId: live.resultArtifactId, version: 1 })}>Open findings artifact</button>}
       {again && <button type="button" className="primary" disabled={!!launcher.busy || !!launcher.unavailable} title={launcher.unavailable || `${run.reviewerLabel} reviews ${run.scopeLabel.toLowerCase()} again, in a new read-only conversation`}
-        onClick={() => void launcher.start(again.scope, again.choice, live?.focus || '')}><Icon name="review" size={12}/>{launcher.busy ? 'Starting…' : 'Review again'}</button>}
+        onClick={() => void launcher.start(again.scope, again.choice, live?.focus || '', live?.templateId)}><Icon name="review" size={12}/>{launcher.busy ? 'Starting…' : 'Review again'}</button>}
       {canSend && <button type="button" className="primary" title={`Put ${unsent.length === 1 ? 'the finding' : `the ${unsent.length} findings`} in ${author}'s message box, exactly as filed; you send it`} onClick={() => void send()}>Send {unsent.length} finding{unsent.length === 1 ? '' : 's'} to {author}</button>}
       <button type="button" className={!running && findings && !canSend && !again ? 'primary' : ''} title={findings ? `Triage ${countsSummary(run)} in the Review tray` : 'Open the Review tray'} onClick={() => showReview({ collectionId: data.workspace, reviewId: data.review })}>Open review</button>
       <button type="button" title={`Open ${run.reviewerLabel}'s review conversation: ask it about a finding`} onClick={() => showConversation({ collectionId: data.workspace, sessionId: data.reviewerSession })}>Open conversation</button>

@@ -37,9 +37,21 @@ const (
 	ScopePR      = "pr"
 )
 
+// ReviewInput identifies the exact tree and comparison behind a template result.
+type ReviewInput struct {
+	Member  string `json:"member"`
+	Base    string `json:"base"`
+	Commit  string `json:"commit"`
+	Head    string `json:"head"`
+	Skipped int    `json:"skipped,omitempty"`
+}
+
 // Run is one agent review.
 type Run struct {
-	ID string `json:"id"`
+	ID             string        `json:"id"`
+	TemplateID     string        `json:"templateId,omitempty"`
+	Input          []ReviewInput `json:"input,omitempty"`
+	ResultArtifact string        `json:"resultArtifact,omitempty"`
 	// The reviewer: its conversation (session and conversation id, which
 	// outlives a resumed session), title, how people name the agent, and the
 	// subscription it runs on.
@@ -425,6 +437,9 @@ func (s *Store) AddFinding(workspace string, c Comment) (out Comment, updated bo
 		run, err := findRun(r, c.ReviewID)
 		if err != nil {
 			return err
+		}
+		if run.TemplateID != "" && run.State != RunRunning {
+			return errors.New("the template review has already ended")
 		}
 		round := max(run.Round, 1)
 		for i := range r.Comments {

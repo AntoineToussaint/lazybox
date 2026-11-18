@@ -78,7 +78,9 @@ screenshots its suites saved (`.cache/*.png`, `/tmp/lazybox-*.png`) and its
 gate report. The suites drive Playwright as a library, so there are no traces.
 
 The launcher and browser worker tests use a cached Chromium headless shell.
-The UI shards install the full Chromium and WebKit set for suites that need it.
+The UI shards use the Playwright Ubuntu image matching the npm lockfile. The
+image bundles Chromium, WebKit, and their Linux libraries, so each shard can
+start testing without installing system packages.
 
 The Go suite runs on macOS, where the desktop's Runner runs, and on Linux,
 where a Runner for remote use runs ([REMOTE_RUNNERS.md](REMOTE_RUNNERS.md)).

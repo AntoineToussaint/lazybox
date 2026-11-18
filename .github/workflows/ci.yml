@@ -65,6 +65,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       ui: ${{ steps.shards.outputs.ui }}
+      playwright-image: ${{ steps.shards.outputs.playwright-image }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -78,6 +79,8 @@ jobs:
           node scripts/release-gates.mjs list release
           matrix="$(node scripts/release-gates.mjs shards ui "$UI_SHARDS")"
           echo "ui=$matrix" >> "$GITHUB_OUTPUT"
+          version="$(node -p 'require("./package-lock.json").packages["node_modules/@playwright/test"].version')"
+          echo "playwright-image=mcr.microsoft.com/playwright:v${version}-noble" >> "$GITHUB_OUTPUT"
 
   go:
     name: go (vet, test, race, launcher)
@@ -255,6 +258,10 @@ jobs:
     name: ui ${{ matrix.shard }}
     needs: plan
     runs-on: ubuntu-24.04
+    # Includes the exact browsers and Ubuntu libraries used by the lockfile.
+    # Installing system packages per shard can take longer than the tests.
+    container:
+      image: ${{ needs.plan.outputs.playwright-image }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -266,10 +273,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
-      - run: make deps
-      - uses: ./.github/actions/playwright
-        with:
-          browsers: chromium webkit
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       # The gate runner, not `npm run` directly: same env scrubbing, process
       # groups and per-gate deadlines as staging, and every gate in the shard
       # runs even after one fails. --retry-flaky runs a failed UI gate once

@@ -321,8 +321,9 @@ export type RecognitionSession = {
 export type RecognitionOptions = { language: string; punctuation: boolean; allowServer: boolean };
 /** A speech recognizer: the desktop's (macOS Speech, on-device) or the browser's (Web Speech). */
 export type SpeechRecognizerHost = {
-  id: 'system' | 'browser';
+  id: 'system' | 'browser' | 'wispr';
   label: string;
+  stopGraceMs?: number;
   status(language: string): Promise<RecognizerStatus>;
   /** Asks for the microphone and speech recognition, where the system asks once. */
   requestPermission?(language: string): Promise<RecognizerStatus>;

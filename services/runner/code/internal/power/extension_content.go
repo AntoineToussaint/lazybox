@@ -96,6 +96,7 @@ var runtimeFiles = map[string]string{
 	"shell.css":   "text/css; charset=utf-8",
 	"lazybox.js":  "text/javascript; charset=utf-8",
 	"lazybox.css": "text/css; charset=utf-8",
+	"workflow.js": "text/javascript; charset=utf-8",
 }
 
 func (c *contentServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {

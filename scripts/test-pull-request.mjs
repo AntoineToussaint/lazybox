@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // The PR loop on the Changes page against the fake Runner: commit (with an
 // agent-drafted message), push, open a pull request, read its checks, send the
 // failing ones to the conversation's message box, and merge when green.
@@ -25,7 +26,7 @@ try{
  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`);
  await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');await page.getByRole('combobox',{name:'Session',exact:true}).selectOption('alpha-session');
- await page.getByRole('button',{name:'Review changes',exact:true}).click();
+ await openWorkspaceChanges(page);
  const changes=page.getByRole('region',{name:'Workspace changes'});
  const bar=changes.getByRole('toolbar',{name:'Ship api'});
  await expect(changes.getByRole('toolbar',{name:'Ship web'})).toHaveCount(0);

@@ -71,6 +71,10 @@ service RunnerService {
   rpc ListGitHubRepositories(ListGitHubRepositoriesRequest) returns (ListGitHubRepositoriesResponse);
   rpc ImportGitHubRepository(ImportGitHubRepositoryRequest) returns (ImportGitHubRepositoryResponse);
   rpc ListGitHubItems(ListGitHubItemsRequest) returns (ListGitHubItemsResponse);
+  rpc ListMailbox(ListMailboxRequest) returns (ListMailboxResponse);
+  rpc ListReleaseWatch(ListReleaseWatchRequest) returns (ListReleaseWatchResponse);
+  rpc WisprStatus(WisprStatusRequest) returns (WisprStatusResponse);
+  rpc TranscribeWispr(TranscribeWisprRequest) returns (TranscribeWisprResponse);
   // Work items (PROJECTS_AND_INTEGRATIONS.md): search a provider for the
   // picker, read one item with the context an agent is given, turn a pasted
   // link into its reference, and find the workspaces started from one.
@@ -4231,3 +4235,41 @@ message ExtensionPanelSession {
 }
 
 message DeleteThemeRequest { string file = 1; }
+
+message ListMailboxRequest {}
+message MailboxItem {
+  string id = 1;
+  string repository = 2;
+  string title = 3;
+  string reason = 4;
+  string url = 5;
+  string updated_at = 6;
+  repeated string workspace_ids = 7;
+}
+message ListMailboxResponse {
+  repeated MailboxItem items = 1;
+  bool truncated = 2;
+}
+
+message WisprStatusRequest {}
+message WisprStatusResponse { bool configured = 1; }
+message TranscribeWisprRequest {
+  bytes wav = 1;
+  string language = 2;
+}
+message TranscribeWisprResponse { string text = 1; }
+
+message ListReleaseWatchRequest {}
+message ReleaseWatchItem {
+  string id = 1;
+  string repository = 2;
+  string environment = 3;
+  string reason = 4;
+  string url = 5;
+  string updated_at = 6;
+  repeated string workspace_ids = 7;
+}
+message ListReleaseWatchResponse {
+  repeated ReleaseWatchItem items = 1;
+  bool truncated = 2;
+}

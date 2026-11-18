@@ -9,7 +9,7 @@
 
 // ---- Preferences -----------------------------------------------------------
 
-export type EngineChoice = 'auto' | 'system' | 'browser';
+export type EngineChoice = 'auto' | 'system' | 'browser' | 'wispr';
 /** How the dictation key behaves: held down, pressed to start and again to stop, or both (a tap toggles, a hold talks). */
 export type KeyBehaviour = 'both' | 'hold' | 'toggle';
 export type SpokenCommand = 'send' | 'newline' | 'cancel' | 'stop';
@@ -72,7 +72,7 @@ export function parseVoicePreferences(raw: unknown): VoicePreferences {
   const rate = typeof value.rate === 'number' && Number.isFinite(value.rate) ? Math.min(2, Math.max(0.5, value.rate)) : d.rate;
   const language = typeof value.language === 'string' && /^(?:[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{1,8}){0,3})?$/.test(value.language) ? value.language : '';
   return {
-    engine: oneOf(value.engine, ['auto', 'system', 'browser'], d.engine),
+    engine: oneOf(value.engine, ['auto', 'system', 'browser', 'wispr'], d.engine),
     language,
     keyBehaviour: oneOf(value.keyBehaviour, ['both', 'hold', 'toggle'], d.keyBehaviour),
     autoPunctuation: flag(value.autoPunctuation, d.autoPunctuation),

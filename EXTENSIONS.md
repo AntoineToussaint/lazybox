@@ -50,6 +50,14 @@ person read.
 | `read:sessions` | conversations: title, workspace, provider, model, status — not messages | `ListHistory` |
 | `read:attention` | what needs the person, as the Inbox shows it (the question or the last line) | `ListHistory` |
 | `read:commands` | a conversation's command runs: title, state, exit — not output | `ListCommands` for one conversation |
+| `read:runtime` | workspace service, port and setup status | `GetWorkspaceRuntime` with script bodies and command output removed |
+| `read:pulls` | tracked PR titles, check results and status | `ListLinks` without changing poll rate |
+| `read:releases` | failures and approvals for deployments in workspace repositories | `ListReleaseWatch` |
+| `read:mailbox` | unread GitHub issue and PR notifications | `ListMailbox` |
+| `read:artifacts` | workspace artifact titles and kinds | `ListArtifacts` without document content |
+| `show:github` | open a GitHub item or deployment in the browser | Client navigation |
+| `show:runtime` | open an Actions or Preview panel | Client navigation for the current workspace |
+| `draft:artifact` | open a draft for the person to review and save | Client-side confirmation |
 | `read:missions` | missions and their tasks | `ListMissions` |
 | `read:usage` | tokens and cost by workspace, conversation and model, and hour by hour | `GetTelemetry` (with `series` for the hours) |
 | `show:conversations` | bring a conversation or workspace forward in the window | `PostUiRequest` `open` with a conversation or workspace only (no file, panel or screenshot) |
@@ -93,6 +101,21 @@ Runner acts on them itself.
   `do:inbox.open`) are bundled; *Add* copies one into the folder, then the sheet
   asks. `lazybox extension new my-panel [--example agent-board]` writes a
   starter (with `lazybox.d.ts` for the editor).
+
+## Bundled workflow plugins
+
+Install these from **Settings → Extensions**, then open them in an
+**Extensions** panel. Each plugin shows the name of the workspace or Runner
+it acts on.
+
+| Plugin | What you can do |
+| --- | --- |
+| Mailbox | Read review requests, assignments, mentions and unread GitHub discussions. Enable Inbox delivery in **Settings → Repositories → Connections & folders**. Mailbox uses the Runner's connected classic personal token or a compatible GitHub CLI OAuth token. |
+| Preview Desk | See the selected workspace's services and ports. Open the live preview or the command log in Lazybox. |
+| Workspace Bootstrap | See what the Runner automatically set up from approved configuration, copied and missing files, and service status. Open the setup row in Actions to review or retry. |
+| Runner Radar | Open the conversations on this Runner that have waited the longest for a person. |
+| Release Watch | See tracked pull request checks and deployment failures or approvals you can give. Enable deployment items in Inbox from the GitHub connection settings. The deployment scan covers the first eight workspace repositories by name and requires GitHub Actions and Deployments read access. |
+| Handoff Brief | Collect PR links and artifact references for the selected workspace, add decisions and a next step, and review the draft before saving it as a shareable artifact. |
 
 ## Account policy
 

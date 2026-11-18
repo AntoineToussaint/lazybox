@@ -11,7 +11,7 @@ const now=Date.now(),at=offset=>new Date(now+offset).toISOString();
 const session=f.sessions[0];
 Object.assign(session,{title:'Ship the front door',provider:'claude',busy:true,status:'running',agents:[{id:'root',status:'running',phase:'tool',tool:'Bash',phaseSinceUnixMillis:String(now-321000),turnStartedAtUnixMillis:String(now-400000)},{id:'claude-tool:toolu_sa',parentId:'root',status:'running',name:'Review the API',kind:'local_agent'}]});
 const output=Array.from({length:12},(_,i)=>`\x1b[32m✓\x1b[0m check step ${i+1}`).join('\n')+'\nCHECK_TAIL_LINE\n';
-f.commands.push({id:'cmd-check',sessionId:session.id,title:'pnpm run check',argv:['pnpm','run','check'],mode:'managed',done:false,offset:String(output.length),output});
+const checkCommand = f.streamCommand(session.id, 'pnpm run check', ['pnpm', 'run', 'check']);
 const ch=f.openEvents(session.id);
 const push=(offset,event)=>ch.push(event.data===undefined?event:{...Object.fromEntries(Object.entries(event).filter(([k])=>k!=='data')),providerDataJson:b64(event.data)},at(offset));
 // What the agent does during the test happens when the test says it: timed from then, not from the fixture
@@ -41,6 +41,13 @@ try{
  await expect(bar.locator('.live-bar-where')).toHaveText('in services/front-door');
  // A managed command streams: its last lines, without colour codes.
  const out=bar.locator('.live-bar-output');
+ await expect(out).toContainText('No output yet.');
+ const commandRow = bar.locator('.live-bar-code');
+ await commandRow.dblclick();
+ await expect(out).toHaveAttribute('data-expanded','true');
+ await commandRow.dblclick();
+ await expect(out).not.toHaveAttribute('data-expanded','true');
+ checkCommand.write(output);
  await expect(out).toContainText('CHECK_TAIL_LINE');
  await expect(out).not.toContainText('[32m');
  assert.equal((await out.textContent()).split('\n').length,3,'three lines until more is asked for');
@@ -89,7 +96,7 @@ try{
 
  // Stop says what it stops: the command, not the turn.
  await bar.getByRole('button',{name:'Stop command'}).click();
- await expect.poll(()=>f.mutations.findLast(m=>m.method==='CancelCommand')?.body.commandId).toBe('cmd-check');
+ await expect.poll(()=>f.mutations.findLast(m=>m.method==='CancelCommand')?.body.commandId).toBe(checkCommand.id);
  assert.equal(f.mutations.filter(m=>m.method==='Apply'&&m.body.interrupt).length,0,'stopping the command does not interrupt the turn');
  // Once no managed command runs, the control interrupts the turn, and says so.
  await expect(bar.getByRole('button',{name:'Interrupt'})).toBeVisible({timeout:5000});

@@ -25,6 +25,7 @@ declare namespace Lazybox {
     /** What this panel may do now: the grants the person approved. */
     grants: string[];
     hosts: string[];
+    runnerLabel?: string;
     theme: Theme;
   }
 
@@ -80,7 +81,30 @@ declare namespace Lazybox {
     on(event: 'theme', listener: (theme: Theme) => void): () => void;
     on(event: string, listener: (data: unknown) => void): () => void;
     /** read:workspaces */
-    workspaces: { list(): Promise<{ workspaces: Workspace[] }> };
+    workspaces: { list(): Promise<{ workspaces: Workspace[] }>; focused(): Promise<{ workspace: Workspace | null }> };
+    runtime: {
+      /** read:runtime — status and ports, without script bodies or logs. */
+      read(workspaceId: string): Promise<{
+        services: { id: string; name: string; member: string; port: number; preview: boolean; state: string; hasLog: boolean }[];
+        setups: { member: string; pendingApproval: boolean; state: string; copied: number; missing: number }[];
+      }>;
+      /** show:runtime + read:runtime — opens an approved workspace UI, where a person may act. */
+      show(workspaceId: string, kind: 'preview' | 'setup' | 'logs', target: string): Promise<{ shown: true }>;
+    };
+    /** show:github — opens a GitHub issue, pull request or Actions run. */
+    github: { open(url: string): Promise<{ shown: true }> };
+    /** read:releases — deployments for workspace repositories. */
+    releases: { list(): Promise<{ items: { id: string; repository: string; environment: string; reason: string; url: string }[]; truncated: boolean }> };
+    /** read:pulls — metadata for tracked pull requests. */
+    pulls: { list(workspaceId?: string): Promise<{ pulls: { key: string; title: string; repository: string; number: number; status: string; detail: string; workspaceId: string; sessionId: string; url: string; checkUrl: string; checks: string }[]; error: string }> };
+    artifacts: {
+      /** read:artifacts — titles and IDs, without contents. */
+      list(workspaceId: string): Promise<{ artifacts: { id: string; title: string; kind: string }[] }>;
+      /** draft:artifact — opens a review dialog in the selected workspace. */
+      draft(workspaceId: string, content: string): Promise<{ shown: true }>;
+    };
+    /** read:mailbox — unread notifications for the Runner's GitHub account. */
+    mailbox: { list(): Promise<{ items: { id: string; repository: string; title: string; reason: string; url: string; updatedAt: string }[]; truncated: boolean }> };
     /** read:sessions — titles and status, never messages. */
     sessions: { list(options?: { workspaceId?: string; limit?: number }): Promise<{ conversations: Conversation[] }> };
     /** read:attention — what needs the person, as the Inbox shows it. */

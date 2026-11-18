@@ -350,7 +350,7 @@ function WorkspaceList({
         </p>
       )}
       {index.unsupported&&<p className="module-empty">Live conversations · saved history requires a Runner update.</p>}
-      {index.error&&!connectionError&&<p className="error" role="alert">Could not refresh conversation history. Previously loaded entries are retained.</p>}
+      {index.error&&!connectionError&&<p className="error" role="alert">Could not refresh conversation history. Previously loaded entries are retained. <button type="button" onClick={index.refresh}>Retry history refresh</button></p>}
       {creating && (
         <WorkspaceRepositoryDialog
           chooseRepositoryFolder={chooseRepositoryFolder}

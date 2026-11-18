@@ -1,5 +1,5 @@
 import {Code,ConnectError} from '@lazybox/client-core';
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@lazybox/protocol";
 import { useRunner } from "./RunnerContext";
 import { mergeConversations } from "./conversation-model";
@@ -11,13 +11,24 @@ export function useConversationIndex() {
   const [complete, setComplete] = useState(false);
   const [error, setError] = useState("");
   const [unsupported,setUnsupported]=useState(false);
-  useEffect(()=>{setSaved([]);setComplete(false);setError('');setUnsupported(false);},[api]);
+  const refresh = useRef<() => void>(() => {});
+  useEffect(() => {
+    setSaved([]);
+    setComplete(false);
+    setError('');
+    setUnsupported(false);
+  }, [api]);
   useEffect(() => {
     const control = new AbortController();
     let pending = false;
+    let refreshRequested = false;
     let timeouts = 0;
     const load = async () => {
-      if (pending) return;
+      if (control.signal.aborted) return;
+      if (pending) {
+        refreshRequested = true;
+        return;
+      }
       pending = true;
       try {
         const rows: Session[] = [];
@@ -44,15 +55,20 @@ export function useConversationIndex() {
         }
       } finally {
         pending = false;
+        if (refreshRequested) {
+          refreshRequested = false;
+          void load();
+        }
       }
     };
-    void load();
+    refresh.current = () => void load();
     const timer = setInterval(() => void load(), 15000);
     return () => {
       control.abort();
       clearInterval(timer);
     };
-  }, [api, revision]);
+  }, [api]);
+  useEffect(() => refresh.current(), [api, revision]);
   return {
     sessions: useMemo(
       () => mergeConversations(saved, info?.sessions || []),
@@ -61,5 +77,6 @@ export function useConversationIndex() {
     complete,
     error,
     unsupported,
+    refresh: () => refresh.current(),
   };
 }

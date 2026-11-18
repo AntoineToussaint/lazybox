@@ -57,6 +57,10 @@ const (
 	RunnerService_ListGitHubRepositories_FullMethodName       = "/lazybox.bench.v1.RunnerService/ListGitHubRepositories"
 	RunnerService_ImportGitHubRepository_FullMethodName       = "/lazybox.bench.v1.RunnerService/ImportGitHubRepository"
 	RunnerService_ListGitHubItems_FullMethodName              = "/lazybox.bench.v1.RunnerService/ListGitHubItems"
+	RunnerService_ListMailbox_FullMethodName                  = "/lazybox.bench.v1.RunnerService/ListMailbox"
+	RunnerService_ListReleaseWatch_FullMethodName             = "/lazybox.bench.v1.RunnerService/ListReleaseWatch"
+	RunnerService_WisprStatus_FullMethodName                  = "/lazybox.bench.v1.RunnerService/WisprStatus"
+	RunnerService_TranscribeWispr_FullMethodName              = "/lazybox.bench.v1.RunnerService/TranscribeWispr"
 	RunnerService_SearchItems_FullMethodName                  = "/lazybox.bench.v1.RunnerService/SearchItems"
 	RunnerService_GetItem_FullMethodName                      = "/lazybox.bench.v1.RunnerService/GetItem"
 	RunnerService_ResolveItemUrl_FullMethodName               = "/lazybox.bench.v1.RunnerService/ResolveItemUrl"
@@ -307,6 +311,10 @@ type RunnerServiceClient interface {
 	ListGitHubRepositories(ctx context.Context, in *ListGitHubRepositoriesRequest, opts ...grpc.CallOption) (*ListGitHubRepositoriesResponse, error)
 	ImportGitHubRepository(ctx context.Context, in *ImportGitHubRepositoryRequest, opts ...grpc.CallOption) (*ImportGitHubRepositoryResponse, error)
 	ListGitHubItems(ctx context.Context, in *ListGitHubItemsRequest, opts ...grpc.CallOption) (*ListGitHubItemsResponse, error)
+	ListMailbox(ctx context.Context, in *ListMailboxRequest, opts ...grpc.CallOption) (*ListMailboxResponse, error)
+	ListReleaseWatch(ctx context.Context, in *ListReleaseWatchRequest, opts ...grpc.CallOption) (*ListReleaseWatchResponse, error)
+	WisprStatus(ctx context.Context, in *WisprStatusRequest, opts ...grpc.CallOption) (*WisprStatusResponse, error)
+	TranscribeWispr(ctx context.Context, in *TranscribeWisprRequest, opts ...grpc.CallOption) (*TranscribeWisprResponse, error)
 	// Work items (PROJECTS_AND_INTEGRATIONS.md): search a provider for the
 	// picker, read one item with the context an agent is given, turn a pasted
 	// link into its reference, and find the workspaces started from one.
@@ -1136,6 +1144,46 @@ func (c *runnerServiceClient) ListGitHubItems(ctx context.Context, in *ListGitHu
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListGitHubItemsResponse)
 	err := c.cc.Invoke(ctx, RunnerService_ListGitHubItems_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) ListMailbox(ctx context.Context, in *ListMailboxRequest, opts ...grpc.CallOption) (*ListMailboxResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMailboxResponse)
+	err := c.cc.Invoke(ctx, RunnerService_ListMailbox_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) ListReleaseWatch(ctx context.Context, in *ListReleaseWatchRequest, opts ...grpc.CallOption) (*ListReleaseWatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListReleaseWatchResponse)
+	err := c.cc.Invoke(ctx, RunnerService_ListReleaseWatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) WisprStatus(ctx context.Context, in *WisprStatusRequest, opts ...grpc.CallOption) (*WisprStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WisprStatusResponse)
+	err := c.cc.Invoke(ctx, RunnerService_WisprStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) TranscribeWispr(ctx context.Context, in *TranscribeWisprRequest, opts ...grpc.CallOption) (*TranscribeWisprResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TranscribeWisprResponse)
+	err := c.cc.Invoke(ctx, RunnerService_TranscribeWispr_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3028,6 +3076,10 @@ type RunnerServiceServer interface {
 	ListGitHubRepositories(context.Context, *ListGitHubRepositoriesRequest) (*ListGitHubRepositoriesResponse, error)
 	ImportGitHubRepository(context.Context, *ImportGitHubRepositoryRequest) (*ImportGitHubRepositoryResponse, error)
 	ListGitHubItems(context.Context, *ListGitHubItemsRequest) (*ListGitHubItemsResponse, error)
+	ListMailbox(context.Context, *ListMailboxRequest) (*ListMailboxResponse, error)
+	ListReleaseWatch(context.Context, *ListReleaseWatchRequest) (*ListReleaseWatchResponse, error)
+	WisprStatus(context.Context, *WisprStatusRequest) (*WisprStatusResponse, error)
+	TranscribeWispr(context.Context, *TranscribeWisprRequest) (*TranscribeWisprResponse, error)
 	// Work items (PROJECTS_AND_INTEGRATIONS.md): search a provider for the
 	// picker, read one item with the context an agent is given, turn a pasted
 	// link into its reference, and find the workspaces started from one.
@@ -3594,6 +3646,18 @@ func (UnimplementedRunnerServiceServer) ImportGitHubRepository(context.Context, 
 }
 func (UnimplementedRunnerServiceServer) ListGitHubItems(context.Context, *ListGitHubItemsRequest) (*ListGitHubItemsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListGitHubItems not implemented")
+}
+func (UnimplementedRunnerServiceServer) ListMailbox(context.Context, *ListMailboxRequest) (*ListMailboxResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListMailbox not implemented")
+}
+func (UnimplementedRunnerServiceServer) ListReleaseWatch(context.Context, *ListReleaseWatchRequest) (*ListReleaseWatchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListReleaseWatch not implemented")
+}
+func (UnimplementedRunnerServiceServer) WisprStatus(context.Context, *WisprStatusRequest) (*WisprStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method WisprStatus not implemented")
+}
+func (UnimplementedRunnerServiceServer) TranscribeWispr(context.Context, *TranscribeWisprRequest) (*TranscribeWisprResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TranscribeWispr not implemented")
 }
 func (UnimplementedRunnerServiceServer) SearchItems(context.Context, *SearchItemsRequest) (*ItemPage, error) {
 	return nil, status.Error(codes.Unimplemented, "method SearchItems not implemented")
@@ -4802,6 +4866,78 @@ func _RunnerService_ListGitHubItems_Handler(srv interface{}, ctx context.Context
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).ListGitHubItems(ctx, req.(*ListGitHubItemsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_ListMailbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMailboxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ListMailbox(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ListMailbox_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ListMailbox(ctx, req.(*ListMailboxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_ListReleaseWatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListReleaseWatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ListReleaseWatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ListReleaseWatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ListReleaseWatch(ctx, req.(*ListReleaseWatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_WisprStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WisprStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).WisprStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_WisprStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).WisprStatus(ctx, req.(*WisprStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_TranscribeWispr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TranscribeWisprRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).TranscribeWispr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_TranscribeWispr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).TranscribeWispr(ctx, req.(*TranscribeWisprRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -8107,6 +8243,22 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListGitHubItems",
 			Handler:    _RunnerService_ListGitHubItems_Handler,
+		},
+		{
+			MethodName: "ListMailbox",
+			Handler:    _RunnerService_ListMailbox_Handler,
+		},
+		{
+			MethodName: "ListReleaseWatch",
+			Handler:    _RunnerService_ListReleaseWatch_Handler,
+		},
+		{
+			MethodName: "WisprStatus",
+			Handler:    _RunnerService_WisprStatus_Handler,
+		},
+		{
+			MethodName: "TranscribeWispr",
+			Handler:    _RunnerService_TranscribeWispr_Handler,
 		},
 		{
 			MethodName: "SearchItems",

@@ -350,7 +350,7 @@ stays fixed, and existing folders and branches are preserved.
    **Find a conversation…** filter to find it later. Search runs over the whole
    workspace history before pagination, including saved titles and first-message
    titles. Continuation keeps the name and original ordering.
-3. Choose **Review changes**. Each repository shows its current local branch and
+3. Choose **Review changes** from **Page actions** or press `] ] d`. Each repository shows its current local branch and
    changed files; selecting a file opens its unstaged diff. **Staged** shows the
    index diff. Untracked text files can be previewed, binary files are labelled,
    and **Refresh changes** updates an open diff while the agent keeps working.
@@ -421,10 +421,12 @@ for verification and remaining mobile/layout limitations.
 ### Responsive workspace shell
 
 The header and workspace-row plus buttons open the same **New conversation**
-flow. The dialog names the target workspace. **Start with last settings** is an
-explicit action inside that dialog; opening navigation, resizing, or opening the
-dialog never starts an agent. Page customization, layout import/export and
-opening another workspace window live under **Page actions**.
+flow. The dialog names the target workspace and leads with **Start with last
+settings**. The custom launch form is immediately below it. Opening the dialog
+never starts an agent. The header groups Files, Run, Terminal and New conversation
+under the active workspace name. Inbox and Settings apply across workspaces.
+**Page actions** includes Review changes, page customization, layout configuration
+and opening another workspace window.
 
 At phone widths (760px and below), use **Open workspace navigator** in the top
 left to switch workspaces/conversations. The navigator overlays the active panel.

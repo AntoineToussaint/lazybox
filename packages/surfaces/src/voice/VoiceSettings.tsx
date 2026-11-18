@@ -1,3 +1,5 @@
+import { useRunner } from '../RunnerContext';
+import { wisprRecognizer } from './wispr-recognizer';
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import type { RecognizerLanguage, RecognizerStatus, SpeechVoice, ViewStateStore, VoicePermission } from '@lazybox/platform';
 import { bindings, canonicalBinding, canonicalKey, chordFromEvent, displayBinding, isLoneModifier, resolveMod, actionDefinition } from '../actions';
@@ -35,8 +37,10 @@ const samples: Record<string, string> = { fr: 'Voici comment Lazybox lira les r�
 export function VoiceSettings({ store }: { store?: ViewStateStore }) {
   const [preferences, save] = useVoicePreferences(store);
   const set = (change: Partial<VoicePreferences>) => save({ ...preferences, ...change });
-  const recognizer = chosenRecognizer(preferences);
-  const all = recognizers();
+  const { api } = useRunner();
+  const wispr = wisprRecognizer(api);
+  const recognizer = chosenRecognizer(preferences, wispr);
+  const all = recognizers(wispr);
   const [status, setStatus] = useState<RecognizerStatus | undefined>();
   const [languages, setLanguages] = useState<RecognizerLanguage[]>([]);
   const [voices, setVoices] = useState<SpeechVoice[]>([]);
@@ -44,16 +48,17 @@ export function VoiceSettings({ store }: { store?: ViewStateStore }) {
   const [asking, setAsking] = useState(false);
   const voice = useVoiceState();
   const refresh = () => {
-    if (!recognizer) return;
+    if (!recognizer) { setStatus(undefined); return; }
     recognizer.status(preferences.language).then(setStatus, error => setProblem(String(error)));
   };
-  useEffect(refresh, [recognizer?.id, preferences.language]);
+  useEffect(refresh, [api, recognizer?.id, preferences.language]);
   useEffect(() => { recognizer?.languages().then(setLanguages, () => setLanguages([])); }, [recognizer?.id]);
   useEffect(() => { synthesizer()?.voices().then(setVoices, () => setVoices([])); }, []);
   // Coming back from System Settings: read the permissions again.
   useEffect(() => { window.addEventListener('focus', refresh); return () => window.removeEventListener('focus', refresh); });
 
   const system = recognizer?.id === 'system';
+  const usingWispr = recognizer?.id === 'wispr';
   const place = system ? 'this Mac' : 'this device';
   const automatic = status?.language ? `Automatic (${languages.find(l => l.code === status.language)?.name || status.language})` : 'Automatic (your system’s language)';
   const ask = async () => {
@@ -67,22 +72,23 @@ export function VoiceSettings({ store }: { store?: ViewStateStore }) {
   return <section className="voice-settings" aria-labelledby="voice-settings-title">
     <SettingsHeader id="voice-settings-title" title="Voice" description={<>Dictate messages, say commands, and have replies read to you. Hold <VoiceKey store={store} id="voice.dictate" plain/> and speak; release to finish.</>}/>
     <SettingsGroup title="Dictation">
-      {!recognizer ? <p className="settings-error tone-note" role="note">This browser has no speech recognition. Use Chrome, Edge or Safari, or the Lazybox desktop app — or your keyboard’s own dictation key (on iPhone, the microphone on the keyboard).</p> : <>
-        <SettingsRow label="Engine" htmlFor="voice-engine" description={system ? 'The Speech framework of macOS, on this Mac.' : 'The speech recognition your browser provides.'}>
-          {all.length > 1
+      {!recognizer && <p className="settings-error tone-note" role="note">This browser has no speech recognition. Use Chrome, Edge or Safari, or choose a supported dictation engine.</p>}
+      {all.length > 0 && <>
+        <SettingsRow label="Engine" htmlFor="voice-engine" description={usingWispr ? 'The composer microphone uses Wispr Flow. Audio is sent through this Runner when you finish recording.' : system ? 'The Speech framework of macOS, on this Mac.' : 'The speech recognition your browser provides.'}>
+          {all.length > 1 || !!wispr
             ? <select id="voice-engine" value={preferences.engine} onChange={e => set({ engine: e.target.value as VoicePreferences['engine'] })}>
-              <option value="auto">Automatic ({all[0].label})</option>
+              <option value="auto">Automatic</option>
               {all.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
             </select>
-            : <span>{recognizer.label}</span>}
+            : <span>{recognizer?.label || "Unavailable"}</span>}
         </SettingsRow>
         <SettingsRow label="Permissions" description={`Lazybox asks once; ${system ? 'macOS' : 'your browser'} remembers your answer.`}>
           <span className="voice-status">
             <span className="voice-permission" data-state={status?.microphone || 'unsupported'}><Icon name="mic" size={12}/>Microphone: {status ? permissionText[status.microphone] : '…'}</span>
             {system && <span className="voice-permission" data-state={status?.speech || 'unsupported'}><Icon name="text" size={12}/>Speech recognition: {status ? permissionText[status.speech] : '…'}</span>}
-            {needsAsking && recognizer.requestPermission && <button type="button" className="primary" disabled={asking} onClick={() => void ask()}>{asking ? 'Waiting for your answer…' : 'Allow…'}</button>}
-            {blocked.map(pane => recognizer.openPrivacySettings
-              ? <button key={pane} type="button" onClick={() => void recognizer.openPrivacySettings!(pane).catch(error => setProblem(String(error)))}><Icon name="external" size={12}/>Open {pane === 'microphone' ? 'Microphone' : 'Speech Recognition'} settings</button>
+            {needsAsking && recognizer?.requestPermission && <button type="button" className="primary" disabled={asking} onClick={() => void ask()}>{asking ? 'Waiting for your answer…' : 'Allow…'}</button>}
+            {blocked.map(pane => recognizer?.openPrivacySettings
+              ? <button key={pane} type="button" onClick={() => void recognizer?.openPrivacySettings?.(pane).catch(error => setProblem(String(error)))}><Icon name="external" size={12}/>Open {pane === 'microphone' ? 'Microphone' : 'Speech Recognition'} settings</button>
               : <small key={pane}>Allow the microphone in your browser’s site settings, then come back.</small>)}
             <button type="button" className="quiet" aria-label="Check the permissions again" title="Check again" onClick={refresh}><Icon name="refresh" size={12}/></button>
           </span>
@@ -98,17 +104,14 @@ export function VoiceSettings({ store }: { store?: ViewStateStore }) {
           <span className="settings-row-text"><span className="settings-row-label">Use Apple’s server when needed</span><small>For a language this Mac cannot recognize itself. Off: such a language does not dictate, and audio never leaves this Mac.</small></span>
           <span className="settings-row-control settings-switch"><input type="checkbox" role="switch" checked={preferences.allowServer} onChange={e => set({ allowServer: e.target.checked })}/></span>
         </label>}
-        <PrivacyNote status={status} system={system} place={place} allowServer={preferences.allowServer}/>
+        <PrivacyNote status={status} system={system} wispr={usingWispr} place={place} allowServer={preferences.allowServer}/>
         {(problem || status?.reason) && <p className="settings-error" role="alert">{problem || status?.reason}</p>}
       </>}
     </SettingsGroup>
 
-    <SettingsGroup title="Wispr Flow" description="Use the Wispr Flow app to dictate into any Lazybox message box.">
-      <SettingsRow label="Install and sign in" description="Open the Wispr Flow app, sign in there, and follow its microphone and accessibility setup for your device.">
-        <span><a href="https://wisprflow.ai/" target="_blank" rel="noreferrer">Get Wispr Flow</a> · <a href="https://docs.wisprflow.ai/articles/3152211871-setup-guide" target="_blank" rel="noreferrer">Setup guide</a></span>
-      </SettingsRow>
-      <SettingsRow label="Try Wispr Flow" htmlFor="wispr-flow-test" stacked description="Click the field, hold your Wispr shortcut, speak, then release. When you’re ready, use the same shortcut in the Lazybox composer.">
-        <input id="wispr-flow-test" type="text" autoComplete="off" placeholder="Dictate a test sentence"/>
+    <SettingsGroup title="Wispr Flow" description="Select Wispr Flow as the dictation engine, then click the microphone in a conversation to start and click Stop to insert the transcript.">
+      <SettingsRow label="API access" description="Set LAZYBOX_WISPR_API_KEY on this Runner with an approved Wispr Voice Interface API key.">
+        <a href="https://api-docs.wisprflow.ai/quickstart" target="_blank" rel="noreferrer">Wispr setup ↗</a>
       </SettingsRow>
     </SettingsGroup>
 
@@ -170,14 +173,14 @@ function Switch({ label, detail, checked, disabled, onChange }: { label: string;
 }
 
 /** Where the audio goes, said plainly. "On-device" only when the engine confirmed it. */
-function PrivacyNote({ status, system, place, allowServer }: { status?: RecognizerStatus; system: boolean; place: string; allowServer: boolean }) {
+function PrivacyNote({ status, system, wispr, place, allowServer }: { status?: RecognizerStatus; system: boolean; wispr: boolean; place: string; allowServer: boolean }) {
   const local = !!status?.onDevice;
-  const where = local ? `On-device: audio never leaves ${place}.`
+  const where = wispr ? 'Lazybox sends your finished microphone recording to Wispr Flow through this Runner.' : local ? `On-device: audio never leaves ${place}.`
     : system ? (allowServer ? 'This language is recognized by Apple’s server: the audio is sent to Apple while you dictate.' : 'This language is not available on-device on this Mac. Add it in System Settings → Keyboard → Dictation, or allow Apple’s server above.')
     : 'Your browser sends the audio to its speech service while you dictate (Google for Chrome and Edge, Apple for Safari).';
   return <p className={'voice-privacy' + (local ? ' is-local' : '')} role="note" aria-label="Privacy">
     <Icon name={local ? 'lock' : 'cloud'} size={14}/>
-    <span><strong>{where}</strong> The microphone is on only while the recording light shows, and no audio is ever saved.</span>
+    <span><strong>{where}</strong> Lazybox opens the microphone only for dictation and does not save the recording.</span>
   </p>;
 }
 

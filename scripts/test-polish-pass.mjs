@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // Fixture only: layout defects a person hits without doing anything unusual.
 // A chat squeezed by docked panels keeps its title and a working message box;
 // a phone reaches every page tab and keeps the running step on one row; a
@@ -85,7 +86,7 @@ try {
   {
     const page = await open({ width: 1440, height: 900 });
     const pages = page.locator('.workspace-header > nav');
-    await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+    await openWorkspaceChanges(page);
     await expect(pages.getByRole('button', { name: 'Changes', exact: true })).toBeVisible();
     const close = page.getByRole('button', { name: 'Close Changes page', exact: true });
     await expect(close).toBeVisible();
@@ -96,7 +97,7 @@ try {
     // The last page keeps its conversation: the chat is not closable.
     await expect(page.locator('.panel-chat').getByRole('button', { name: /^Close .* (panel|page)$/ })).toHaveCount(0);
     // And it comes back from the same button.
-    await page.getByRole('button', { name: 'Review changes', exact: true }).click();
+    await openWorkspaceChanges(page);
     await expect(page.getByRole('region', { name: 'Workspace changes' })).toBeVisible();
     await page.context().close();
   }

@@ -1126,6 +1126,7 @@ actions:
         mutations.push({ method, body });
         const command = commands.find(value => value.id === body.commandId);
         if (!command) return error('not_found', 'Command missing');
+        command.finish?.(143);
         Object.assign(command, { done: true, signal: 'SIGTERM', canBackground: false });
         return json({ status: wireCommand(command) });
       }

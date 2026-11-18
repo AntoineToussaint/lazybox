@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // The Changes diff side by side, against the fake Runner: the Unified/Split
 // toggle (remembered, and unified when the pane is too narrow), the changed
 // words marked, a long unchanged run folded and the lines between hunks shown
@@ -39,7 +40,7 @@ try{
  page.on('console',message=>{if(message.type()==='error'&&/key|React|Warning/.test(message.text()))errors.push(message.text());});
  await page.goto(url);
  await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');await page.getByRole('combobox',{name:'Session',exact:true}).selectOption('alpha-session');
- await page.getByRole('button',{name:'Review changes',exact:true}).click();
+ await openWorkspaceChanges(page);
  const changes=page.getByRole('region',{name:'Workspace changes'});
  const diff=changes.getByRole('grid',{name:'File diff'});
  const files=changes.getByRole('navigation',{name:'Changed files'});
@@ -131,7 +132,7 @@ try{
 
  // 9. A reload keeps the layout and what was viewed.
  await page.reload();
- if(!await changes.isVisible())await page.getByRole('button',{name:'Review changes',exact:true}).click();
+ if(!await changes.isVisible())await openWorkspaceChanges(page);
  await expect(files.getByRole('checkbox',{name:'Viewed src/handler.go'})).toBeChecked();
  await files.getByRole('button',{name:/src\/handler\.go/}).click();
  await expect(diff).toHaveClass(/is-split/);

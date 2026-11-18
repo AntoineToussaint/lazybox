@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // Lazybox context menus against the fake Runner, in WebKit (the desktop
 // app's engine; TEST_CHROMIUM=1 for Chromium): every wired place shows the
 // Lazybox menu and never the browser's (the event's default is prevented),
@@ -255,7 +256,7 @@ try{
  await page.keyboard.press('Escape');
 
  // Changes: a file row and a diff line.
- await page.getByRole('button',{name:'Review changes',exact:true}).click();
+ await openWorkspaceChanges(page);
  const changes=page.getByRole('region',{name:'Workspace changes'});
  const fileRow=changes.getByRole('navigation',{name:'Changed files'}).getByRole('button',{name:/handler\.go/});
  await open(fileRow);

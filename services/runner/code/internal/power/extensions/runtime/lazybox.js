@@ -135,7 +135,19 @@
       listeners.get(event).push(listener);
       return function () { listeners.set(event, (listeners.get(event) || []).filter(function (l) { return l !== listener; })); };
     },
-    workspaces: { list: function () { return call('workspaces.list'); } },
+    workspaces: { list: function () { return call('workspaces.list'); }, focused: function () { return call('workspaces.focused'); } },
+    runtime: {
+      read: function (workspaceId) { return call('runtime.read', { workspaceId: workspaceId }); },
+      show: function (workspaceId, kind, target) { return call('runtime.show', { workspaceId: workspaceId, kind: kind, target: target }); },
+    },
+    github: { open: function (url) { return call('github.open', { url: url }); } },
+    releases: { list: function () { return call('releases.list'); } },
+    pulls: { list: function (workspaceId) { return call('pulls.list', workspaceId ? { workspaceId: workspaceId } : {}); } },
+    artifacts: {
+      list: function (workspaceId) { return call('artifacts.list', { workspaceId: workspaceId }); },
+      draft: function (workspaceId, content) { return call('artifacts.draft', { workspaceId: workspaceId, content: content }); },
+    },
+    mailbox: { list: function () { return call('mailbox.list'); } },
     sessions: { list: function (options) { return call('sessions.list', options); } },
     attention: { list: function () { return call('attention.list'); } },
     commands: { list: function (sessionId) { return call('commands.list', { sessionId: sessionId }); } },

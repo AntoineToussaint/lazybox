@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -571,7 +572,9 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 		return agent.Receipt{ID: op.ID, Delivery: "accepted"}, nil
 	}
 	// The interrupt ends the turn; the dispatch that follows takes this message.
-	r, err := e.Apply(ctx, agent.Operation{ID: op.ID[:min(len(op.ID), 120)] + ":now", Kind: agent.Interrupt})
+	// Each delivery attempt can interrupt again if the provider did not end
+	// the turn. Reusing the queued message ID here only replayed the old receipt.
+	r, err := e.Apply(ctx, agent.Operation{ID: "queued-interrupt:" + rand.Text(), Kind: agent.Interrupt})
 	if err != nil && e.stillQueued(op.ID) {
 		return r, err
 	}

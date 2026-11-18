@@ -39,7 +39,7 @@ const clip = (text: string, length = 140) => { const line = text.replace(/\s+/g,
  * meanwhile: one state for the strip's buttons and for ⌘↵ in the message box.
  */
 export type QueuedDelivery = {
-  working?: { id: string; how: 'now' | 'steer' };
+  working?: { id: string; how: 'now' | 'steer'; acknowledged?: boolean };
   error?: { id: string; text: string };
   /**
    * Delivers the queued message with this operation id. `justSent`: the
@@ -51,7 +51,7 @@ export type QueuedDelivery = {
 /** How long Send now or Steer may say it is at work before the strip gives the buttons back to try again. */
 export const DELIVERY_TIMEOUT_MS = 20_000;
 export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: readonly { operationId: string }[] | undefined): QueuedDelivery {
-  const [working, setWorking] = useState<{ id: string; how: 'now' | 'steer' }>();
+  const [working, setWorking] = useState<QueuedDelivery['working']>();
   const [error, setError] = useState<{ id: string; text: string }>();
   // A message that left the queue takes its confirmation, progress and error with it.
   const ids = (queued || []).map(message => message.operationId).join('\0');
@@ -73,10 +73,13 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
     return () => clearTimeout(timer);
   }, [working]);
   const deliver = async (operationId: string, how: 'now' | 'steer', justSent = false) => {
-    setError(undefined); setWorking({ id: operationId, how });
-    try { await api.apply({ sessionId: sessionID, operationId: crypto.randomUUID(), operation: { case: 'deliverQueued', value: { operationId, how } } }); }
-    catch (e) {
-      setWorking(undefined);
+    const attempt = { id: operationId, how };
+    setError(undefined); setWorking(attempt);
+    try {
+      await api.apply({ sessionId: sessionID, operationId: crypto.randomUUID(), operation: { case: 'deliverQueued', value: { operationId, how } } }, { timeoutMs: DELIVERY_TIMEOUT_MS });
+      setWorking(current => current === attempt ? { ...attempt, acknowledged: true } : current);
+    } catch (e) {
+      setWorking(current => current === attempt ? undefined : current);
       const why = humanError(e);
       if (justSent && /no longer queued/.test(why)) return;
       setError({ id: operationId, text: `${how === 'steer' ? 'Could not steer' : 'Could not send it now'}: ${why}` });
@@ -135,7 +138,7 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
             {event ? <span className="queued-text queued-event" title={message.text}><Icon name={event.icon} size={11}/><span>{clip(event.line)}</span>{event.detail && <small>{event.detail}</small>}</span>
               : <q className="queued-text" title={message.text}>{clip(message.text)}</q>}
             <span className="queued-actions">
-              {mine ? <span className="queued-working" role="status">{working!.how === 'steer' ? 'Steering…' : 'Stopping the current step…'}</span> : <>
+              {mine ? <span className="queued-working" role="status">{working!.how === 'steer' ? 'Steering…' : working!.acknowledged ? 'Waiting for the current turn to end…' : 'Stopping the current step…'}</span> : <>
                 {steer && <button type="button" onClick={() => void deliver(message, 'steer')}
                   title={`Give ${agentName} this message now, inside the running turn, without stopping it`}><Icon name="send" size={11}/>Steer</button>}
                 <button type="button" onClick={() => void deliver(message, 'now')}

@@ -17,7 +17,27 @@ import (
 // lazybox_command tool, which checks its session's permission.
 
 func (s *Service) GetWorkspaceRuntime(ctx context.Context, r *pb.WorkspaceRuntimeRequest) (*pb.WorkspaceRuntime, error) {
-	return s.workspaceRuntime(ctx, r.CollectionId)
+	runtime, err := s.workspaceRuntime(ctx, r.CollectionId)
+	if err != nil {
+		return nil, err
+	}
+	if who, _ := ctx.Value(principalKey{}).(principal); who.extension != "" {
+		// Report health without exposing script bodies, paths, or command output.
+		runtime.Sources = nil
+		for _, action := range runtime.Actions {
+			action.Run, action.Cwd = "", ""
+			if action.RunState != nil {
+				action.RunState.LastLine, action.RunState.Error = "", ""
+			}
+		}
+		for _, setup := range runtime.Setups {
+			setup.Run = ""
+			if setup.RunState != nil {
+				setup.RunState.LastLine, setup.RunState.Error = "", ""
+			}
+		}
+	}
+	return runtime, nil
 }
 
 func (s *Service) workspaceRuntime(ctx context.Context, id string) (*pb.WorkspaceRuntime, error) {

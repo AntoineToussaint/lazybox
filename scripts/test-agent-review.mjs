@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // One-click cross-agent review against the fake Runner (GITHUB.md, "Agent
 // review"): Review with Codex from Changes opens a read-only reviewer
 // conversation with its brief; the reviewer's findings land in the Review
@@ -49,7 +50,7 @@ try{
  const mod='Meta';
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}#token=${fixture.token}`);
  await expect(page.locator('.messages:visible')).toContainText('REPLY_ONE');
- await page.getByRole('button',{name:'Review changes',exact:true}).click();
+ await openWorkspaceChanges(page);
  const changes=page.getByRole('region',{name:'Workspace changes'});
  await expect(changes.getByRole('grid',{name:'File diff'})).toContainText('log.Print("handle")');
 
@@ -207,7 +208,7 @@ try{
 
  // 10. The PR card: "Review the PR with Codex".
  api.pr={number:'7',title:'Return handler errors',url:'https://github.com/fixture-team/api/pull/7',state:'open',draft:false,base:'main',headSha:api.head,mergeableState:'clean',reviewDecision:'',checksState:'success',author:'fixture-user',checks:[]};
- await page.getByRole('button',{name:'Review changes',exact:true}).click();
+ await openWorkspaceChanges(page);
  const pr=page.getByRole('region',{name:'Workspace changes'}).getByRole('region',{name:'Pull request #7'});
  await pr.getByRole('button',{name:'Review the PR with Codex'}).click();
  await expect.poll(()=>starts().length).toBe(6);

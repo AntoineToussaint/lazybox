@@ -82,9 +82,38 @@ try {
   browser = await (process.env.TEST_CHROMIUM ? chromium : webkit).launch();
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   await context.addInitScript(fakeSpeech);
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
+      getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }),
+    } });
+    Object.defineProperty(window, 'MediaRecorder', { configurable: true, value: class {
+      state = 'inactive';
+      mimeType = 'audio/webm';
+      start() { this.state = 'recording'; }
+      stop() {
+        this.state = 'inactive';
+        this.ondataavailable?.({ data: new Blob(['fixture audio']) });
+        queueMicrotask(() => this.onstop?.());
+      }
+    } });
+    Object.defineProperty(window, 'AudioContext', { configurable: true, value: class {
+      async decodeAudioData() { return { duration: 0.01 }; }
+      async close() {}
+    } });
+    Object.defineProperty(window, 'OfflineAudioContext', { configurable: true, value: class {
+      createBufferSource() { return { connect() {}, start() {} }; }
+      async startRendering() { return { getChannelData: () => new Float32Array(160).fill(0.3) }; }
+    } });
+  });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
   const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  await page.route('**/WisprStatus', route => route.fulfill({ json: { configured: true } }));
+  let wisprAudio;
+  await page.route('**/TranscribeWispr', route => {
+    wisprAudio = route.request().postDataJSON().wav;
+    return route.fulfill({ json: { text: 'Direct from Wispr Flow' } });
+  });
   await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
   const message = page.getByRole('textbox', { name: 'Message', exact: true });
   const pill = page.locator('.voice-pill');
@@ -308,13 +337,21 @@ try {
   await page.getByRole('tab', { name: 'Voice' }).click();
   const settings = page.locator('.voice-settings');
   await expect(settings.getByRole('heading', { name: 'Voice' })).toBeVisible();
-  await expect(settings.getByRole('link', { name: 'Get Wispr Flow' })).toHaveAttribute('href', 'https://wisprflow.ai/');
-  await expect(settings.getByRole('link', { name: 'Setup guide' })).toHaveAttribute('href', /docs\.wisprflow\.ai/);
-  const wisprPractice = settings.getByRole('textbox', { name: 'Try Wispr Flow' });
-  await wisprPractice.fill('Practice dictation');
-  await wisprPractice.press('Enter');
-  await expect(wisprPractice).toHaveValue('Practice dictation');
-  assert.equal(applied('Practice dictation'), false);
+  await expect(settings.getByRole('link', { name: 'Wispr setup' })).toHaveAttribute('href', 'https://api-docs.wisprflow.ai/quickstart');
+  await settings.getByLabel('Engine').selectOption('wispr');
+  await expect(settings.getByRole('note', { name: 'Privacy' })).toContainText('to Wispr Flow');
+  const work = page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first();
+  await work.click();
+  await message.fill('');
+  await page.getByRole('button', { name: 'Dictate', exact: true }).click();
+  await expect(pill).toContainText('Listening');
+  await page.getByRole('button', { name: 'Stop dictation', exact: true }).click();
+  await expect(message).toHaveValue('Direct from Wispr Flow');
+  assert.equal(Buffer.from(wisprAudio, 'base64').subarray(0, 4).toString(), 'RIFF');
+  assert.equal(applied('Direct from Wispr Flow'), false);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('tab', { name: 'Voice' }).click();
+  await settings.getByLabel('Engine').selectOption('browser');
   await expect(settings).toContainText('Browser speech recognition');
   await expect(settings.getByRole('note', { name: 'Privacy' })).toContainText('Your browser sends the audio to its speech service');
   await expect(settings.getByRole('note', { name: 'Privacy' })).not.toContainText('On-device');

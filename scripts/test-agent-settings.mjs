@@ -42,7 +42,8 @@ try{
  await page.getByRole('button',{name:'Save model price',exact:true}).click();await expect(page.getByRole('status').filter({hasText:'Model price saved.'})).toBeVisible();
  const price=fixture.mutations.findLast(m=>m.method==='SetModelPrice').body.price;assert.equal(price.input,'10000');assert.equal(price.cacheRead,'250');assert.equal(price.cacheWrite5m,'12500');
  await mkdir('.cache',{recursive:true});await page.screenshot({path:'.cache/agent-pricing-settings.png'});
- await page.getByRole('button',{name:'New conversation',exact:true}).click();const setup=page.getByRole('dialog',{name:'New conversation',exact:true});await page.screenshot({path:'.cache/agent-startup.png'});
+ await page.getByRole('button',{name:'New conversation',exact:true}).click();const setup=page.getByRole('dialog',{name:'New conversation',exact:true});await expect(setup.getByRole('button',{name:'Start with last settings'})).toBeFocused();
+ await page.screenshot({path:'.cache/agent-startup.png'});
  await setup.getByRole('combobox',{name:'Agent',exact:true}).click();await setup.getByRole('option',{name:/^Codex/}).click();await setup.getByLabel('Account profile').selectOption('saved-codex');
  await setup.getByRole('combobox',{name:'Permissions',exact:true}).selectOption('yolo');await setup.getByText('Model & context',{exact:true}).click();await setup.getByLabel('Additional session context').fill('Inspect this workspace');
  await setup.getByRole('button',{name:'Start Codex ↗',exact:true}).click();await expect(setup).not.toBeVisible();
@@ -50,7 +51,9 @@ try{
  // Reset the explicitly saved Runner default; one-off session YOLO must not be remembered.
  await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('tab',{name:'Agents & workspaces',exact:true}).click();await page.getByLabel('Default permissions').selectOption('');await page.getByRole('button',{name:'Save agent settings'}).click();await expect(page.getByRole('status').filter({hasText:'Agent settings saved.'})).toBeVisible();
  const before=fixture.mutations.filter(m=>m.method==='OpenSession').length;
- await page.getByRole('button',{name:'New conversation',exact:true}).click();await page.getByRole('button',{name:'Start with last settings',exact:true}).click();await expect.poll(()=>fixture.mutations.filter(m=>m.method==='OpenSession').length).toBe(before+1);await expect(setup).not.toBeVisible();
+ await page.getByRole('button',{name:'New conversation',exact:true}).click();
+ await setup.getByLabel('Account profile').selectOption('codex-default');
+ await setup.getByRole('button',{name:'Start with last settings',exact:true}).click();await expect.poll(()=>fixture.mutations.filter(m=>m.method==='OpenSession').length).toBe(before+1);await expect(setup).not.toBeVisible();
  opened=fixture.mutations.findLast(m=>m.method==='OpenSession').body;assert.equal(opened.profileId,'saved-codex');assert.ok(!opened.options.permission);assert.ok(!opened.options.instructions);
  await page.reload();await expect(page.getByRole('button',{name:'New conversation',exact:true})).toBeVisible();assert.equal(fixture.mutations.filter(m=>m.method==='OpenSession').length,before+1,'Reload started a session');
  fixture.profiles.splice(fixture.profiles.findIndex(p=>p.id==='saved-codex'),1);

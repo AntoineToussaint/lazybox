@@ -187,3 +187,27 @@ func TestAMessageQueuedAcrossARestartJournalsItsReceipt(t *testing.T) {
 		t.Fatalf("its receipt: %+v", r)
 	}
 }
+
+func TestDeliverNowRetrySendsAnotherInterrupt(t *testing.T) {
+	e, session := bench(t, true)
+	ctx := contextFor(t)
+	if _, err := e.Apply(ctx, agent.Operation{ID: "active", Kind: agent.Message, Text: "run checks"}); err != nil {
+		t.Fatal(err)
+	}
+	applied(t, session)
+	if _, err := e.Apply(ctx, agent.Operation{ID: "queued", Kind: agent.Message, Text: "next"}); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := range 2 {
+		if _, err := e.DeliverQueued(ctx, "queued", DeliverNow); err != nil {
+			t.Fatal(err)
+		}
+		if operation := applied(t, session); operation.Kind != agent.Interrupt {
+			t.Fatalf("attempt %d: %+v", attempt, operation)
+		}
+	}
+	session.Events <- agent.Event{Type: "turn_ended", Status: "interrupted"}
+	if operation := applied(t, session); operation.ID != "queued" {
+		t.Fatalf("expected queued message once, got %+v", operation)
+	}
+}

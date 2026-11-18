@@ -1,0 +1,11 @@
+lazybox: 1
+name: Handoff Brief
+version: 1.0.0
+description: Draft a shareable workspace handoff with pull requests and artifacts.
+author: Lazybox
+panels:
+  - id: main
+    title: Handoff Brief
+    icon: notes
+    entry: index.html
+grants: [read:workspaces, read:pulls, read:artifacts, draft:artifact]

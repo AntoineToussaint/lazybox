@@ -16,6 +16,7 @@ import { useAttentionHost, useNotificationPreferences, useViewingReader } from '
 import { RunnerBadge, useMergedInbox, useRunnerActionHosts, useRunnerDirectory } from './RunnerDirectory';
 import { rowTarget, type RunnerRow } from './runner-directory';
 import { MissionInboxSection, useAwaitingTasks, useMissionAttention } from './MissionInbox';
+import { GitHubInboxSections, useGitHubInboxCount } from './Mailbox';
 import { PullRequestInboxSection, usePullInboxCount } from './PullRequestInbox';
 import { lineageLabel } from './agents-model';
 import type { ViewTarget } from './workspace-model';
@@ -53,9 +54,9 @@ export function AttentionCenter({ collections, selection, onOpen, viewState }: {
   const show = () => { if (conversationOpeners()?.showAgents()) requestAgentsFocus(); else setOpen(true); };
   useKeyboardAction('inbox.open', show);
   useAttentionNotifier(inbox, collections, selection, onOpen, keymap);
-  const awaiting = useAwaitingTasks(), plans = useMissionAttention() - awaiting, pulls = usePullInboxCount();
-  const needsInput = inbox.counts['needs-input'] + awaiting + plans, count = inbox.unread + awaiting + plans + pulls;
-  const label = [inbox.unread ? `Inbox, ${inbox.unread} ${inbox.unread === 1 ? 'conversation needs' : 'conversations need'} attention` : 'Inbox', awaiting ? `${awaiting} ${awaiting === 1 ? 'task awaits' : 'tasks await'} acceptance` : '', plans ? `${plans} ${plans === 1 ? 'plan awaits' : 'plans await'} approval` : '', pulls ? `${pulls} ${pulls === 1 ? 'pull request needs' : 'pull requests need'} you` : ''].filter(Boolean).join(', ');
+  const awaiting = useAwaitingTasks(), plans = useMissionAttention() - awaiting, pulls = usePullInboxCount(), github = useGitHubInboxCount();
+  const needsInput = inbox.counts['needs-input'] + awaiting + plans, count = inbox.unread + awaiting + plans + pulls + github;
+  const label = [inbox.unread ? `Inbox, ${inbox.unread} ${inbox.unread === 1 ? 'conversation needs' : 'conversations need'} attention` : 'Inbox', awaiting ? `${awaiting} ${awaiting === 1 ? 'task awaits' : 'tasks await'} acceptance` : '', plans ? `${plans} ${plans === 1 ? 'plan awaits' : 'plans await'} approval` : '', pulls ? `${pulls} ${pulls === 1 ? 'pull request needs' : 'pull requests need'} you` : '', github ? `${github} GitHub ${github === 1 ? 'item' : 'items'}` : ''].filter(Boolean).join(', ');
   return <>
     <button className="toolbar-action inbox-action" aria-label={label} title={`Inbox (${keymap['inbox.open']})`} aria-expanded={open} onClick={show}>
       <Icon name="inbox"/><span>Inbox</span>
@@ -103,8 +104,8 @@ function InboxDialog({ inbox, collections, selection, onClose, onOpen }: { inbox
     }
   };
   const waiting = inbox.counts['needs-input'] + useMissionAttention();
-  const pulls = usePullInboxCount();
-  const summary = waiting ? `${waiting} waiting for you` : unseen.length ? `${unseen.length} to review` : pulls ? `${pulls} ${pulls === 1 ? 'pull request' : 'pull requests'} to look at` : inbox.rows.length ? 'All caught up' : '';
+  const pulls = usePullInboxCount(), github = useGitHubInboxCount();
+  const summary = waiting ? `${waiting} waiting for you` : unseen.length ? `${unseen.length} to review` : pulls ? `${pulls} ${pulls === 1 ? 'pull request' : 'pull requests'} to look at` : github ? `${github} GitHub items` : inbox.rows.length ? 'All caught up' : '';
   return <dialog ref={dialog} className="inbox-dialog" aria-labelledby="inbox-title" onCancel={onClose} onKeyDown={keyDown}>
     <header>
       <h2 id="inbox-title">Inbox</h2>
@@ -115,8 +116,9 @@ function InboxDialog({ inbox, collections, selection, onClose, onOpen }: { inbox
     <div className="inbox-body">
       <MissionInboxSection onOpen={onOpen}/>
       <PullRequestInboxSection collections={collections} onOpen={onOpen}/>
+      <GitHubInboxSections collections={collections} onOpen={onOpen}/>
       {!inbox.rows.length && <div className="inbox-empty"><Icon name="inbox" size={28}/><strong>No conversations yet</strong><p>Agents that need you will show up here, from every workspace.</p></div>}
-      {inbox.rows.length > 0 && !waiting && !pulls && !inbox.counts.failed && !inbox.counts.review && <p className="inbox-caught-up"><Icon name="check" size={14}/>Nothing needs you right now.</p>}
+      {inbox.rows.length > 0 && !waiting && !pulls && !github && !inbox.counts.failed && !inbox.counts.review && <p className="inbox-caught-up"><Icon name="check" size={14}/>Nothing needs you right now.</p>}
       {inbox.groups.map(group => {
         const visible = group.state === 'idle' && !allDone ? group.rows.slice(0, doneLimit) : group.rows;
         return <section key={group.state} className={`inbox-group group-${group.state}`} aria-labelledby={`inbox-group-${group.state}`}>

@@ -15,6 +15,12 @@ try {
  const chat=page.locator('.panel-chat');const composer=chat.getByRole('textbox',{name:'Message',exact:true});
  await expect(composer).toBeVisible();await composer.fill('Keep this draft through navigation and resizing');
  await chat.evaluate(node=>node.dataset.qaIdentity='retained');
+ const toolbar = page.locator('.workspace-header');
+ const toolGroup = toolbar.getByRole('group',{name:'Alpha feature'});
+ await expect(toolGroup.getByRole('button',{name:'Browse files'})).toBeVisible();
+ await expect(toolGroup.getByRole('button',{name:'New conversation'})).toBeVisible();
+ await expect(toolGroup.getByRole('button',{name:/^Inbox/})).toHaveCount(0);
+ await expect(toolbar.getByRole('button',{name:'Review changes',exact:true})).toHaveCount(0);
  const streams=fixture.calls.filter(c=>c.method==='WatchEvents').length;
  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
  await page.screenshot({path:'/tmp/lazybox-polish-desktop.png',animations:'disabled'});

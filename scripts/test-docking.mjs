@@ -1,3 +1,4 @@
+import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // The page dock (DockLayout, dockview): drag a tab onto another panel's edge to
 // split or onto its middle to join its tabs, with a live drop preview; resize
 // by mouse and keyboard; maximize; minimize; presets applied and saved; Files
@@ -250,9 +251,9 @@ try{
  }
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'no horizontal overflow');
  await shot(page,'minimums');
- // An open Changes panel's tool keeps only its icon: "Changes" is not said twice.
- await page.getByRole('button',{name:'Review changes',exact:true}).click();
- await expect(page.getByRole('button',{name:'Review changes',exact:true})).toHaveText('');
+ // Changes is a workspace menu action and never occupies the top bar.
+ await openWorkspaceChanges(page);
+ await expect(page.locator('.workspace-header').getByRole('button',{name:'Review changes',exact:true})).toHaveCount(0);
  await page.setViewportSize({width:1440,height:900});
  await page.getByRole('navigation',{name:'Pages'}).getByRole('button',{name:'Work',exact:true}).click();
  // Another page shows other panels; back on Work, the chat is drawn again: mark it anew.

@@ -71,10 +71,11 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
   };
 
   useEffect(() => {
-    if (!autoStart || quickStarted.current || sessionID || !info || settingsLoading || !selectedProfile || !allowStart) return;
+    if (!autoStart || quickStarted.current || sessionID || !info || settingsLoading || !allowStart) return;
     if (remembered.profile && !profiles.some(p => p.id === remembered.profile)) {
       quickStarted.current = true; onError('The last account is no longer available. Choose an account to start this session.'); return;
     }
+    if (!selectedProfile) return;
     let cancelled = false;
     queueMicrotask(() => { if (!cancelled && !quickStarted.current) { quickStarted.current = true; void open(); } });
     return () => { cancelled = true; };

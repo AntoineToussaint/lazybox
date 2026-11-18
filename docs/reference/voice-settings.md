@@ -16,6 +16,12 @@ Shortcuts). The two voice keys are part of your shortcuts.
 | Use Apple's server when needed | Off | Mac only. Off: a language not available on-device does not dictate, and audio never leaves the Mac. On: such a language is sent to Apple while you dictate. |
 | Privacy note | — | Says where audio goes for the engine and language in use. "On-device" only when the engine confirms it. |
 
+## Wispr Flow
+
+Use **Get Wispr Flow** and **Setup guide** to install and sign in to the
+Wispr Flow app. **Try Wispr Flow** is an editable practice field. Its text
+is discarded when you leave Voice settings.
+
 ## Keys
 
 | Setting | Default | What it does |

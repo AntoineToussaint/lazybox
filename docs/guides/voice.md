@@ -10,9 +10,10 @@ none of it is ever saved.
 
 ## Dictate a message
 
-To use a system dictation app such as [Wispr Flow](https://wisprflow.ai/),
-focus the Lazybox message box and use the app’s own shortcut. Review the
-inserted text and send it through the usual composer controls.
+Open **Settings → Voice → Wispr Flow** for the app download, sign-in
+instructions, and a practice field. Sign in in the Wispr Flow app. Then focus
+the Lazybox message box and use your Wispr shortcut. Review the inserted text
+and send it through the usual composer controls.
 
 1. Click into a conversation's message box (or just have one on screen).
 2. **Hold `Right ⌥`** — the Option key on the right of the space bar, on its

@@ -103,6 +103,15 @@ export function VoiceSettings({ store }: { store?: ViewStateStore }) {
       </>}
     </SettingsGroup>
 
+    <SettingsGroup title="Wispr Flow" description="Use the Wispr Flow app to dictate into any Lazybox message box.">
+      <SettingsRow label="Install and sign in" description="Open the Wispr Flow app, sign in there, and follow its microphone and accessibility setup for your device.">
+        <span><a href="https://wisprflow.ai/" target="_blank" rel="noreferrer">Get Wispr Flow</a> · <a href="https://docs.wisprflow.ai/articles/3152211871-setup-guide" target="_blank" rel="noreferrer">Setup guide</a></span>
+      </SettingsRow>
+      <SettingsRow label="Try Wispr Flow" htmlFor="wispr-flow-test" stacked description="Click the field, hold your Wispr shortcut, speak, then release. When you’re ready, use the same shortcut in the Lazybox composer.">
+        <input id="wispr-flow-test" type="text" autoComplete="off" placeholder="Dictate a test sentence"/>
+      </SettingsRow>
+    </SettingsGroup>
+
     <SettingsGroup title="Keys" description="Both keys work from anywhere in the window, also while you type.">
       <SettingsRow label="Dictate" description={<>Into the message box you are working in. Right ⌥ alone: hold it to talk, tap it twice to keep listening. If ⌥Space does nothing, another app (ChatGPT, Raycast, Alfred) may use it. Pick another key.</>}><VoiceKey store={store} id="voice.dictate"/></SettingsRow>
       <SettingsRow label="Say a command" description="Opens the command palette and runs what you say: “next agent that needs me”, “open changes”, “switch to Beta”."><VoiceKey store={store} id="voice.command"/></SettingsRow>

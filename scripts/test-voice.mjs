@@ -308,6 +308,13 @@ try {
   await page.getByRole('tab', { name: 'Voice' }).click();
   const settings = page.locator('.voice-settings');
   await expect(settings.getByRole('heading', { name: 'Voice' })).toBeVisible();
+  await expect(settings.getByRole('link', { name: 'Get Wispr Flow' })).toHaveAttribute('href', 'https://wisprflow.ai/');
+  await expect(settings.getByRole('link', { name: 'Setup guide' })).toHaveAttribute('href', /docs\.wisprflow\.ai/);
+  const wisprPractice = settings.getByRole('textbox', { name: 'Try Wispr Flow' });
+  await wisprPractice.fill('Practice dictation');
+  await wisprPractice.press('Enter');
+  await expect(wisprPractice).toHaveValue('Practice dictation');
+  assert.equal(applied('Practice dictation'), false);
   await expect(settings).toContainText('Browser speech recognition');
   await expect(settings.getByRole('note', { name: 'Privacy' })).toContainText('Your browser sends the audio to its speech service');
   await expect(settings.getByRole('note', { name: 'Privacy' })).not.toContainText('On-device');

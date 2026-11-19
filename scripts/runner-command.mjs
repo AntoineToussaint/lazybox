@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 // A Runner launched from an agent shell owns its own account selection.
 // Keep the person's normal terminal overrides, but drop the parent agent's.
@@ -17,6 +17,7 @@ export function runnerArguments({ paths, source, snippetAdapter, snippetDirector
   const args = ['run', 'service', 'runner', '--runtime-context', 'native', '--temporary-ports', '--headless'];
   const settings = {
     LAZYBOX_V2_STATE: paths.state,
+    LAZYBOX_V2_ENVIRONMENTS: dirname(paths.directory),
     LAZYBOX_V2_WORKTREE_ROOT: join(paths.directory, 'collections'),
     LAZYBOX_V2_CONFIG: paths.config,
     LAZYBOX_V2_WORKER: join(source, 'workers/claude-sdk/dist/main.js'),

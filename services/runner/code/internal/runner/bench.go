@@ -1141,7 +1141,11 @@ func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args
 		if err != nil {
 			return "", err
 		}
-		if c.Status().Spec.SessionID != e.ID && c.Status().Spec.SessionID != e.Previous {
+		spec := c.Status().Spec
+		owned := spec.SessionID != "" && (spec.SessionID == e.ID || spec.SessionID == e.Previous)
+		workspaceAction := e.CollectionID != "" && spec.CollectionID == e.CollectionID && spec.Kind == "action"
+		reading := p.Action == "read" || p.Action == "tail" || p.Action == "wait"
+		if !owned && !(workspaceAction && reading) {
 			return "", errors.New("command belongs to another execution")
 		}
 		switch p.Action {

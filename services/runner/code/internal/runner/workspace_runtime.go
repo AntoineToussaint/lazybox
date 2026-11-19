@@ -517,6 +517,12 @@ func (b *Bench) runtimeEnv(c collections.Collection, m WorkspaceMember, base, pi
 	vars["LAZYBOX_WORKSPACE_ROOT"] = c.Root
 	vars["LAZYBOX_REPOSITORY"] = m.Name
 	vars["LAZYBOX_WORKTREE"] = m.Worktree
+	if home, _ := b.Collections.Home(m.RepositoryID); home != "" {
+		vars["LAZYBOX_REPOSITORY_HOME"] = home
+	}
+	if root := os.Getenv("LAZYBOX_V2_ENVIRONMENTS"); root != "" {
+		vars["LAZYBOX_ENVIRONMENTS"] = root
+	}
 	if m.Source != "" {
 		vars["LAZYBOX_ROOT_PATH"] = m.Source
 	}

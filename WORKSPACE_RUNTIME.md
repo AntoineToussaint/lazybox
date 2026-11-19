@@ -125,6 +125,8 @@ Runner's own (`LAZYBOX_V2_*`, `CODEFLY*`, as [terminals](TERMINALS.md) drop),
 | `LAZYBOX_PORT_0` … `_9` | The workspace's block |
 | `LAZYBOX_WORKSPACE_ID`, `_NAME`, `_ROOT` | The workspace |
 | `LAZYBOX_REPOSITORY`, `LAZYBOX_WORKTREE` | The member's name and folder |
+| `LAZYBOX_REPOSITORY_HOME` | The resolved repository home, when configured |
+| `LAZYBOX_ENVIRONMENTS` | The environment root supplied by a Dev or Working launcher |
 | `LAZYBOX_ROOT_PATH` | The source checkout it was made from |
 
 `$LAZYBOX_*` in `env` values and `url` is expanded by Lazybox; anything else is

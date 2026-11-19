@@ -1,5 +1,6 @@
 // Independent native applications and Runner state, with explicit promotion of
 // frozen source/build snapshots. This is the local macOS dogfooding launcher.
+import { watch } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { cp, mkdir, readFile, writeFile, rename, rm, readdir, lstat, realpath } from 'node:fs/promises';
@@ -214,13 +215,13 @@ export async function acquireLock(path) {
   await writeFile(join(path, 'owner.json'), JSON.stringify({ pid: process.pid }), { flag: 'wx', mode: 0o600 });
   return () => rm(path, { recursive: true });
 }
-async function stage(environmentRoot) {
+async function stage(environmentRoot, revision) {
   const unlock = await acquireLock(join(environmentRoot, 'stage.lock'));
   try {
-    await stageCandidate(environmentRoot);
+    return await stageCandidate(environmentRoot, revision);
   } finally { await unlock(); }
 }
-async function stageCandidate(environmentRoot) {
+async function stageCandidate(environmentRoot, revision) {
   const id = new Date().toISOString().replaceAll(/[:.]/g, '-') + '-' + randomUUID().slice(0, 8);
   const destination = releasePath(environmentRoot, id), source = join(destination, 'source');
   await mkdir(destination, { recursive: true });
@@ -243,8 +244,9 @@ async function stageCandidate(environmentRoot) {
   await cp(app, join(destination, 'Lazybox.app'), { recursive: true, force: false, errorOnExist: true });
   const after = await digestTree(source);
   if (before !== after) throw new Error('Validation modified the source snapshot; stage again after reviewing generated changes');
-  await saveJSON(join(destination, 'release.json'), { version: 2, id, sourceDigest: after, appDigest: await digestTree(join(destination, 'Lazybox.app'), () => true), workerDigest: await digestTree(join(source, 'workers/claude-sdk/dist'), () => true), validatedAt: new Date().toISOString(), gateReceipt, liveGitHubVerified: false });
+  await saveJSON(join(destination, 'release.json'), { version: 2, id, revision, sourceDigest: after, appDigest: await digestTree(join(destination, 'Lazybox.app'), () => true), workerDigest: await digestTree(join(source, 'workers/claude-sdk/dist'), () => true), validatedAt: new Date().toISOString(), gateReceipt, liveGitHubVerified: false });
   console.log(`Candidate ready: ${id}\nPromote explicitly with: make promote RELEASE=${id}`);
+  return id;
 }
 // Promotion and both launch paths share artifact validation. A mutable compiled
 // worker is execution code too, even though dist is excluded from source hashes.
@@ -301,10 +303,32 @@ export async function superviseRunner({ start, restartRequest, stopping, onReady
     return;
   }
 }
+// A stop request is addressed to one generation of this exact launch lock.
+export async function listenForDevStop(lock, receipt, stop) {
+  const nonce = randomUUID();
+  const watcher = watch(lock, (_event, name) => {
+    if (name === 'stop-' + nonce) stop();
+  });
+  try {
+    await saveJSON(join(lock, 'control.json'), { ...receipt, nonce });
+    return watcher;
+  } catch (error) { watcher.close(); throw error; }
+}
+
+export async function waitForDesktop(receipt, desktop, stopping) {
+  const deadline = Date.now() + 30 * 60_000;
+  while (!stopping() && desktop.pid && desktop.exitCode === null && !desktop.signalCode && Date.now() < deadline) {
+    try { if (await readFile(receipt, 'utf8') === 'ready') return; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  throw new Error('Dev desktop did not finish starting');
+}
+
 async function launch(environmentRoot, channel) {
   const paths = environmentPaths(environmentRoot, channel);
   const unlock = await acquireLock(paths.lock);
-  let runner, desktop, worker, ui, cliWatch, finished, stopping = false;
+  let control, runner, desktop, worker, ui, cliWatch, finished, stopping = false;
   const stop = () => { if (stopping) return; stopping = true; runner?.kill('SIGINT'); };
   try {
     const subscriptionState = await sharedSubscriptionState(environmentRoot);
@@ -367,18 +391,28 @@ async function launch(environmentRoot, channel) {
       return { finished };
     };
     // The desktop and watchers start once and outlive any requested restart.
-    const onReady = () => {
+    const onReady = async () => {
       // `lazybox` in any terminal finds this Runner (lazybox runners / --runner).
       registerRunner(channel, paths).catch(error => console.error(`The lazybox CLI will not find this Runner by name: ${error.message}`));
-      desktop =channel === 'dev'
-        ? spawn(join(source, 'node_modules/.bin/tauri'), ['dev', '--config', JSON.stringify(desktopDevConfig(paths, ui.url, ui.nonce)), '--', '--', '--endpoint', paths.endpoint], { cwd: join(source, 'apps/desktop'), env: { ...buildEnv, CARGO_TARGET_DIR: join(environmentRoot, 'build', 'dev') }, stdio: 'inherit', detached: true })
+      const desktopReceipt = channel === 'dev' && process.env.LAZYBOX_BUILD_REQUEST
+        ? join(paths.lock, 'desktop-' + randomUUID()) : undefined;
+      desktop = channel === 'dev'
+        ? spawn(join(source, 'node_modules/.bin/tauri'), ['dev', '--config', JSON.stringify(desktopDevConfig(paths, ui.url, ui.nonce)), '--', '--', '--endpoint', paths.endpoint], { cwd: join(source, 'apps/desktop'), env: { ...buildEnv, ...(desktopReceipt && { LAZYBOX_DEV_DESKTOP_READY: desktopReceipt }), CARGO_TARGET_DIR: join(environmentRoot, 'build', 'dev') }, stdio: 'inherit', detached: true })
         : spawn(join(app, 'Contents/MacOS/lazybox-v2-desktop'), ['--endpoint', paths.endpoint], { env: buildEnv, stdio: 'inherit' });
       desktop.on('error', error => console.error(`Desktop launch failed: ${error.message}`));
+      if (desktopReceipt) await waitForDesktop(desktopReceipt, desktop, () => stopping);
+      if (channel === 'dev') {
+        control = await listenForDevStop(paths.lock, {
+          request: process.env.LAZYBOX_BUILD_REQUEST,
+          revision: process.env.LAZYBOX_BUILD_REVISION,
+        }, stop);
+      }
       console.log(`${paths.productName} is running. State: ${paths.state}\nClosing the desktop leaves this Runner alive. Ctrl+C here stops this environment's Runner; Restart Runner in the app starts it again here.`);
       if (ui) console.log(`Auto reload: Vite refreshes the UI (${ui.watchBackend} watcher), Tauri rebuilds Rust, Codefly rebuilds/restarts Go, and the lazybox CLI agents run is rebuilt with it. A Runner restart does not stop Dev agents or their managed commands: the restarted Runner re-attaches to their session hosts.`);
     };
     await superviseRunner({ start, restartRequest, stopping: () => stopping, onReady });
   } finally {
+    control?.close();
     await Promise.all([stopProcessGroup(channel === 'dev' ? desktop : undefined), stopProcessGroup(worker), cliWatch?.close()]);
     await ui?.server.close();
     runner?.kill('SIGINT');
@@ -393,7 +427,12 @@ async function main() {
   const canonical = await realpath(environmentRoot);
   validateEnvironmentRoot(root, canonical);
   const command = process.argv[2];
-  if (command === 'stage') return stage(canonical);
+  if (command === 'stage') {
+    const revision = process.env.LAZYBOX_BUILD_REVISION;
+    const id = await stage(canonical, revision);
+    process.send?.({ id, revision });
+    return;
+  }
   if (command === 'promote') return promote(canonical, process.argv[3] || '');
   if (command === 'share-subscriptions') return shareSubscriptions(canonical, process.argv[3] || '');
   if (['dev', 'working'].includes(command)) return launch(canonical, command);

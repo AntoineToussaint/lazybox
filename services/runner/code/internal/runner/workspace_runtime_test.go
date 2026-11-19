@@ -406,3 +406,70 @@ func TestAgentStartsAnActionOnlyWhenItsPermissionAllows(t *testing.T) {
 		t.Fatalf("an unknown action: %v", err)
 	}
 }
+
+// Exercise the repository's real build action from a conversation. A dirty
+// fixture home must produce both outcomes without reaching either launcher.
+func TestManagedBuildActionUsesApprovedHomeAndRoot(t *testing.T) {
+	runtimeEnvironment(t)
+	root := t.TempDir()
+	t.Setenv("LAZYBOX_V2_ENVIRONMENTS", root)
+	config, err := os.ReadFile("../../../../../.lazybox/workspace.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := runtimeRepo(t, string(config))
+	b := runtimeBench(t, t.TempDir(), t.TempDir(), collections.Repository{ID: "lazybox", Path: repo})
+	defer b.Close()
+	ctx := context.Background()
+	c, err := b.Collections.Create(ctx, "create", collections.Spec{Name: "Build", Members: []collections.MemberSpec{{Name: "lazybox", RepositoryID: "lazybox"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile("../../../../../scripts/managed-build.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(c.Members[0].Path, "scripts")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "managed-build.mjs"), script, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "local-edit"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := &Execution{ID: "requester", CollectionID: c.ID, Previous: "earlier"}
+	const key = "lazybox/rebuild-dev-working"
+	start := func() error {
+		_, err := b.agentAction(ctx, e, "start_action", key, false)
+		return err
+	}
+	if err := start(); err == nil {
+		t.Fatal("build started before approval")
+	}
+	view, err := b.WorkspaceRuntime(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ApproveWorkspaceScripts(ctx, c.ID, "lazybox", view.Members[0].Config.Hash(), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := start(); err != nil {
+		t.Fatal(err)
+	}
+	view = waitState(t, b, c.ID, action(key), "failed")
+	commandID := view.Actions[0].State.CommandID
+	log, err := b.toolWithEnv(ctx, e, "lazybox_command", []byte(`{"action":"read","id":"`+commandID+`"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.toolWithEnv(ctx, e, "lazybox_command", []byte(`{"action":"cancel","id":"`+commandID+`"}`), nil); err == nil {
+		t.Fatal("reading the action must not grant cancellation")
+	}
+	for _, channel := range []string{"Dev", "Working"} {
+		if !strings.Contains(log, "["+channel+"] skipped: Repository home must be a clean checkout") {
+			t.Fatalf("missing %s outcome in %q", channel, log)
+		}
+	}
+}

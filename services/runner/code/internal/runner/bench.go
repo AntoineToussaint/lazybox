@@ -175,6 +175,7 @@ type Execution struct {
 	browserTools bool
 }
 type Bench struct {
+	forkMu            sync.Mutex
 	pendingDeletions  *pendingDeletions
 	RepositoryCatalog *repositorycatalog.Cache
 	Telemetry         telemetry.Store
@@ -625,11 +626,14 @@ func (b *Bench) OpenAssistant(profile, purpose, contextText string, options acco
 	return b.open(profile, cwd, "", options, gatewayID, "", "", collectionID, purpose, contextText, false)
 }
 
-func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gatewayID, workID, previous, collectionID, purpose, suppliedContext string, emptyWorkspace bool) (*Execution, error) {
+func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gatewayID, workID, previous, collectionID, purpose, suppliedContext string, emptyWorkspace bool, fork ...conversationFork) (*Execution, error) {
 	if err := b.ReloadProfiles(); err != nil {
 		return nil, err
 	}
 	id := commands.ID()
+	if len(fork) > 0 {
+		id = fork[0].id
+	}
 	b.mu.Lock()
 	activeCount := 0
 	for _, item := range b.items {
@@ -703,6 +707,9 @@ func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gate
 	}
 	if selected.ID == "" {
 		return nil, errors.New("unknown account profile")
+	}
+	if len(fork) > 0 && (selected.Provider != "codex" || profileBinding(selected) != fork[0].profileBinding) {
+		return nil, errors.New("source Codex profile is no longer available")
 	}
 	if emptyWorkspace {
 		root := filepath.Join(b.Config.State, "workspaces")
@@ -880,6 +887,7 @@ func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gate
 		record.ProfileBindings[p.ID] = profileBinding(p)
 	}
 	if parent != nil {
+		record.ForkedFrom, record.ForkCursor = parent.ForkedFrom, parent.ForkCursor
 		record.Title = parent.Title
 		if parent.Snapshot.Title != "" {
 			record.Title = parent.Snapshot.Title
@@ -890,12 +898,22 @@ func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gate
 			record.Snapshot.Grants = parent.Snapshot.Grants
 		}
 	}
+	var inherited []agent.Event
+	if len(fork) > 0 {
+		record.ForkedFrom = fork[0].source
+		record.ForkCursor = fork[0].cursor
+		inherited = fork[0].history
+	}
 	e.Saved = record
 	if err = b.History.Create(b.ctx, record); err != nil {
 		spool.Dispose()
 		return nil, err
 	}
 	open := b.sessionOpen(e, contextText, resume)
+	if len(fork) > 0 {
+		open.ForkThread = fork[0].thread
+		open.ForkAfterTurn = fork[0].turn
+	}
 	if parent != nil && profile == parent.Snapshot.Profile {
 		open.ProviderSettings = parent.ProviderSettings
 	}
@@ -904,7 +922,7 @@ func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gate
 	open.Grants = record.Snapshot.Grants
 	eng, err := engine.NewDurable(b.ctx, adapter, open, spool, func(snapshot engine.Snapshot, settings json.RawMessage) error {
 		return b.History.SaveState(context.Background(), id, snapshot, settings)
-	}, func(a engine.Attachment) error { return b.saveAttachment(id, a) })
+	}, func(a engine.Attachment) error { return b.saveAttachment(id, a) }, inherited...)
 	if err != nil {
 		snapshot := record.Snapshot
 		snapshot.Closed = true

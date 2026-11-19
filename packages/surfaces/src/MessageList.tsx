@@ -91,16 +91,24 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
  * is added as the reader scrolls toward it. A render of the window that hosts
  * it (a keystroke in the composer) does not touch the rows.
  */
-export const MessageList = memo(function MessageList({ messages, visible, agentName, onOpenFile, onShowEarlier, nameFor, checkpoints, sessionId, onReveal, onHandoff, detail = 'verbose', loadingEarlier = false, alwaysShowTime }: { messages: TranscriptMessage[]; visible: number; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; onShowEarlier(): void; /** A subscription's name by profile ID, for switch lines. */ nameFor?(id: string): string; checkpoints?: CheckpointScope; /** The conversation, for Quote in reply. */ sessionId?: string; /** Scroll a message into view, mounting earlier history when needed. */ onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; /** How much tool activity to show. */ detail?: ActivityDetail; /** Only the latest turns are in: the earlier history is being read (transcript `partial`). */ loadingEarlier?: boolean; alwaysShowTime?: boolean }) {
+export const MessageList = memo(function MessageList({ messages, visible, agentName, onOpenFile, onShowEarlier, nameFor, checkpoints, sessionId, onReveal, onHandoff, onBranch, detail = 'verbose', loadingEarlier = false, alwaysShowTime }: { messages: TranscriptMessage[]; visible: number; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; onShowEarlier(): void; /** A subscription's name by profile ID, for switch lines. */ nameFor?(id: string): string; checkpoints?: CheckpointScope; /** The conversation, for Quote in reply. */ sessionId?: string; /** Scroll a message into view, mounting earlier history when needed. */ onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; onBranch?(message: TranscriptMessage): void; /** How much tool activity to show. */ detail?: ActivityDetail; /** Only the latest turns are in: the earlier history is being read (transcript `partial`). */ loadingEarlier?: boolean; alwaysShowTime?: boolean }) {
   const hidden = Math.max(0, messages.length - visible);
   const checkpoint = useCheckpointUI(messages, checkpoints);
   // One stable menu for every row, so a new message does not re-render the others.
-  const latest = useRef({ messages, checkpoint, onReveal, onHandoff });
-  latest.current = { messages, checkpoint, onReveal, onHandoff };
+  const latest = useRef({ messages, checkpoint, onReveal, onHandoff, onBranch });
+  latest.current = { messages, checkpoint, onReveal, onHandoff, onBranch };
   const [menu] = useState<MessageMenu>(() => (context: ContextMenuContext<MessageMenuDetail>) => {
-    const { messages, checkpoint, onReveal, onHandoff } = latest.current;
-    const id = context.detail.message.id;
-    return messageItems(context, { prompt: promptBefore(messages, id), onReveal, onHandoff, turn: checkpoint.items(id) });
+    const { messages, checkpoint, onReveal, onHandoff, onBranch } = latest.current;
+    const { message, role } = context.detail;
+    const id = message.id;
+    const retry = role === 'user' && !!message.operationId && !message.command && !message.steered && !message.files?.length;
+    const fork = role === 'agent' && !!message.turnId;
+    const actions = checkpoint.items(id);
+    if (onBranch && (retry || fork)) actions.push({
+      label: retry ? 'Edit and restart here…' : 'Fork after this turn…',
+      run: () => onBranch(message),
+    });
+    return messageItems(context, { prompt: promptBefore(messages, id), onReveal, onHandoff, turn: actions });
   });
   // Quiet: a turn's calls are one line, on its first run of calls.
   const turnCache = useRef<TurnCache>(new Map());

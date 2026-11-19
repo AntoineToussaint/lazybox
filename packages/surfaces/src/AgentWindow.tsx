@@ -57,6 +57,9 @@ import { BackgroundWorkButton, SubagentAttention } from './SubagentTray';
 import { SubagentPanel } from './SubagentPanel';
 import { ConversationHandoff, type HandoffMessage, type OpenHandoffConversation } from './ConversationHandoff';
 import type { PanelTitle } from './PanelRegistry';
+import { revealMessage } from './artifact-events';
+import { ConfirmDialog } from './ConfirmDialog';
+import type { TranscriptMessage } from './transcript-model';
 import { MessageArea } from './MessageArea';
 import { SubscriptionControls } from './SubscriptionSwitch';
 import { Composer } from './Composer';
@@ -165,6 +168,10 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // other read of the window (its review, its sessions) then waited forever.
   const shown = useContext(PanelShownContext);
   const transcript = useTranscript(api, sessionID, !!info && shown);
+  const [branchSelection, setBranchSelection] = useState<{ message: TranscriptMessage; source: string; requestKey: string }>();
+  const branchMessage = branchSelection?.source === sessionID ? branchSelection.message : undefined;
+  const [retryDraft, setRetryDraft] = useState('');
+  const [branchFromCheckpoint, setBranchFromCheckpoint] = useState(false);
   const [handoffMessage, setHandoffMessage] = useState<HandoffMessage>();
   const [session, setSession] = useState<Session | undefined>(transcript.reader.session);
   useMarkViewed(session, mode === 'agent');
@@ -521,6 +528,47 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     setSession(undefined); setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
     setSessionID(opened.session.id); onSessionChange?.(opened.session.id); refresh();
   };
+  const openBranch = async () => {
+    if (!branchMessage || !branchSelection) return;
+    const retry = branchMessage.type === 'operation_accepted';
+    const boundary = retry
+      ? { case: 'beforePromptCursor' as const, value: BigInt(branchMessage.id) }
+      : { case: 'afterTurnId' as const, value: branchMessage.turnId };
+    const opened = await api.openSession({ fork: { sourceSessionId: branchSelection.source, boundary, checkpointFiles: branchFromCheckpoint, requestKey: branchSelection.requestKey } }, { timeoutMs: 90_000 });
+    if (!opened.session) throw new Error('Runner did not return the branched conversation');
+    const child = opened.session;
+    if (retry) {
+      const stopped = await api.stopSessionResources({ sessionId: branchSelection.source }, { timeoutMs: 90_000 });
+      if (!stopped.session?.closed || stopped.session.recoveryRequired) {
+        throw new Error('Lazybox could not confirm that the previous continuation stopped.');
+      }
+      await api.apply({ sessionId: child.id, operationId: branchSelection.requestKey,
+        operation: { case: 'message', value: { text: retryDraft, attachments: [] } } });
+      savePrompt(viewState, retryDraft, child.conversationId || child.id);
+    }
+    setBranchSelection(undefined);
+    if (!retry || branchFromCheckpoint) {
+      if (!onOpenHandoff?.({ collectionId: child.collectionId, sessionId: child.id, commandId: '' })) {
+        showMenuNotice('The new conversation is available in History.');
+      }
+      refresh();
+      return;
+    }
+    setSession(undefined); setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
+    setSessionID(opened.session.id); onSessionChange?.(opened.session.id); refresh();
+  };
+  const openBranchSource = async (id: string, cursor: bigint) => {
+    try {
+      const { session: source } = await api.getSession({ sessionId: id });
+      if (!source) throw new Error('The source conversation is no longer available.');
+      if (!onOpenHandoff?.({ collectionId: source.collectionId, sessionId: source.id, commandId: '' })) {
+        setSessionID(source.id); onSessionChange?.(source.id);
+      }
+      if (cursor) revealMessage({ sessionId: source.id, messageId: cursor.toString() });
+    } catch (error) {
+      setError(humanError(error));
+    }
+  };
   const continueInCodex = session && allowStart && !assistant ? async (profileId: string) => {
     const pending = queued.filter(entry => !entry.origin).map(entry => entry.text.trim()).filter(Boolean);
     const lastRequest = conversation.findLast(entry => entry.type === 'operation_accepted' && !entry.origin)?.text.trim();
@@ -608,7 +656,30 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {transcript.error && <TranscriptNotice error={transcript.error} onRetry={transcript.retry}/>}
           {handoffMessage && session?.collectionId && onOpenHandoff && <ConversationHandoff source={session} message={handoffMessage}
             open={onOpenHandoff} onClose={() => setHandoffMessage(undefined)}/>}
-          <CodeRunContext.Provider value={codeRuns}><MessageArea onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
+          {branchMessage && <ConfirmDialog title={branchMessage.type === 'operation_accepted' ? 'Edit and restart here' : 'Fork after this turn'}
+            confirm={branchMessage.type === 'operation_accepted' ? 'Restart with revised prompt' : 'Fork conversation'} working="Opening conversation…" tone="primary"
+            closeLabel="Close conversation branch" canConfirm={branchMessage.type !== 'operation_accepted' || !!retryDraft.trim()}
+            onClose={() => setBranchSelection(undefined)} onConfirm={openBranch}
+            details={busy => <>
+              {session?.collectionId && onOpenHandoff && <label>Workspace files<select disabled={busy} value={branchFromCheckpoint ? 'checkpoint' : 'current'} onChange={event => setBranchFromCheckpoint(event.target.value === 'checkpoint')}>
+                <option value="checkpoint">New workspace from this turn</option>
+                <option value="current">Use current workspace files</option>
+              </select></label>}
+              {branchMessage.type === 'operation_accepted' && <label>Revised prompt<textarea disabled={busy} value={retryDraft} onChange={event => setRetryDraft(event.target.value)}/></label>}
+            </>}>
+            {branchMessage.type === 'operation_accepted'
+              ? 'Restarting stops the previous continuation and sends your revised prompt. The previous continuation remains available in History.'
+              : 'The source conversation can keep working while the fork runs.'}
+            {' '}
+            {branchFromCheckpoint
+              ? 'The new worktrees start at the saved repository checkpoint. Ignored files are excluded.'
+              : 'This uses the current workspace files.'}
+          </ConfirmDialog>}
+          {session?.forkedFromSessionId && <button type="button" className="text-button" onClick={() => void openBranchSource(session.forkedFromSessionId, session.forkedFromCursor)}>
+            Open previous conversation
+          </button>}
+          <CodeRunContext.Provider value={codeRuns}><MessageArea onBranch={allowStart && !assistant && session?.provider === 'codex'
+            ? entry => { setBranchSelection({ message: entry, source: sessionID, requestKey: crypto.randomUUID() }); setRetryDraft(entry.text); setBranchFromCheckpoint(entry.type !== 'operation_accepted' && !!session.collectionId && !!onOpenHandoff); } : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
             subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
           {!transcript.error && <LiveBar api={api} session={session} sessionID={sessionID} live={live} disconnected={disconnected} activity={transcript.activity} viewState={viewState} onInterrupt={() => void interrupt()}

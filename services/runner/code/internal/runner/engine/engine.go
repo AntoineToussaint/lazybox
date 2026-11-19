@@ -149,7 +149,7 @@ func NewPersisted(ctx context.Context, adapter agent.Adapter, open agent.Open, s
 
 // NewDurable also records an Attachment after every change, so a later Runner
 // can re-attach to the live native process with Adopt.
-func NewDurable(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *journal.Journal, capture func(Snapshot, json.RawMessage) error, durable func(Attachment) error) (*Engine, error) {
+func NewDurable(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *journal.Journal, capture func(Snapshot, json.RawMessage) error, durable func(Attachment) error, inherited ...agent.Event) (*Engine, error) {
 	life, cancel := context.WithCancel(ctx)
 	s, err := adapter.Open(life, open)
 	if err != nil {
@@ -172,6 +172,13 @@ func NewDurable(ctx context.Context, adapter agent.Adapter, open agent.Open, spo
 		cancel()
 		s.Close()
 		return nil, err
+	}
+	for _, event := range inherited {
+		if _, err = spool.Append(event); err != nil {
+			cancel()
+			s.Close()
+			return nil, err
+		}
 	}
 	if err = e.persistLocked(); err != nil {
 		cancel()
@@ -779,6 +786,7 @@ func (e *Engine) receive() {
 				break
 			}
 			e.state.Busy = false
+			ev.OperationID = e.turnOp
 			if e.stop.ended() && (ev.Status == "failed" || ev.Status == "") {
 				ev.Status = "interrupted"
 			}

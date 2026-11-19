@@ -36,6 +36,10 @@ func fixtureAppServer() {
 				Input []struct {
 					Text string `json:"text"`
 				} `json:"input"`
+				ThreadID       string          `json:"threadId"`
+				LastTurnID     string          `json:"lastTurnId"`
+				Cwd            string          `json:"cwd"`
+				ExcludeTurns   bool            `json:"excludeTurns"`
 				Cursor         string          `json:"cursor"`
 				ApprovalPolicy string          `json:"approvalPolicy"`
 				SandboxPolicy  json.RawMessage `json:"sandboxPolicy"`
@@ -60,6 +64,20 @@ func fixtureAppServer() {
 			send(map[string]any{"id": m.ID, "result": result})
 		case "thread/start":
 			send(map[string]any{"id": m.ID, "result": map[string]any{"model": "fixture-model", "thread": map[string]string{"id": "thread-1"}}})
+		case "thread/fork":
+			if m.Params.ThreadID != "thread-1" || m.Params.LastTurnID != "turn-1" || !m.Params.ExcludeTurns || m.Params.Cwd != os.Getenv("FIXTURE_FORK_CWD") {
+				send(map[string]any{"id": m.ID, "error": map[string]any{"code": -32602, "message": "incorrect bounded fork parameters"}})
+				continue
+			}
+			send(map[string]any{"id": m.ID, "result": map[string]any{"model": "fixture-model", "cwd": m.Params.Cwd, "thread": map[string]string{"id": "new-thread"}}})
+		case "thread/turns/list":
+			turn := "turn-1"
+			if os.Getenv("FIXTURE_FORK_WRONG_TURN") != "" {
+				turn = "later-turn"
+			}
+			send(map[string]any{"id": m.ID, "result": map[string]any{"data": []map[string]string{{"id": turn}}}})
+		case "thread/archive":
+			send(map[string]any{"id": m.ID, "result": map[string]any{}})
 		case "turn/start":
 			if os.Getenv("FIXTURE_EXPECT_YOLO_TURN") != "" && (m.Params.ApprovalPolicy != "never" || string(m.Params.SandboxPolicy) != `{"type":"dangerFullAccess"}`) {
 				send(map[string]any{"id": m.ID, "error": map[string]any{"code": -32602, "message": "turn did not receive YOLO policy"}})
@@ -611,5 +629,46 @@ func TestExplicitYOLOOverridesCarriedSettingsOnFirstTurn(t *testing.T) {
 	defer s.Close()
 	if _, err := s.Apply(ctx, agent.Operation{ID: "first", Kind: agent.Message, Text: "hello"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOpenForksThroughExactTurnInTargetDirectory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	s, err := (Adapter{Binary: binary}).Open(ctx, agent.Open{
+		Cwd: cwd, ForkThread: "thread-1", ForkAfterTurn: "turn-1",
+		Env: append(os.Environ(), "FIXTURE_FORK_CWD="+cwd),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got := s.Reference(); got != "new-thread" {
+		t.Fatalf("fork returned thread %q", got)
+	}
+}
+
+func TestOpenRejectsForkThatRetainedLaterNativeTurns(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	s, err := (Adapter{Binary: binary}).Open(ctx, agent.Open{
+		Cwd: cwd, ForkThread: "thread-1", ForkAfterTurn: "turn-1",
+		Env: append(os.Environ(), "FIXTURE_FORK_CWD="+cwd, "FIXTURE_FORK_WRONG_TURN=1"),
+	})
+	if s != nil {
+		s.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "did not end at the selected turn") {
+		t.Fatalf("unsafe fork was not rejected: %v", err)
 	}
 }

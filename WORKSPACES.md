@@ -914,8 +914,22 @@ could not restore. **Undo revert** (in the toast, and on the reverted turn's
 marker) restores the safety checkpoint; an undo is itself undoable. The
 conversation is kept, not truncated: a Runner notice records the revert, and the
 agent is told with the next message (through the same path as instruction
-updates) that files were reverted and must be re-read. Forking the provider
-conversation at a turn is not implemented.
+updates) that files were reverted and must be re-read. In a Codex coding conversation, **Fork after this turn…** opens a separate
+conversation through a completed turn. The original can continue working while you open the fork.
+**Edit and restart here…** on a supported user prompt sends a revised prompt
+using the history before it. Confirming stops the previous continuation,
+which stays available in History. The source link opens the conversation at
+the original reply or prompt.
+
+In a managed workspace, the dialog can create separate worktrees from the
+turn's saved files (after a fork, before a retry). Restart uses current files by default. The checkpoint is the base
+commit of each new branch, including any uncommitted files it captured.
+Ignored files are outside that snapshot. The Runner requires each recorded
+repository snapshot to be available and complete. **Use current workspace
+files** shares the live working directory with the source conversation.
+Branching requires a Codex installation with bounded thread forks. Turn
+boundaries from a different native thread and retry prompts with attachments
+are currently unavailable.
 
 Each conversation keeps its latest 100 turns and 20 reverts; older ones are
 pruned with their refs (`codeCheckpoints` in the Runner configuration changes

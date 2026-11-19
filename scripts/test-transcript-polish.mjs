@@ -189,6 +189,59 @@ try{
  {const width=await page.evaluate(()=>document.documentElement.scrollWidth);assert.ok(width<=390,`no sideways scroll on a phone (${width}px)`);}
  await page.screenshot({path:'.cache/transcript-polish-events-narrow-light.png'});
 
+
+ // A fork leaves the live source running. Restart stops it and sends the revised prompt.
+
+ Object.assign(f.sessions[0],{provider:'codex',profileId:'codex-default',providerReference:'source-thread',busy:true});
+ push(1,{type:'turn_started',turnId:'historical-turn'});
+ push(2,{type:'message_delta',text:'A completed reply for the branching fixture.',turnId:'historical-turn'});
+ push(3,{type:'turn_ended',status:'completed',turnId:'historical-turn'});
+ const branchRequests=[];
+ const branchPage=await browser.newPage({viewport:{width:1440,height:960}});
+ const branchErrors=[];
+ branchPage.on('pageerror',error=>branchErrors.push(String(error)));
+ await branchPage.route('**/OpenSession',async route=>{
+   const {fork}=route.request().postDataJSON();
+   branchRequests.push(fork);
+   const session={...f.sessions[0],id:`fork-session-${branchRequests.length}`,conversationId:`fork-session-${branchRequests.length}`,busy:false,providerReference:'new-thread',forkedFromSessionId:'alpha-session',forkedFromCursor:fork.beforePromptCursor};
+   f.sessions.push(session);
+   f.openEvents(session.id).push({type:'message_delta',text:'Inherited reply'});
+   await route.fulfill({json:{session}});
+ });
+ await branchPage.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
+ const branchMessages=branchPage.locator('.embedded-chat:visible').first().locator('.messages:visible');
+ const reply=branchMessages.locator('article.message').filter({hasText:'A completed reply for the branching fixture.'});
+ await reply.click({button:'right'});
+ await branchPage.getByRole('menuitem',{name:'Fork after this turn…'}).click();
+ await expect(branchPage.getByLabel('Workspace files')).toHaveValue('checkpoint');
+ await branchPage.getByRole('button',{name:'Cancel',exact:true}).click();
+ assert.equal(branchRequests.length,0);
+ await reply.click({button:'right'});
+ await branchPage.getByRole('menuitem',{name:'Fork after this turn…'}).click();
+ await branchPage.getByLabel('Workspace files').selectOption('current');
+ await branchPage.getByRole('button',{name:'Fork conversation',exact:true}).click();
+ await branchPage.getByRole('button',{name:'Open previous conversation'}).click();
+ await expect(reply).toBeVisible();
+ assert.equal(branchRequests[0].afterTurnId,'historical-turn');
+ assert.equal(f.sessions[0].busy,true);
+ assert.equal(f.mutations.filter(m=>m.method==='StopSessionResources').length,0);
+ const prompt=branchMessages.locator('article.message.operation_accepted').filter({hasText:'Thanks, ship it.'});
+ const cursor=await prompt.getAttribute('data-message-id');
+ await prompt.click({button:'right'});
+ await branchPage.getByRole('menuitem',{name:'Edit and restart here…'}).click();
+ await expect(branchPage.getByLabel('Revised prompt')).toHaveValue('Thanks, ship it.');
+ await branchPage.getByLabel('Revised prompt').fill('Run the tests first.');
+ await expect(branchPage.getByLabel('Workspace files')).toHaveValue('current');
+ await branchPage.getByRole('button',{name:'Restart with revised prompt'}).click();
+ await expect.poll(()=>f.mutations.findLast(m=>m.method==='Apply')?.body?.message?.text).toBe('Run the tests first.');
+ assert.equal(f.sessions[0].closed,true);
+ assert.equal(branchRequests.length,2);
+ assert.equal(branchRequests[1].sourceSessionId,'alpha-session');
+ assert.equal(branchRequests[1].beforePromptCursor,cursor);
+ assert.ok(branchRequests[1].requestKey);
+ await branchPage.getByRole('button',{name:'Open previous conversation'}).click();
+ await expect(branchMessages.locator('article.message').filter({hasText:'A completed reply for the branching fixture.'})).toBeVisible();
+ assert.deepEqual(branchErrors,[]);
  assert.deepEqual(errors,[]);
  console.log('PASS Lazybox messages as one-line events (icon, summary, detail, copy, open to the exact text, grouped, legacy journals, never "You", not recalled), one restart mark for 13 restarts and one line for an uncertain one, background work counted by kind (newest first, failed visible, older folded, whole titles), usage by part with cost and unpriced reasons, dark and light. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

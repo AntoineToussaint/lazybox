@@ -36,6 +36,7 @@ type Capabilities struct {
 // Open contains resolved execution configuration. Env is private child-process
 // state: it must never be written to event journals or returned by transport.
 type Open struct {
+	ForkThread, ForkAfterTurn                             string
 	ID, Cwd, Model, Resume, Profile, Permission, Workflow string
 	Context                                               string
 	Purpose                                               string

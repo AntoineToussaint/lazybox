@@ -313,6 +313,7 @@ pub fn setup_finish(app: tauri::AppHandle) -> Result<(), String> {
 #[serde(rename_all = "camelCase")]
 pub struct AppInfo {
     version: String,
+    built_at_unix_seconds: u64,
     /// "release" for an installed release, otherwise the app's identity (Dev, Working).
     channel: String,
     updater: bool,
@@ -326,6 +327,9 @@ pub fn app_info(app: tauri::AppHandle) -> AppInfo {
     let release = Release::detect(&app);
     AppInfo {
         version: app.package_info().version.to_string(),
+        built_at_unix_seconds: env!("LAZYBOX_DESKTOP_BUILT_AT")
+            .parse()
+            .expect("build timestamp must be Unix seconds"),
         channel: if release.is_some() {
             "release".into()
         } else {

@@ -31,6 +31,8 @@ export type PowerHost = {
 /** The app itself: its version and, for an installed release, its updates (INSTALL.md). */
 export type AppInfo = {
   version: string;
+  /** Build time of the running desktop binary. Older hosts may omit it. */
+  builtAtUnixSeconds?: number;
   /** "release" for an installed release; otherwise the app's identity (Dev, Working). */
   channel: string;
   /** This build checks a signed update feed. */

@@ -215,6 +215,10 @@ try {
     await expect(sourcePanel).toContainText('Built from source; update with make update in /Users/tester/lazybox.');
     await expect(sourcePanel.locator('code', { hasText: 'make update' })).toBeVisible();
     await expect(sourcePanel).toContainText('0123456789ab');
+    const buildTime = sourcePanel.locator('time[datetime]');
+    await expect(buildTime).toHaveAttribute('datetime', '2026-11-17T10:00:00.000Z');
+    await expect(buildTime).toHaveText(await page.evaluate(() =>
+      new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date('2026-11-17T10:00:00Z'))));
     await expect(sourcePanel.getByRole('button', { name: 'Check now' })).toHaveCount(0);
     await expect(sourcePanel.getByRole('switch', { name: 'Check automatically' })).toHaveCount(0);
     if (scheme === 'dark') await page.screenshot({ path: '.cache/updates-source-dark.png' });

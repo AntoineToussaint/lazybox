@@ -30,7 +30,7 @@ const source = params.get('source') === '1';
 
 const app: AppHost = {
   info: async () => source
-    ? { version, channel: 'release', updater: false, cli: '/Applications/Lazybox.app/Contents/Resources/runtime/bin/lazybox', source: { commit: '0123456789abcdef0123456789abcdef01234567', dirty: false, checkout: '/Users/tester/lazybox' } }
+    ? { version, builtAtUnixSeconds: 1794909600, channel: 'release', updater: false, cli: '/Applications/Lazybox.app/Contents/Resources/runtime/bin/lazybox', source: { commit: '0123456789abcdef0123456789abcdef01234567', dirty: false, checkout: '/Users/tester/lazybox' } }
     : { version, channel: 'release', updater: true, cli: '/Applications/Lazybox.app/Contents/Resources/runtime/bin/lazybox' },
   async checkForUpdate() {
     if (source) throw fail('unavailable', 'This build of Lazybox does not update itself');

@@ -31,13 +31,13 @@ export type InboxRow = {
   attention: Attention;
 };
 export type InboxSection = { id: string; title: string; state?: AttentionState; count: number; rows: InboxRow[]; /** Rows not shown until "Show more". */ hidden: number };
-export type InboxView = { sections: InboxSection[]; summary: string; needsYou: number; empty: boolean };
+export type InboxView = { sections: InboxSection[]; summary: string; needsYou: number; empty: boolean; hiddenDone: number };
 
 /** Done conversations shown before "Show more", as on the phone web app. */
 export const DONE_SHOWN = 5;
 
-export function inboxView({ sessions, collections, profiles, seen, respond, now, showAllDone = false }: {
-  sessions: readonly Session[]; collections: readonly Collection[]; profiles: readonly Profile[]; seen: Seen; respond: boolean; now: number; showAllDone?: boolean;
+export function inboxView({ sessions, collections, profiles, seen, respond, now, hideDone = false, showAllDone = false }: {
+  sessions: readonly Session[]; collections: readonly Collection[]; profiles: readonly Profile[]; seen: Seen; respond: boolean; now: number; hideDone?: boolean; showAllDone?: boolean;
 }): InboxView {
   const inbox = buildInbox(sessions, seen);
   const pinned = sessions.filter(session => pinnedAt(session) > 0).sort((a, b) => pinnedAt(a) - pinnedAt(b)).map(session => session.conversationId || session.id);
@@ -49,12 +49,14 @@ export function inboxView({ sessions, collections, profiles, seen, respond, now,
     age: ageLabel(attention.at, now), reason: attention.reason, line: attention.line, plan: rowPlan(attention, respond),
     stoppable: respond && attention.state === 'working' && !attention.session.closed, attention,
   });
-  const sections = phoneSections(inbox, pinned).map(section => {
+  const groups = phoneSections(inbox, pinned);
+  const hiddenDone = hideDone ? groups.find(section => section.state === 'idle')?.rows.length ?? 0 : 0;
+  const sections = groups.filter(section => !hideDone || section.state !== 'idle').map(section => {
     const limit = section.state === 'idle' && !showAllDone ? DONE_SHOWN : section.rows.length;
     return { id: section.id, title: section.title, state: section.state, count: section.rows.length, rows: section.rows.slice(0, limit).map(row), hidden: Math.max(0, section.rows.length - limit) };
   });
   const needsYou = inbox.counts['needs-input'];
   const toLook = inbox.counts.failed + inbox.counts.review;
   const summary = needsYou ? `${needsYou} waiting for you` : toLook ? `${toLook} to look at` : inbox.rows.length ? 'Nothing needs you' : '';
-  return { sections, summary, needsYou, empty: inbox.rows.length === 0 };
+  return { sections, summary, needsYou, empty: inbox.rows.length === 0, hiddenDone };
 }

@@ -16,6 +16,13 @@ appId: ai.lazybox.mobile
       - tapOn: "Cancel"
 - assertVisible: "Your agents, in your pocket"
 - takeScreenshot: 01-welcome
+- tapOn:
+    id: "pair"
+- tapOn:
+    id: "link"
+- inputText: "https://runner.example:8443"
+- assertVisible:
+    id: "invalid-pairing-link"
 - openLink: "lazybox://pair?link=${LINK}"
 - runFlow:
     when:
@@ -44,6 +51,8 @@ appId: ai.lazybox.mobile
     visible: "Approval required"
     timeout: 15000
 - assertVisible: "npm update --save"
+- assertVisible:
+    id: "dictate"
 - takeScreenshot: 05-approval
 - tapOn:
     id: "allow"

@@ -18,6 +18,7 @@ export * from './request-model';
 export * from './transcript-model';
 export * from './transcript-cache';
 export * from './conversation-model';
+export { mergeDictation } from './voice/voice-model';
 export * from './agent-status';
 export * from './human-error';
 export * from './live-status';

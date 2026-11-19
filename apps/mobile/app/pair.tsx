@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as Linking from 'expo-linking';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -32,11 +32,15 @@ export default function PairScreen() {
   const [scanning, setScanning] = useState(false);
   const scanned = useRef(false);
   const parsed = useMemo(() => parsePairingLink(link), [link]);
-  useEffect(() => { const linked = deepLinkedPairing(url); if (linked) setLink(linked); }, [url]);
+  useEffect(() => {
+    const linked = deepLinkedPairing(url);
+    if (linked) { Keyboard.dismiss(); setError(''); setLink(linked); }
+  }, [url]);
 
   const paste = async () => {
     const text = (await Clipboard.getStringAsync().catch(() => '')).trim();
     if (!text) { setError('The clipboard is empty. Copy the pairing link on your computer first.'); return; }
+    if (parsePairingLink(text)) Keyboard.dismiss();
     setError(''); setLink(text);
   };
   const scan = async () => {
@@ -76,23 +80,27 @@ export default function PairScreen() {
   </View>;
 
   return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
-    <ScrollView contentContainerStyle={styles.form} keyboardShouldPersistTaps="handled" contentInsetAdjustmentBehavior="automatic">
-      <Text style={[styles.lead, { color: theme.secondary }]}>On your computer, open Lazybox → Settings → Devices and choose <Text style={{ fontWeight: '700', color: theme.text }}>Pair a phone</Text>. The code works once, for five minutes.</Text>
+    <ScrollView contentContainerStyle={styles.form} keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" contentInsetAdjustmentBehavior="automatic">
+      <Text style={[styles.lead, { color: theme.secondary }]}>On your computer, go to Lazybox → Settings → Devices → <Text style={{ fontWeight: '700', color: theme.text }}>Pair a phone</Text>. Scan the code or choose Copy link.</Text>
       <View style={styles.row}>
         <Button label="Scan code" icon="qrcode.viewfinder" tone={parsed ? 'secondary' : 'primary'} onPress={() => void scan()} style={styles.flex} testID="scan"/>
         <Button label="Paste link" icon="doc.on.clipboard" onPress={() => void paste()} style={styles.flex} testID="paste"/>
       </View>
       <Text style={[styles.label, { color: theme.muted }]}>PAIRING LINK</Text>
-      <TextInput value={link} onChangeText={value => { setLink(value.trim()); setError(''); }} placeholder="https://your-mac.tailnet.ts.net:8443/…" placeholderTextColor={theme.faint}
+      <TextInput value={link} onChangeText={value => { setLink(value.trim()); setError(''); }} placeholder="Paste the one-time link" placeholderTextColor={theme.faint}
+        accessibilityLabel="Pairing link"
         autoCapitalize="none" autoCorrect={false} keyboardType="url" multiline testID="link"
         style={[styles.input, styles.linkInput, { color: theme.text, backgroundColor: theme.surface, borderColor: link && !parsed ? theme.danger : theme.line }]}/>
+      {!!link && !parsed && !error && <Text style={[styles.error, { color: theme.danger }]} accessibilityRole="alert" testID="invalid-pairing-link">
+        Use Copy link in the Pair a phone dialog on your computer. The gateway address alone cannot pair this phone.
+      </Text>}
       {parsed && <View style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.lineSubtle }]}>
         <Text style={[styles.cardTitle, { color: theme.textStrong }]}>{parsed.baseUrl.replace(/^https?:\/\//, '')}</Text>
         <Text style={[styles.hint, { color: theme.muted, textAlign: 'left' }]}>This phone will be able to</Text>
         {parsed.offer.grants.map(grant => <View key={grant} style={styles.grant}><Icon name="checkmark" size={13} color={theme.ok} weight="bold"/><Text style={{ color: theme.text, fontSize: 15 }}>{grantText[grant] || grant}</Text></View>)}
       </View>}
       <Text style={[styles.label, { color: theme.muted }]}>NAME THIS PHONE</Text>
-      <TextInput value={name} onChangeText={setName} maxLength={64} autoCorrect={false} testID="name" returnKeyType="done"
+      <TextInput value={name} onChangeText={setName} accessibilityLabel="Name this phone" maxLength={64} autoCorrect={false} testID="name" returnKeyType="done"
         style={[styles.input, { color: theme.text, backgroundColor: theme.surface, borderColor: theme.line }]}/>
       {error ? <Text style={[styles.error, { color: theme.danger }]} accessibilityRole="alert">{error}</Text> : null}
       <Button label={busy ? 'Pairing…' : 'Pair this phone'} tone="primary" busy={busy} disabled={!parsed || !name.trim()} onPress={() => void submit()} style={styles.wide} testID="pair-submit"/>
@@ -108,7 +116,7 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   label: { fontSize: 12, fontWeight: '700', letterSpacing: 0.6, marginTop: space.s },
   input: { minHeight: 44, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.m, paddingHorizontal: space.m, paddingVertical: 10, fontSize: 16 },
-  linkInput: { fontFamily: mono, fontSize: 13, minHeight: 64 },
+  linkInput: { fontFamily: mono, fontSize: 13, minHeight: 64, maxHeight: 88 },
   card: { borderRadius: radius.m, borderWidth: StyleSheet.hairlineWidth, padding: space.m, gap: 6 },
   cardTitle: { fontSize: 16, fontWeight: '600' },
   grant: { flexDirection: 'row', alignItems: 'center', gap: space.s },

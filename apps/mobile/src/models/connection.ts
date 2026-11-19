@@ -18,6 +18,7 @@ export function connectionView({ hasInfo, error, stream, foreground = true }: {
   if (!foreground) return { tone: 'connecting', label: 'Paused', detail: 'Lazybox reconnects when you come back.', banner: false };
   if (error && !hasInfo) return { tone: 'connecting', label: 'Connecting to your computer…', detail: error, banner: true };
   if (error) return { tone: 'unreachable', label: 'Can’t reach your computer · retrying', detail: 'What you see was loaded earlier. Check that it is awake and on your tailnet.', banner: true };
+  if (!hasInfo && stream === undefined) return { tone: 'connecting', label: 'Connecting to your computer…', detail: '', banner: false };
   if (stream === undefined || stream === 'Live') return { tone: 'live', label: 'Live', detail: '', banner: false };
   if (stream === 'Connecting') return { tone: 'connecting', label: 'Connecting…', detail: '', banner: false };
   if (stream === 'Complete') return { tone: 'ended', label: 'Ended', detail: '', banner: false };

@@ -18,6 +18,10 @@
     "plugins": [
       "expo-router",
       "expo-secure-store",
+      ["expo-speech-recognition", {
+        "microphonePermission": "Lazybox uses the microphone when you dictate a message.",
+        "speechRecognitionPermission": "Lazybox uses speech recognition to turn your dictation into a draft."
+      }],
       ["expo-camera", { "cameraPermission": "Lazybox uses the camera to scan the pairing code your computer shows.", "recordAudioAndroid": false }]
     ],
     "experiments": { "typedRoutes": false }

@@ -42,12 +42,13 @@ function Inbox() {
   const deferred = useDeferred();
   const [now, setNow] = useState(Date.now);
   const [showAllDone, setShowAllDone] = useState(false);
+  const [showDone, setShowDone] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(timer); }, []);
   const respond = !!device?.grants.includes('respond');
-  const view = useMemo(() => inboxView({ sessions: info?.sessions || [], collections, profiles: info?.profiles || [], seen, respond, now: Date.now(), showAllDone }),
+  const view = useMemo(() => inboxView({ sessions: info?.sessions || [], collections, profiles: info?.profiles || [], seen, respond, now: Date.now(), hideDone: !showDone, showAllDone }),
     // `now` re-renders the ages every 30 s.
-    [info, collections, seen, respond, showAllDone, now]);
+    [info, collections, seen, respond, showDone, showAllDone, now]);
   const connection = connectionView({ hasInfo: !!info, error });
   // An answer sent from a row stays "sent" until the Runner no longer lists its request.
   useEffect(() => { if (info) deferred.settle(new Set(info.sessions.flatMap(session => session.pending.map(request => request.requestId)))); }, [info, deferred.settle]);
@@ -109,7 +110,10 @@ function Inbox() {
         {view.summary ? <Text style={[styles.summary, { color: view.needsYou ? theme.warn : theme.muted }]} testID="inbox-summary">{view.summary}</Text> : null}
       </>}
       ListEmptyComponent={!info ? <View style={styles.empty}><ActivityIndicator color={theme.muted}/><Text style={[styles.hint, { color: theme.muted }]}>Loading conversations…</Text></View>
-        : <View style={styles.empty}><Icon name="tray" size={34} color={theme.faint}/><Text style={[styles.emptyTitle, { color: theme.text }]}>No conversations yet</Text><Text style={[styles.hint, { color: theme.muted }]}>Agents that need you will show up here.</Text></View>}
+        : view.empty ? <View style={styles.empty}><Icon name="tray" size={34} color={theme.faint}/><Text style={[styles.emptyTitle, { color: theme.text }]}>No conversations yet</Text><Text style={[styles.hint, { color: theme.muted }]}>Agents that need you will show up here.</Text></View> : undefined}
+      ListFooterComponent={view.hiddenDone || showDone ? <Button
+        label={showDone ? 'Hide completed conversations' : `Show completed (${view.hiddenDone})`}
+        tone="plain" onPress={() => { setShowDone(!showDone); setShowAllDone(false); }} testID="toggle-completed"/> : undefined}
       renderSectionHeader={({ section }) => {
         const look = stateStyle(section.state, theme);
         return <View style={styles.sectionHead} accessibilityRole="header">

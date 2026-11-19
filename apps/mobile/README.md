@@ -13,6 +13,16 @@ request with Allow, Deny or the answer form), and the composer with **Send**,
 **Queue** behind a running turn, **Send now** and **Stop**. Haptics on actions;
 one connection state, said once.
 
+The Inbox keeps completed conversations behind **Show completed**, with pinned
+conversations and work that needs attention still visible. The composer uses
+a compact layout by default. While a turn is active,
+**Send now** sits above the draft and the send button queues the message.
+Tap the microphone to dictate and tap again to finish. iOS asks for microphone
+and speech recognition permission on first use. The recognized text is appended
+to the editable draft. Tap Send or Queue when it is ready. iOS may process
+speech through Apple's recognition service. The Runner receives the text when
+you send it.
+
 ## How it is built
 
 | Where | What |
@@ -143,4 +153,4 @@ Not in this slice, in rough order:
 - **Live Activities** for a running turn, **App Intents** (Shortcuts and Siri:
   "What needs me?"), **TestFlight**.
 - The offline cache (last Inbox and tails in SQLite, read marks), swipe
-  actions on rows, several Runners, voice, diff review, PR status.
+  actions on rows, several Runners, spoken replies, diff review, PR status.

@@ -267,5 +267,78 @@ try {
     assert.deepEqual(errors, [], `no page errors (${scheme})`);
     await context.close();
   }
+  // Use the default kept-tab setting. Creating a workspace on its own and
+  // starting its first chat must consume the workspace's starter tab.
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
+  const source = f.collections.find(workspace => workspace.name === 'Add a response cache to the API');
+  source.members[0].spec.baseRef = 'refs/remotes/origin/feat/v2-command-output';
+  await page.goto(`${base}&collection=${source.id}#token=${f.token}`);
+  const row = page.locator('.workspace-row').filter({ hasText: source.name });
+  await row.locator('.workspace-link').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Clone workspace…' }).click();
+  const workspace = page.getByRole('dialog', { name: 'Clone workspace', exact: true });
+  await expect(workspace.getByText('feat/v2-command-output', { exact: true })).toBeVisible();
+  const workspaceName = workspace.getByRole('textbox', { name: 'Workspace name' });
+  await expect(workspaceName).toBeFocused();
+  await workspaceName.fill('Cache follow-up');
+  await workspaceName.press('Enter');
+  await expect(workspace).toBeHidden();
+  const cloned = f.collections.at(-1);
+  assert.equal(cloned.name, 'Cache follow-up');
+  const preparation = since('PrepareWorkspace').at(-1).body;
+  assert.equal(preparation.branch, 'feature/cache-follow-up');
+  assert.deepEqual(preparation.repositoryIdentities, ['github:fixture-team/api', 'github:fixture-team/web']);
+  assert.equal(preparation.startFrom['github:fixture-team/api'], 'feat/v2-command-output');
+
+  await page.keyboard.press('Meta+Shift+n');
+  const conversation = page.getByRole('dialog', { name: 'New conversation', exact: true });
+  await conversation.getByRole('combobox', { name: 'Agent', exact: true }).click();
+  await conversation.getByRole('option', { name: /^Codex/ }).click();
+  await conversation.getByText('Model & context', { exact: true }).click();
+  await conversation.getByRole('textbox', { name: 'Model', exact: true }).fill('gpt-6.2-sol');
+  await conversation.getByRole('combobox', { name: 'Permissions', exact: true }).selectOption('read-only');
+  await conversation.getByRole('combobox', { name: 'Workflow', exact: true }).selectOption('plan');
+  await conversation.getByRole('button', { name: 'Start Codex ↗' }).click();
+  await expect(conversation).toBeHidden();
+  const tabs = page.locator('.dock-tab[data-kind="chat"]');
+  await expect(tabs).toHaveCount(1);
+  const original = f.sessions.at(-1);
+  assert.equal(original.collectionId, cloned.id);
+
+  // Choices carry across workspace boundaries and between both start forms.
+  const sourceRow = page.locator('.workspace-row').filter({ hasText: source.name });
+  await sourceRow.locator('.workspace-link').click();
+  await page.keyboard.press('Meta+Shift+n');
+  await expect(conversation.getByRole('button', { name: 'Start Codex ↗' })).toBeEnabled();
+  await expect(conversation.getByText(/Codex.*gpt-6.2-sol/)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Meta+n');
+  const newTask = page.getByRole('dialog', { name: 'New task' });
+  await expect(newTask.getByRole('textbox', { name: 'Model', exact: true })).toHaveValue('gpt-6.2-sol');
+  await expect(newTask.locator('.new-task-chip-name')).toHaveText(['fixture-team/api', 'fixture-team/web']);
+  await page.keyboard.press('Escape');
+
+  await page.locator('.workspace-row').filter({ hasText: cloned.name }).locator('.workspace-link').click();
+  await expect(tabs).toHaveCount(1);
+  await tabs.first().click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Clone conversation…' }).click();
+  const copy = page.getByRole('dialog', { name: 'Clone conversation', exact: true });
+  await expect(copy.getByRole('textbox', { name: 'Model', exact: true })).toHaveValue('gpt-6.2-sol');
+  const name = copy.getByRole('textbox', { name: 'Conversation name' });
+  await expect(name).toBeFocused();
+  await name.fill('Second approach');
+  await copy.getByRole('button', { name: 'Start Codex ↗' }).click();
+  await expect(copy).toBeHidden();
+  await expect(tabs).toHaveCount(2);
+  await expect(tabs.filter({ hasText: 'Second approach' })).toBeVisible();
+  const started = since('OpenSession').at(-1).body;
+  assert.equal(started.collectionId, cloned.id);
+  assert.equal(started.options.model, 'gpt-6.2-sol');
+  assert.equal(started.options.workflow, 'execute');
+  assert.equal(started.options.permission || '', '');
+  assert.ok(!started.resumeReference);
+  await context.close();
+
   console.log('PASS: ⌘N sheet — workspace, conversation and message in one step, remembered choices, start-from branch (chip, ⌥B, remembered), background start, kept draft, palette and empty state, empty workspace, ⌘⇧N unchanged. Fixture only.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

@@ -21,6 +21,7 @@ import { readPreference, writePreference } from './view-state';
 import { humanError } from './human-error';
 
 /** Whether the bar shows a command's latest lines: a choice that holds for every conversation until changed. */
+const EXPANDED_PREFERENCE = 'chat.live-output-expanded';
 const OUTPUT_PREFERENCE = 'chat.live-output';
 const outputHidden = (store?: ViewStateStore) => { try { return readPreference(store, OUTPUT_PREFERENCE) === 'hidden'; } catch { return false; } };
 
@@ -52,9 +53,16 @@ function useSessionCommands(api: RunnerClient, sessionId: string, active: boolea
   useEffect(() => {
     if (!active || !sessionId) { setCommands([]); return; }
     const control = new AbortController();
-    const update = () => api.listCommands({ sessionId }, { signal: control.signal }).then(result => { if (!control.signal.aborted) setCommands(result.commands); }, () => {});
-    void update(); const timer = setInterval(() => void update(), 1500);
-    return () => { control.abort(); clearInterval(timer); };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const update = async () => {
+      try {
+        const result = await api.listCommands({ sessionId }, { signal: control.signal, timeoutMs: 5000 });
+        if (!control.signal.aborted) setCommands(result.commands);
+      } catch { /* Keep the last known command until a poll succeeds. */ }
+      if (!control.signal.aborted) timer = setTimeout(() => void update(), 1500);
+    };
+    void update();
+    return () => { control.abort(); clearTimeout(timer); };
   }, [api, sessionId, active]);
   return commands;
 }
@@ -90,15 +98,21 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
   // Behind another tab, the command's output is not followed (AgentWindow, the transcript's stream).
   const shown = useContext(PanelShownContext);
   const tail = useCommandTail(api, shown ? managed?.id || '' : '');
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => {
+    try { return readPreference(viewState, EXPANDED_PREFERENCE) === 'expanded'; } catch { return false; }
+  });
+  const expand = (value: boolean) => {
+    setExpanded(value);
+    try { writePreference(viewState, EXPANDED_PREFERENCE, value ? 'expanded' : 'compact'); } catch { /* The choice holds in this bar. */ }
+  };
   const [hidden, setHidden] = useState(() => outputHidden(viewState));
   // The command whose whole output is open in the console: its tail here would only repeat it, and take room
   // from the messages in a chat the console has made short. Show output brings it back.
   const [inConsole, setInConsole] = useState('');
   const tailHidden = hidden || (!!managed && inConsole === managed.id);
-  const openInConsole = (id: string) => { setExpanded(false); setInConsole(id); onOpenCommand?.(id); };
+  const openInConsole = (id: string) => { setInConsole(id); onOpenCommand?.(id); };
   const showOutput = (show: boolean) => {
-    setHidden(!show); setInConsole(''); if (!show) setExpanded(false);
+    setHidden(!show); setInConsole('');
     try { writePreference(viewState, OUTPUT_PREFERENCE, show ? 'shown' : 'hidden'); } catch { /* the choice still holds for this window */ }
   };
   const [stopping, setStopping] = useState('');
@@ -121,7 +135,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
   const changed = useRef({ id: '', at: 0, tail: '' });
   if (managed && (changed.current.id !== managed.id || changed.current.tail !== tail)) changed.current = { id: managed.id, at: Date.now(), tail };
   const now = useNow(rootBusy);
-  useEffect(() => { setExpanded(false); setStopping(''); setMoving(''); setError(''); }, [managed?.id]);
+  useEffect(() => { setStopping(''); setMoving(''); setError(''); }, [managed?.id]);
   useEffect(() => { if (!moved) return; const timer = setTimeout(() => setMoved(''), 8000); return () => clearTimeout(timer); }, [moved]);
   // What moving to the background did is said even when the turn ended right after (the bar itself is gone then).
   const movedNotice = moved && <p className="live-bar-notice" role="status"><Icon name="check" size={12}/><span>{moved}</span><button type="button" className="icon-button" aria-label="Dismiss" onClick={() => setMoved('')}><Icon name="close" size={11}/></button></p>;
@@ -161,7 +175,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
     { label: managed ? 'Stop command' : 'Interrupt', icon: 'stop', danger: true, disabled: !!managed && stopping === managed.id && 'Stopping…', run: () => stop() },
     managed && managed.ports.length > 0 && { label: `Preview :${managed.ports[0]}`, icon: 'globe', run: () => openPreview(managed.ports[0]) },
     managed && onOpenCommand && { label: 'Open in console', icon: 'output', run: () => openInConsole(managed.id) },
-    managed && !tailHidden && { label: expanded ? 'Less output' : 'More output', icon: expanded ? 'collapse' : 'expand', run: () => setExpanded(value => !value) },
+    managed && !tailHidden && { label: expanded ? 'Less output' : 'More output', icon: expanded ? 'collapse' : 'expand', run: () => expand(!expanded) },
     managed && { label: tailHidden ? 'Show output' : 'Hide output', icon: tailHidden ? 'eye' : 'close', run: () => showOutput(tailHidden) },
     'separator',
     // The command Stop and the console are about, else the step's own.
@@ -171,8 +185,8 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
   return <section className="live-bar" aria-label="What the agent is doing" onContextMenu={menu}>
     <div className="live-bar-row" onDoubleClick={event => {
       if (!managed || (event.target instanceof Element && event.target.closest('button, a'))) return;
-      if (tailHidden) { showOutput(true); setExpanded(true); }
-      else setExpanded(value => !value);
+      if (tailHidden) { showOutput(true); expand(true); }
+      else expand(!expanded);
     }}>
       <LiveIndicator tone="busy"/>
       {/* The step and its time, as the status line says them. */}
@@ -181,7 +195,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
       {detail.where && <span className="live-bar-where" title={detail.where}>in <code>{detail.where}</code></span>}
       <span className="live-bar-actions">
         {managed && tailHidden && <button type="button" className="live-bar-button" aria-expanded={false} onClick={() => showOutput(true)} title={inConsole === managed.id && !hidden ? 'The output is open in the console. Show its latest lines here too' : 'Show the command’s latest output here'}><Icon name="eye" size={12}/><span>Show output</span></button>}
-        {managed && !tailHidden && <button type="button" className="live-bar-button" aria-expanded={expanded} aria-controls={outputId} onClick={() => setExpanded(value => !value)}><Icon name={expanded ? 'collapse' : 'expand'} size={12}/><span>{expanded ? 'Less output' : 'More output'}</span></button>}
+        {managed && !tailHidden && <button type="button" className="live-bar-button" aria-label={expanded ? 'Less output' : 'More output'} aria-expanded={expanded} aria-controls={outputId} onClick={() => expand(!expanded)}><Icon name={expanded ? 'collapse' : 'expand'} size={12}/><span>{expanded ? 'Less output' : 'More output'}</span></button>}
         {managed && managed.ports.length > 0 && <button type="button" className="live-bar-button live-bar-preview" title={`Open http://localhost:${managed.ports[0]} in the Web panel (or your browser)`}
           onClick={() => void openPreview(managed.ports[0]).catch(e => setError(`Could not open port ${managed.ports[0]}: ${humanError(e)}`))}><Icon name="globe" size={12}/><span>Preview :{managed.ports[0]}</span></button>}
         {managed && onOpenCommand && <button type="button" className="live-bar-button" onClick={() => openInConsole(managed.id)} title="The whole output, with search, in the command console"><Icon name="output" size={12}/><span>Open in console</span></button>}
@@ -197,8 +211,8 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
     </div>
     {managed && !tailHidden && <div className="live-bar-output-frame">
       <pre id={outputId} className="live-bar-output" data-expanded={expanded || undefined} aria-label={`Latest output of ${managed.title || 'the command'}`} tabIndex={expanded ? 0 : -1} data-link-routing="own"
-        onDoubleClick={event => { if (event.target instanceof Element && !event.target.closest('a, button')) setExpanded(value => !value); }}
-        onKeyDown={event => { if (event.key === 'Escape' && expanded) { event.stopPropagation(); setExpanded(false); } }}>{lines.length ? <LogTail text={tail} count={expanded ? 40 : 3} actions={tailActions}/> : <span className="live-bar-quiet">No output yet.</span>}</pre>
+        onDoubleClick={event => { if (event.target instanceof Element && !event.target.closest('a, button')) expand(!expanded); }}
+        onKeyDown={event => { if (event.key === 'Escape' && expanded) { event.stopPropagation(); expand(false); } }}>{lines.length ? <LogTail text={tail} count={expanded ? 40 : 3} actions={tailActions}/> : <span className="live-bar-quiet">No output yet.</span>}</pre>
       <button type="button" className="icon-button live-bar-hide" aria-label="Hide output" title="Hide the output here. The command keeps running; Show output brings it back." onClick={() => showOutput(false)}><Icon name="close" size={12}/></button>
     </div>}
     {neverEnds && <p className="live-bar-hint" role="note"><Icon name="alert" size={12}/><span>This command may never end. Interrupt the turn and ask {agentLabel(session)} to start it with <code>lazybox run</code> — it moves servers to the background.</span></p>}

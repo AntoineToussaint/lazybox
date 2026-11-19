@@ -121,6 +121,7 @@ test('send as text: commands run, the agent\'s go through, an unknown /word asks
  assert.equal(decideSend('/INIT',all()).kind,'provider','names are case-insensitive');
  assert.equal(decideSend('/test',all()).kind,'snippet');
  assert.deepEqual(decideSend('/deploy now',all()),{kind:'unknown',name:'deploy'});
+ assert.deepEqual(decideSend('/compact',lazyboxCommands(ctx({provider:'codex',compact:false}))),{kind:'unknown',name:'compact'});
  assert.equal(decideSend('/compact  ',all()).kind,'lazybox','Lazybox\'s /compact stands in for the agent\'s');});
 
 test('models resolve by id, name or prefix; an id the list lacks is kept as typed',()=>{

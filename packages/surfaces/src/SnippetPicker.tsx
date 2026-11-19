@@ -141,10 +141,11 @@ export function SnippetPicker({
         }}
       />
       <div className="snippet-filters" role="group" aria-label="Show snippets">{([['all','All'],['favorites',`Favorites${favorites.length?` · ${favorites.length}`:''}`],['frequent','Frequent']] as const).map(([value,label])=><button key={value} aria-pressed={view===value} onClick={()=>{setView(value);setIndex(0);}}>{label}</button>)}<small>{filtered.length} {filtered.length===1?'snippet':'snippets'}</small></div>
-      {error && <p role="alert">{error}</p>}
-      {loading && <p role="status">Loading snippets…</p>}
       <div className="snippet-browser">
         <div role="listbox" aria-label="Available snippets">
+          {error && <p role="alert">{error}</p>}
+          {loading && <p role="status">Loading snippets…</p>}
+          {!loading && !filtered.length && <p className="snippet-empty">{query ? 'No matching snippets.' : view==='frequent' ? 'Snippets you send or insert show up here, most used first.' : view==='favorites' ? 'Star a snippet to keep it here.' : 'No snippets yet.'}</p>}
           {filtered.map((s, i) => (
             <button
               type="button"
@@ -176,7 +177,6 @@ export function SnippetPicker({
           )}
         </article>
       </div>
-      {!loading && !filtered.length && <p className="snippet-empty">{query ? 'No matching snippets.' : view==='frequent' ? 'Snippets you send or insert show up here, most used first.' : view==='favorites' ? 'Star a snippet to keep it here.' : 'No snippets yet.'}</p>}
       <footer>
         <small>
           {canSend

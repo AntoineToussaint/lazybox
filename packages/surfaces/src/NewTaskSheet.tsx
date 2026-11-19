@@ -19,8 +19,8 @@ import { RunnerHealthDot, RunnerScope, useRunnerDirectory, useRunnerIdentity } f
 import { healthLabel, type RunnerHealth } from './runner-directory';
 import { useRunnerSettings } from './RunnerSettings';
 import { showToast } from './toasts';
-import { readLaunchChoices, readPreference, writePreference } from './view-state';
-import { modeOf, parseTaskChoices, rankRepositories, rememberTask, TASK_MODES, taskBranch, taskName, taskProblem, type TaskChoices, type TaskMode, type TaskProblem } from './new-task-model';
+import { conversationDefaults, readPreference, writeLaunchChoices, writePreference } from './view-state';
+import { modeOf, parseTaskChoices, rankRepositories, rememberTask, TASK_CHOICES_PREFERENCE, TASK_MODES, taskBranch, taskName, taskProblem, type TaskChoices, type TaskMode, type TaskProblem } from './new-task-model';
 import { itemBranch, itemMessage, itemReference, itemSafeMode, itemTaskName, type ItemLike } from './item-context';
 import { ItemPicker, ItemSource, StartedNotice, useItemDetail, useStartedFrom } from './WorkItems';
 import { forgetStarts, StartFromChip, StartFromPicker, useRepositoryStarts } from './StartFrom';
@@ -40,16 +40,15 @@ import './new-task.css';
 
 /** The work item a task starts from (an issue), and whether its comments go to the agent. */
 type ItemChoice = { provider: string; key: string };
-type Draft = { prompt: string; identities: string[]; empty: boolean; name?: string; branch?: string; /** The branch each repository starts from, chosen in this sheet. */ starts?: Record<string, string>; provider: string; profile: string; mode: TaskMode; behaviorProfile?: string; item?: ItemChoice; withoutComments?: boolean };
+type Draft = { prompt: string; identities: string[]; empty: boolean; name?: string; branch?: string; /** The branch each repository starts from, chosen in this sheet. */ starts?: Record<string, string>; provider: string; profile: string; model?: string; gateway?: string; mode: TaskMode; behaviorProfile?: string; item?: ItemChoice; withoutComments?: boolean };
 /** `message` is what is sent: the prompt, then the item's quoted context when there is one. */
-type Plan = { prompt: string; message: string; name: string; branch: string; identities: string[]; starts: Record<string, string>; empty: boolean; provider: string; profileId: string; mode: TaskMode; behaviorProfile: string; agent: string; item?: ItemChoice };
+type Plan = { prompt: string; message: string; name: string; branch: string; identities: string[]; starts: Record<string, string>; empty: boolean; provider: string; profileId: string; model: string; gateway: string; mode: TaskMode; behaviorProfile: string; agent: string; item?: ItemChoice };
 type Progress = (message: string) => void;
 /** Where a start got to, so trying again picks up there instead of making a second workspace. */
 type Attempt = { spec: string; requestKey: string; operationId: string; collectionId?: string; sessionId?: string; sent?: boolean; message?: string;
   /** The repository the Runner refused because its history changed on GitHub (the error card's way forward). */
   replaced?: RepositoryReplacement };
 
-const CHOICES = 'new-task';
 /** The unsent sheet of this window: an Escape never loses a long message. */
 let unsent: Draft | undefined;
 /** When the sheet was remade for another Runner from its Runner row: focus goes back there (a time, so a repeated mount effect agrees). */
@@ -73,7 +72,7 @@ async function startTask(api: RunnerClient, plan: Plan, attempt: Attempt, progre
   if (!attempt.sessionId) {
     progress(`Starting ${plan.agent}…`);
     const mode = modeOf(plan.mode);
-    const opened = await api.openSession({ profileId: plan.profileId, collectionId: attempt.collectionId, options: { model: '', permission: mode.permission, workflow: mode.workflow, behaviorProfile: plan.behaviorProfile, gatewayId: '', rotationProfileIds: [], noRotation: false, instructions: '' } });
+    const opened = await api.openSession({ profileId: plan.profileId, collectionId: attempt.collectionId, options: { model: plan.model, permission: mode.permission, workflow: mode.workflow, behaviorProfile: plan.behaviorProfile, gatewayId: plan.gateway, rotationProfileIds: [], noRotation: false, instructions: '' } });
     if (!opened.session) throw new Error('The Runner did not start the conversation.');
     attempt.sessionId = opened.session.id;
   }
@@ -179,9 +178,15 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
   const { api, info } = useRunner();
   const { settings } = useRunnerSettings();
   const { catalog, loading: catalogLoading, refreshing: catalogRefreshing, reload: reloadCatalog } = useRepositoryCatalog(api);
-  const [remembered] = useState<TaskChoices>(() => { try { return parseTaskChoices(readPreference(viewState, CHOICES)); } catch { return parseTaskChoices(null); } });
-  const [draft, setDraft] = useState<Draft>(() => unsent || {
-    prompt: '', identities: remembered.identities, empty: false, provider: remembered.provider || readLaunchChoices(viewState).provider || 'claude', profile: remembered.profile, mode: remembered.mode,
+  const [remembered] = useState<TaskChoices>(() => { try { return parseTaskChoices(readPreference(viewState, TASK_CHOICES_PREFERENCE)); } catch { return parseTaskChoices(null); } });
+  const [draft, setDraft] = useState<Draft>(() => {
+    if (unsent) return unsent;
+    const last = conversationDefaults(viewState, info);
+    return {
+      prompt: '', identities: remembered.identities, empty: !!remembered.empty,
+      provider: last.provider || remembered.provider || 'claude', profile: last.provider ? last.profile || '' : remembered.profile,
+      model: last.model, gateway: last.gateway, mode: remembered.mode,
+    };
   });
   const change = (next: Partial<Draft>) => setDraft(current => { const value = { ...current, ...next }; unsent = value; return value; });
   const behaviorProfile = behaviorForProvider(draft.behaviorProfile ?? readDefaultBehavior(viewState), draft.provider);
@@ -279,7 +284,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
       if (found.field === 'name' || found.field === 'branch') setEditingName(true);
       return undefined;
     }
-    return { prompt: draft.prompt, message, name, branch, identities: draft.empty ? [] : draft.identities, starts: draft.empty ? {} : startsFor(draft.identities, draft.starts || {}), empty: draft.empty, provider: draft.provider, profileId, mode: behaviorProfile === CHECK_IN_FIRST ? 'read-only' : safe.mode as TaskMode, behaviorProfile, agent, item: itemRef ? { provider: itemRef.provider, key: itemRef.key } : undefined };
+    return { prompt: draft.prompt, message, name, branch, identities: draft.empty ? [] : draft.identities, starts: draft.empty ? {} : startsFor(draft.identities, draft.starts || {}), empty: draft.empty, provider: draft.provider, profileId, model: draft.model || '', gateway: draft.gateway || '', mode: behaviorProfile === CHECK_IN_FIRST ? 'read-only' : safe.mode as TaskMode, behaviorProfile, agent, item: itemRef ? { provider: itemRef.provider, key: itemRef.key } : undefined };
   };
 
   const start = async (inBackground: boolean) => {
@@ -289,7 +294,6 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
     const spec = JSON.stringify({ ...value, prompt: '', message: '' });
     if (spec !== attempt.current.spec) attempt.current = { spec, requestKey: crypto.randomUUID(), operationId: crypto.randomUUID() };
     else if (value.message !== attempt.current.message) attempt.current.operationId = crypto.randomUUID();
-    try { writePreference(viewState, CHOICES, JSON.stringify(rememberTask(remembered, { identities: value.identities, provider: value.provider, profile: value.profileId, mode: draft.mode }))); } catch { /* the next sheet starts from the defaults */ }
     try { if (draft.behaviorProfile !== undefined) saveDefaultBehavior(viewState, value.behaviorProfile); } catch { /* the task can still start */ }
     attempt.current.message = value.message;
     setBusy(true); setError(''); setReplaced(undefined); setProgress('');
@@ -299,6 +303,10 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
     const run = attempt.current;
     try {
       const target = await startTask(api, value, run, message => { if (!background.current) setProgress(message); });
+      try {
+        writePreference(viewState, TASK_CHOICES_PREFERENCE, JSON.stringify(rememberTask(parseTaskChoices(readPreference(viewState, TASK_CHOICES_PREFERENCE)), { identities: value.identities, empty: value.empty, provider: value.provider, profile: value.profileId, mode: draft.mode })));
+        writeLaunchChoices(viewState, { provider: value.provider, profile: value.profileId, model: value.model, gateway: value.gateway, behaviorProfile: value.behaviorProfile });
+      } catch { /* The task has already started. */ }
       unsent = undefined;
       if (background.current) showToast({ id: `task:${run.requestKey}`, tone: 'review', title: `Started “${value.name}”`, body: value.message.trim() ? `${value.agent} has your message.` : `${value.agent} is ready.`, action: { label: 'Open', run: () => onStarted({ ...target, commandId: '' }) }, button: { label: 'Open', run: () => onStarted({ ...target, commandId: '' }) } });
       else { onClose(); onStarted({ ...target, commandId: '' }); }
@@ -438,10 +446,11 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
       <div className="new-task-field new-task-agent" data-invalid={problem?.field === 'agent' || undefined}>
         <span className="new-task-label" aria-hidden="true"><Icon name="agent" size={13}/>Agent</span>
         <div className="new-task-controls">
-          <AgentPicker value={draft.provider} disabled={!info || busy} onChange={provider => change({ provider, profile: '' })}/>
+          <AgentPicker value={draft.provider} disabled={!info || busy} onChange={provider => change({ provider, profile: '', model: '', gateway: '' })}/>
           {profiles.length > 1 && <select aria-label="Account" value={profileId} disabled={busy} onChange={event => change({ profile: event.target.value })}>
             <SubscriptionOptions profiles={profiles}/>
           </select>}
+          <input aria-label="Model" placeholder="Provider default model" value={draft.model || ''} disabled={busy} onChange={event => change({ model: event.target.value })}/>
         </div>
       </div>
       <div className="new-task-field">

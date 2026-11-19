@@ -6,7 +6,11 @@ import type { InfoResponse } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
 import { AgentPicker } from './AgentPicker';
 import { useRunnerSettings } from './RunnerSettings';
-import { readLaunchChoices, writeLaunchChoices } from './view-state';
+import { conversationDefaults, writeLaunchChoices } from './view-state';
+
+import { showToast } from './toasts';
+
+export type ConversationCopy = { provider: string; model: string; title: string };
 
 type Purpose = 'coding' | 'help' | 'planning' | 'summary';
 
@@ -16,11 +20,12 @@ type Purpose = 'coding' | 'help' | 'planning' | 'summary';
  * choices are reused only for the same agent. Starting always takes an
  * explicit click, except an explicit Quick start (`autoStart`).
  */
-export function useSessionLauncher({ api, info, viewState, agent, workingDirectory, purpose, assistantContext, collectionId, emptyWorkspace, allowStart, autoStart, sessionID, lifetime, onError, onStarted }: {
+export function useSessionLauncher({ api, info, viewState, agent, copy, workingDirectory, purpose, assistantContext, collectionId, emptyWorkspace, allowStart, autoStart, sessionID, lifetime, onError, onStarted }: {
   api: RunnerClient;
   info?: InfoResponse;
   viewState?: ViewStateStore;
   agent?: 'claude' | 'codex';
+  copy?: ConversationCopy;
   workingDirectory: string;
   purpose: Purpose;
   assistantContext: string;
@@ -31,11 +36,12 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
   sessionID: string;
   lifetime: RefObject<AbortController | null>;
   onError(message: string): void;
-  onStarted(sessionId: string): void;
+  onStarted(sessionId: string, collectionId?: string): void;
 }) {
-  const [remembered] = useState(() => { const choices = readLaunchChoices(viewState); return agent && agent !== choices.provider ? {} : choices; });
+  const [remembered] = useState(() => { const choices = conversationDefaults(viewState, info); return copy ? { provider: copy.provider, model: copy.model } : agent && agent !== choices.provider ? {} : choices; });
   const { settings: runnerSettings, loading: settingsLoading } = useRunnerSettings();
   const [provider, setProvider] = useState<string>(agent || remembered.provider || 'claude');
+  const [title, setTitle] = useState(copy?.title || '');
   const [profile, setProfile] = useState(remembered.profile || '');
   // On by default: the Runner may continue on another signed-in subscription of this provider.
   const [rotate, setRotate] = useState(true);
@@ -58,14 +64,25 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
 
   const open = async (event?: FormEvent) => {
     event?.preventDefault();
-    if (openingRef.current || !selectedProfile || !allowStart) return;
+    if (openingRef.current || !selectedProfile || !allowStart || (copy && !title.trim())) return;
     openingRef.current = true; setOpening(true); onError('');
     const signal = lifetime.current!.signal;
     try {
       const options = { model, permission: checkInFirst ? 'read-only' : permission, workflow, gatewayId: gateway, rotationProfileIds: [], noRotation: !rotate, instructions, behaviorProfile: assistant ? '' : behaviorProfile };
       const result = assistant ? await api.openAssistant({ profileId: selectedProfile, purpose, context: assistantContext, collectionId, options }, { signal }) : await api.openSession({ profileId: selectedProfile, cwd: collectionId || emptyWorkspace ? '' : cwd, collectionId, emptyWorkspace, options }, { signal });
       if (!result.session) throw new Error('Runner did not return a session');
-      if (!signal.aborted) { try { writeLaunchChoices(viewState, { provider, profile: selectedProfile, model, gateway, behaviorProfile }); if (!assistant) saveDefaultBehavior(viewState, behaviorProfile); } catch { /* Session remains usable if local preferences cannot be saved. */ } onStarted(result.session.id); }
+      if (signal.aborted) return;
+      if (!assistant) {
+        try {
+          writeLaunchChoices(viewState, { provider, profile: selectedProfile, model, gateway, behaviorProfile });
+          saveDefaultBehavior(viewState, behaviorProfile);
+        } catch { /* The conversation can still open. */ }
+      }
+      if (title.trim()) {
+        try { await api.renameConversation({ sessionId: result.session.id, title: title.trim() }, { signal }); }
+        catch { if (!signal.aborted) showToast({ tone: 'info', title: 'Conversation started', body: 'Could not save its name. Rename it from the chat header.' }); }
+      }
+      if (!signal.aborted) onStarted(result.session.id, result.session.collectionId);
     } catch (e) { if (!signal.aborted) onError(String(e)); }
     finally { if (!signal.aborted) { openingRef.current = false; setOpening(false); } }
   };
@@ -82,7 +99,7 @@ export function useSessionLauncher({ api, info, viewState, agent, workingDirecto
   }, [autoStart, sessionID, info, settingsLoading, selectedProfile, allowStart]);
 
   return {
-    runnerSettings, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway,
+    runnerSettings, copy, title, setTitle, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway,
     instructions, setInstructions, behaviorProfile, setBehaviorProfile, checkInFirst, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open,
   };
 }
@@ -100,13 +117,12 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
   collectionId: string;
   agentName: string;
 }) {
-  const { runnerSettings, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway, instructions, setInstructions, behaviorProfile, setBehaviorProfile, checkInFirst, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open } = launcher;
+  const { runnerSettings, copy, title, setTitle, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway, instructions, setInstructions, behaviorProfile, setBehaviorProfile, checkInFirst, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open } = launcher;
   const assistant = purpose !== 'coding';
   return <section className="session-setup">
-    <div className="eyebrow">New conversation</div>
-    <h2>{emptyWorkspace ? 'Empty workspace' : 'Choose your agent.'}</h2>
-    <p>{assistant ? `${purposeLabel(purpose)}. This conversation runs on the Runner.` : emptyWorkspace ? 'Start a conversation with room to create files. No repository needed.' : 'Connect to your project and start working.'}</p>
+    {assistant && <p>{purposeLabel(purpose)}. This conversation runs on the Runner.</p>}
     <form onSubmit={open} className="open-form">
+      {copy && <label>Conversation name<input autoFocus required maxLength={128} value={title} disabled={opening} onFocus={event => event.target.select()} onChange={event => setTitle(event.target.value)}/></label>}
       <div className="setup-row">
         <AgentPicker value={provider} disabled={!info || opening} onChange={next => { setProvider(next); setProfile(''); setModel(''); setGateway(''); setBehaviorProfile(behaviorForProvider(behaviorProfile, next)); }}/>
         <label>Account profile<select value={selectedProfile} disabled={!profiles.length || opening} onChange={e => setProfile(e.target.value)}>
@@ -119,7 +135,7 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
         : emptyWorkspace
           ? <p className="collection-context">A private folder is created on the Runner. Your files remain after the session ends.</p>
           : collectionId
-            ? <p className="collection-context">Uses the selected workspace and its repositories</p>
+            ? null
             : <label>Working directory<input required disabled={opening} placeholder="/absolute/path/to/project" value={cwd} onChange={e => setCwd(e.target.value)}/></label>}
       <label>Permissions<select disabled={opening || assistant || checkInFirst} value={assistant || checkInFirst ? 'read-only' : permission} onChange={e => setPermission(e.target.value)}>
         <option value="">Runner default{runnerSettings?.permission ? ` · ${runnerSettings.permission === 'yolo' ? 'YOLO' : runnerSettings.permission}` : ' · current CLI settings'}</option>
@@ -133,7 +149,7 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
         <BehaviorOptions provider={provider}/>
       </select></label>}
       {checkInFirst && <small>Starts read only. Approve the plan when you’re ready. Use the session menu to change permissions if it stays read only.</small>}
-      <details className="session-options">
+      <details className="session-options" open={copy ? true : undefined}>
         <summary>Model & context</summary>
         <div className="options-grid">
           <label>Model<input disabled={opening} placeholder="Provider default" value={model} onChange={e => setModel(e.target.value)}/></label>

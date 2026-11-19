@@ -33,6 +33,7 @@ import {monacoVimCompat} from './monaco-vim-compat.mjs';
 const fixture=await startRunnerFixture();
 // Five conversations in Alpha, so the sidebar lists them under the workspace, and the review of the first.
 const first=fixture.sessions.find(s=>s.id==='alpha-session');
+fixture.sessions.find(s=>s.id==='beta-session').title='Prepare Beta release';
 first.title='Main alpha conversation';
 for(const [id,title] of [['alpha-second','Second alpha conversation'],['alpha-third','Third alpha conversation'],['alpha-fourth','Fourth alpha conversation'],['alpha-fifth','Fifth alpha conversation'],['alpha-review','Review of the main conversation']])
  fixture.sessions.push({...structuredClone(first),id,workId:id,title,instructionsPending:false});
@@ -222,7 +223,7 @@ async function tabsOn(){
  // Another workspace's conversation, ⌘-clicked in Agents: the window goes to that workspace; this one's page does not get it.
  const pagesOf=w=>page.evaluate(key=>localStorage.getItem(key)||'',`${scope}:workspace:${w}:pages`);
  await page.getByRole('textbox',{name:/Filter agents/}).or(page.getByPlaceholder('Filter agents')).first().fill('Beta');
- await page.locator('.agent-row').filter({hasText:'Beta release'}).first().click({modifiers:['Meta']});
+ await page.locator('.agent-row').filter({hasText:'Prepare Beta release'}).click({modifiers:['Meta']});
  await expect(page.getByRole('combobox',{name:'Workspace',exact:true})).toHaveValue('beta');
  assert.ok(!(await pagesOf('alpha')).includes('beta-session'),'alpha’s pages hold no beta conversation');
  // A page saved before tabs (a chat following the page): its conversation is a kept tab.

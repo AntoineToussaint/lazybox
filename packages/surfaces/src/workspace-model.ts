@@ -534,9 +534,8 @@ export type Opened = { page: WorkspacePage; id: string; added: boolean; full?: b
 /**
  * Open a conversation as a tab. A conversation already in a tab is brought
  * forward there (a background open leaves the page as it is), never shown
- * twice; otherwise the chat group's preview tab takes it (a preview open, or
- * a tab opened while the preview shows no conversation yet), or it gets a new
- * tab, while the page has room. Opening it in front selects it.
+ * twice. A foreground open uses the empty workspace starter or, in preview
+ * mode, the chat group's preview. Otherwise it gets a new tab if there is room. Opening it in front selects it.
  */
 export function openConversation(page: WorkspacePage, target: ViewTarget, options: OpenOptions, newID: () => string): Opened {
   const settled = settleChats(page), existing = tabFor(settled, target);
@@ -547,10 +546,12 @@ export function openConversation(page: WorkspacePage, target: ViewTarget, option
   }
   const all = pageGroups(settled);
   const group = (options.group ? all.find(value => value.id === options.group) : undefined) || chatGroup(settled);
-  const preview = group?.panels.find(panel => isChatTab(panel) && panel.preview);
-  if (preview && options.mode !== 'background' && (options.mode === 'preview' || !resolveTarget(preview, settled.selection).sessionId)) {
-    const shown = mapPagePanels(settled, panel => panel.id === preview.id ? chatTab(panel.id, target, options.mode === 'preview') : panel);
-    return { page: dedupeChats(withSelection(activatePanel(shown, preview.id), target)), id: preview.id, added: false };
+  const starter = target.sessionId && group?.panels.find(panel => isChatTab(panel) && !resolveTarget(panel, settled.selection).sessionId);
+  const preview = options.mode === 'preview' && group?.panels.find(panel => isChatTab(panel) && panel.preview);
+  const replace = preview || starter;
+  if (replace && options.mode !== 'background') {
+    const shown = mapPagePanels(settled, panel => panel.id === replace.id ? chatTab(panel.id, target, options.mode === 'preview') : panel);
+    return { page: dedupeChats(withSelection(activatePanel(shown, replace.id), target)), id: replace.id, added: false };
   }
   if (allPanels(settled).length >= PANEL_LIMIT) return { page: settled, id: '', added: false, full: true };
   const panel = chatTab(newID(), target, options.mode === 'preview'), front = options.mode !== 'background';

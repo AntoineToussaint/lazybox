@@ -88,17 +88,19 @@ test('canceling a reader ends retry wait without reopening a subscription', asyn
 });
 
 
-test('launch choices follow workspace scope across windows without carrying permissions', () => {
+test('launch choices follow the Runner across workspaces and windows', () => {
   const items = new Map<string,string>();
   const first = {...storage('main',items),scope:'runner:workspace-a'};
-  const second = {...storage('detached',items),scope:'runner:workspace-a'};
+  const second = {...storage('detached',items),scope:'runner:workspace-b'};
   const choices = {provider:'codex',profile:'saved',model:'model',gateway:'metered'};
+  first.setItem('runner:workspace-a:launch-choices',JSON.stringify({...choices,permission:'yolo',instructions:'old-context'}));
+  assert.deepEqual(readLaunchChoices(first),choices, 'older workspace settings are read safely');
+  assert.deepEqual(readLaunchChoices(second),{});
   writeLaunchChoices(first,choices);
   assert.deepEqual(readLaunchChoices(second),choices);
-  assert.deepEqual(readLaunchChoices({...second,scope:'runner:workspace-b'}),{});
-  first.setItem('runner:workspace-a:launch-choices',JSON.stringify({...choices,permission:'yolo',instructions:'old-context'}));
-  assert.deepEqual(readLaunchChoices(first),choices);
-  first.setItem('runner:workspace-a:launch-choices','broken');assert.deepEqual(readLaunchChoices(first),{});
+  assert.deepEqual(readLaunchChoices({...second,scope:'another-runner:workspace-b'}),{});
+  first.setItem('runner:launch-choices','broken');
+  assert.deepEqual(readLaunchChoices(second),{});
 });
 
 

@@ -187,7 +187,7 @@ export function decideSend(text: string, commands: readonly SlashCommand[]): Sla
   const input = parseSlash(text.trimEnd());
   if (!input || !COMMAND_NAME.test(input.name)) return { kind: 'text' };
   const command = findCommand(commands, input.name);
-  if (!command) return { kind: 'unknown', name: input.name };
+  if (!command || command.unsupported) return { kind: 'unknown', name: input.name };
   if (command.group === 'snippet') return { kind: 'snippet', command };
   return { kind: command.group, command, args: input.args.trim() };
 }

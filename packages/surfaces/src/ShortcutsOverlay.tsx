@@ -54,7 +54,7 @@ export function ShortcutsOverlay({ keymap, onClose }: { keymap: Keymap; onClose(
       <input ref={input} type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Filter shortcuts" aria-label="Filter shortcuts" spellCheck={false} autoComplete="off"/>
       <button type="button" className="icon-button" aria-label="Close keyboard shortcuts" onClick={close}><Icon name="close" size={14}/></button>
     </header>
-    <div className="shortcuts-groups">
+    <div className="shortcuts-results"><div className="shortcuts-groups">
       {actionGroups.map(group => {
         const items = shown.filter(row => row.group === group);
         if (!items.length) return null;
@@ -67,7 +67,7 @@ export function ShortcutsOverlay({ keymap, onClose }: { keymap: Keymap; onClose(
         </section>;
       })}
       {!shown.length && <p className="command-palette-empty" role="status">No shortcut matches “{query}”.</p>}
-    </div>
+    </div></div>
     <footer>
       <span>Keys separated by a space are pressed one after another. Every action is also in the command palette.
         {escape && <> Lost? <kbd>{escape.keys[0].join(' ')}</kbd> resets the layout and keys, with Undo.</>}</span>

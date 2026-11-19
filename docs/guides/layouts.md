@@ -55,6 +55,11 @@ the order on the Runner, so it is the same after a restart, in every window
 and on your phone; a new workspace comes in at the top. With several Runners
 in the sidebar, each Runner's workspaces move within its own section.
 
+Right-click a workspace and choose **Clone workspace…** to start with the same
+repositories and base branches. Give the copy a name and Lazybox suggests a
+fresh working branch. **New workspace** and **New task** both remember the
+last repository selection, including an empty workspace.
+
 ## Conversation tabs
 
 Conversations open as tabs, like files in an editor: keep several open, split
@@ -67,7 +72,8 @@ them side by side, drag them anywhere.
 - **A single click** on a conversation (in Workspaces, Agents, ⌘K, ⌘J) brings
   its tab forward, or opens it in a tab of its own. A new conversation opens in
   a regular tab even when previews are enabled, including one started from
-  **New task** in another workspace.
+  **New task** in another workspace. The first conversation takes the place
+  of the empty workspace's starter tab.
 - **Settings → Chat → Open a workspace's conversations as tabs** (on unless you
   turn it off). Off, a single click shows a conversation in the chat group's
   **preview tab**, its title in *italics*, which the next single click
@@ -77,6 +83,13 @@ them side by side, drag them anywhere.
   conversation: it opens in a tab behind the one in front.
 - A conversation already open is brought forward in its tab, never opened
   twice on a page.
+- Right-click a conversation tab and choose **Clone conversation…** to name
+  a fresh conversation in the same workspace with the source agent and model.
+  The copy starts with an empty transcript and uses the usual account and
+  permission defaults.
+- **New conversation** and **New task** share the last agent, account and
+  model used to start a coding conversation across workspaces on the Runner.
+  You can change the model directly in **New task**.
 - Each conversation tab shows its status before its title: working, needs
   you, failed, done. The tab in front is the selected conversation: the
   sidebar, Command output and Changes follow it.

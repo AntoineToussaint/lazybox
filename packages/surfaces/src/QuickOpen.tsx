@@ -66,8 +66,9 @@ export function QuickOpen({ workbench, onClose }: { workbench: Workbench; onClos
    <input ref={input} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={keydown} placeholder="Go to file — name, path, or name:line" aria-label="File name" role="combobox" aria-expanded="true" aria-controls="quick-open-results" aria-activedescendant={results[selected] ? `quick-open-${selected}` : undefined} spellCheck={false} autoComplete="off"/>
    {status.searching && <span className="quick-open-busy" aria-hidden="true"/>}
   </div>
-  {!term && results.length > 0 && <small className="quick-open-heading">Recently opened</small>}
   <div ref={list} id="quick-open-results" className="quick-open-results" role="listbox" aria-label="Files">
+   {!term && results.length > 0 && <div className="quick-open-heading">Recently opened</div>}
+   {term && !status.searching && status.truncated && <small className="quick-open-limit" role="status">Searched the first {status.indexed.toLocaleString()} files</small>}
    {results.map((result, i) => {
     const slash = result.path.lastIndexOf('/'), file = result.path.slice(slash + 1), folder = slash < 0 ? '' : result.path.slice(0, slash);
     return <div key={result.path} id={`quick-open-${i}`} role="option" aria-selected={i === selected} className="quick-open-row" title={result.path} onPointerMove={() => setSelected(i)} onClick={event => choose(result, { side: modKey(event), quick: event.altKey })}>
@@ -78,6 +79,6 @@ export function QuickOpen({ workbench, onClose }: { workbench: Workbench; onClos
    })}
    {!results.length && empty && <p className="quick-open-empty" role="status">{empty}</p>}
   </div>
-  <footer className="quick-open-footer"><span><kbd>↑</kbd><kbd>↓</kbd> choose</span><span><kbd>Enter</kbd> open</span><span><kbd>{shortcut('Mod+Enter')}</kbd> beside</span><span><kbd>{shortcut('Alt+Enter')}</kbd> quick look</span><span><kbd>:42</kbd> line</span>{status.truncated && <span className="quick-open-limit">Searched the first {status.indexed.toLocaleString()} files</span>}</footer>
+  <footer className="quick-open-footer"><span><kbd>↑</kbd><kbd>↓</kbd> choose</span><span><kbd>Enter</kbd> open</span><span><kbd>{shortcut('Mod+Enter')}</kbd> beside</span><span><kbd>{shortcut('Alt+Enter')}</kbd> quick look</span><span><kbd>:42</kbd> line</span></footer>
  </dialog>;
 }

@@ -50,10 +50,11 @@ export function SlashMenu({ menu, selected, sessionId, agentName, onSelect, onCh
       <div className="slash-list" ref={list} id={id} role="listbox" aria-label={`/${command.name} choices`}>
         {items.map((choice, i) => <ChoiceRow key={choice.value} choice={choice} id={slashOptionId(sessionId, i)} selected={i === selected} onHover={() => onSelect(i)} onChoose={() => onChoose(i)}/>)}
       </div>
-      <Footer hint={command.freeArgument ? '↑↓ to choose · Enter to switch · or type an id · Esc to close' : '↑↓ to choose · Enter to apply · Esc to close'} onClose={onClose}/>
+      <Footer hint={items[selected]?.disabled ? "Unavailable · ↑↓ to choose · Tab to leave · Esc to close" : command.freeArgument ? '↑↓ to choose · Enter to switch · or type an id · Esc to close' : '↑↓ to choose · Enter to apply · Esc to close'} onClose={onClose}/>
     </div>;
   }
 
+  const unavailable = !!menu.items[selected]?.command.disabled;
   const groups = SLASH_GROUPS.map(group => ({ group, rows: menu.items.map((item, index) => ({ item, index })).filter(row => row.item.command.group === group) })).filter(g => g.rows.length);
   return <div className="slash-menu" onMouseDown={keep}>
     <div className="slash-list" ref={list} id={id} role="listbox" aria-label="Commands">
@@ -62,7 +63,7 @@ export function SlashMenu({ menu, selected, sessionId, agentName, onSelect, onCh
         {rows.map(({ item, index }) => <CommandRow key={item.command.key} command={item.command} positions={item.positions} id={slashOptionId(sessionId, index)} selected={index === selected} onHover={() => onSelect(index)} onChoose={() => onChoose(index)}/>)}
       </Fragment>)}
     </div>
-    <Footer hint="↑↓ to choose · Tab to complete · Enter to run · Esc to close" onClose={onClose}/>
+    <Footer hint={unavailable ? "Unavailable · Tab to leave · Esc to close" : "↑↓ to choose · Tab to complete · Enter to run · Esc to close"} onClose={onClose}/>
   </div>;
 }
 

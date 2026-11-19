@@ -75,6 +75,8 @@ To try Lazybox straight from your checkout instead, run `make dev`: it
 opens **Lazybox Dev**, a separate app with its own Runner and data, which
 reloads as the source changes.
 
+Check **Settings → About & updates → Versions** for the build time of the running desktop app.
+
 Keep the launcher's terminal open. Closing the window leaves the Runner — and
 your agents — running; `Ctrl+C` in the launcher stops the Runner. Agents keep
 running even then, and the next Runner picks them up again.

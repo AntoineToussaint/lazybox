@@ -13,6 +13,7 @@ import { lastCheckedText, progressText, updatePath, versionAgreement, type Updat
 import './about.css';
 import './updates.css';
 
+const buildDateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 const FEED = 'github.com/AntoineToussaint/lazybox';
 
 /** Versions, update controls, and CLI diagnostics for this installation. */
@@ -48,6 +49,7 @@ export function AboutSettings({ app }: { app?: AppHost }) {
     });
     return () => control.abort();
   }, [api, revision]);
+  const builtAt = info?.builtAtUnixSeconds ? new Date(info.builtAtUnixSeconds * 1000) : undefined;
   const release = info?.channel === 'release';
   const path = updatePath(info);
   const updater = path.kind === 'updater' && !!app?.checkForUpdate;
@@ -109,6 +111,10 @@ export function AboutSettings({ app }: { app?: AppHost }) {
     <SettingsGroup title="Versions" className="update-rows" description={release && own ? 'The app, its Runner and the lazybox command are one release and move together.' : undefined}>
       {info && <SettingsRow label="Lazybox app" description={release ? undefined : `Build ${info.channel}`}>
         <span className="about-version">{info.version}</span>
+      </SettingsRow>}
+      {info && <SettingsRow label="Desktop build time">
+        {builtAt ? <time className="about-version" dateTime={builtAt.toISOString()} title={builtAt.toISOString()}>{buildDateFormat.format(builtAt)}</time>
+          : <span className="about-version">Unavailable</span>}
       </SettingsRow>}
       <SettingsRow label={own ? "Runner" : runnerLabel || "Selected Runner"} description={own ? "The background service your agents run in" : "The Runner selected in this window"}>
         <span className={`about-version${agreement.agree ? '' : ' is-warn'}`}>{runnerVersion === undefined ? '…' : runnerVersion || 'not answering'}</span>

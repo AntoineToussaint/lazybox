@@ -29,7 +29,7 @@ export default function InboxScreen() {
     <Text style={[styles.body, { color: theme.secondary }]}>{phase.message}</Text>
     <Text style={[styles.hint, { color: theme.muted }]}>Lazybox keeps working there. Check that the computer is awake and that this phone is on the same tailnet.</Text>
     <Button label="Try again" tone="primary" onPress={runner.retry} style={styles.wide}/>
-    <Button label="Forget this pairing" tone="plain" onPress={() => void runner.forget()}/>
+    <Button label="Forget this pairing" tone="plain" onPress={() => void runner.forget().catch(() => {})}/>
   </Center>;
   return <Inbox/>;
 }

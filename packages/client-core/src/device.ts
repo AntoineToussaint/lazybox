@@ -66,6 +66,7 @@ export function parsePairingFragment(hash: string): PairingOffer | undefined {
 export function parsePairingLink(link: string): { baseUrl: string; offer: PairingOffer } | undefined {
   const match = /^(https?:\/\/[^/?#\s]+)[^#\s]*(#\S+)$/i.exec(link.trim());
   if (!match) return undefined;
+  if (!/^https:\/\//i.test(match[1]) && !/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i.test(match[1])) return undefined;
   const offer = parsePairingFragment(match[2]);
   return offer && { baseUrl: match[1], offer };
 }

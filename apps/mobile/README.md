@@ -154,3 +154,9 @@ Not in this slice, in rough order:
   "What needs me?"), **TestFlight**.
 - The offline cache (last Inbox and tails in SQLite, read marks), swipe
   actions on rows, several Runners, spoken replies, diff review, PR status.
+
+Pairing links use HTTPS. Local simulator fixtures can also use HTTP on
+localhost, 127.0.0.1, or ::1. If forgetting a pairing fails, unlock the phone
+and retry. Tap the conversation header for its full title and workspace.
+Backgrounding the app while dictating keeps the latest recognized words in
+the draft.

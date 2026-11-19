@@ -30,7 +30,7 @@ export default function SettingsScreen() {
       <Text style={[styles.hint, { color: theme.muted }]}>The owner of the computer chose these when pairing. To change them, revoke this phone in Settings → Devices on your computer and pair again.</Text>
       <Button label="Forget this pairing" tone="danger" onPress={() => Alert.alert('Forget this pairing?', 'This phone forgets its key. It stays listed on your computer until you revoke it there.', [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Forget', style: 'destructive', onPress: () => void forget().then(() => router.dismissTo('/')) },
+        { text: 'Forget', style: 'destructive', onPress: () => void forget().then(() => router.dismissTo('/'), () => router.dismissTo('/')) },
       ])} style={{ marginTop: space.l }}/>
     </> : <Text style={[styles.hint, { color: theme.muted }]}>This phone is not paired.</Text>}
   </ScrollView>;

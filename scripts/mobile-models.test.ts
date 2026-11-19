@@ -194,3 +194,25 @@ test('a pairing deep link keeps the offer in its fragment', () => {
   assert.equal(deepLinkedPairing(`lazybox://pair/?x=1&link=${encodeURIComponent(link)}`), link);
   for (const bad of [null, '', 'lazybox://other?link=x', 'https://pair?link=x', 'lazybox://pair?link=%E0%A4%A']) assert.equal(deepLinkedPairing(bad), '', String(bad));
 });
+
+test('a superseded Keychain mutation finishes before the new save and stale queued deletes never run', async () => {
+  const { PairingLifecycle } = await import('../apps/mobile/src/runner/lifecycle.ts');
+  const life = new PairingLifecycle();
+  const first = life.begin();
+  const calls: string[] = [];
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const inFlight = life.write(first, async () => { calls.push('first'); await barrier; });
+  await Promise.resolve();
+  const staleDelete = life.write(first, async () => { calls.push('delete'); });
+  const second = life.begin();
+  const save = life.write(second, async () => { calls.push('second'); });
+  release();
+  await assert.rejects(inFlight, /Pairing changed/);
+  await assert.rejects(staleDelete, /Pairing changed/);
+  await save;
+  assert.deepEqual(calls, ['first', 'second']);
+  await assert.rejects(life.write(second, async () => { throw new Error('Keychain locked'); }), /Keychain locked/);
+  await life.write(second, async () => { calls.push('retry'); });
+  assert.equal(calls.at(-1), 'retry');
+});

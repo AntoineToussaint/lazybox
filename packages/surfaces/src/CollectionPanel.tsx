@@ -4,6 +4,7 @@ import { isWorkConversation } from "./attention";
 import { DeleteConversationDialog } from "./DeleteConversationDialog";
 import { repositoryLabel } from "./repository-model";
 import { WorkspaceRepositories } from "./WorkspaceRepositories";
+import { PendingDeletions } from "./PendingDeletions";
 import { WorkspaceRow } from "./WorkspaceRow";
 import { DraggableDialog, DialogHeader } from "./DraggableDialog";
 import { DeleteWorkspaceDialog } from "./DeleteWorkspaceDialog";
@@ -378,6 +379,7 @@ function WorkspaceList({
           }}
         />
       )}
+      <PendingDeletions />
       <nav className="collection-list" aria-label="Workspaces" aria-keyshortcuts="Alt+Shift+ArrowUp Alt+Shift+ArrowDown" {...reorder.listProps}>
         <span className="sr-only" role="status" aria-live="polite">{reorder.announcement}</span>
         {reorder.items.map((collection) => {

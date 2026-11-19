@@ -288,6 +288,15 @@ const (
 	// RunnerServiceDeleteConversationProcedure is the fully-qualified name of the RunnerService's
 	// DeleteConversation RPC.
 	RunnerServiceDeleteConversationProcedure = "/lazybox.bench.v1.RunnerService/DeleteConversation"
+	// RunnerServiceScheduleDeletionProcedure is the fully-qualified name of the RunnerService's
+	// ScheduleDeletion RPC.
+	RunnerServiceScheduleDeletionProcedure = "/lazybox.bench.v1.RunnerService/ScheduleDeletion"
+	// RunnerServiceListPendingDeletionsProcedure is the fully-qualified name of the RunnerService's
+	// ListPendingDeletions RPC.
+	RunnerServiceListPendingDeletionsProcedure = "/lazybox.bench.v1.RunnerService/ListPendingDeletions"
+	// RunnerServiceUndoDeletionProcedure is the fully-qualified name of the RunnerService's
+	// UndoDeletion RPC.
+	RunnerServiceUndoDeletionProcedure = "/lazybox.bench.v1.RunnerService/UndoDeletion"
 	// RunnerServicePreviewWorkspaceDeletionProcedure is the fully-qualified name of the RunnerService's
 	// PreviewWorkspaceDeletion RPC.
 	RunnerServicePreviewWorkspaceDeletionProcedure = "/lazybox.bench.v1.RunnerService/PreviewWorkspaceDeletion"
@@ -851,6 +860,9 @@ type RunnerServiceClient interface {
 	CloseSession(context.Context, *connect.Request[gen.SessionRequest]) (*connect.Response[gen.SessionResponse], error)
 	StopSessionResources(context.Context, *connect.Request[gen.SessionRequest]) (*connect.Response[gen.SessionResponse], error)
 	DeleteConversation(context.Context, *connect.Request[gen.DeleteConversationRequest]) (*connect.Response[gen.DeleteConversationResponse], error)
+	ScheduleDeletion(context.Context, *connect.Request[gen.ScheduleDeletionRequest]) (*connect.Response[gen.PendingDeletion], error)
+	ListPendingDeletions(context.Context, *connect.Request[gen.ListPendingDeletionsRequest]) (*connect.Response[gen.ListPendingDeletionsResponse], error)
+	UndoDeletion(context.Context, *connect.Request[gen.UndoDeletionRequest]) (*connect.Response[gen.ListPendingDeletionsResponse], error)
 	PreviewWorkspaceDeletion(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.WorkspaceDeletionPreview], error)
 	DeleteWorkspace(context.Context, *connect.Request[gen.DeleteWorkspaceRequest]) (*connect.Response[gen.CollectionResponse], error)
 	ContinueSession(context.Context, *connect.Request[gen.ContinueSessionRequest]) (*connect.Response[gen.SessionResponse], error)
@@ -1731,6 +1743,24 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceDeleteConversationProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("DeleteConversation")),
+			connect.WithClientOptions(opts...),
+		),
+		scheduleDeletion: connect.NewClient[gen.ScheduleDeletionRequest, gen.PendingDeletion](
+			httpClient,
+			baseURL+RunnerServiceScheduleDeletionProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("ScheduleDeletion")),
+			connect.WithClientOptions(opts...),
+		),
+		listPendingDeletions: connect.NewClient[gen.ListPendingDeletionsRequest, gen.ListPendingDeletionsResponse](
+			httpClient,
+			baseURL+RunnerServiceListPendingDeletionsProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("ListPendingDeletions")),
+			connect.WithClientOptions(opts...),
+		),
+		undoDeletion: connect.NewClient[gen.UndoDeletionRequest, gen.ListPendingDeletionsResponse](
+			httpClient,
+			baseURL+RunnerServiceUndoDeletionProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("UndoDeletion")),
 			connect.WithClientOptions(opts...),
 		),
 		previewWorkspaceDeletion: connect.NewClient[gen.CollectionRequest, gen.WorkspaceDeletionPreview](
@@ -2622,6 +2652,9 @@ type runnerServiceClient struct {
 	closeSession                 *connect.Client[gen.SessionRequest, gen.SessionResponse]
 	stopSessionResources         *connect.Client[gen.SessionRequest, gen.SessionResponse]
 	deleteConversation           *connect.Client[gen.DeleteConversationRequest, gen.DeleteConversationResponse]
+	scheduleDeletion             *connect.Client[gen.ScheduleDeletionRequest, gen.PendingDeletion]
+	listPendingDeletions         *connect.Client[gen.ListPendingDeletionsRequest, gen.ListPendingDeletionsResponse]
+	undoDeletion                 *connect.Client[gen.UndoDeletionRequest, gen.ListPendingDeletionsResponse]
 	previewWorkspaceDeletion     *connect.Client[gen.CollectionRequest, gen.WorkspaceDeletionPreview]
 	deleteWorkspace              *connect.Client[gen.DeleteWorkspaceRequest, gen.CollectionResponse]
 	continueSession              *connect.Client[gen.ContinueSessionRequest, gen.SessionResponse]
@@ -3185,6 +3218,21 @@ func (c *runnerServiceClient) StopSessionResources(ctx context.Context, req *con
 // DeleteConversation calls lazybox.bench.v1.RunnerService.DeleteConversation.
 func (c *runnerServiceClient) DeleteConversation(ctx context.Context, req *connect.Request[gen.DeleteConversationRequest]) (*connect.Response[gen.DeleteConversationResponse], error) {
 	return c.deleteConversation.CallUnary(ctx, req)
+}
+
+// ScheduleDeletion calls lazybox.bench.v1.RunnerService.ScheduleDeletion.
+func (c *runnerServiceClient) ScheduleDeletion(ctx context.Context, req *connect.Request[gen.ScheduleDeletionRequest]) (*connect.Response[gen.PendingDeletion], error) {
+	return c.scheduleDeletion.CallUnary(ctx, req)
+}
+
+// ListPendingDeletions calls lazybox.bench.v1.RunnerService.ListPendingDeletions.
+func (c *runnerServiceClient) ListPendingDeletions(ctx context.Context, req *connect.Request[gen.ListPendingDeletionsRequest]) (*connect.Response[gen.ListPendingDeletionsResponse], error) {
+	return c.listPendingDeletions.CallUnary(ctx, req)
+}
+
+// UndoDeletion calls lazybox.bench.v1.RunnerService.UndoDeletion.
+func (c *runnerServiceClient) UndoDeletion(ctx context.Context, req *connect.Request[gen.UndoDeletionRequest]) (*connect.Response[gen.ListPendingDeletionsResponse], error) {
+	return c.undoDeletion.CallUnary(ctx, req)
 }
 
 // PreviewWorkspaceDeletion calls lazybox.bench.v1.RunnerService.PreviewWorkspaceDeletion.
@@ -4019,6 +4067,9 @@ type RunnerServiceHandler interface {
 	CloseSession(context.Context, *connect.Request[gen.SessionRequest]) (*connect.Response[gen.SessionResponse], error)
 	StopSessionResources(context.Context, *connect.Request[gen.SessionRequest]) (*connect.Response[gen.SessionResponse], error)
 	DeleteConversation(context.Context, *connect.Request[gen.DeleteConversationRequest]) (*connect.Response[gen.DeleteConversationResponse], error)
+	ScheduleDeletion(context.Context, *connect.Request[gen.ScheduleDeletionRequest]) (*connect.Response[gen.PendingDeletion], error)
+	ListPendingDeletions(context.Context, *connect.Request[gen.ListPendingDeletionsRequest]) (*connect.Response[gen.ListPendingDeletionsResponse], error)
+	UndoDeletion(context.Context, *connect.Request[gen.UndoDeletionRequest]) (*connect.Response[gen.ListPendingDeletionsResponse], error)
 	PreviewWorkspaceDeletion(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.WorkspaceDeletionPreview], error)
 	DeleteWorkspace(context.Context, *connect.Request[gen.DeleteWorkspaceRequest]) (*connect.Response[gen.CollectionResponse], error)
 	ContinueSession(context.Context, *connect.Request[gen.ContinueSessionRequest]) (*connect.Response[gen.SessionResponse], error)
@@ -4895,6 +4946,24 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceDeleteConversationProcedure,
 		svc.DeleteConversation,
 		connect.WithSchema(runnerServiceMethods.ByName("DeleteConversation")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceScheduleDeletionHandler := connect.NewUnaryHandler(
+		RunnerServiceScheduleDeletionProcedure,
+		svc.ScheduleDeletion,
+		connect.WithSchema(runnerServiceMethods.ByName("ScheduleDeletion")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceListPendingDeletionsHandler := connect.NewUnaryHandler(
+		RunnerServiceListPendingDeletionsProcedure,
+		svc.ListPendingDeletions,
+		connect.WithSchema(runnerServiceMethods.ByName("ListPendingDeletions")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceUndoDeletionHandler := connect.NewUnaryHandler(
+		RunnerServiceUndoDeletionProcedure,
+		svc.UndoDeletion,
+		connect.WithSchema(runnerServiceMethods.ByName("UndoDeletion")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServicePreviewWorkspaceDeletionHandler := connect.NewUnaryHandler(
@@ -5869,6 +5938,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceStopSessionResourcesHandler.ServeHTTP(w, r)
 		case RunnerServiceDeleteConversationProcedure:
 			runnerServiceDeleteConversationHandler.ServeHTTP(w, r)
+		case RunnerServiceScheduleDeletionProcedure:
+			runnerServiceScheduleDeletionHandler.ServeHTTP(w, r)
+		case RunnerServiceListPendingDeletionsProcedure:
+			runnerServiceListPendingDeletionsHandler.ServeHTTP(w, r)
+		case RunnerServiceUndoDeletionProcedure:
+			runnerServiceUndoDeletionHandler.ServeHTTP(w, r)
 		case RunnerServicePreviewWorkspaceDeletionProcedure:
 			runnerServicePreviewWorkspaceDeletionHandler.ServeHTTP(w, r)
 		case RunnerServiceDeleteWorkspaceProcedure:
@@ -6486,6 +6561,18 @@ func (UnimplementedRunnerServiceHandler) StopSessionResources(context.Context, *
 
 func (UnimplementedRunnerServiceHandler) DeleteConversation(context.Context, *connect.Request[gen.DeleteConversationRequest]) (*connect.Response[gen.DeleteConversationResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.DeleteConversation is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) ScheduleDeletion(context.Context, *connect.Request[gen.ScheduleDeletionRequest]) (*connect.Response[gen.PendingDeletion], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ScheduleDeletion is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) ListPendingDeletions(context.Context, *connect.Request[gen.ListPendingDeletionsRequest]) (*connect.Response[gen.ListPendingDeletionsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ListPendingDeletions is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) UndoDeletion(context.Context, *connect.Request[gen.UndoDeletionRequest]) (*connect.Response[gen.ListPendingDeletionsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.UndoDeletion is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) PreviewWorkspaceDeletion(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.WorkspaceDeletionPreview], error) {

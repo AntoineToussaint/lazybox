@@ -1523,6 +1523,94 @@ pub fn open_link(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .open_url(url.as_str(), None::<&str>)
         .map_err(|_| "Could not open the link in your browser".into())
 }
+// A file link can open media in the person's default app. Resolve symlinks
+// before checking the extension and never pass directories or executables on.
+fn local_media_path(raw: &str, home: &std::path::Path) -> Option<PathBuf> {
+    let path = match raw.strip_prefix("~/") {
+        Some(relative) => home.join(relative),
+        None if std::path::Path::new(raw).is_absolute() => PathBuf::from(raw),
+        None => return None,
+    };
+    let resolved = path.canonicalize().ok()?;
+    let extension = resolved.extension()?.to_str()?.to_ascii_lowercase();
+    (resolved.is_file()
+        && matches!(
+            extension.as_str(),
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "heic"
+                | "tif"
+                | "tiff"
+                | "bmp"
+                | "mp4"
+                | "mov"
+                | "webm"
+                | "m4v"
+                | "mp3"
+                | "m4a"
+                | "wav"
+                | "flac"
+                | "ogg"
+        ))
+    .then_some(resolved)
+}
+
+#[tauri::command]
+pub fn open_local_media(app: tauri::AppHandle, path: String) -> Result<bool, String> {
+    use tauri_plugin_opener::OpenerExt;
+    let home = app.path().home_dir().map_err(|error| error.to_string())?;
+    let Some(file) = local_media_path(&path, &home) else {
+        return Ok(false);
+    };
+    let file = file.to_str().ok_or("The media path is not valid UTF-8")?;
+    app.opener()
+        .open_path(file, None::<&str>)
+        .map_err(|_| "Could not open the media file in its default app".to_string())?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod local_media_tests {
+    use super::local_media_path;
+
+    #[test]
+    fn opens_home_relative_and_absolute_media_only() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let video = home.path().join("example.mp4");
+        std::fs::write(&video, "").expect("video path");
+        let expected = video.canonicalize().ok();
+        assert_eq!(local_media_path("~/example.mp4", home.path()), expected);
+        assert_eq!(
+            local_media_path(video.to_str().expect("UTF-8"), home.path()),
+            expected
+        );
+        let screenshot = home.path().join("compact chat.PNG");
+        std::fs::write(&screenshot, "").expect("screenshot path");
+        let expected = screenshot.canonicalize().ok();
+        assert_eq!(
+            local_media_path("~/compact chat.PNG", home.path()),
+            expected
+        );
+        assert_eq!(
+            local_media_path(screenshot.to_str().expect("UTF-8"), home.path()),
+            expected
+        );
+        assert!(local_media_path("example.mp4", home.path()).is_none());
+        assert!(local_media_path("~/missing.mp4", home.path()).is_none());
+        let script = home.path().join("script.sh");
+        std::fs::write(&script, "").expect("script path");
+        assert!(local_media_path("~/script.sh", home.path()).is_none());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(script, home.path().join("alias.mp4")).expect("symlink");
+            assert!(local_media_path("~/alias.mp4", home.path()).is_none());
+        }
+    }
+}
+
 #[cfg(test)]
 mod external_link_tests {
     use super::external_link;

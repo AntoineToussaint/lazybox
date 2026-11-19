@@ -77,6 +77,9 @@ export async function startRunnerFixture() {
   const frozenSessions=new Map();
   const openEvents=id=>{const channel={events:[],clients:new Set(),done:false,push({receipt,...event},capturedAt){const record={cursor:String(this.events.length+1),event,...(receipt?{receipt}:{}),...(capturedAt?{capturedAt}:{})};this.events.push(record);for(const res of this.clients)res.write(frame({...record,retained:record.cursor}));},complete(){this.done=true;for(const res of this.clients)res.end(frame({},2));this.clients.clear();},cut(){for(const res of this.clients)res.end(frame({error:{code:'unavailable',message:'the Runner is restarting; reconnect'}},2));this.clients.clear();}};eventStreams.set(id,channel);return channel;};
   const collections = ['alpha', 'beta'].map((id, index) => ({ id, name: index ? 'Beta release' : 'Alpha feature', workId: id, root: `/fixture/collections/${id}`, state: 'ready', ownerExecutionId: `${id}-session`, members: ['api', 'web'].map((name, i) => ({ spec: { name, repositoryId: i ? 'frontend' : 'backend', baseRef: 'main', branch: `lazybox/${id}/${name}` }, path: `/fixture/collections/${id}/${name}`, baseCommit: (index ? 'b' : 'a').repeat(40), ready: true })) }));
+  const pendingDeletions = new Map();
+  const visibleSessions = () => sessions.filter(s => !pendingDeletions.has(`conversation:${s.id}`));
+  const visibleCollections = () => arranged().filter(c => !pendingDeletions.has(`workspace:${c.id}`));
   const arrangement = [];
   const arranged = () => { if (!arrangement.length) return collections; const at = new Map(arrangement.map((id, i) => [id, i])); return [...collections.filter(c => !at.has(c.id)).reverse(), ...collections.filter(c => at.has(c.id)).sort((a, b) => at.get(a.id) - at.get(b.id))]; };
   const sessions = collections.map(collection => ({ id: `${collection.id}-session`, collectionId: collection.id, workId: collection.id, profileId: 'claude-default', gatewayId: 'direct', workingDirectory: collection.root, capabilities: { files: true, images: true, resume: true, livePermission: true }, permission: 'ask', instructionsPending: collection.id === 'alpha', pending: [] }));
@@ -710,7 +713,7 @@ actions:
         if (body.refresh) availability.refreshes++;
         return json(availabilityReport());
       }
-      case 'Info': return json({ restartAvailable: runner.restartAvailable, instanceId: runner.instanceId, profiles, pendingEnrollments: [...enrollments.values()].filter(flow => flow.state === 'awaiting_login').map(({ id, state, provider, label, profileId }) => ({ id, state, provider, label, profileId })), sessions, attachmentLimits: { maxFiles: 4, maxFileBytes: '20971520', maxMessageBytes: '20971520' } });
+      case 'Info': return json({ restartAvailable: runner.restartAvailable, instanceId: runner.instanceId, profiles, pendingEnrollments: [...enrollments.values()].filter(flow => flow.state === 'awaiting_login').map(({ id, state, provider, label, profileId }) => ({ id, state, provider, label, profileId })), sessions: visibleSessions(), attachmentLimits: { maxFiles: 4, maxFileBytes: '20971520', maxMessageBytes: '20971520' } });
       case 'AddSubscription': {
         mutations.push({ method, body });
         const id = `enrollment-${body.requestKey}`;
@@ -728,11 +731,11 @@ actions:
         if(!on)delete session[field];else if(!Number(session[field]))session[field]=String(Date.now());
         pins.push({method,body});return json({session});
       }
-      case 'ListHistory': return json({sessions:sessions.filter(s=>(body.collectionId===undefined||s.collectionId===body.collectionId)&&(!body.search||(s.title||`Conversation ${s.id}`).toLowerCase().includes(body.search.toLowerCase()))).map(s=>({...s,title:s.title||`Conversation ${s.id}`,conversationId:s.workId||s.id})),hasMore:false});
+      case 'ListHistory': return json({sessions:visibleSessions().filter(s=>(body.collectionId===undefined||s.collectionId===body.collectionId)&&(!body.search||(s.title||`Conversation ${s.id}`).toLowerCase().includes(body.search.toLowerCase()))).map(s=>({...s,title:s.title||`Conversation ${s.id}`,conversationId:s.workId||s.id})),hasMore:false});
       case 'RefreshSubscription': { const profile = profiles.find(p => p.id === body.profileId); if (!profile) return error('not_found', 'Unknown profile'); if (profile.provider === 'claude') profile.availability = {state:'available',plan:'max',windows:[{name:'five_hour',usedPercent:37,durationMinutes:'300',resetAt:String(Math.floor(Date.now()/1000)+3600)}]}; profile.availability.observedAtUnixMillis = String(Date.now()); profile.availability.windows[0].usedPercent += 5; return json(profile); }
-      case 'ListCollections': { if (runner.listDelayMs) await new Promise(resolve => setTimeout(resolve, runner.listDelayMs)); return json({ collections: arranged() }); }
+      case 'ListCollections': { if (runner.listDelayMs) await new Promise(resolve => setTimeout(resolve, runner.listDelayMs)); return json({ collections: visibleCollections() }); }
       // The person's order, as the Runner keeps it (collections/arrangement.go): new ones first, then the kept order.
-      case 'ArrangeWorkspaces': { if (runner.arrangeError) return error('unavailable', runner.arrangeError); mutations.push({method,body}); arrangement.splice(0, arrangement.length, ...new Set((body.collectionIds || []).filter(id => collections.some(c => c.id === id)))); return json({ collections: arranged() }); }
+      case 'ArrangeWorkspaces': { if (runner.arrangeError) return error('unavailable', runner.arrangeError); mutations.push({method,body}); arrangement.splice(0, arrangement.length, ...new Set((body.collectionIds || []).filter(id => collections.some(c => c.id === id)))); return json({ collections: visibleCollections() }); }
       case 'GetCollection': { const collection = collections.find(c => c.id === body.collectionId); return collection ? json({ collection }) : error('not_found', 'Workspace missing'); }
       case 'AddLocalRepository': {
         mutations.push({ method, body });
@@ -830,6 +833,24 @@ actions:
       case 'SearchWorkspaceFiles': {const files=treeFiles(body.collectionId);const found=body.query?files.map(p=>fuzzy(p,body.query)).filter(Boolean).sort((a,b)=>b.score-a.score||a.path.localeCompare(b.path)).slice(0,body.limit||50):[];return json({matches:found.map(({path,positions})=>({path,positions})),indexed:files.length});}
       case 'ReadWorkspaceFile': {const key=body.collectionId+'/'+body.path; if(treeFolders(body.collectionId).has(body.path))return json({path:body.path,directory:true,entries:listFolder(body.collectionId,body.path)}); if(!workspaceFiles.has(key))workspaceFiles.set(key,{path:body.path,text:'# File preview\nA retained file.\n',version:'v1',binary:false,truncated:false});return json(workspaceFiles.get(key));}
       case 'SaveWorkspaceFile': {const key=body.collectionId+'/'+body.path,file=workspaceFiles.get(key);if(file.version!==body.expectedVersion)return error('aborted','File changed on the Runner');Object.assign(file,{text:body.text,version:crypto.randomUUID()});mutations.push({method,body});return json(file);}
+      case 'ScheduleDeletion': {
+        const session = sessions.find(value => value.id === body.conversation?.sessionId);
+        const workspace = collections.find(value => value.id === body.workspace?.collectionId);
+        if (!session && !workspace) return error('not_found', 'Deletion target required');
+        const id = session ? `conversation:${session.id}` : `workspace:${workspace.id}`;
+        const entry = pendingDeletions.get(id) || {
+          id, workspaceId: workspace?.id || session.collectionId, sessionId: session?.id,
+          title: workspace?.name || session.title, expiresAtUnixMillis: String(Date.now() + 300_000),
+        };
+        pendingDeletions.set(id, entry);
+        mutations.push({method, body});
+        return json(entry);
+      }
+      case 'ListPendingDeletions': return json({deletions: [...pendingDeletions.values()]});
+      case 'UndoDeletion':
+        if (!pendingDeletions.delete(body.id)) return error('not_found', 'Deletion not pending');
+        mutations.push({method, body});
+        return json({deletions: [...pendingDeletions.values()]});
       case 'DeleteConversation': {const session=sessions.find(s=>s.id===body.sessionId);if(session&&!session.closed&&!body.stopSessions)return error('failed_precondition','Agent running');if(session){reviewerEnded(session.id,'deleted');sessions.splice(sessions.indexOf(session),1);}mutations.push({method,body});return json({});}
       case 'ResumeSession': {
         const previous=sessions.find(s=>s.id===body.sessionId);if(!previous)return error('not_found','Missing conversation');

@@ -36,7 +36,7 @@ try{
  await dialog.getByRole('button',{name:'Close file preview'}).click();await dialog.getByRole('button',{name:'Discard changes',exact:true}).click();await expect(dialog).toHaveCount(0);
  await page.getByLabel('Actions for Renamed',{exact:true}).click();await page.getByRole('button',{name:'Manage repositories…',exact:true}).click();await expect(page.getByRole('dialog',{name:'Repositories in Renamed'})).toBeVisible();await expect(page.getByRole('button',{name:'Add repositories to Renamed',exact:true})).toBeVisible();await page.keyboard.press('Escape');
  await page.getByLabel('Actions for Renamed',{exact:true}).click();await page.getByRole('button',{name:'Delete conversation…',exact:true}).first().click();
- const deletion=page.getByRole('dialog',{name:'Delete conversation',exact:true});await expect(deletion.getByRole('button',{name:'Stop and delete'})).toBeDisabled();
+ const deletion=page.getByRole('dialog',{name:'Delete conversation',exact:true});await expect(deletion.getByRole('button',{name:'Delete conversation',exact:true})).toBeDisabled();
  // The confirmation reads as one: the name is a subtitle (one heading), the box and its words share a line,
  // and the danger button is plainly off until the box is ticked, then a full danger fill.
  {
@@ -50,7 +50,7 @@ try{
   assert.ok(b.x+b.width<=text.x&&text.x-(b.x+b.width)<14,'the box sits just left of its words');
   assert.ok(Math.abs((b.y+b.height/2)-(text.y+line/2))<1.5,'the box is centred on the first line of its words');
   assert.ok(l.height<line*1.5+2,'box and words: one row');
-  const confirm=deletion.getByRole('button',{name:'Stop and delete'});
+  const confirm=deletion.getByRole('button',{name:'Delete conversation',exact:true});
   assert.equal(await confirm.evaluate(node=>getComputedStyle(node).opacity),'1','off is plain grey, not faded red');
   assert.equal(await confirm.evaluate(node=>getComputedStyle(node).backgroundColor),await token('surface-strong'));
   await page.mouse.move(0,0);
@@ -61,7 +61,7 @@ try{
   await expect.poll(()=>confirm.evaluate(node=>getComputedStyle(node).backgroundColor),{message:'ticked: a full danger fill'}).toBe(await token('danger-solid'));
   for(const scheme of ['light','dark']){await page.emulateMedia({colorScheme:scheme});await page.waitForTimeout(200);await deletion.screenshot({path:`.cache/confirm-delete-conversation-ready-${scheme}.png`});}
   await page.emulateMedia({colorScheme:null});
- }await deletion.getByRole('button',{name:'Stop and delete'}).click();await expect(deletion).toHaveCount(0);await expect(page.locator('.workspace-agent-label').filter({hasText:'model-fixture'})).toHaveCount(0);
- assert.equal(fixture.mutations.filter(call=>call.method==='DeleteConversation').length,1);assert.equal(fixture.collections.length,2);
+ }await deletion.getByRole('button',{name:'Delete conversation',exact:true}).click();await expect(deletion).toHaveCount(0);await expect(page.locator('.workspace-agent-label').filter({hasText:'model-fixture'})).toHaveCount(0);
+ assert.equal(fixture.mutations.filter(call=>call.method==='ScheduleDeletion').length,1);assert.equal(fixture.collections.length,2);
  assert.deepEqual(errors,[]);console.log('PASS: metadata, rename without replay, cached navigation/draft, scoped repository management, tall Monaco editing, version conflict, unsaved guard, deletion. WebKit fixtures only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

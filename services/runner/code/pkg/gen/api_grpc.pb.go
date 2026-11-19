@@ -106,6 +106,9 @@ const (
 	RunnerService_CloseSession_FullMethodName                 = "/lazybox.bench.v1.RunnerService/CloseSession"
 	RunnerService_StopSessionResources_FullMethodName         = "/lazybox.bench.v1.RunnerService/StopSessionResources"
 	RunnerService_DeleteConversation_FullMethodName           = "/lazybox.bench.v1.RunnerService/DeleteConversation"
+	RunnerService_ScheduleDeletion_FullMethodName             = "/lazybox.bench.v1.RunnerService/ScheduleDeletion"
+	RunnerService_ListPendingDeletions_FullMethodName         = "/lazybox.bench.v1.RunnerService/ListPendingDeletions"
+	RunnerService_UndoDeletion_FullMethodName                 = "/lazybox.bench.v1.RunnerService/UndoDeletion"
 	RunnerService_PreviewWorkspaceDeletion_FullMethodName     = "/lazybox.bench.v1.RunnerService/PreviewWorkspaceDeletion"
 	RunnerService_DeleteWorkspace_FullMethodName              = "/lazybox.bench.v1.RunnerService/DeleteWorkspace"
 	RunnerService_ContinueSession_FullMethodName              = "/lazybox.bench.v1.RunnerService/ContinueSession"
@@ -410,6 +413,9 @@ type RunnerServiceClient interface {
 	CloseSession(ctx context.Context, in *SessionRequest, opts ...grpc.CallOption) (*SessionResponse, error)
 	StopSessionResources(ctx context.Context, in *SessionRequest, opts ...grpc.CallOption) (*SessionResponse, error)
 	DeleteConversation(ctx context.Context, in *DeleteConversationRequest, opts ...grpc.CallOption) (*DeleteConversationResponse, error)
+	ScheduleDeletion(ctx context.Context, in *ScheduleDeletionRequest, opts ...grpc.CallOption) (*PendingDeletion, error)
+	ListPendingDeletions(ctx context.Context, in *ListPendingDeletionsRequest, opts ...grpc.CallOption) (*ListPendingDeletionsResponse, error)
+	UndoDeletion(ctx context.Context, in *UndoDeletionRequest, opts ...grpc.CallOption) (*ListPendingDeletionsResponse, error)
 	PreviewWorkspaceDeletion(ctx context.Context, in *CollectionRequest, opts ...grpc.CallOption) (*WorkspaceDeletionPreview, error)
 	DeleteWorkspace(ctx context.Context, in *DeleteWorkspaceRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
 	ContinueSession(ctx context.Context, in *ContinueSessionRequest, opts ...grpc.CallOption) (*SessionResponse, error)
@@ -1636,6 +1642,36 @@ func (c *runnerServiceClient) DeleteConversation(ctx context.Context, in *Delete
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DeleteConversationResponse)
 	err := c.cc.Invoke(ctx, RunnerService_DeleteConversation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) ScheduleDeletion(ctx context.Context, in *ScheduleDeletionRequest, opts ...grpc.CallOption) (*PendingDeletion, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PendingDeletion)
+	err := c.cc.Invoke(ctx, RunnerService_ScheduleDeletion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) ListPendingDeletions(ctx context.Context, in *ListPendingDeletionsRequest, opts ...grpc.CallOption) (*ListPendingDeletionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPendingDeletionsResponse)
+	err := c.cc.Invoke(ctx, RunnerService_ListPendingDeletions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) UndoDeletion(ctx context.Context, in *UndoDeletionRequest, opts ...grpc.CallOption) (*ListPendingDeletionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPendingDeletionsResponse)
+	err := c.cc.Invoke(ctx, RunnerService_UndoDeletion_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3186,6 +3222,9 @@ type RunnerServiceServer interface {
 	CloseSession(context.Context, *SessionRequest) (*SessionResponse, error)
 	StopSessionResources(context.Context, *SessionRequest) (*SessionResponse, error)
 	DeleteConversation(context.Context, *DeleteConversationRequest) (*DeleteConversationResponse, error)
+	ScheduleDeletion(context.Context, *ScheduleDeletionRequest) (*PendingDeletion, error)
+	ListPendingDeletions(context.Context, *ListPendingDeletionsRequest) (*ListPendingDeletionsResponse, error)
+	UndoDeletion(context.Context, *UndoDeletionRequest) (*ListPendingDeletionsResponse, error)
 	PreviewWorkspaceDeletion(context.Context, *CollectionRequest) (*WorkspaceDeletionPreview, error)
 	DeleteWorkspace(context.Context, *DeleteWorkspaceRequest) (*CollectionResponse, error)
 	ContinueSession(context.Context, *ContinueSessionRequest) (*SessionResponse, error)
@@ -3806,6 +3845,15 @@ func (UnimplementedRunnerServiceServer) StopSessionResources(context.Context, *S
 }
 func (UnimplementedRunnerServiceServer) DeleteConversation(context.Context, *DeleteConversationRequest) (*DeleteConversationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteConversation not implemented")
+}
+func (UnimplementedRunnerServiceServer) ScheduleDeletion(context.Context, *ScheduleDeletionRequest) (*PendingDeletion, error) {
+	return nil, status.Error(codes.Unimplemented, "method ScheduleDeletion not implemented")
+}
+func (UnimplementedRunnerServiceServer) ListPendingDeletions(context.Context, *ListPendingDeletionsRequest) (*ListPendingDeletionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPendingDeletions not implemented")
+}
+func (UnimplementedRunnerServiceServer) UndoDeletion(context.Context, *UndoDeletionRequest) (*ListPendingDeletionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UndoDeletion not implemented")
 }
 func (UnimplementedRunnerServiceServer) PreviewWorkspaceDeletion(context.Context, *CollectionRequest) (*WorkspaceDeletionPreview, error) {
 	return nil, status.Error(codes.Unimplemented, "method PreviewWorkspaceDeletion not implemented")
@@ -5764,6 +5812,60 @@ func _RunnerService_DeleteConversation_Handler(srv interface{}, ctx context.Cont
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).DeleteConversation(ctx, req.(*DeleteConversationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_ScheduleDeletion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ScheduleDeletionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ScheduleDeletion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ScheduleDeletion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ScheduleDeletion(ctx, req.(*ScheduleDeletionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_ListPendingDeletions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPendingDeletionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ListPendingDeletions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ListPendingDeletions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ListPendingDeletions(ctx, req.(*ListPendingDeletionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_UndoDeletion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UndoDeletionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).UndoDeletion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_UndoDeletion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).UndoDeletion(ctx, req.(*UndoDeletionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -8473,6 +8575,18 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteConversation",
 			Handler:    _RunnerService_DeleteConversation_Handler,
+		},
+		{
+			MethodName: "ScheduleDeletion",
+			Handler:    _RunnerService_ScheduleDeletion_Handler,
+		},
+		{
+			MethodName: "ListPendingDeletions",
+			Handler:    _RunnerService_ListPendingDeletions_Handler,
+		},
+		{
+			MethodName: "UndoDeletion",
+			Handler:    _RunnerService_UndoDeletion_Handler,
 		},
 		{
 			MethodName: "PreviewWorkspaceDeletion",

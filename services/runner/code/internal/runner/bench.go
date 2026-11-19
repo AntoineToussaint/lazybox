@@ -175,6 +175,7 @@ type Execution struct {
 	browserTools bool
 }
 type Bench struct {
+	pendingDeletions  *pendingDeletions
 	RepositoryCatalog *repositorycatalog.Cache
 	Telemetry         telemetry.Store
 	Meter             *telemetry.Gateway
@@ -535,6 +536,11 @@ func New(cfg Config) (*Bench, error) {
 		_ = b.Detach()
 		return nil, err
 	}
+	if b.pendingDeletions, err = openPendingDeletions(filepath.Join(cfg.State, "pending-deletions.json")); err != nil {
+		_ = b.Detach()
+		return nil, err
+	}
+	b.watchPendingDeletions()
 	return b, nil
 }
 

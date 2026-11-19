@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -44,7 +45,7 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 			return p, fmt.Errorf("%s: %w", member.Name, err)
 		}
 		// Include ignored build artifacts: they are user bytes too.
-		dirty, err := m.git(ctx, member.Path, "status", "--porcelain", "--untracked-files=all", "--ignored")
+		dirty, err := m.git(ctx, member.Path, "status", "--porcelain", "--untracked-files=normal", "--ignored")
 		if err != nil {
 			return p, err
 		}
@@ -64,11 +65,9 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 	return p, nil
 }
 func (m *Manager) PreviewDeletion(ctx context.Context, id string, active func(string) bool) (DeletionPreview, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	c, ok := m.items[id]
-	if !ok {
-		return DeletionPreview{}, os.ErrNotExist
+	c, err := m.Get(id)
+	if err != nil {
+		return DeletionPreview{}, err
 	}
 	if c.State == "deleted" {
 		return DeletionPreview{}, nil
@@ -78,21 +77,24 @@ func (m *Manager) PreviewDeletion(ctx context.Context, id string, active func(st
 
 // BeginDeletion durably fences new attachments before any process is stopped.
 func (m *Manager) BeginDeletion(ctx context.Context, id, name string, discard, stop bool, active func(string) bool) (Collection, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	c, ok := m.items[id]
-	if !ok {
-		return Collection{}, os.ErrNotExist
+	c, err := m.Get(id)
+	if err != nil {
+		return Collection{}, err
 	}
-	if m.closed || name != c.Name {
+	if name != c.Name {
 		return Collection{}, errors.New("workspace name confirmation does not match")
 	}
 	if c.State == "deleted" {
-		return clone(c), nil
+		return c, nil
 	}
 	p, err := m.deletionPreview(ctx, c, active)
 	if err != nil {
 		return Collection{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.finishingDeletion[id] || !reflect.DeepEqual(c, clone(m.items[id])) {
+		return Collection{}, errors.New("workspace changed while checking deletion; retry")
 	}
 	if p.Blocked != "" {
 		return Collection{}, errors.New(p.Blocked)
@@ -115,20 +117,38 @@ func (m *Manager) BeginDeletion(ctx context.Context, id, name string, discard, s
 // conversation evidence are retained; credentials and source clones are untouched.
 func (m *Manager) FinishDeletion(ctx context.Context, id string, discard bool, active func(string) bool) (Collection, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	c, ok := m.items[id]
 	if !ok {
+		m.mu.Unlock()
 		return Collection{}, os.ErrNotExist
 	}
+	c = clone(c)
 	if c.State == "deleted" {
-		return clone(c), nil
+		m.mu.Unlock()
+		return c, nil
 	}
-	if m.closed || c.State != "deleting" {
-		return Collection{}, errors.New("workspace deletion has not begun")
+	if m.closed || c.State != "deleting" || m.finishingDeletion[id] {
+		m.mu.Unlock()
+		return Collection{}, errors.New("workspace deletion has not begun or cleanup is already running")
 	}
+	if m.finishingDeletion == nil {
+		m.finishingDeletion = make(map[string]bool)
+	}
+	m.finishingDeletion[id] = true
+	m.deletionWorkers.Add(1)
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.finishingDeletion, id)
+		m.mu.Unlock()
+		m.deletionWorkers.Done()
+	}()
 	fail := func(err error) (Collection, error) {
-		c.Error = err.Error()
-		return clone(c), errors.Join(err, m.save(c))
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		current := m.items[id]
+		current.Error = err.Error()
+		return clone(current), errors.Join(err, m.save(current))
 	}
 	p, err := m.deletionPreview(ctx, c, active)
 	if err != nil {
@@ -140,13 +160,26 @@ func (m *Manager) FinishDeletion(ctx context.Context, id string, discard bool, a
 	if (len(p.Dirty) > 0 || p.FilesOutsideRepositories) && !discard {
 		return fail(errors.New("workspace files changed during shutdown; review and explicitly discard before retrying"))
 	}
-	c.OwnerExecutionIDs = nil
-	c.syncOwners()
-	if err = m.save(c); err != nil {
+	// Persist release before removing files so a crash cannot leave stale
+	// owners attached to an already-removed checkout.
+	m.mu.Lock()
+	current := m.items[id]
+	current.OwnerExecutionIDs = nil
+	current.syncOwners()
+	err = m.save(current)
+	m.mu.Unlock()
+	if err != nil {
 		return Collection{}, err
 	}
 	for _, member := range c.Members {
-		if err = m.removeWorktree(ctx, member, discard); err != nil {
+		m.mu.Lock()
+		repo, ok := m.repos[member.RepositoryID]
+		verified := ok && m.common[repo.ID] == member.CommonDir
+		m.mu.Unlock()
+		if !verified {
+			return fail(errors.New("source repository changed; cleanup refused"))
+		}
+		if err = m.removeRegisteredWorktree(ctx, repo, member, discard); err != nil {
 			return fail(err)
 		}
 	}
@@ -158,6 +191,9 @@ func (m *Manager) FinishDeletion(ctx context.Context, id string, discard bool, a
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fail(err)
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c = m.items[id]
 	c.State = "deleted"
 	c.Error = ""
 	if err = m.save(c); err != nil {

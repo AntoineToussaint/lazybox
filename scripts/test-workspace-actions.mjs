@@ -27,10 +27,18 @@ try{
  await actions.click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();await expect(dialog).toBeVisible();await expect(dialog.getByRole('button',{name:'Delete workspace',exact:true})).toBeDisabled();
  await expect(dialog).toContainText('running session');await expect(dialog).toContainText('Uncommitted or untracked files');await expect(dialog.getByRole('textbox')).toHaveCount(0);await dialog.getByLabel(/Stop .* active session/).check();await dialog.getByLabel('Discard these workspace files permanently').check();
  await dialog.getByRole('button',{name:'Delete workspace',exact:true}).click();await expect(dialog).toHaveCount(0);await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).not.toContainText('Beta release');await expect(page.locator('.workspace-row button[aria-current=page]')).toContainText('Alpha feature');
- assert.equal(fixture.mutations.filter(m=>m.method==='DeleteWorkspace').length,1);
+ assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,1);
+ // Recently deleted survives a reload and Undo restores the actual workspace.
+ await page.reload();
+ const trash = page.locator('.recently-deleted');
+ await trash.getByText('Recently deleted (1)').click();
+ await trash.getByRole('button',{name:'Undo deletion of Beta release'}).click();
+ await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).toContainText('Beta release');
+ await expect(trash).toHaveCount(0);
+ assert.equal(fixture.mutations.filter(m=>m.method==='UndoDeletion').length,1);
  // A clean, idle workspace needs only the confirmation button, with no typing.
  await page.route('**/PreviewWorkspaceDeletion',route=>route.fulfill({json:{activeSessionIds:[],dirtyRepositories:[],filesOutsideRepositories:false,blocked:''}}));
- await page.getByLabel('Actions for Alpha feature',{exact:true}).click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();await expect(dialog).toBeVisible();await expect(dialog.getByRole('textbox')).toHaveCount(0);await expect(dialog.getByRole('button',{name:'Delete workspace',exact:true})).toBeEnabled();await page.screenshot({path:'/tmp/lazybox-workspace-delete-clean.png'});await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await expect(dialog).toHaveCount(0);assert.equal(fixture.mutations.filter(m=>m.method==='DeleteWorkspace').length,1);
+ await page.getByLabel('Actions for Alpha feature',{exact:true}).click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();await expect(dialog).toBeVisible();await expect(dialog.getByRole('textbox')).toHaveCount(0);await expect(dialog.getByRole('button',{name:'Delete workspace',exact:true})).toBeEnabled();await page.screenshot({path:'/tmp/lazybox-workspace-delete-clean.png'});await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await expect(dialog).toHaveCount(0);assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,1);
 // Right-click, keyboard dismissal, outside click, and narrow viewport placement.
 const alpha=rows.first();
 // A right-click opens the row's actions (the ⋯ menu's list) at the pointer, as a Lazybox menu.

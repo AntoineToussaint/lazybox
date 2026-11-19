@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDeleteWorktreesFencesStartsAndPreservesSourcesBranchesAndRetryIdentity(t *testing.T) {
@@ -134,5 +135,53 @@ func TestCleanupRefusesReplacedRootAndRetriesPartialDeletion(t *testing.T) {
 	}
 	if _, err = os.Stat(marker); err != nil {
 		t.Fatal("external file removed")
+	}
+}
+
+func TestDeletionCleanupDoesNotBlockWorkspaceReads(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "slow-delete", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inactive := func(string) bool { return false }
+	if _, err := m.Acquire(ctx, c.ID, "owner", inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+
+	checking := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan error, 1)
+	go func() {
+		_, err := m.FinishDeletion(ctx, c.ID, false, func(string) bool {
+			close(checking)
+			<-release
+			return false
+		})
+		finished <- err
+	}()
+	select {
+	case <-checking:
+	case err := <-finished:
+		t.Fatalf("cleanup exited before checking ownership: %v", err)
+	}
+	listed := make(chan []Collection, 1)
+	go func() { listed <- m.List() }()
+	select {
+	case list := <-listed:
+		if len(list) != 1 || list[0].State != "deleting" {
+			t.Errorf("unexpected workspace list: %+v", list)
+		}
+	case <-time.After(time.Second):
+		t.Error("workspace reads are blocked by cleanup")
+	}
+	close(release)
+	if err := <-finished; err != nil {
+		t.Fatal(err)
 	}
 }

@@ -169,6 +169,9 @@ service RunnerService {
   rpc CloseSession(SessionRequest) returns (SessionResponse);
   rpc StopSessionResources(SessionRequest) returns (SessionResponse);
   rpc DeleteConversation(DeleteConversationRequest) returns (DeleteConversationResponse);
+  rpc ScheduleDeletion(ScheduleDeletionRequest) returns (PendingDeletion);
+  rpc ListPendingDeletions(ListPendingDeletionsRequest) returns (ListPendingDeletionsResponse);
+  rpc UndoDeletion(UndoDeletionRequest) returns (ListPendingDeletionsResponse);
   rpc PreviewWorkspaceDeletion(CollectionRequest) returns (WorkspaceDeletionPreview);
   rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (CollectionResponse);
   rpc ContinueSession(ContinueSessionRequest) returns (SessionResponse);
@@ -4278,3 +4281,21 @@ message ListReleaseWatchResponse {
   repeated ReleaseWatchItem items = 1;
   bool truncated = 2;
 }
+
+message ScheduleDeletionRequest {
+  oneof target {
+    DeleteWorkspaceRequest workspace = 1;
+    DeleteConversationRequest conversation = 2;
+  }
+}
+message PendingDeletion {
+  string id = 1;
+  string workspace_id = 2;
+  string session_id = 3;
+  string title = 4;
+  int64 expires_at_unix_millis = 5;
+  string failure = 6;
+}
+message ListPendingDeletionsRequest {}
+message ListPendingDeletionsResponse { repeated PendingDeletion deletions = 1; }
+message UndoDeletionRequest { string id = 1; }

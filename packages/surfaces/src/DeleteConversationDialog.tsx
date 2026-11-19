@@ -6,6 +6,7 @@ import {OwnershipPanel} from './OwnershipPanel';
 import {useRunner} from './RunnerContext';
 import {forgetConversation} from './transcript-cache';
 // Its tabs leave every page of this window (conversation-requests.ts).
+import {announceDeletion} from './PendingDeletions';
 import {conversationOpeners} from './conversation-requests';
 export function DeleteConversationDialog({session,onClose,onDeleted}:{session:Session;onClose():void;onDeleted():void}){
  const {api,refresh}=useRunner();
@@ -29,8 +30,12 @@ export function DeleteConversationDialog({session,onClose,onDeleted}:{session:Se
   details={checked&&unconfirmed?<OwnershipPanel target={{sessionId:session.id}} what="Deleting this conversation waits" onSettled={()=>{setSettled(true);refresh();}}/>:undefined}
   warning={live?'This conversation has an active session or command.':undefined}
   check={live?{label:'Stop its agent and running commands before deleting',checked:stop,onChange:setStop,required:true}:undefined}
-  canConfirm={checked&&!unconfirmed} confirm={live?'Stop and delete':'Delete conversation'} working="Deleting…" onClose={onClose}
-  onConfirm={async()=>{await api.deleteConversation({sessionId:session.id,stopSessions:stop},{timeoutMs:120000});forgetConversation(api,session.id);conversationOpeners()?.forget(session.id);refresh();onDeleted();}}>
-  Its messages and uploads will be removed from Lazybox.
+  canConfirm={checked&&!unconfirmed} confirm="Delete conversation" working="Deleting…" onClose={onClose}
+  onConfirm={async()=>{
+    const entry = await api.scheduleDeletion({target:{case:'conversation',value:{sessionId:session.id,stopSessions:stop}}},{timeoutMs:120000});
+    announceDeletion(entry,async()=>{await api.undoDeletion({id:entry.id});refresh();});
+    forgetConversation(api,session.id);conversationOpeners()?.forget(session.id);refresh();onDeleted();
+  }}>
+  You can undo for five minutes before Lazybox removes the messages and uploads. Running resources stop when deletion becomes permanent.
  </ConfirmDialog>;
 }

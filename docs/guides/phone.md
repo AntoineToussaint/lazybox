@@ -10,6 +10,8 @@ A native iPhone app is being built beside this web page. It pairs the same
 way, from the same code, and shows the same Inbox, conversations, approvals,
 answers and Send now. It is not on the App Store or TestFlight yet; developers
 can build it from source onto their own iPhone (`apps/mobile/README.md`).
+In the native app, tap the microphone next to the message field to dictate.
+Tap it again to finish, then review the draft and send or queue it.
 Until it ships, the web page below is the way to use Lazybox on a phone.
 
 ## What you need

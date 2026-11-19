@@ -4,10 +4,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { randomUUID } from 'expo-crypto';
 import { ConnectError, type RunnerClient } from '@lazybox/client-core';
 import type { Session } from '@lazybox/protocol';
-import { humanError } from '@lazybox/surfaces/models';
+import { humanError, mergeDictation } from '@lazybox/surfaces/models';
 import { composerView } from '../models/conversation';
 import { Button, IconButton, haptic } from './kit';
 import { radius, space, useTheme } from './theme';
+import { useDictation } from './useDictation';
 
 /** Drafts outlive leaving the conversation (the PWA keeps them per tab session). */
 const drafts = new Map<string, string>();
@@ -26,12 +27,16 @@ export function Composer({ session, busy, grants, api, onSent, onError }: { sess
   const [text, setText] = useState(() => drafts.get(key) || '');
   const [sending, setSending] = useState<'send' | 'now' | 'stop'>();
   const attempt = useRef('');
+  const change = (value: string) => { setText(value); attempt.current = ''; if (value) drafts.set(key, value); else drafts.delete(key); };
+  const dictation = useDictation(offered.mode !== 'readonly' && offered.mode !== 'ended', transcript => {
+    change(mergeDictation(text, '', transcript).text);
+  });
+  const dictating = dictation.phase !== 'idle';
   const pad = { paddingBottom: Math.max(insets.bottom, space.s) };
   if (offered.mode === 'readonly' || offered.mode === 'ended') return <View style={[styles.bar, styles.readonly, pad, { borderTopColor: theme.lineSubtle, backgroundColor: theme.bg }]}>
     <Text style={{ color: theme.muted, fontSize: 14, textAlign: 'center' }}>{offered.note}</Text>
   </View>;
   const view = offered;
-  const change = (value: string) => { setText(value); attempt.current = ''; if (value) drafts.set(key, value); else drafts.delete(key); };
   const send = async (now: boolean) => {
     const message = text.trim();
     if (!message || sending || !session) return;
@@ -61,17 +66,23 @@ export function Composer({ session, busy, grants, api, onSent, onError }: { sess
     catch (error) { haptic.error(); onError(humanError(ConnectError.from(error))); }
     finally { setSending(undefined); }
   };
-  const ready = !!text.trim() && !sending;
+  const ready = !!text.trim() && !sending && !dictating;
+  const status = dictation.phase === 'starting' ? 'Starting dictation…'
+    : dictation.phase === 'listening' ? 'Listening…'
+    : dictation.phase === 'finishing' ? 'Finishing dictation…' : '';
   return <View style={[styles.bar, pad, { borderTopColor: theme.lineSubtle, backgroundColor: theme.bg }]}>
-    {/* While a request waits for the person, the card above says so; the agent is not "working". */}
-    {view.mode === 'busy' && !session?.pending.length && <View style={styles.busy}>
-      <Text style={{ flex: 1, color: theme.muted, fontSize: 13 }}>{text.trim() ? 'Queue it for after this turn, or send it now.' : 'The agent is working. What you send waits for this turn.'}</Text>
-      {view.interrupt && <Button label="Stop" icon="stop.fill" tone="danger" compact busy={sending === 'stop'} disabled={!!sending} onPress={() => void interrupt()} testID="interrupt"/>}
+    {status ? <Text accessibilityLiveRegion="polite" style={{ color: theme.accent, fontSize: 13 }}>{status}</Text> : null}
+    {dictation.error ? <Text accessibilityRole="alert" style={{ color: theme.danger, fontSize: 13 }}>{dictation.error}</Text> : null}
+    {!dictating && view.mode === 'busy' && (!session?.pending.length || ready) && <View style={styles.busy}>
+      <Text style={{ flex: 1, color: theme.muted, fontSize: 13 }}>{ready ? 'Queue for after this turn' : 'Agent working'}</Text>
+      {view.sendNow && ready && <Button label="Send now" onPress={() => void send(true)} testID="send-now"/>}
+      {view.interrupt && !session?.pending.length && <IconButton label="Stop turn" icon="stop.fill" color={theme.danger} disabled={!!sending} onPress={() => void interrupt()} testID="interrupt"/>}
     </View>}
     <View style={styles.row}>
-      <TextInput value={text} onChangeText={change} multiline placeholder={view.placeholder} placeholderTextColor={theme.faint} testID="composer"
+      <TextInput value={dictation.preview ? mergeDictation(text, '', dictation.preview).text : text} onChangeText={change} editable={!dictating && !sending} multiline placeholder={view.placeholder} placeholderTextColor={theme.faint} testID="composer"
         accessibilityLabel="Message" style={[styles.input, { color: theme.text, backgroundColor: theme.surface, borderColor: theme.line }]}/>
-      {view.sendNow && ready && <Button label="Send now" tone="secondary" compact onPress={() => void send(true)} busy={sending === 'now'} testID="send-now"/>}
+      <IconButton icon={dictating ? 'stop.circle.fill' : 'mic'} label={dictating ? 'Finish dictation' : 'Dictate message'}
+        disabled={!!sending || dictation.phase === 'starting' || dictation.phase === 'finishing'} onPress={() => void dictation.toggle()} testID="dictate"/>
       <IconButton icon={view.mode === 'busy' ? 'text.append' : 'arrow.up.circle.fill'} size={view.mode === 'busy' ? 22 : 32} label={view.send === 'Queue' ? 'Queue message' : 'Send message'}
         color={ready ? theme.accentSolid : theme.disabled} disabled={!ready} onPress={() => void send(false)} testID="send"/>
     </View>

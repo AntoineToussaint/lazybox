@@ -58,6 +58,18 @@ test('a read-only phone sees everything and is offered nothing to do', () => {
   assert.ok(v.sections.flatMap(s => s.rows).every(row => row.plan.kind === 'none' && !row.stoppable));
 });
 
+test('the compact Inbox hides completed work and keeps requests and pins visible', () => {
+  const sessions = [
+    session('request', { status: 'waiting_approval', pending: [approval('a1', 'npm update')] }),
+    session('pinned', { status: 'done', pinnedAtUnixMillis: BigInt(NOW - 1000) }),
+    session('done', { status: 'done', ended: NOW - 60 * 60_000 }),
+  ];
+  const compact = inboxView({ sessions, collections, profiles: [], seen, respond: true, now: NOW, hideDone: true });
+  assert.deepEqual(compact.sections.map(group => group.id), ['needs-input', 'pinned']);
+  assert.equal(compact.hiddenDone, 1);
+  assert.equal(compact.empty, false);
+});
+
 test('pins sit below what needs the person; archived conversations leave unless one waits; Done shows five', () => {
   const done = Array.from({ length: DONE_SHOWN + 3 }, (_, i) => session(`done-${i}`, { status: 'done', updated: NOW - (i + 60) * 60_000, ended: NOW - (i + 60) * 60_000 }));
   const pinned = session('pinned', { status: 'done', pinnedAtUnixMillis: BigInt(NOW - 1000) });
@@ -152,6 +164,8 @@ test('the journal says whether a turn runs before the next poll does', () => {
 });
 
 test('one clear connection state', () => {
+  assert.equal(connectionView({ hasInfo: false, error: '' }).tone, 'connecting');
+  assert.equal(connectionView({ hasInfo: false, error: '', stream: 'Live' }).tone, 'live');
   assert.deepEqual(connectionView({ hasInfo: true, error: '' }), { tone: 'live', label: 'Live', detail: '', banner: false });
   assert.equal(connectionView({ hasInfo: false, error: 'refused' }).tone, 'connecting');
   const lost = connectionView({ hasInfo: true, error: 'refused' });

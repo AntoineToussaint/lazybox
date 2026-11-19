@@ -111,6 +111,22 @@ rounds, and can review every turn that changes files. When the default
 reviewer is not installed or signed in, a fresh conversation of the author's
 agent reviews, and the review's card says so in a quiet line.
 
+### Verify behavior with another agent
+
+In the workspace's **New tab** menu, choose **Behavior verification**. The
+reviewer receives a captured snapshot including uncommitted changes, derives
+acceptance criteria from the goal, and chooses an independent behavioral check.
+It reports each criterion as passed, failed, or unverified, with expected and
+observed results, revision, and output references. For bug fixes it attempts the
+same scenario on base and candidate when the available tools support it.
+
+Findings appear in the Review tray. The findings artifact retains the full
+verification report alongside the captured input revisions. This is an agent's
+account of evidence. Runtime checks require an environment that preserves the
+captured revision during execution. When that environment is unavailable, the
+reviewer records the runtime gap as unverified. Later edits require a fresh
+Behavior verification run. This template runs one pass per snapshot.
+
 ## Undo a turn: checkpoints
 
 Before every agent turn, and again after it, Lazybox saves a checkpoint of every
@@ -220,3 +236,6 @@ focus and every five minutes otherwise; merged or closed ones once a day for
 a week. Unchanged pull requests cost nothing against GitHub's rate limit; if
 the limit is reached, checking pauses and the panel says until when.
 Automatic reactions are not available: every send is yours.
+
+Codex can list workspace actions and read or wait for managed command output
+without a per-call approval. Starting or cancelling commands retains its approval.

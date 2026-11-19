@@ -269,6 +269,13 @@ try{
  assert.equal(opens.at(-1).body.options.permission,'ask');
  assert.equal(fixture.mutations.filter(m=>m.method==='Apply'&&m.body?.message?.text?.includes(selected.id)).length,0);
 
+ await page.locator('.dv-groupview').filter({has:tabs().filter({hasText:'Harden the handler'})})
+  .getByLabel(/^New tab in the .* group$/).first().click();
+ await page.getByRole('button',{name:'Behavior verification Workspace changes'}).click();
+ await expect.poll(()=>starts().length).toBe(12);
+ assert.equal(starts()[11].templateId,'behavior-verification-v1');
+ await expect(tabs().filter({hasText:'Behavior verification · Codex'})).toBeVisible();
+
  assert.deepEqual(errors,[]);
  console.log('Review from the chat: the header button, /review <focus> and ⌘K; the other agent by default, the fallback said; a background tab with its findings; the sidebar row focuses it; cancelled from the card, Esc, the reviewer’s menu and ⌘K; stopped when its reviewer is ended.');
 }finally{await browser?.close();await server.close();await fixture.close();}

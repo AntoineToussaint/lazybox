@@ -807,7 +807,7 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match, operation, reply string) {
 			if r := &rv.Runs[i]; r.ID == m.Run.ID {
 				r.State, r.UpdatedAt = reviews.RunDone, time.Now().Unix()
 				if r.TemplateID != "" {
-					if err := b.publishReviewResult(m.Workspace, *r, rv.Comments, reviewCoverage(reply)); err != nil {
+					if err := b.publishReviewResult(m.Workspace, *r, rv.Comments, reviewCoverage(reply), reply); err != nil {
 						r.State, r.Detail = reviews.RunFailed, "Could not publish review result: "+err.Error()
 						action = reviews.Action{}
 						run = *r

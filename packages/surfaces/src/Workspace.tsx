@@ -732,7 +732,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     const base = liveTitles[panel.id]?.text || registry[panel.kind]?.title || panel.kind;
     if (panel.kind !== 'chat') return base;
     const run = reviewOf(panel);
-    if (run) return `${run.templateId === "security-review-v1" ? "Security review" : "Review"} · ${run.reviewerLabel}`;
+    if (run) return `${run.templateId === "behavior-verification-v1" ? "Behavior verification" : run.templateId === "security-review-v1" ? "Security review" : "Review"} · ${run.reviewerLabel}`;
     const session = info?.sessions.find(value => value.id === resolveTarget(panel, page.selection).sessionId);
     return conversationTitle(session) || base;
   };

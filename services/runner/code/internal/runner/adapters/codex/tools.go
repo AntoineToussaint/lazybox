@@ -48,8 +48,11 @@ func toolOffered(purpose, name string) bool {
 }
 
 // toolApproval is the approval card title of a dynamic tool call; empty when
-// the call runs without asking, which only reading (settings, documentation) does.
-func toolApproval(name string) string {
+// the call runs without asking, which reading settings, documentation and managed command state does.
+func toolApproval(name string, args json.RawMessage) string {
+	if name == agent.CommandTool && agent.ToolReplaySafe(name, args) {
+		return ""
+	}
 	switch name {
 	case agent.SettingsReadTool, agent.DocsSearchTool, agent.DocsReadTool:
 		return ""

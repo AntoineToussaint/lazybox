@@ -11,12 +11,13 @@ import (
 )
 
 type reviewResult struct {
-	Schema   string                `json:"schema"`
-	Run      string                `json:"run"`
-	Template string                `json:"template"`
-	Input    []reviews.ReviewInput `json:"input"`
-	Coverage string                `json:"coverage"`
-	Findings []reviewResultFinding `json:"findings"`
+	Schema       string                `json:"schema"`
+	Run          string                `json:"run"`
+	Template     string                `json:"template"`
+	Input        []reviews.ReviewInput `json:"input"`
+	Verification string                `json:"verification,omitempty"`
+	Coverage     string                `json:"coverage"`
+	Findings     []reviewResultFinding `json:"findings"`
 }
 
 type reviewResultFinding struct {
@@ -49,7 +50,7 @@ func reviewCoverage(reply string) string {
 	return ""
 }
 
-func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments []reviews.Comment, coverage string) error {
+func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments []reviews.Comment, coverage, reply string) error {
 	if coverage == "" {
 		return errors.New("the reviewer did not report coverage")
 	}
@@ -57,6 +58,9 @@ func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments 
 		return errors.New("the artifact store or captured review input is unavailable")
 	}
 	result := reviewResult{Schema: "lazybox.review-findings/v1", Run: run.ID, Template: run.TemplateID, Input: run.Input, Coverage: coverage, Findings: []reviewResultFinding{}}
+	if run.TemplateID == reviews.VerificationTemplate {
+		result.Verification = strings.TrimSpace(reply)
+	}
 	for _, f := range comments {
 		if f.ReviewID == run.ID {
 			result.Findings = append(result.Findings, reviewResultFinding{ID: f.ID, Member: f.Member, Path: f.Path,
@@ -69,6 +73,9 @@ func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments 
 	}
 	var body strings.Builder
 	fmt.Fprintf(&body, "# %s\n\n%d findings filed against the captured changes. \n\n**Coverage** %s\n\n", run.ReviewerTitle, len(result.Findings), coverage)
+	if result.Verification != "" {
+		fmt.Fprintf(&body, "## Verification report\n\n%s\n\n", result.Verification)
+	}
 	for _, f := range result.Findings {
 		fmt.Fprintf(&body, "- **%s** · %s (%s/%s:%d)\n", f.Severity, f.Title, f.Member, f.Path, f.StartLine)
 	}

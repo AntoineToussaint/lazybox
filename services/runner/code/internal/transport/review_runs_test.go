@@ -377,3 +377,46 @@ func TestCheckInFirstStartsReadOnlyAcrossNativeHarnesses(t *testing.T) {
 		})
 	}
 }
+
+func TestBehaviorVerificationCapturesInputAndRetainsEvidence(t *testing.T) {
+	f := newReviewFixture(t)
+	path := filepath.Join(f.mine.Members[0].Path, "untracked.go")
+	if err := os.WriteFile(path, []byte("package api\n// captured\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, TemplateId: "behavior-verification-v1"}
+	started, err := f.client.StartReview(f.owner, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brief := <-f.codex.Session.Applied
+	if started.Run.TemplateId != request.TemplateId || started.Session.Permission != "read-only" ||
+		!strings.Contains(brief.Text, "Independently verify the behavior") || !strings.Contains(brief.Text, "api/untracked.go") {
+		t.Fatalf("run %+v; brief %s", started.Run, brief.Text)
+	}
+	if err := os.WriteFile(path, []byte("package api\n// changed afterward\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reviewer := bearer(timeout(t), agentToken(t, f.codex.Session.Open.Env))
+	filed, err := f.client.AddReviewFinding(reviewer, &pb.AddReviewFindingRequest{
+		SessionId: started.Session.Id, File: "api/untracked.go", StartLine: 2, Severity: "major", Title: "Example finding", Body: "Review the evidence.",
+	})
+	if err != nil || strings.Join(filed.GetFinding().GetSnippet(), "") != "// captured" {
+		t.Fatalf("finding: %+v, %v", filed, err)
+	}
+	f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "Criterion: unverified. Captured runtime unavailable.\nReview coverage: captured API changes."}
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	events(t, f.bench, f.conversation.ID, "review_finished")
+	report, err := f.client.GetArtifact(f.owner, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: started.Run.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Versions) != 1 || report.Versions[0].Schema != "lazybox.review-findings/v1" {
+		t.Fatalf("result version: %+v", report.Versions)
+	}
+	for _, want := range []string{"lazybox.review-findings/v1", "Criterion: unverified. Captured runtime unavailable.", "verification", "captured API changes", filed.Finding.Id, "// captured"} {
+		if !strings.Contains(report.Content, want) {
+			t.Errorf("result lacks %q: %s", want, report.Content)
+		}
+	}
+}

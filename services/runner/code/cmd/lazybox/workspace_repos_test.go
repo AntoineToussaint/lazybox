@@ -126,6 +126,11 @@ func TestAgentAsksForARepositoryFromTheCLI(t *testing.T) {
 	if len(left) != 1 || left[0].Candidates[0].Name != "third-party" {
 		t.Fatalf("a timed-out request must stay open: %+v", left)
 	}
+	for _, want := range []string{left[0].Id, "wait ended", "lazybox workspace repos", "do not submit a duplicate request"} {
+		if !strings.Contains(out.err.Error(), want) {
+			t.Errorf("timeout lacks %q: %v", want, out.err)
+		}
+	}
 	// From the person's own terminal: deny declines it; adding happens in the app.
 	if out = r.cli(r.owner(), "", "approve", left[0].Id); out.code != exitUsage || !strings.Contains(out.err.Error(), "add it from its card in the app") {
 		t.Fatalf("approve a repository request: %+v", out)

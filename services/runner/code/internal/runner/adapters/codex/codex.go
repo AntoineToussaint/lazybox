@@ -738,7 +738,7 @@ func (s *session) read() {
 						go s.runTool(m.ID, "", call.Tool, call.Arguments)
 						return
 					}
-					title := toolApproval(call.Tool)
+					title := toolApproval(call.Tool, call.Arguments)
 					switch {
 					case title == "":
 						// Only reads: there is nothing to approve.

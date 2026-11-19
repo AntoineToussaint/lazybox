@@ -635,7 +635,7 @@ actions:
         if(scope==='turn'){const turn=checkpointState(source.id).turns.find(t=>t.turn===body.turn);if(!turn)return error('failed_precondition',`this conversation has no turn ${body.turn}`);scopeLabel=`Turn ${body.turn}`;}
         else if(scope==='pr'){const pr=shipState(collection.id,body.member).pr;if(!pr)return error('failed_precondition','this branch has no pull request to review');scopeLabel=`PR #${pr.number}`;}
         else scopeLabel=!body.compare?'Changes':body.compare===':uncommitted'?'Uncommitted changes':`Changes vs ${body.compare}`;
-        const label=providerName(profile.provider),title=`${body.templateId==='security-review-v1'?'Security review':'Review'} · ${scopeLabel} · ${label}`;
+        const label=providerName(profile.provider),title=`${body.templateId==='behavior-verification-v1'?'Behavior verification':body.templateId==='security-review-v1'?'Security review':'Review'} · ${scopeLabel} · ${label}`;
         const reviewer={id:`review-${sessions.length}`,collectionId:collection.id,workId:collection.id,profileId:profile.id,provider:profile.provider,model,permission:'read-only',title,status:'running',busy:true,capabilities:{files:true},pending:[]};sessions.push(reviewer);
         const now=String(Math.floor(Date.now()/1000));
         const loop=body.templateId?'off':runnerSettings.review?.loop||'ask',maxRounds=Math.min(10,Math.max(1,runnerSettings.review?.maxRounds||3));

@@ -14,6 +14,8 @@ import (
 // Record contains references to credentials, never resolved environment values.
 // Previous links immutable attempts within one stable ConversationID.
 type Record struct {
+	ForkedFrom                                                       string `json:",omitempty"`
+	ForkCursor                                                       uint64 `json:",omitempty"`
 	DisplayTitle                                                     string // Resolved conversation title; projections derive this from the root attempt or explicit rename.
 	ProfileBindings                                                  map[string]string
 	ID, ConversationID, Previous, WorkID, CollectionID, Cwd, Purpose string

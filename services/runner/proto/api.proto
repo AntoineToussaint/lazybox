@@ -887,6 +887,19 @@ message OpenSessionRequest {
   string collection_id = 5;
   // Allocate a persistent, repo-less directory on the Runner. Exclusive with cwd, collection and resume.
   bool empty_workspace = 6;
+  // Owner only. Create a child of an existing conversation.
+  ConversationFork fork = 7;
+}
+message ConversationFork {
+  string source_session_id = 1;
+  // Completed native turn to include, or transcript cursor of a prompt to replace.
+  oneof boundary {
+    string after_turn_id = 2;
+    uint64 before_prompt_cursor = 3;
+  }
+  // Provision isolated worktrees from the corresponding code checkpoint.
+  bool checkpoint_files = 4;
+  string request_key = 5;
 }
 message OpenAssistantRequest {
   string profile_id = 1;
@@ -1383,6 +1396,8 @@ message Session {
   // the browser does not apply (no service, assistants, ACP agents, ended).
   string browser_access = 41;
   string behavior_profile = 42;
+  string forked_from_session_id = 43;
+  uint64 forked_from_cursor = 44;
 }
 // PermissionGrant is one "always allow" of a conversation.
 message PermissionGrant {

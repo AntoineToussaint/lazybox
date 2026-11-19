@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,6 +67,9 @@ func GatewayArgs(g *agent.Gateway) []string {
 }
 
 func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) {
+	if (o.ForkThread == "") != (o.ForkAfterTurn == "") || (o.ForkThread != "" && o.Resume != "") {
+		return nil, errors.New("a Codex fork requires a source thread and a completed turn")
+	}
 	if len(o.ProviderSettings) > 0 {
 		var carried map[string]json.RawMessage
 		if json.Unmarshal(o.ProviderSettings, &carried) != nil {
@@ -152,7 +156,12 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 		params["config"] = config
 	}
 	method := "thread/start"
-	if o.Resume != "" {
+	if o.ForkThread != "" {
+		method = "thread/fork"
+		params["threadId"] = o.ForkThread
+		params["lastTurnId"] = o.ForkAfterTurn
+		params["excludeTurns"] = true
+	} else if o.Resume != "" {
 		method = "thread/resume"
 		params["threadId"] = o.Resume
 	} else if tools := dynamicTools(o.Purpose, o.Browser); o.Tools != nil && tools != nil {
@@ -164,6 +173,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	}
 	var response struct {
 		Model             string          `json:"model"`
+		Cwd               string          `json:"cwd"`
 		Approval          json.RawMessage `json:"approvalPolicy"`
 		Reviewer          json.RawMessage `json:"approvalsReviewer"`
 		Sandbox           json.RawMessage `json:"sandbox"`
@@ -176,6 +186,15 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	}
 	if err = json.Unmarshal(result, &response); err != nil || response.Thread.ID == "" {
 		return fail(errors.New("Codex omitted native thread id"))
+	}
+	if o.ForkThread != "" {
+		if response.Thread.ID == o.ForkThread {
+			return fail(errors.New("Codex returned the source thread for a fork"))
+		}
+		if err := verifyFork(setup, p, response.Thread.ID, o.ForkAfterTurn, o.Cwd, response.Cwd); err != nil {
+			_, archiveErr := p.Call(setup, "thread/archive", map[string]any{"threadId": response.Thread.ID})
+			return fail(errors.Join(err, archiveErr))
+		}
 	}
 	s := &session{p: p, ref: response.Thread.ID, model: response.Model, workflow: o.Workflow, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose}
 	s.titler = newTitler(binary, o, s.currentModel)
@@ -324,6 +343,33 @@ var turnPolicies = map[string]map[string]json.RawMessage{
 	"yolo":      {"approvalPolicy": json.RawMessage(`"never"`), "sandboxPolicy": json.RawMessage(`{"type":"dangerFullAccess"}`), "approvalsReviewer": json.RawMessage(`"user"`)},
 	"ask":       {"approvalPolicy": json.RawMessage(`"untrusted"`), "sandboxPolicy": json.RawMessage(`{"type":"workspaceWrite"}`), "approvalsReviewer": json.RawMessage(`"user"`)},
 	"read-only": {"approvalPolicy": json.RawMessage(`"never"`), "sandboxPolicy": json.RawMessage(`{"type":"readOnly"}`), "approvalsReviewer": json.RawMessage(`"user"`)},
+}
+
+// Verify the cutoff and cwd before admitting the child. An older server could
+// accept a fork request while silently ignoring fields it does not recognize.
+func verifyFork(ctx context.Context, p *jsonl.Process, thread, turn, expectedCwd, cwd string) error {
+	if cwd != expectedCwd {
+		expected, wantErr := os.Stat(expectedCwd)
+		actual, gotErr := os.Stat(cwd)
+		if wantErr != nil || gotErr != nil || !os.SameFile(expected, actual) {
+			return errors.New("Codex fork did not open in the target workspace")
+		}
+	}
+	result, err := p.Call(ctx, "thread/turns/list", map[string]any{
+		"threadId": thread, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded",
+	})
+	if err != nil {
+		return fmt.Errorf("verify Codex fork boundary: %w", err)
+	}
+	var page struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(result, &page); err != nil || len(page.Data) != 1 || page.Data[0].ID != turn {
+		return errors.New("Codex fork did not end at the selected turn")
+	}
+	return nil
 }
 
 func threadParams(o agent.Open) map[string]any {

@@ -163,6 +163,8 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 		cancel()
 		return nil, err
 	}
+	// Historical forking applies only when this conversation first opens.
+	o.ForkThread, o.ForkAfterTurn = "", ""
 	if o.Host != nil {
 		// Later attempts start their own hosts; never re-attach them to this one.
 		hosting := *o.Host

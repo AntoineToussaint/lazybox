@@ -436,6 +436,7 @@
     },
     {
       "agentId": "root",
+      "operationId": "tour",
       "status": "completed",
       "turnId": "turn-1",
       "type": "turn_ended"

@@ -979,7 +979,14 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const moduleProps: SharedModuleProps = {
     workspaceId: workspaceID, chooseRepositoryFolder: host?.chooseRepositoryFolder, collections, error: catalogError, loaded: catalogLoaded, refresh: refreshCatalog,
     onNewConversation: beginConversation, onShowSession: showSession,
-    onOpenHandoff: target => target.collectionId === workspaceID && !current.current.pages.some(page => detachedFor(page, target)) && !!tabs.open(target, 'tab'),
+    onOpenHandoff: target => {
+      if (target.collectionId !== workspaceID) {
+        if (fixedWorkspaceId) return false;
+        select(target, 'tab');
+        return true;
+      }
+      return !current.current.pages.some(page => detachedFor(page, target)) && !!tabs.open(target, 'tab');
+    },
     onShowPanel: showPanelFor, onShowModule: kind => kind === 'terminal' ? showTerminal() : showChanges(), onOpenViewer,
   };
   const storeFor = (panel: Panel) => {

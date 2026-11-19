@@ -116,6 +116,7 @@ export type ContextMenuPlatform = {
   inspect?(): void | Promise<void>;
   /** Show an absolute path in Finder or the platform's file manager. */
   revealInFinder?(path: string): void | Promise<void>;
+  openLocalMedia?(path: string): Promise<boolean>;
 };
 let platform: ContextMenuPlatform = { development: !!import.meta.env?.DEV };
 export function configureContextMenus(change: Partial<ContextMenuPlatform>) { platform = { ...platform, ...change }; }
@@ -129,7 +130,7 @@ export function configureContextMenus(change: Partial<ContextMenuPlatform>) { pl
 let pageFilesHere = true;
 export function setPageFilesHere(here: boolean) { pageFilesHere = here; }
 export const pageFilesAreHere = () => pageFilesHere;
-export const contextMenuPlatform = (): ContextMenuPlatform => pageFilesHere ? platform : { ...platform, revealInFinder: undefined };
+export const contextMenuPlatform = (): ContextMenuPlatform => pageFilesHere ? platform : { ...platform, revealInFinder: undefined, openLocalMedia: undefined };
 
 // Contributions ---------------------------------------------------------------
 

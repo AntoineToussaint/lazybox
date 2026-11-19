@@ -8,7 +8,7 @@ import { FilePreview } from './FilePreview';
 import { useRunner } from './RunnerContext';
 import type { FileLink } from './file-reference';
 import { modKey, useWorkbench } from './workbench';
-import { copyText } from './ContextMenu';
+import { contextMenuPlatform, copyText } from './ContextMenu';
 import { absolutePath } from './context-menu-model';
 import './files.css';
 
@@ -55,7 +55,14 @@ export function useFileOpener(collectionId: string | undefined, viewState?: View
   if (exact) { show({ path: reference.path, directory: false }, reference, how); return; }
   try {
    const resolved = await api.resolveWorkspacePath({ collectionId, path: reference.path }, { timeoutMs: 15000 });
-   if (!resolved.matches.length) { setNotice(`Nothing named “${reference.path}” in this workspace.`); return; }
+   if (!resolved.matches.length) {
+    const openLocalMedia = contextMenuPlatform().openLocalMedia;
+    if (openLocalMedia && !how.copy && !how.reveal && /^(?:~\/|\/).*\.(?:png|jpe?g|gif|webp|heic|tiff?|bmp|mp4|mov|webm|m4v|mp3|m4a|wav|flac|ogg)$/i.test(reference.path)) {
+     if (await openLocalMedia(reference.path)) return;
+     setNotice(`Could not find “${reference.path}” in this workspace or on this computer.`);
+    } else setNotice(`Nothing named “${reference.path}” in this workspace.`);
+    return;
+   }
    if (resolved.matches.length === 1) show(resolved.matches[0], reference, how);
    else setChoice({ reference, matches: resolved.matches.map((match: WorkspacePathMatch) => ({ path: match.path, directory: match.directory })), truncated: resolved.truncated, how });
   } catch (error) {

@@ -98,3 +98,15 @@
 .workspace-row>.workspace-fold{position:absolute;left:7px;top:9px;width:22px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:4px;background:transparent;color:var(--text-muted);z-index:1}
 .workspace-row>.workspace-fold:hover,.workspace-row>.workspace-fold:focus-visible{background:var(--surface-selected);color:var(--text)}
 .workspace-row:has(>.workspace-fold)>.workspace-link>svg:first-child{visibility:hidden}
+
+.workspace-section-heading{margin:10px 10px 3px;color:var(--text-muted);font-size:calc(12px * var(--text-scale));font-weight:600}
+.workspace-section-dialog form{display:grid;gap:12px;padding:16px}
+.workspace-section-dialog label{display:grid;gap:6px}
+.workspace-section-dialog p{margin:0;color:var(--text-muted)}
+
+.recently-deleted{padding:8px 10px}
+.recently-deleted summary{cursor:pointer;color:var(--text-muted)}
+.recently-deleted ul{list-style:none;margin:4px 0 0;padding:0}
+.recently-deleted li{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;padding:4px 0;overflow-wrap:anywhere}
+.recently-deleted li>span{flex:1;min-width:0}
+.recently-deleted small{color:var(--text-muted)}

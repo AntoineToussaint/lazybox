@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react';
 import type { Collection, WorkspaceDeletionPreview } from '@lazybox/protocol';
 import { ConfirmCheckbox, ConfirmDialog, ConfirmWarning } from './ConfirmDialog';
 import { OwnershipPanel } from './OwnershipPanel';
+import { announceDeletion } from './PendingDeletions';
 import { useRunner } from './RunnerContext';
 
 export function DeleteWorkspaceDialog({ workspace, onClose, onDeleted }: {
   workspace: Collection; onClose(): void; onDeleted(): void;
 }) {
-  const { api } = useRunner();
+  const { api, refresh } = useRunner();
   const [preview, setPreview] = useState<WorkspaceDeletionPreview>();
   const [error, setError] = useState('');
   const [discard, setDiscard] = useState(false);
@@ -35,19 +36,23 @@ export function DeleteWorkspaceDialog({ workspace, onClose, onDeleted }: {
     details={busy => <>
       {unconfirmed && <OwnershipPanel target={{ collectionId: workspace.id }} what="Deleting this workspace waits" onSettled={() => setSettled(true)}/>}
       {!!active && <ConfirmWarning title={`${active} running ${active === 1 ? 'session' : 'sessions'}`}>
-        <p>Deletion will stop {active === 1 ? 'this session' : 'these sessions'} and their owned commands.</p>
+        <p>When the five minutes end, deletion will stop {active === 1 ? 'this session' : 'these sessions'} and their owned commands.</p>
         <ConfirmCheckbox label={`Stop ${active} active ${active === 1 ? 'session' : 'sessions'} and their owned commands`} checked={stop} disabled={busy} onChange={setStop}/>
       </ConfirmWarning>}
       {!unconfirmed && dirty && <ConfirmWarning title="Uncommitted or untracked files">
-        <p>{preview!.dirtyRepositories.length ? `In ${preview!.dirtyRepositories.join(', ')}. ` : ''}{preview!.filesOutsideRepositories ? 'Also found outside repository folders. ' : ''}These files, including ignored files, cannot be recovered after deletion.</p>
+        <p>{preview!.dirtyRepositories.length ? `In ${preview!.dirtyRepositories.join(', ')}. ` : ''}{preview!.filesOutsideRepositories ? 'Also found outside repository folders. ' : ''}These files, including ignored files, will be discarded when the five minutes end.</p>
         <ConfirmCheckbox label="Discard these workspace files permanently" checked={discard} disabled={busy} onChange={setDiscard}/>
       </ConfirmWarning>}
     </>}
     canConfirm={canDelete} confirm="Delete workspace" working="Deleting…" onClose={onClose}
     onConfirm={async () => {
-      await api.deleteWorkspace({ collectionId: workspace.id, confirmName: workspace.name, discardChanges: discard, stopSessions: stop }, { timeoutMs: 120000 });
+      const entry = await api.scheduleDeletion({ target: { case: 'workspace', value: {
+        collectionId: workspace.id, confirmName: workspace.name, discardChanges: discard, stopSessions: stop,
+      } } }, { timeoutMs: 120000 });
+      announceDeletion(entry, async () => { await api.undoDeletion({ id: entry.id }); refresh(); });
+      refresh();
       onDeleted();
     }}>
-    Remove this workspace and its local files.
+    The workspace moves to Recently deleted for five minutes. Then Lazybox permanently removes the workspace folder and everything inside it.
   </ConfirmDialog>;
 }

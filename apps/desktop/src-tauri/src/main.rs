@@ -154,6 +154,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             host::save_view_state,
             host::open_sign_in,
             host::open_link,
+            host::open_local_media,
             host::open_web_window,
             host::dock_web,
             viewer::web_view_show,

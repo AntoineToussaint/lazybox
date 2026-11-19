@@ -215,10 +215,17 @@ func (s *Service) Info(ctx context.Context, r *pb.InfoRequest) (*pb.InfoResponse
 	for _, provider := range []string{"claude", "codex"} {
 		w.Gateways = append(w.Gateways, &pb.Gateway{Id: "metered", Provider: provider})
 	}
+	hidden := s.hiddenConversations()
 	for _, e := range s.Bench.List() {
+		if hidden[e.ID] {
+			continue
+		}
 		record, err := s.sessionView(ctx, e)
 		if err != nil {
 			return nil, err
+		}
+		if hidden[record.ConversationId] {
+			continue
 		}
 		w.Sessions = append(w.Sessions, record)
 	}
@@ -955,7 +962,11 @@ func (s *Service) ListHistory(ctx context.Context, r *pb.ListHistoryRequest) (*p
 		return nil, rpcError(err)
 	}
 	response := &pb.ListHistoryResponse{HasMore: len(records) == limit}
+	hidden := s.hiddenConversations()
 	for _, record := range records {
+		if hidden[record.ID] || hidden[record.ConversationID] {
+			continue
+		}
 		e, err := s.Bench.Get(record.ID)
 		var view *pb.Session
 		if err == nil {

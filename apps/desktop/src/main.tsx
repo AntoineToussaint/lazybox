@@ -313,6 +313,7 @@ window.open = ((url?: string | URL) => { const href = String(url || ''); if (/^(
 // Context menus reveal workspace files in Finder; a development build opens
 // the inspector from them (Alt+right-click also shows WebKit's own menu).
 configureContextMenus({
+  openLocalMedia: path => invoke<boolean>('open_local_media', { path }),
   revealInFinder: path => invoke<void>('plugin:opener|reveal_item_in_dir', { paths: [path] }),
   ...(import.meta.env.DEV ? { inspect: () => invoke<void>('plugin:webview|internal_toggle_devtools') } : {}),
 });

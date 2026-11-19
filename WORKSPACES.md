@@ -957,8 +957,9 @@ then each shorter tail of it at the workspace root and under every repository
 (so `scripts/x.json`, `./scripts/x.json` and an absolute path from another
 checkout all find `api/scripts/x.json`), then a path-suffix match, then the file
 name. Several matches open a chooser, nearest first; only a reference that names
-nothing in the workspace is reported. Resolution never reads outside the
-workspace: traversal is reduced to a lookup by tail and every candidate is opened
+nothing in the workspace is reported. In the desktop app, an unmatched absolute
+or `~/` image, audio, or video path on the local computer opens in its default app.
+Runner resolution stays within the workspace: traversal is reduced to a lookup by tail and every candidate is opened
 through `os.Root`, so a symlink out of the workspace never matches. Previews are
 bounded to 1 MiB and report binary files explicitly. **Open file** in Changes
 opens the changed path as is, without resolution.
@@ -1068,6 +1069,18 @@ label. This transport is Connect streaming RPC, not SSE; text deltas are rendere
 before stream completion.
 
 ## Delete and resource cleanup
+
+Git checks and worktree removal for a deletion run outside the shared
+workspace registry lock. Other workspaces remain readable during cleanup.
+
+Deleting a workspace or conversation moves it out of the normal lists for
+five minutes. Use **Undo** in the deletion notification or open **Recently
+deleted** in the Workspaces sidebar. The Runner persists the deadline, and
+existing files, messages and running processes stay in place during that
+window. At expiry the Runner checks the existing cleanup safeguards and
+permanently deletes the item. For a workspace, this removes the entire folder,
+including all worktrees and any approved ignored or outside-repository files.
+If cleanup fails, Recently deleted shows the failure.
 
 **Workspace actions → Delete workspace** uses a confirmation button without name
 typing. It previews active executions and local

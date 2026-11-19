@@ -79,7 +79,11 @@ func (s *Service) ListCollections(ctx context.Context, r *pb.ListCollectionsRequ
 		return nil, err
 	}
 	w := &pb.ListCollectionsResponse{}
+	hidden := s.hiddenWorkspaces()
 	for _, c := range m.List() {
+		if hidden[c.ID] {
+			continue
+		}
 		w.Collections = append(w.Collections, wireCollection(c))
 	}
 	return w, nil
@@ -100,7 +104,11 @@ func (s *Service) ArrangeWorkspaces(ctx context.Context, r *pb.ArrangeWorkspaces
 		return nil, rpcError(err)
 	}
 	w := &pb.ListCollectionsResponse{}
+	hidden := s.hiddenWorkspaces()
 	for _, c := range list {
+		if hidden[c.ID] {
+			continue
+		}
 		w.Collections = append(w.Collections, wireCollection(c))
 	}
 	return w, nil

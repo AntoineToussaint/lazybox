@@ -2,6 +2,9 @@ package transport
 
 import (
 	"context"
+	"errors"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/reviews"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
@@ -50,4 +53,66 @@ func (s *Service) DeleteConversation(ctx context.Context, r *pb.DeleteConversati
 	}
 	s.Bench.ReviewerEndedByHand(reviewing, reviews.EndedDeleted)
 	return &pb.DeleteConversationResponse{}, nil
+}
+
+func (s *Service) ScheduleDeletion(ctx context.Context, r *pb.ScheduleDeletionRequest) (*pb.PendingDeletion, error) {
+	var entry runner.PendingDeletion
+	switch {
+	case r.GetWorkspace() != nil && r.GetWorkspace().CollectionId != "":
+		w := r.GetWorkspace()
+		entry = runner.PendingDeletion{WorkspaceID: w.CollectionId, Title: w.ConfirmName, Stop: w.StopSessions, Discard: w.DiscardChanges}
+	case r.GetConversation() != nil && r.GetConversation().SessionId != "":
+		c := r.GetConversation()
+		entry = runner.PendingDeletion{SessionID: c.SessionId, Stop: c.StopSessions}
+	default:
+		return nil, rpcError(errors.New("deletion target required"))
+	}
+	entry, err := s.Bench.ScheduleDeletion(ctx, entry)
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	return wirePendingDeletion(entry), nil
+}
+
+func (s *Service) ListPendingDeletions(context.Context, *pb.ListPendingDeletionsRequest) (*pb.ListPendingDeletionsResponse, error) {
+	out := &pb.ListPendingDeletionsResponse{}
+	for _, entry := range s.Bench.PendingDeletions() {
+		out.Deletions = append(out.Deletions, wirePendingDeletion(entry))
+	}
+	return out, nil
+}
+
+func (s *Service) UndoDeletion(ctx context.Context, r *pb.UndoDeletionRequest) (*pb.ListPendingDeletionsResponse, error) {
+	if err := s.Bench.UndoDeletion(r.Id); err != nil {
+		return nil, rpcError(err)
+	}
+	return s.ListPendingDeletions(ctx, &pb.ListPendingDeletionsRequest{})
+}
+
+func wirePendingDeletion(entry runner.PendingDeletion) *pb.PendingDeletion {
+	return &pb.PendingDeletion{Id: entry.ID, WorkspaceId: entry.WorkspaceID, SessionId: entry.SessionID, Title: entry.Title, ExpiresAtUnixMillis: entry.Expires.UnixMilli(), Failure: entry.Failure}
+}
+
+func (s *Service) hiddenWorkspaces() map[string]bool {
+	hidden := map[string]bool{}
+	for _, entry := range s.Bench.PendingDeletions() {
+		if entry.SessionID == "" && entry.Failure == "" {
+			hidden[entry.WorkspaceID] = true
+		}
+	}
+	return hidden
+}
+
+func (s *Service) hiddenConversations() map[string]bool {
+	hidden := map[string]bool{}
+	for _, entry := range s.Bench.PendingDeletions() {
+		if entry.SessionID == "" || entry.Failure != "" {
+			continue
+		}
+		hidden[entry.SessionID] = true
+		if entry.ConversationID != "" {
+			hidden[entry.ConversationID] = true
+		}
+	}
+	return hidden
 }

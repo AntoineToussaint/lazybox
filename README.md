@@ -80,8 +80,8 @@ of your own · [missions](docs/guides/missions.md) and
 
 ## Known limitations
 
-- **Mac only**, Apple Silicon only. No Windows, Linux or Intel Macs.
-- **No cloud.** The Runner and your agents run on your Mac; nothing is hosted.
+- **Desktop app:** Apple Silicon Mac. The separate [Linux Runner](REMOTE_RUNNERS.md) supports remote execution.
+- **Self-hosted.** The Runner and agents run on your Mac or on a Linux machine you manage.
 - **The phone is a web page**, reached over [Tailscale](docs/guides/phone.md);
   there is no phone app.
 - **Gemini CLI, Goose and other ACP agents are a Preview**

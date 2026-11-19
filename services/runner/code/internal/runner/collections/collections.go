@@ -89,15 +89,17 @@ var component = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 // Manager serializes provisioning and attachment. The filesystem lock excludes
 // other Runners even when they have different session-state directories.
 type Manager struct {
-	mu     sync.Mutex
-	root   string
-	lock   *os.File
-	repos  map[string]Repository
-	common map[string]string
-	items  map[string]Collection
-	ctx    context.Context
-	cancel context.CancelFunc
-	closed bool
+	mu                sync.Mutex
+	root              string
+	lock              *os.File
+	repos             map[string]Repository
+	common            map[string]string
+	items             map[string]Collection
+	finishingDeletion map[string]bool
+	deletionWorkers   sync.WaitGroup
+	ctx               context.Context
+	cancel            context.CancelFunc
+	closed            bool
 	// adopted holds owners whose live agents this Runner re-attached: their
 	// ownership is certain even though a previous Runner recorded it.
 	adopted map[string]bool
@@ -747,6 +749,9 @@ func (m *Manager) Archive(id string, active func(string) bool) (Collection, erro
 	if m.closed {
 		return Collection{}, errors.New("collection manager closed")
 	}
+	if c.State == "deleting" || c.State == "deleted" {
+		return Collection{}, errors.New("workspace is being deleted or has been deleted")
+	}
 	if c.OwnershipUncertain {
 		return Collection{}, errors.New("workspace ownership must be reconciled")
 	}
@@ -885,11 +890,13 @@ func (m *Manager) settleLocked(c *Collection) {
 func (m *Manager) Close() error {
 	m.cancel()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return nil
 	}
 	m.closed = true
+	m.mu.Unlock()
+	m.deletionWorkers.Wait()
 	return m.lock.Close()
 }
 

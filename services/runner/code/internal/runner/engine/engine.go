@@ -493,6 +493,8 @@ const (
 	DeliverNow = "now"
 	// DeliverSteer sends the message into the running turn (Capabilities.Steer).
 	DeliverSteer = "steer"
+	// DeleteQueued removes a message before it reaches the agent.
+	DeleteQueued = "delete"
 )
 
 // ErrNotQueued means the message is no longer waiting: it was delivered, or
@@ -505,8 +507,8 @@ var ErrNotQueued = errors.New("that message is no longer queued")
 // it out of the queue and sends it into the running turn; if the provider
 // refuses, it goes back to the head of the queue and the error is returned.
 func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Receipt, error) {
-	if how != DeliverNow && how != DeliverSteer {
-		return agent.Receipt{}, errors.New(`delivery must be "now" or "steer"`)
+	if how != DeliverNow && how != DeliverSteer && how != DeleteQueued {
+		return agent.Receipt{}, errors.New(`queue action must be "now", "steer", or "delete"`)
 	}
 	e.mu.Lock()
 	at := -1
@@ -517,8 +519,16 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 		}
 	}
 	if at < 0 {
+		previous := e.ops[id].receipt
 		e.mu.Unlock()
+		if how == DeleteQueued && previous.Delivery == "canceled_before_delivery" {
+			return previous, nil
+		}
 		return agent.Receipt{}, ErrNotQueued
+	}
+	if how == DeleteQueued {
+		defer e.mu.Unlock()
+		return e.deleteQueuedLocked(at)
 	}
 	// A provider error that ended a turn does not hold the queue: the
 	// message continues the conversation, as a new one would.
@@ -594,6 +604,24 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 	// for its own turn (the stop then found nothing to stop): either way it
 	// is delivered next, which is what was asked.
 	return agent.Receipt{ID: op.ID, Delivery: "accepted"}, nil
+}
+
+// Record cancellation before allowing dispatch or acknowledging it. If the
+// attachment write lags, adoption uses the journal receipt to skip this message.
+func (e *Engine) deleteQueuedLocked(at int) (agent.Receipt, error) {
+	queue := e.queue
+	id := queue[at].ID
+	e.queue = append(e.queue[:at:at], e.queue[at+1:]...)
+	r := agent.Receipt{ID: id, Delivery: "canceled_before_delivery"}
+	if !e.appendLocked(agent.Event{Type: "receipt", OperationID: id, Status: r.Delivery}) {
+		e.queue = queue
+		return agent.Receipt{}, errors.New("could not record queued message deletion")
+	}
+	delete(e.queuedAt, id)
+	old := e.ops[id]
+	old.receipt = r
+	e.ops[id] = old
+	return r, nil
 }
 
 // stillQueued reports whether the message id waits in the queue.

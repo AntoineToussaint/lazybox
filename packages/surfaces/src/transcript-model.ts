@@ -61,6 +61,7 @@ export type Transcript = { messages: TranscriptMessage[]; recent: JournalEvent[]
    * conversation shows each once, where its receipt says the agent got it.
    */
   pending?: Record<string, TranscriptMessage>;
+  canceled?: ReadonlySet<string>;
   /** Whether this turn was interrupted or an approval declined: a call that then failed was stopped or denied. */
   stops?: TurnStops };
 
@@ -77,11 +78,12 @@ export type QueuedEntry = { operationId: string; text: string; /** A message Laz
  * way it is in one place only: never gone for a poll, never shown twice.
  * The Runner's order wins; the transcript's newer ones follow it.
  */
-export function queuedMessages(polled: readonly QueuedEntry[] | undefined, transcript: Pick<Transcript, 'pending' | 'messages'>): QueuedEntry[] {
+export function queuedMessages(polled: readonly QueuedEntry[] | undefined, transcript: Pick<Transcript, 'pending' | 'messages' | 'canceled'>): QueuedEntry[] {
   const pending = transcript.pending ?? {};
   const out: QueuedEntry[] = [];
   let placed: Set<string> | undefined;
   for (const message of polled ?? []) {
+    if (transcript.canceled?.has(message.operationId)) continue;
     const waiting = pending[message.operationId];
     if (!waiting) {
       // In the conversation already: the agent got it since the poll.
@@ -130,6 +132,7 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
   const replaceAt = (index: number, message: TranscriptMessage) => { list()[index] = message; owned.add(message); };
   let requests: Record<string, RequestNote> | undefined;
   let pending: Record<string, TranscriptMessage> | undefined;
+  let canceled: Set<string> | undefined;
   const queued = () => pending ?? state.pending ?? {};
   /** A message the person (or Lazybox) said, at the end or at `at`. */
   const place = (message: TranscriptMessage, at?: number) => {
@@ -174,6 +177,15 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
     // session dropped while it waited never does.
     const receipt = receiptOf(record);
     if (receipt) {
+      if (receipt.delivery === 'canceled_before_delivery') {
+        (canceled ??= new Set(next.canceled)).add(receipt.id);
+        next.canceled = canceled;
+        const index = lastWith(messages ?? state.messages, receipt.id);
+        if (index >= 0) {
+          list().splice(index, 1);
+          if (next.turnStart !== undefined && index < next.turnStart) next.turnStart--;
+        }
+      }
       const message = queued()[receipt.id];
       if (message) {
         delete (pending ??= { ...state.pending })[receipt.id];

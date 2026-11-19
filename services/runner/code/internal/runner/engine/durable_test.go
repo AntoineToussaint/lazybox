@@ -371,3 +371,41 @@ func TestAdoptedConversationPlacesMessagesWhereTheyWereDelivered(t *testing.T) {
 		t.Fatalf("transcript: %q", got)
 	}
 }
+
+func TestAdoptDoesNotDeliverDeletedMessageFromStaleAttachment(t *testing.T) {
+	e, native, st, path := durableEngine(t)
+	ctx := contextFor(t)
+	if _, err := e.Apply(ctx, agent.Operation{ID: "current", Kind: agent.Message, Text: "current"}); err != nil {
+		t.Fatal(err)
+	}
+	applied(t, native)
+	for _, id := range []string{"deleted", "next"} {
+		if _, err := e.Apply(ctx, agent.Operation{ID: id, Kind: agent.Message, Text: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, stale := st.saved()
+	if _, err := e.DeliverQueued(ctx, "deleted", DeleteQueued); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.attach(stale); err != nil {
+		t.Fatal(err)
+	}
+	next, adapter, err := adopt(t, path, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := next.Snapshot().QueuedMessages; len(q) != 1 || q[0].OperationID != "next" {
+		t.Fatalf("adopted queue: %+v", q)
+	}
+	if r, err := next.DeliverQueued(ctx, "deleted", DeleteQueued); err != nil || r.Delivery != "canceled_before_delivery" {
+		t.Fatalf("repeat deletion after adoption: %+v, %v", r, err)
+	}
+	adapter.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	if op := applied(t, adapter.Session); op.ID != "next" {
+		t.Fatalf("dispatched %+v, want next", op)
+	}
+}

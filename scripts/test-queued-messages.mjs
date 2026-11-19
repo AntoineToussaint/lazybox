@@ -120,7 +120,7 @@ try{
  await expect.poll(()=>claude.queuedMessages.length).toBe(3);
  await expect(strip.locator('.queued-head [role=status]')).toHaveText(/^3 messages queued — Claude is busy/,{timeout:5000});
  await expect(strip.getByRole('listitem')).toHaveCount(2);
- await expect(strip.locator('.queued-more')).toHaveText('and 1 more, sent in order after these');
+ await expect(strip.locator('.queued-more')).toHaveText('Show 1 more');
  await agentSays(chat,claude,'Port 4000 is free.');
  for(const text of ['First follow-up','Second follow-up','Third follow-up'])await expect(youSaid(chat,text)).toHaveCount(0);
  // A reload shows the same: the delivered message once, in its place; the queued ones in the strip only.
@@ -134,6 +134,18 @@ try{
  await expect(strip.getByRole('button',{name:'Show'})).toHaveAttribute('aria-expanded','false');
  await strip.getByRole('button',{name:'Show'}).click();
  await expect(strip.getByRole('listitem')).toHaveCount(2);
+ await composer.fill('Delete this queued follow-up');await composer.press('Enter');
+ await expect.poll(()=>claude.queuedMessages.length).toBe(4);
+ await strip.getByRole('button',{name:'Show 2 more'}).click();
+ const deleted=strip.getByRole('listitem',{name:'Queued message: Delete this queued follow-up'});
+ const interruptedBeforeDelete=claude.interrupted;
+ await deleted.getByRole('button',{name:'Delete',exact:true}).click();
+ await expect(deleted).toHaveCount(0);
+ await expect(youSaid(chat,'Delete this queued follow-up')).toHaveCount(0);
+ assert.equal(claude.interrupted,interruptedBeforeDelete);
+ await page.reload();
+ await expect(strip.locator('.queued-head [role=status]')).toHaveText(/^3 messages queued/);
+ await expect(youSaid(chat,'Delete this queued follow-up')).toHaveCount(0);
  // A phone keeps the strip and its buttons on screen, without sideways scroll.
  await page.setViewportSize({width:390,height:844});
  {const chatTab=page.locator('.mobile-panel-switcher').getByRole('button',{name:/Agent chat/});if(await chatTab.count())await chatTab.first().click();}

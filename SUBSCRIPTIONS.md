@@ -129,6 +129,12 @@ shows "Reset" instead of a stale percentage. With no reported reset time the
 card says so. An available card names only its next reset, of its most-used
 window.
 
+Opening **Settings → Subscriptions** refreshes usage for each managed
+subscription with a private sign-in. The page shows the last report while
+the provider is contacted, and an individual card can still be refreshed.
+The conversation’s limit card also has **Refresh** to check the current
+provider’s managed subscriptions and update the available choices.
+
 Use **Settings → Subscriptions → Add subscription** in the main workspace,
 or enroll a Codex account on the Runner host using `lazybox account-login` as
 described in [Running](RUNNING.md#enroll-subscriptions-once). Codex uses its
@@ -306,6 +312,11 @@ Pin a session to its own verified credential/configuration context. Switching on
 Record support per adapter: isolated concurrent profiles, serialized switching, or unsupported. Report limitations to scheduling and UI. Test switching one profile while another execution remains active.
 
 ## Checkpoint contents
+
+When every Claude subscription is limited, **Continue in a new Codex
+conversation** opens Codex in the same workspace and sends a text handoff
+with prior requests, agent progress, and queued follow-ups. For long
+conversations, it keeps the opening request and prioritizes recent context.
 
 Capture the objective and criteria, accepted decisions, outstanding questions, completed results, source/base revisions, working-tree state, relevant staged/unstaged/untracked changes, retained command/output references, and running service references. Prefer stable references over copying large transcripts.
 

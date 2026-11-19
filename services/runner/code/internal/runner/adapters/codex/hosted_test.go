@@ -672,3 +672,60 @@ func TestOpenRejectsForkThatRetainedLaterNativeTurns(t *testing.T) {
 		t.Fatalf("unsafe fork was not rejected: %v", err)
 	}
 }
+
+func TestYOLOManagedCommandDoesNotAskForApproval(t *testing.T) {
+	for _, changeLive := range []bool{false, true} {
+		name, mode := "at launch", "yolo"
+		if changeLive {
+			name, mode = "after live change", "ask"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			binary, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := make(chan string, 1)
+			s, err := (Adapter{Binary: binary}).Open(ctx, agent.Open{
+				Cwd: t.TempDir(), Permission: mode, Env: os.Environ(),
+				Tools: func(_ context.Context, name string, _ json.RawMessage) (string, error) {
+					calls <- name
+					return "done", nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			if changeLive {
+				if _, err := s.Apply(ctx, agent.Operation{ID: "permission", Kind: agent.Permission, Permission: "yolo"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.Apply(ctx, agent.Operation{ID: "first", Kind: agent.Message, Text: "Run the test"}); err != nil {
+				t.Fatal(err)
+			}
+			for {
+				event, err := s.Receive(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if event.Type == "approval" {
+					t.Fatalf("YOLO prompted for approval: %+v", event)
+				}
+				if event.Type == "turn_ended" {
+					break
+				}
+			}
+			select {
+			case name := <-calls:
+				if name != agent.CommandTool {
+					t.Fatalf("executed %q", name)
+				}
+			default:
+				t.Fatal("managed command did not run")
+			}
+		})
+	}
+}

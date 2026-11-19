@@ -28,6 +28,7 @@ type session struct {
 	p               *jsonl.Process
 	ref, turn       string
 	model, workflow string
+	permission      string
 	settings        json.RawMessage
 	overrides       map[string]json.RawMessage
 	requests        map[string]pending
@@ -196,7 +197,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 			return fail(errors.Join(err, archiveErr))
 		}
 	}
-	s := &session{p: p, ref: response.Thread.ID, model: response.Model, workflow: o.Workflow, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose}
+	s := &session{p: p, ref: response.Thread.ID, model: response.Model, workflow: o.Workflow, permission: o.Permission, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose}
 	s.titler = newTitler(binary, o, s.currentModel)
 	settings := map[string]json.RawMessage{}
 	for key, value := range map[string]json.RawMessage{"approvalPolicy": response.Approval, "approvalsReviewer": response.Reviewer, "sandboxPolicy": response.Sandbox} {
@@ -287,7 +288,7 @@ func (s *session) replyItems(native json.RawMessage, request string, items []any
 	}
 }
 
-const toolOutcomeUnknown = "The Runner restarted while this approved lazybox_command was running; its outcome is unknown. Inspect the workspace and command list before retrying."
+const toolOutcomeUnknown = "The Runner restarted while this lazybox_command was running; its outcome is unknown. Inspect the workspace and command list before retrying."
 
 func attach(ctx context.Context, o agent.Open, binary string) (agent.Session, error) {
 	var state durable
@@ -307,7 +308,7 @@ func attach(ctx context.Context, o agent.Open, binary string) (agent.Session, er
 			return nil, err
 		}
 	}
-	s := &session{p: p, ref: o.Host.Attach.Reference, turn: state.Turn, model: state.Model, workflow: o.Workflow, settings: state.Settings, overrides: state.Overrides, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose, responded: o.Host.Attach.Responded}
+	s := &session{p: p, ref: o.Host.Attach.Reference, turn: state.Turn, model: state.Model, workflow: o.Workflow, permission: o.Permission, settings: state.Settings, overrides: state.Overrides, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose, responded: o.Host.Attach.Responded}
 	s.titler = newTitler(binary, o, s.currentModel)
 	go s.read()
 	return s, nil
@@ -496,6 +497,7 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 			s.overrides = map[string]json.RawMessage{}
 		}
 		maps.Copy(s.overrides, policy)
+		s.permission = op.Permission
 		s.mu.Unlock()
 		r.Delivery = "accepted"
 		return r, nil
@@ -739,10 +741,20 @@ func (s *session) read() {
 						return
 					}
 					title := toolApproval(call.Tool)
+					s.mu.Lock()
+					autoRun := call.Tool == agent.CommandTool && s.permission == "yolo" && s.workflow != "plan" && !agent.IsAssistant(s.purpose)
+					s.mu.Unlock()
 					switch {
 					case title == "":
 						// Only reads: there is nothing to approve.
 						go s.runTool(m.ID, "", call.Tool, call.Arguments)
+						return
+					case !answered && autoRun:
+						if m.Redelivered && !agent.ToolReplaySafe(call.Tool, call.Arguments) {
+							s.replyTool(m.ID, id, toolOutcomeUnknown, false)
+						} else {
+							go s.runTool(m.ID, "", call.Tool, call.Arguments)
+						}
 						return
 					case !answered:
 					case response.Decision != "" && response.Decision != "accept":

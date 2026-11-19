@@ -72,7 +72,7 @@ export function useRunnerState(connection: RunnerConnection, expectRestart?: () 
     const update = async () => {
       if (updating) return; updating = true;
       try {
-        const next = await api.info({}, { signal: control.signal, timeoutMs:5000 });
+        const next = await api.info({}, { signal: control.signal, timeoutMs:15000 });
         if (!control.signal.aborted) {
           timeouts = 0;
           latest.current = next; setInfo(next); setError(''); setSlow(false);

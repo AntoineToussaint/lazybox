@@ -219,7 +219,9 @@ jobs:
       - name: README and CONTRIBUTING name only what exists
         run: node scripts/export-check.mjs
       - name: Nothing private or secret in the tree
-        run: node scripts/check-private.mjs
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          node scripts/check-private.mjs
 
   desktop:
     needs: plan

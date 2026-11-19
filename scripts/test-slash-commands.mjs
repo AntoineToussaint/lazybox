@@ -272,6 +272,24 @@ try{
  await expect(codexChat.locator('.command-line').filter({hasText:'Switched model to gpt-6-luna'})).toBeVisible();
  await expect(codexChat.locator('.restart-model')).toHaveCount(0);
 
+ // An unavailable suggestion must not swallow Tab or the normal send flow.
+ await codexMessage.fill('/comp');
+ const codexCommands = codexChat.getByRole('listbox', {name:'Commands', exact:true});
+ await expect(codexCommands.getByRole('option', {selected:true})).toHaveAttribute('aria-disabled','true');
+ await codexMessage.press('Tab');
+ await expect(codexMessage).not.toBeFocused();
+ await expect(codexMessage).toHaveValue('/comp');
+ await codexMessage.fill('');
+ await codexMessage.fill('/comp');
+ await expect(codexCommands).toBeVisible();
+ const beforeUnavailable = applies().length;
+ await codexMessage.press('Enter');
+ await expect(codexChat.getByRole('button',{name:/Send as text/})).toBeVisible();
+ assert.equal(applies().length, beforeUnavailable);
+ await codexMessage.press('Enter');
+ await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe('/comp');
+ await expect(codexMessage).toHaveValue('');
+
  // The ⋯ menu says what is current: YOLO is selected (pressed, not greyed out), and the provider's
  // Default is the current model when the conversation names none. Twelve models: the first few, then More.
  await go(`${base}/?view=workspace&collection=beta&session=codex-default-session#token=${f.token}`);

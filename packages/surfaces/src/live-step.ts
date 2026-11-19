@@ -74,11 +74,13 @@ export function commandParts(script: string): { code: string; where?: string } {
  * `lazybox run` moved there) is not the turn's step any more.
  */
 export function runningCommand(commands: readonly CommandStatus[], sessionId: string): CommandStatus | undefined {
-  for (let i = commands.length - 1; i >= 0; i--) {
-    const command = commands[i];
-    if (!command.done && command.sessionId === sessionId && !command.origin && !command.background) return command;
+  let newest: CommandStatus | undefined;
+  for (const command of commands) {
+    if (command.done || command.sessionId !== sessionId || command.origin || command.background) continue;
+    if (!newest || command.startedAtUnixMillis > newest.startedAtUnixMillis ||
+      (command.startedAtUnixMillis === newest.startedAtUnixMillis && command.id > newest.id)) newest = command;
   }
-  return;
+  return newest;
 }
 
 /** How long a foreground command may stay quiet before the bar offers to move it to the background. */

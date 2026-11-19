@@ -279,6 +279,7 @@ function WorkspaceList({
   }, [historyOpen]);
   const [deleting, setDeleting] = useState<Collection>();
   const [creating, setCreating] = useState(false);
+  const [copy, setCopy] = useState<Collection>();
   const [addingTo, setAddingTo] = useState<Collection>();
   const [managing, setManaging] = useState<Collection>();
   useKeyboardAction("workspace.new", () => setCreating(true));
@@ -352,12 +353,15 @@ function WorkspaceList({
       )}
       {index.unsupported&&<p className="module-empty">Live conversations · saved history requires a Runner update.</p>}
       {index.error&&!connectionError&&<p className="error" role="alert">Could not refresh conversation history. Previously loaded entries are retained. <button type="button" onClick={index.refresh}>Retry history refresh</button></p>}
-      {creating && (
+      {(creating || copy) && (
         <WorkspaceRepositoryDialog
+          copy={copy}
+          viewState={viewState}
           chooseRepositoryFolder={chooseRepositoryFolder}
-          onClose={() => setCreating(false)}
+          onClose={() => { setCreating(false); setCopy(undefined); }}
           onSaved={(workspace) => {
             setCreating(false);
+            setCopy(undefined);
             refresh();
             onTarget({
               collectionId: workspace.id,
@@ -415,6 +419,7 @@ function WorkspaceList({
                 selected={target.collectionId === collection.id}
                 onSelect={() => choose(collection)}
                 onDelete={() => setDeleting(collection)}
+                onClone={() => setCopy(collection)}
                 onAdd={() => setAddingTo(collection)}
                 onManage={() => setManaging(collection)}
                 onSaved={refresh}

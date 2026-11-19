@@ -27,7 +27,7 @@
 .new-task-chip button{display:inline-flex;align-items:center;justify-content:center;flex:none;width:18px;height:18px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--text-subtle)}
 .new-task-chip button:hover{background:var(--surface-strong);color:var(--text)}
 
-.new-task-repo-list{position:absolute;z-index:40;top:calc(100% + 4px);left:124px;right:0;max-height:min(300px,40dvh);overflow:auto;margin:0;padding:4px;list-style:none;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-hover);box-shadow:0 12px 32px color-mix(in srgb,var(--shadow) calc(47% * var(--shadow-strength)),transparent)}
+.new-task-repo-list{position:absolute;z-index:40;top:calc(100% + 4px);left:124px;right:0;box-sizing:border-box;height:min(224px,33dvh);overflow:auto;scrollbar-gutter:stable;overscroll-behavior:contain;margin:0;padding:4px;list-style:none;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-hover);box-shadow:0 12px 32px color-mix(in srgb,var(--shadow) calc(47% * var(--shadow-strength)),transparent)}
 .new-task-repo-list li{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:5px;font-size:calc(13px * var(--text-scale));color:var(--text-soft);cursor:pointer}
 .new-task-repo-list li.active{background:var(--accent-bg);color:var(--text)}
 .new-task-repo-list li small{margin-left:auto;font-size:calc(10px * var(--text-scale));color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em}
@@ -50,7 +50,7 @@
 
 .new-task-controls{display:flex;align-items:center;gap:8px;min-width:0}
 .new-task-controls>*{flex:1;min-width:0}
-.new-task-controls select{padding:7px 10px;border-radius:8px;font-size:calc(13px * var(--text-scale))}
+.new-task-controls :is(select, input){padding:7px 10px;border-radius:8px;font-size:calc(13px * var(--text-scale))}
 /* The agent picker in the sheet's grid: its own label stays for screen readers, the row's label shows. */
 .new-task-agent .agent-picker{gap:0}
 .new-task-agent .agent-picker-label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}

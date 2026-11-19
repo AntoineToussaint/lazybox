@@ -145,6 +145,7 @@ export type GroupCommands = {
   togglePin?(panel: Panel): void;
   /** Chat: the conversation on a page of its own. */
   moveToNewPage?(panel: Panel): void;
+  cloneConversation?(panel: Panel): (() => void) | undefined;
   /** Close the group's other tabs, or those to the right of this one. */
   closeTabs?(panel: Panel, which: 'others' | 'right'): void;
 };
@@ -157,8 +158,10 @@ export function groupMenuItems(group: GroupView, handle: DockHandle, commands: G
   // Tabs that "Close other tabs" and "Close tabs to the right" would close (the sidebar's lists stay).
   const closable = (value: Panel) => value.id !== panel.id && commands.canClose(value) && value.kind !== 'collections' && value.kind !== 'agents';
   const index = group.panels.findIndex(value => value.id === panel.id), others = group.panels.filter(closable), right = group.panels.slice(index + 1).filter(closable);
+  const clone = commands.cloneConversation?.(panel);
   const previewed = panel.preview || panel.binding.mode === 'follow';
   return [
+    !!clone && { label: 'Clone conversation…', icon: 'plus', run: clone },
     { label: 'Split right', icon: 'split-right', shortcut: keys.split, run: () => commands.splitWith(group.id, panel, 'right') },
     { label: 'Split down', icon: 'split-down', run: () => commands.splitWith(group.id, panel, 'below') },
     docked && { label: group.maximized ? 'Restore layout' : 'Maximize', icon: group.maximized ? 'restore' : 'maximize', shortcut: keys.maximize, run: () => handle.toggleMaximize(panel.id) },

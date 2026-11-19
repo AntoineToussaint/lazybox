@@ -86,7 +86,12 @@ try {
   const picker = page.getByRole('dialog', { name: 'Run an action' });
   await expect(picker.getByRole('searchbox', { name: 'Find actions' })).toBeFocused();
   await expect(picker.getByRole('option')).toHaveCount(5);
-  await page.keyboard.type('unatt');
+  const actionBounds = await picker.boundingBox();
+  const actionSearch = picker.getByRole('searchbox', { name: 'Find actions' });
+  await actionSearch.fill('zzqxyunmatched');
+  await expect(picker.getByText('No matching actions.')).toBeVisible();
+  assert.deepEqual(await picker.boundingBox(), actionBounds);
+  await actionSearch.fill('unatt');
   await expect(picker.getByRole('option')).toHaveCount(1);
   await page.screenshot({ path: '.cache/power-picker.png' });
   await page.keyboard.press('Enter');

@@ -81,6 +81,11 @@ try {
   dialog = page.getByRole("dialog", { name: "Snippets", exact: true });
   await expect(dialog).toBeVisible();
   const search = dialog.getByRole("searchbox", { name: "Find snippets" });
+  await expect(dialog.getByRole("option").first()).toBeVisible();
+  const snippetBounds = await dialog.boundingBox();
+  await search.fill("zzqxyunmatched");
+  await expect(dialog.getByText("No matching snippets.")).toBeVisible();
+  assert.deepEqual(await dialog.boundingBox(), snippetBounds, "empty snippet results stay inside the browser");
   await search.fill("carefully");
   await dialog.getByRole("button",{name:"☆ Add to favorites",exact:true}).click();
   await expect(dialog.getByRole("button",{name:"★ Favorite",exact:true})).toHaveAttribute("aria-pressed","true");

@@ -1,5 +1,5 @@
 /* The running turn, above the composer: its step with the real command, time, output, Stop, and background work. */
-.live-bar{--lb-working:var(--attention-working,var(--running));display:flex;flex-direction:column;gap:4px;flex:0 1 auto;min-height:0;max-height:45%;margin:0 24px 8px;padding:7px 8px 7px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-raised);font-size:calc(12px * var(--text-scale));min-width:0}
+.live-bar{--lb-working:var(--attention-working,var(--running));position:relative;display:flex;flex-direction:column;gap:4px;flex:0 1 auto;min-height:0;max-height:45%;margin:0 24px 8px;padding:7px 8px 7px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-raised);font-size:calc(12px * var(--text-scale));min-width:0}
 .live-bar[data-only=background]{padding:2px 4px}
 .live-bar-row{flex:none;display:flex;align-items:center;gap:8px;min-width:0;min-height:26px}
 .live-bar .live-activity{display:inline;padding:0;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--lb-working);font-variant-numeric:tabular-nums}
@@ -15,14 +15,14 @@
 .live-bar-button:hover:not(:disabled){background:var(--surface-selected)!important;color:var(--text)!important}
 .embedded-chat .live-bar-stop,.live-bar-stop{color:var(--danger-soft)!important;border:1px solid var(--danger-line-subtle)!important}
 .live-bar-stop:hover:not(:disabled){background:var(--danger-bg)!important;color:var(--danger-strong)!important}
-.live-bar-output{margin:0;padding:6px 10px;border-radius:7px;background:var(--surface-sunken);color:var(--text-tertiary);font-family:var(--font-console,var(--font-mono,ui-monospace,monospace));font-size:calc(11px * var(--code-scale));line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;max-height:calc(3 * 1.5em + 12px);overflow:hidden}
+.live-bar-output{margin:0;padding:6px 10px;border-radius:7px;background:var(--surface-sunken);color:var(--text-tertiary);font-family:var(--font-console,var(--font-mono,ui-monospace,monospace));font-size:calc(11px * var(--code-scale));line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;height:calc(3 * 1.5em + 12px);box-sizing:border-box;overflow:hidden}
 .live-bar-output{flex:none}
 /* The output's own close, in its corner: it is in the way as often as it is wanted. */
 .live-bar-output-frame{position:relative;display:flex;flex-direction:column;flex:0 1 auto;min-height:0}
 .live-bar-output-frame>.live-bar-output{padding-right:34px}
 .live-bar .live-bar-hide{position:absolute;top:4px;right:4px;width:22px;height:22px;min-width:0;padding:0!important;border:0;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;color:var(--text-muted);background:var(--surface-sunken)}
 .live-bar .live-bar-hide:hover{background:var(--surface-selected);color:var(--text)}
-.live-bar-output[data-expanded]{flex:0 1 auto;min-height:calc(3 * 1.5em + 12px);max-height:min(320px,40dvh);overflow:auto;overscroll-behavior:contain}
+.live-bar-output[data-expanded]{flex:0 1 auto;height:min(240px,28dvh);min-height:0;overflow:auto;scrollbar-gutter:stable;overscroll-behavior:contain}
 .live-bar>.subagent-tray,.live-bar-error{flex:none}
 .live-bar-quiet{color:var(--text-faint);font-style:italic}
 .live-bar-error{margin:0;color:var(--attention-failed,var(--danger));font-size:calc(11px * var(--text-scale))}

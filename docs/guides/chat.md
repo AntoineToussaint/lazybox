@@ -145,7 +145,9 @@ runs and `Esc` closes it and leaves your text. It works in Vim insert mode too.
   `/artifact` (track the agent's last message), `/mission`, `/run` (the last
   command block), `/stop`, `/detail quiet|smart|verbose`, `/rename <title>` and
   `/help`. A command that takes a choice lists it (models, modes) with the
-  current one marked; one that cannot run now says why. They are in the command
+  current one marked. An unavailable suggestion says why and lets Tab move
+  focus away. Enter returns to the normal send flow, which asks before sending
+  an unsupported command as text. They are in the command
   palette (`⌘K`) as well, where they leave your draft alone; there `/review`
   is *Open the review tray*. The model name in the chat header and under the
   message box opens the same `/model` choices (`Tab` to it, `Enter`). A

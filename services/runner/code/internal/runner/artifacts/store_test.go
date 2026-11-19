@@ -360,3 +360,28 @@ func TestAgentPublishedExcludesThePersonsAndTrackedFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestHTMLArtifactKeepsFormatAndSourceAcrossVersions(t *testing.T) {
+	root := t.TempDir()
+	s, _ := open(t, root)
+	const original = "<h1>First version</h1>"
+	first, err := s.Put("alpha", Put{Title: "Preview", Format: "html", Content: original})
+	if err != nil || first.Format != "html" {
+		t.Fatal(first, err)
+	}
+	if _, err := s.Put("alpha", Put{ID: first.ID, Format: "markdown", Content: "# Wrong format"}); !errors.Is(err, ErrInvalid) {
+		t.Fatal("format change accepted", err)
+	}
+	if _, err := s.Put("alpha", Put{Title: "Preview", Format: "../html", Content: original}); !errors.Is(err, ErrInvalid) {
+		t.Fatal("unknown format accepted", err)
+	}
+	next, err := s.Put("alpha", Put{ID: first.ID, Content: "<h1>Second version</h1>"})
+	if err != nil || next.Format != "html" || next.Latest() != 2 {
+		t.Fatal(next, err)
+	}
+	reopened, _ := open(t, root)
+	old, err := reopened.Get("alpha", first.ID, 1)
+	if err != nil || old.Content != original || old.Format != "html" {
+		t.Fatal(old, err)
+	}
+}

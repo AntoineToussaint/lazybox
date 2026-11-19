@@ -114,7 +114,7 @@ func (s *Service) PutArtifact(ctx context.Context, r *pb.PutArtifactRequest) (*p
 	if err != nil {
 		return nil, err
 	}
-	put := artifacts.Put{ID: r.ArtifactId, Title: r.Title, Kind: r.Kind, Content: r.Content, ExpectedVersion: r.ExpectedVersion, Author: artifacts.Author{Kind: "person"}}
+	put := artifacts.Put{ID: r.ArtifactId, Title: r.Title, Kind: r.Kind, Format: r.Format, Content: r.Content, ExpectedVersion: r.ExpectedVersion, Author: artifacts.Author{Kind: "person"}}
 	for _, l := range r.Links {
 		put.Links = append(put.Links, artifacts.Link{Kind: l.Kind, ID: l.Id, Role: l.Role})
 	}

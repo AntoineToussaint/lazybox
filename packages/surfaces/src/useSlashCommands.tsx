@@ -209,7 +209,7 @@ export function useSlashCommands(o: Options) {
     if (!message || !current?.collectionId) return;
     const scope = { collectionId: current.collectionId, sessionId: latest.current.sessionID, conversationId: current.conversationId };
     let existing: Artifact[] = [];
-    try { existing = conversationArtifacts((await api.listArtifacts({ collectionId: current.collectionId }, { timeoutMs: 5000 })).artifacts, scope); } catch { /* offered without updates */ }
+    try { existing = conversationArtifacts((await api.listArtifacts({ collectionId: current.collectionId }, { timeoutMs: 5000 })).artifacts, scope).filter(artifact => !artifact.format || artifact.format === 'markdown'); } catch { /* offered without updates */ }
     setTracking({ kind: 'track', message, existing });
   };
 

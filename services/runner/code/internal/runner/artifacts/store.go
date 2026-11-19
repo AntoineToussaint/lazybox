@@ -140,9 +140,9 @@ type Document struct {
 
 // Put creates an artifact (ID empty) or appends a version to one.
 type Put struct {
-	ID, Title, Kind, Content string
-	Author                   Author
-	Source                   Source
+	ID, Title, Kind, Format, Content string
+	Author                           Author
+	Source                           Source
 	// ExpectedVersion, when not 0, must be the latest version.
 	ExpectedVersion uint32
 	Links           []Link
@@ -273,7 +273,7 @@ func (s *Store) document(a *Artifact, version uint32) (Document, error) {
 	if version > a.Latest() {
 		return Document{}, fmt.Errorf("version %d of %q: %w", version, a.ID, fs.ErrNotExist)
 	}
-	raw, err := os.ReadFile(s.versionPath(a.Workspace, a.ID, version))
+	raw, err := os.ReadFile(s.versionPath(a, version))
 	if err != nil {
 		return Document{}, err
 	}
@@ -281,8 +281,15 @@ func (s *Store) document(a *Artifact, version uint32) (Document, error) {
 }
 
 func (s *Store) dir(ws, id string) string { return filepath.Join(s.root, ws, id) }
-func (s *Store) versionPath(ws, id string, n uint32) string {
-	return filepath.Join(s.dir(ws, id), "v"+strconv.FormatUint(uint64(n), 10)+".md")
+
+var formatExtensions = map[string]string{"markdown": ".md", "html": ".html"}
+
+func (s *Store) versionPath(a *Artifact, n uint32) string {
+	extension := formatExtensions[a.Format]
+	if extension == "" {
+		extension = formatExtensions["markdown"]
+	}
+	return filepath.Join(s.dir(a.Workspace, a.ID), "v"+strconv.FormatUint(uint64(n), 10)+extension)
 }
 
 func normalizeTitle(title string) (string, error) {
@@ -343,11 +350,14 @@ func (s *Store) Put(ws string, p Put) (Document, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p.ID == "" {
-		return s.create(ws, p.Title, p.Kind, p.Content, p.Author, p.Source, "")
+		return s.createWithID(ws, newID(), p.Title, p.Kind, p.Content, p.Author, p.Source, "", "", p.Format)
 	}
 	a, err := s.find(ws, p.ID)
 	if err != nil {
 		return Document{}, err
+	}
+	if p.Format != "" && p.Format != a.Format {
+		return Document{}, fmt.Errorf("%w: an artifact format cannot change", ErrInvalid)
 	}
 	if p.ExpectedVersion != 0 && p.ExpectedVersion != a.Latest() {
 		return Document{}, fmt.Errorf("%w: a newer version (v%d) exists; review it before saving", ErrConflict, a.Latest())
@@ -383,7 +393,7 @@ func (s *Store) Put(ws string, p Put) (Document, error) {
 }
 
 func (s *Store) create(ws, title, kind, content string, author Author, source Source, tracked string) (Document, error) {
-	return s.createWithID(ws, newID(), title, kind, content, author, source, tracked, "")
+	return s.createWithID(ws, newID(), title, kind, content, author, source, tracked, "", "markdown")
 }
 
 // PublishReview publishes an immutable result under the review run ID. A
@@ -403,10 +413,10 @@ func (s *Store) PublishReview(ws, id, title, content, schema string, source Sour
 	if existing := s.items[ws][id]; existing != nil {
 		return s.document(existing, 1)
 	}
-	return s.createWithID(ws, id, title, "report", content, Author{Kind: "agent", SessionID: source.SessionID}, source, "", schema)
+	return s.createWithID(ws, id, title, "report", content, Author{Kind: "agent", SessionID: source.SessionID}, source, "", schema, "markdown")
 }
 
-func (s *Store) createWithID(ws, id, title, kind, content string, author Author, source Source, tracked, schema string) (Document, error) {
+func (s *Store) createWithID(ws, id, title, kind, content string, author Author, source Source, tracked, schema, format string) (Document, error) {
 	title, err := normalizeTitle(title)
 	if err != nil {
 		return Document{}, err
@@ -417,8 +427,14 @@ func (s *Store) createWithID(ws, id, title, kind, content string, author Author,
 	if err = validKind(kind); err != nil {
 		return Document{}, err
 	}
+	if format == "" {
+		format = "markdown"
+	}
+	if _, ok := formatExtensions[format]; !ok {
+		return Document{}, fmt.Errorf("%w: unknown artifact format %q", ErrInvalid, format)
+	}
 	now := s.now().UnixMilli()
-	a := Artifact{ID: id, Workspace: ws, Title: title, Kind: kind, Format: "markdown", CreatedAt: now, TrackedPath: tracked}
+	a := Artifact{ID: id, Workspace: ws, Title: title, Kind: kind, Format: format, CreatedAt: now, TrackedPath: tracked}
 	if source.Kind == "message" || source.Kind == "agent" {
 		a.OriginSessionID, a.OriginConversationID = source.SessionID, source.ConversationID
 	}
@@ -441,7 +457,7 @@ func (s *Store) append(a *Artifact, content string, author Author, source Source
 	}
 	now := s.now().UnixMilli()
 	v := Version{Schema: schema, Number: a.Latest() + 1, CreatedAt: now, Author: author, Source: source, Digest: Digest(content), Size: uint64(len(content))}
-	if err := writeFile(s.versionPath(a.Workspace, a.ID, v.Number), []byte(content)); err != nil {
+	if err := writeFile(s.versionPath(a, v.Number), []byte(content)); err != nil {
 		return err
 	}
 	a.Versions = append(a.Versions, v)

@@ -29,7 +29,7 @@ type artifactAPI interface {
 }
 
 const artifactUsage = `Usage:
-  lazybox artifact put <file|-> --title T [--id ID] [--kind plan|report|spec|notes|other] [--supersedes ID[,ID…]]
+  lazybox artifact put <file|-> --title T [--id ID] [--kind plan|report|spec|notes|other] [--format markdown|html] [--supersedes ID[,ID…]]
   lazybox artifact retire ID [--superseded-by ID] [--reason "…"]
   lazybox artifact get ID [--version N]
   lazybox artifact list [--all]`
@@ -98,6 +98,7 @@ func artifactCommand(ctx context.Context, client artifactAPI, workspace string, 
 	collection := flags.String("collection", workspace, "workspace whose artifacts to use (set for agents and workspace terminals)")
 	title := flags.String("title", "", "put: the artifact's title (required to create one)")
 	id := flags.String("id", "", "put: publish a new version of this artifact instead of creating one")
+	format := flags.String("format", "", "put: markdown or html (set at creation)")
 	kind := flags.String("kind", "", "put: plan, report, spec, notes or other")
 	version := flags.Uint("version", 0, "get: this version instead of the latest")
 	supersedes := flags.String("supersedes", "", "put: retire these artifacts (comma-separated IDs) as superseded by the one published")
@@ -145,7 +146,7 @@ func artifactCommand(ctx context.Context, client artifactAPI, workspace string, 
 			}
 			replaced = append(replaced, current.Msg)
 		}
-		request := &pb.PutArtifactRequest{CollectionId: *collection, ArtifactId: *id, Title: *title, Kind: *kind, Content: string(data)}
+		request := &pb.PutArtifactRequest{CollectionId: *collection, ArtifactId: *id, Title: *title, Kind: *kind, Format: *format, Content: string(data)}
 		for _, old := range replaced {
 			request.Supersedes = append(request.Supersedes, old.Id)
 		}

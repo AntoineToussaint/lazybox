@@ -23,9 +23,9 @@ export function artifactFixture({ workspaceFiles, mutations }) {
     entry.versions.push({ header: { number, createdAtUnixMillis: String(at), author, source, digest: digest(content), size: String(Buffer.byteLength(content)) }, content });
     entry.meta.updatedAtUnixMillis = String(at);
   };
-  const create = ({ collectionId, title, kind, content, author, source, trackedPath = '' }) => {
+  const create = ({ collectionId, title, kind, content, author, source, trackedPath = '', format = 'markdown' }) => {
     const id = randomUUID().replace(/-/g, '').slice(0, 20).toUpperCase(), at = now();
-    const entry = { meta: { id, collectionId, title, kind: KINDS.has(kind) ? kind : 'other', format: 'markdown', createdAtUnixMillis: String(at), updatedAtUnixMillis: String(at), originSessionId: source?.sessionId || '', originConversationId: source?.conversationId || '', trackedPath, trackingProblem: '' }, versions: [] };
+    const entry = { meta: { id, collectionId, title, kind: KINDS.has(kind) ? kind : 'other', format, createdAtUnixMillis: String(at), updatedAtUnixMillis: String(at), originSessionId: source?.sessionId || '', originConversationId: source?.conversationId || '', trackedPath, trackingProblem: '' }, versions: [] };
     append(entry, content, author, source);
     artifacts.set(id, entry);
     return entry;
@@ -115,9 +115,9 @@ export function artifactFixture({ workspaceFiles, mutations }) {
     for (const entry of artifacts.values()) if (entry.meta.collectionId === collectionId && entry.meta.trackedPath === path && entry.versions.at(-1).content !== text) append(entry, text, { kind: 'file' }, { kind: 'file', path });
   };
   /** An agent's `lazybox artifact put`; with `supersedes`, the artifacts it retires as replaced by this one. */
-  const agentPut = ({ collectionId, sessionId, conversationId = '', title, kind, content, artifactId, supersedes = [] }) => {
+  const agentPut = ({ collectionId, sessionId, conversationId = '', title, kind, content, artifactId, format, supersedes = [] }) => {
     const source = { kind: 'agent', sessionId, conversationId }, author = { kind: 'agent', sessionId };
-    const entry = artifactId ? find(collectionId, artifactId) : create({ collectionId, title, kind, content, author, source });
+    const entry = artifactId ? find(collectionId, artifactId) : create({ collectionId, title, kind, content, author, source, format });
     if (artifactId) append(entry, content, author, source);
     for (const id of supersedes) retire(find(collectionId, id), author, entry.meta.id);
     return wire(entry);

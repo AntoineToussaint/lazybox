@@ -138,6 +138,14 @@ func TestArtifactVerbPublishesReadsAndLists(t *testing.T) {
 		t.Fatalf("%q %v", out, err)
 	}
 
+	const html = "<h1>Preview</h1>"
+	if _, err = run(html, "put", "-", "--title", "Preview", "--format", "html"); err != nil {
+		t.Fatal(err)
+	}
+	if put := f.puts[len(f.puts)-1]; put.Format != "html" || put.Content != html {
+		t.Fatalf("%+v", put)
+	}
+
 	if _, err = run("x", "put", "-"); err == nil || !strings.Contains(err.Error(), "--title is required") {
 		t.Fatal(err)
 	}

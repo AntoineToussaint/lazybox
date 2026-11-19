@@ -69,6 +69,8 @@ and choose the branch and **full**. Manual runs default to full.
 Both profiles publish the `ci` result. Fast CI checks the common paths
 before merge. The full profile covers native and cross-platform behavior and
 the complete UI catalog. The release workflow always calls the full profile.
+The TypeScript and UI jobs use the same Playwright image, matched to the
+lockfile, for Chromium and its system libraries.
 
 The UI matrix reads the same catalog as local checks.
 `release-gates.mjs shards ui <count>` splits the UI gates into disjoint shards.

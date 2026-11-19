@@ -73,3 +73,23 @@ The page follows new versions by itself. Rename by double-clicking the title.
   **Create GitHub issue…** in a workspace repository.
 
 Deleting a workspace deletes its artifacts; deleting a conversation does not.
+
+## Preview an HTML artifact
+
+Publish a self-contained page with
+`lazybox artifact put preview.html --title "Deploy walkthrough" --format html`.
+Update it with `lazybox artifact put preview.html --id ID`. The format is fixed
+at creation and independent of the kind. Select a version to preview or
+download its original HTML. **Changes** shows a source diff.
+
+The preview supports inline styles, embedded raster images, and native HTML
+controls such as expandable details. It runs in a sandbox with scripts and
+external resources blocked. Repository file tracking uses Markdown.
+
+Use **Source** to read the original HTML in Lazybox. For artifacts managed
+directly in Lazybox, select an older revision and choose **Republish vN** to
+make that content current while preserving the intervening history.
+
+Select text in the Markdown reader or HTML source to **Send selection to
+agent**. The draft includes the excerpt and a command to read the exact
+revision you had open. In a standalone window, Lazybox copies that draft.

@@ -745,3 +745,17 @@ The catalog stores complete GitHub results on the Runner, scoped by account and
 connection method. All repository pickers consume it. Pagination and credential
 access live behind the Runner source interface, not React component state.
 See [catalog configuration and workflow](WORKSPACES.md#catalog-boundaries-and-configuration).
+
+### Behavior verification
+
+The Behavior verification template runs an automatic review and repair loop.
+The reviewer registers acceptance criteria with `lazybox review verify` or the
+`verify` command tool action. The Runner executes each frozen command against
+independent base and candidate checkouts and retains revision-bound command
+receipts. Failed findings go to the author. After repairs, the Runner captures
+the new candidate and reruns the same checks. Missing or interrupted evidence
+cannot produce a clean result. Acceptance checks and their output are available
+in the review tray and the versioned report.
+
+See [Review agent work](docs/guides/review-agent-work.md) for command recipes,
+regression tests, loop controls, execution limits and checkout isolation.

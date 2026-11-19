@@ -12,6 +12,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent/agenttest"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/reviews"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"google.golang.org/grpc/codes"
@@ -417,6 +418,188 @@ func TestBehaviorVerificationCapturesInputAndRetainsEvidence(t *testing.T) {
 	for _, want := range []string{"lazybox.review-findings/v1", "Criterion: unverified. Captured runtime unavailable.", "verification", "captured API changes", filed.Finding.Id, "// captured"} {
 		if !strings.Contains(report.Content, want) {
 			t.Errorf("result lacks %q: %s", want, report.Content)
+		}
+	}
+}
+
+func TestVerificationExecutesCapturedTreesAndRecordsResults(t *testing.T) {
+	f := newReviewFixture(t)
+	path := filepath.Join(f.mine.Members[0].Path, "acceptance.txt")
+	if err := os.WriteFile(path, []byte("correct"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, TemplateId: "behavior-verification-v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-f.codex.Session.Applied
+	if err := os.WriteFile(path, []byte("later edit"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	call := f.codex.Session.Open.Tools
+	raw, err := call(timeout(t), "lazybox_command", json.RawMessage(`{"action":"verify","name":"preserves captured content","member":"api","expected":"acceptance.txt contains correct","argv":["sh","-c","test \"$(cat acceptance.txt)\" = correct"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var check reviews.VerificationCheck
+	if err := json.Unmarshal([]byte(raw), &check); err != nil {
+		t.Fatal(err)
+	}
+	if len(check.Runs) != 1 {
+		t.Fatalf("missing execution: %s", raw)
+	}
+	receipt := check.Runs[0]
+	if receipt.CandidateCommand == "" {
+		t.Fatalf("execution not started: %s", raw)
+	}
+	for _, id := range []string{receipt.BaseCommand, receipt.CandidateCommand} {
+		args, _ := json.Marshal(map[string]string{"action": "wait", "id": id})
+		if _, err := call(timeout(t), "lazybox_command", args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Simulate a restart between command registration and saving its receipt.
+	// The managed command's durable identity must restore both output links.
+	if _, err := f.bench.Reviews.UpdateRun(f.mine.Id, started.Run.Id, func(run *reviews.Run) error {
+		run.Verification[0].Runs[0].BaseCommand = ""
+		run.Verification[0].Runs[0].CandidateCommand = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "Review coverage: captured content verified."}
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	events(t, f.bench, f.conversation.ID, "review_finished")
+	report, err := f.client.GetArtifact(f.owner, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: started.Run.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"state": "passed"`, `"baseExit": 1`, `"candidateExit": 0`, receipt.BaseCommand, receipt.CandidateCommand} {
+		if !strings.Contains(report.Content, want) {
+			t.Errorf("missing %s in %s", want, report.Content)
+		}
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "later edit" {
+		t.Fatalf("author tree changed: %q %v", content, err)
+	}
+}
+
+func TestVerificationRepairsAndRerunsFrozenChecks(t *testing.T) {
+	f := newReviewFixture(t)
+	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, TemplateId: "behavior-verification-v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-f.codex.Session.Applied
+	call := f.codex.Session.Open.Tools
+	args := json.RawMessage(`{"action":"verify","name":"repair result","member":"api","expected":"acceptance.txt contains correct","argv":["sh","-c","test \"$(cat acceptance.txt)\" = correct"]}`)
+	waitCheck := func() reviews.VerificationCheck {
+		t.Helper()
+		raw, err := call(timeout(t), "lazybox_command", args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var check reviews.VerificationCheck
+		if err := json.Unmarshal([]byte(raw), &check); err != nil {
+			t.Fatal(err)
+		}
+		receipt := check.Runs[len(check.Runs)-1]
+		for _, id := range []string{receipt.BaseCommand, receipt.CandidateCommand} {
+			wait, _ := json.Marshal(map[string]string{"action": "wait", "id": id})
+			if _, err := call(timeout(t), "lazybox_command", wait); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return check
+	}
+	first := waitCheck()
+	reviewer := bearer(timeout(t), agentToken(t, f.codex.Session.Open.Env))
+	filed, err := f.client.AddReviewFinding(reviewer, &pb.AddReviewFindingRequest{SessionId: started.Session.Id, File: "api/handler.go", StartLine: 1, Severity: "blocker", Title: "Missing acceptance output", Body: "Reproduce with the recorded repair result check. Retain a regression test."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "Review coverage: candidate check failed."}
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	applied(t, f.claude, "Missing acceptance output")
+	runUntil(t, f, func(r *pb.ReviewRun) bool { return r.Phase == "fixing" })
+	if err := os.WriteFile(filepath.Join(f.mine.Members[0].Path, "acceptance.txt"), []byte("correct"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.mine.Members[0].Path, "recovery_test.sh"), []byte("test \"$(cat acceptance.txt)\" = correct\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.claude.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	applied(t, f.codex, "Round 2")
+	second := waitCheck()
+	regression := &pb.RunReviewVerificationRequest{SessionId: started.Session.Id, Name: "retained regression", Member: "api", Expected: "the retained recovery test passes", Argv: []string{"sh", "recovery_test.sh"}, Regression: "recovery_test.sh"}
+	retained, err := f.client.RunReviewVerification(reviewer, regression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{retained.Runs[0].BaseCommandId, retained.Runs[0].CandidateCommandId} {
+		wait, _ := json.Marshal(map[string]string{"action": "wait", "id": id})
+		if _, err := call(timeout(t), "lazybox_command", wait); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if len(second.Runs) != 2 || first.Runs[0].Candidate == second.Runs[1].Candidate || first.Runs[0].CandidateCommand == second.Runs[1].CandidateCommand {
+		t.Fatalf("check not rerun on repaired input: %+v", second)
+	}
+	if _, err := f.bench.ReviewVerdict(started.Session.Id, filed.Finding.Id, "resolved", "Recorded check passes"); err != nil {
+		t.Fatal(err)
+	}
+	f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "Review coverage: repaired candidate passed."}
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	runUntil(t, f, func(r *pb.ReviewRun) bool { return r.StopReason == "clean" && r.Round == 2 })
+	report, err := f.client.GetArtifact(f.owner, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: started.Run.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Versions) != 2 || !strings.Contains(report.Content, "repaired candidate passed") {
+		t.Fatalf("round evidence missing: %+v", report)
+	}
+}
+
+func TestVerificationRPCScopesRecipesAndCancelsProcesses(t *testing.T) {
+	f := newReviewFixture(t)
+	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, TemplateId: "behavior-verification-v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-f.codex.Session.Applied
+	request := &pb.RunReviewVerificationRequest{SessionId: started.Session.Id, Name: "long check", Member: "api", Expected: "command completes", Argv: []string{"sh", "-c", "sleep 30"}, Regression: "Retain the timeout scenario in the repository tests"}
+	author := bearer(timeout(t), f.agentToken)
+	if _, err := f.client.RunReviewVerification(author, request); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("author ran reviewer recipe: %v", err)
+	}
+	reviewer := bearer(timeout(t), agentToken(t, f.codex.Session.Open.Env))
+	check, err := f.client.RunReviewVerification(reviewer, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := f.client.RunReviewVerification(reviewer, request)
+	if err != nil || again.Runs[0].CandidateCommandId != check.Runs[0].CandidateCommandId {
+		t.Fatalf("retry duplicated execution: %+v %v", again, err)
+	}
+	request.Argv = []string{"true"}
+	if _, err := f.client.RunReviewVerification(reviewer, request); err == nil {
+		t.Fatal("replaced frozen check")
+	}
+	if _, _, err := f.bench.CancelReview(timeout(t), f.mine.Id, started.Run.Id, "You"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{check.Runs[0].BaseCommandId, check.Runs[0].CandidateCommandId} {
+		command, err := f.bench.Commands.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		status, err := command.Wait(ctx)
+		cancel()
+		if err != nil || !status.Done {
+			t.Fatalf("verification still running after cancel: %+v %v", status, err)
 		}
 	}
 }

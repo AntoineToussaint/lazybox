@@ -116,6 +116,9 @@ func (s *Service) wireReviewRun(review reviews.Review, run reviews.Run, workspac
 			out.Phase = reviews.PhaseReviewing
 		}
 	}
+	for _, check := range run.Verification {
+		out.Verification = append(out.Verification, wireVerification(check))
+	}
 	for _, r := range run.Rounds {
 		out.Rounds = append(out.Rounds, &pb.ReviewRound{Number: uint32(r.N), Trigger: r.Trigger, AuthorTurn: uint32(r.AuthorTurn), StartedAtUnix: r.StartedAt, EndedAtUnix: r.EndedAt,
 			Filed: uint32(r.Filed), Resolved: uint32(r.Resolved), StillOpen: uint32(r.StillOpen), Blockers: uint32(r.Blockers)})

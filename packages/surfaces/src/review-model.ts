@@ -224,6 +224,7 @@ export function loopLine(run: LoopRun): string {
       return `Clean ✓ after ${rounds(run.round)}${left ? ` · ${left} open` : ''}`;
     }
     case 'max_rounds': return `Stopped at its ${rounds(run.maxRounds)} with a blocker open · needs you`;
+    case 'unverified': return 'Acceptance verification incomplete · needs you';
     case 'stuck': return 'Stuck: the same blocker is still open after two fixes · needs you';
     case 'error': return `Stopped: ${run.detail || 'an error'} · needs you`;
     case 'stopped': return 'You stopped the loop';
@@ -256,7 +257,7 @@ export function reviewTabBadge(run: Pick<ReviewRun, 'state' | 'reviewerLabel' | 
   return { text: `${findings} finding${findings === 1 ? '' : 's'}`, tone: run.blockers ? 'failed' : 'warn', label: `${run.reviewerLabel} is done · ${countsSummary(run)}` };
 }
 /** The loop asks the person: findings to send, or it stopped and needs a decision. */
-export const loopNeedsYou = (run: LoopRun) => ['max_rounds', 'stuck', 'error'].includes(run.stopReason) || (run.phase === 'triage' && !run.stopReason && (run.loop === 'ask' || run.paused));
+export const loopNeedsYou = (run: LoopRun) => ['max_rounds', 'stuck', 'error', 'unverified'].includes(run.stopReason) || (run.phase === 'triage' && !run.stopReason && (run.loop === 'ask' || run.paused));
 /** Whether the person can still steer the loop. */
 export const loopActive = (run: LoopRun) => !!run.loop && run.loop !== 'off' && !run.stopReason && run.phase !== 'done' && !!run.phase;
 /** A review still under way, which the person can cancel: its reviewer works, or its loop waits for the next round. */

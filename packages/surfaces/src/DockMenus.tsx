@@ -246,7 +246,7 @@ export function GroupAdd({ group, commands }: { group: GroupView; commands: AddC
         onClick={() => runAction('review.start', 'security-review-v1', 'menu')}>
         <Icon name="review"/><span>Security review</span><small>Workspace changes</small>
       </button>
-      <button type="button" disabled={!!why} title={why || 'Independently check acceptance criteria against captured workspace changes'}
+      <button type="button" disabled={!!why} title={why || 'Run independent acceptance checks and automatically send failures for repair'}
         onClick={() => runAction('review.start', 'behavior-verification-v1', 'menu')}>
         <Icon name="review"/><span>Behavior verification</span><small>Workspace changes</small>
       </button>

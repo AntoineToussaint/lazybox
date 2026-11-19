@@ -153,6 +153,7 @@ const (
 	RunnerService_StartReview_FullMethodName                  = "/lazybox.bench.v1.RunnerService/StartReview"
 	RunnerService_AddReviewFinding_FullMethodName             = "/lazybox.bench.v1.RunnerService/AddReviewFinding"
 	RunnerService_ListReviewFindings_FullMethodName           = "/lazybox.bench.v1.RunnerService/ListReviewFindings"
+	RunnerService_RunReviewVerification_FullMethodName        = "/lazybox.bench.v1.RunnerService/RunReviewVerification"
 	RunnerService_SetReviewFindingState_FullMethodName        = "/lazybox.bench.v1.RunnerService/SetReviewFindingState"
 	RunnerService_UpdateReviewRun_FullMethodName              = "/lazybox.bench.v1.RunnerService/UpdateReviewRun"
 	RunnerService_CancelReview_FullMethodName                 = "/lazybox.bench.v1.RunnerService/CancelReview"
@@ -513,6 +514,8 @@ type RunnerServiceClient interface {
 	// The findings of the review an execution is the reviewer (or the author)
 	// of, from `lazybox review list`. The same agent rule as AddReviewFinding.
 	ListReviewFindings(ctx context.Context, in *ListReviewFindingsRequest, opts ...grpc.CallOption) (*ReviewFindings, error)
+	// Execute a frozen acceptance recipe for the caller’s active verification review.
+	RunReviewVerification(ctx context.Context, in *RunReviewVerificationRequest, opts ...grpc.CallOption) (*ReviewVerificationCheck, error)
 	// The reviewer's verdict on one of its own findings in a later round
 	// (`lazybox review resolve|reopen <id> --note`): resolved, or still open.
 	// The same agent rule as AddReviewFinding; only findings of its own review.
@@ -2147,6 +2150,16 @@ func (c *runnerServiceClient) ListReviewFindings(ctx context.Context, in *ListRe
 	return out, nil
 }
 
+func (c *runnerServiceClient) RunReviewVerification(ctx context.Context, in *RunReviewVerificationRequest, opts ...grpc.CallOption) (*ReviewVerificationCheck, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReviewVerificationCheck)
+	err := c.cc.Invoke(ctx, RunnerService_RunReviewVerification_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *runnerServiceClient) SetReviewFindingState(ctx context.Context, in *SetReviewFindingStateRequest, opts ...grpc.CallOption) (*ReviewFinding, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReviewFinding)
@@ -3333,6 +3346,8 @@ type RunnerServiceServer interface {
 	// The findings of the review an execution is the reviewer (or the author)
 	// of, from `lazybox review list`. The same agent rule as AddReviewFinding.
 	ListReviewFindings(context.Context, *ListReviewFindingsRequest) (*ReviewFindings, error)
+	// Execute a frozen acceptance recipe for the caller’s active verification review.
+	RunReviewVerification(context.Context, *RunReviewVerificationRequest) (*ReviewVerificationCheck, error)
 	// The reviewer's verdict on one of its own findings in a later round
 	// (`lazybox review resolve|reopen <id> --note`): resolved, or still open.
 	// The same agent rule as AddReviewFinding; only findings of its own review.
@@ -3999,6 +4014,9 @@ func (UnimplementedRunnerServiceServer) AddReviewFinding(context.Context, *AddRe
 }
 func (UnimplementedRunnerServiceServer) ListReviewFindings(context.Context, *ListReviewFindingsRequest) (*ReviewFindings, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListReviewFindings not implemented")
+}
+func (UnimplementedRunnerServiceServer) RunReviewVerification(context.Context, *RunReviewVerificationRequest) (*ReviewVerificationCheck, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunReviewVerification not implemented")
 }
 func (UnimplementedRunnerServiceServer) SetReviewFindingState(context.Context, *SetReviewFindingStateRequest) (*ReviewFinding, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetReviewFindingState not implemented")
@@ -6657,6 +6675,24 @@ func _RunnerService_ListReviewFindings_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_RunReviewVerification_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunReviewVerificationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).RunReviewVerification(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_RunReviewVerification_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).RunReviewVerification(ctx, req.(*RunReviewVerificationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RunnerService_SetReviewFindingState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetReviewFindingStateRequest)
 	if err := dec(in); err != nil {
@@ -8785,6 +8821,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListReviewFindings",
 			Handler:    _RunnerService_ListReviewFindings_Handler,
+		},
+		{
+			MethodName: "RunReviewVerification",
+			Handler:    _RunnerService_RunReviewVerification_Handler,
 		},
 		{
 			MethodName: "SetReviewFindingState",

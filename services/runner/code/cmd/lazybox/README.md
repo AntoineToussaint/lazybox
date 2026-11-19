@@ -198,3 +198,5 @@ watchers").
 orchestration process file (`.lazybox/process.yaml`, see
 `ORCHESTRATION.md` §4) from files alone; with `--workspace` it asks the
 Runner. It is implemented in `internal/process`.
+
+`lazybox review verify --name NAME --member REPOSITORY --expected TEXT [--regression TEXT] -- COMMAND [ARGS...]` registers a frozen acceptance check in the caller’s active Behavior verification review. It returns the base and candidate managed-command IDs as JSON. `lazybox review list --json` includes recorded checks and current results.

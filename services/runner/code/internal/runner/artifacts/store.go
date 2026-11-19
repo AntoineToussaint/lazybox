@@ -396,8 +396,9 @@ func (s *Store) create(ws, title, kind, content string, author Author, source So
 	return s.createWithID(ws, newID(), title, kind, content, author, source, tracked, "", "markdown")
 }
 
-// PublishReview publishes an immutable result under the review run ID. A
-// retry after a Runner restart returns the already published version.
+// PublishReview retains each round under the review run ID. Source.TurnID
+// identifies a round for idempotent retries across Runner restarts. An empty
+// TurnID preserves the original single-result behavior.
 func (s *Store) PublishReview(ws, id, title, content, schema string, source Source) (Document, error) {
 	if err := validWorkspace(ws); err != nil {
 		return Document{}, err
@@ -411,7 +412,18 @@ func (s *Store) PublishReview(ws, id, title, content, schema string, source Sour
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing := s.items[ws][id]; existing != nil {
-		return s.document(existing, 1)
+		if source.TurnID == "" {
+			return s.document(existing, 1)
+		}
+		for _, version := range existing.Versions {
+			if version.Source.TurnID == source.TurnID {
+				return s.document(existing, version.Number)
+			}
+		}
+		if err := s.append(existing, content, Author{Kind: "agent", SessionID: source.SessionID}, source, schema); err != nil {
+			return Document{}, err
+		}
+		return s.document(existing, existing.Latest())
 	}
 	return s.createWithID(ws, id, title, "report", content, Author{Kind: "agent", SessionID: source.SessionID}, source, "", schema, "markdown")
 }

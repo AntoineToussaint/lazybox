@@ -175,6 +175,7 @@ type Execution struct {
 	browserTools bool
 }
 type Bench struct {
+	verificationFlow  sync.Mutex
 	forkMu            sync.Mutex
 	pendingDeletions  *pendingDeletions
 	RepositoryCatalog *repositorycatalog.Cache
@@ -543,6 +544,7 @@ func New(cfg Config) (*Bench, error) {
 		return nil, err
 	}
 	b.watchPendingDeletions()
+	b.watchVerification()
 	return b, nil
 }
 
@@ -1089,12 +1091,15 @@ func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args
 		return "", agent.ErrUnsupported
 	}
 	var p struct {
-		Action  string   `json:"action"`
-		Argv    []string `json:"argv"`
-		ID      string   `json:"id"`
-		Offset  uint64   `json:"offset"`
-		Name    string   `json:"name"`
-		Restart bool     `json:"restart"`
+		Action     string   `json:"action"`
+		Argv       []string `json:"argv"`
+		ID         string   `json:"id"`
+		Offset     uint64   `json:"offset"`
+		Name       string   `json:"name"`
+		Restart    bool     `json:"restart"`
+		Member     string   `json:"member"`
+		Expected   string   `json:"expected"`
+		Regression string   `json:"regression"`
 		// A start's console title, folder (inside the workspace) and added
 		// environment: what an ACP agent's terminal/create asks for.
 		Title string   `json:"title"`
@@ -1109,6 +1114,12 @@ func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args
 	var value any
 	if p.Action == agent.InteractiveCommandAction {
 		v, err := b.requestTerminalHandoff(ctx, e, p.Argv, p.Cwd, pinnedEnv)
+		if err != nil {
+			return "", err
+		}
+		value = v
+	} else if p.Action == "verify" {
+		v, err := b.startVerification(ctx, e, reviews.VerificationCheck{Name: p.Name, Member: p.Member, Expected: p.Expected, Regression: p.Regression, Argv: p.Argv})
 		if err != nil {
 			return "", err
 		}

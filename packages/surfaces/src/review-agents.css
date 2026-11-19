@@ -116,3 +116,8 @@
 .review-alert{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0;padding:6px 10px;border:1px solid var(--warn);border-radius:8px;background:var(--warn-bg-strong);color:var(--text);font-size:calc(12px * var(--text-scale))}
 .review-alert span{flex:1;min-width:12em}
 .review-alert button{padding:3px 10px;border-radius:6px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text-soft);cursor:pointer;width:auto;font-size:calc(12px * var(--text-scale))}
+
+.review-verification { margin-block: 8px; }
+.review-verification section { padding-block: 8px; border-top: 1px solid var(--border); }
+.review-verification p { margin-block: 4px; overflow-wrap: anywhere; }
+.review-verification button { margin-inline-end: 6px; }

@@ -403,12 +403,15 @@ func (m *Manager) register(spec Spec, host *sessionhost.Client) (*Command, error
 	if spec.SessionID != "" && (spec.TerminalID != "" || spec.ShareWith != "") {
 		return nil, errors.New("only a workspace run comes from a terminal or is shared")
 	}
+	if spec.Kind == "verification" && (spec.SessionID == "" || spec.Action == "" || len(spec.Argv) == 0) {
+		return nil, errors.New("verification commands require a reviewer session, recipe identity and argv")
+	}
 	// A hook run (POWER.md) is a program or, for a webhook, a pipe the Runner
 	// writes the request's log to.
 	if spec.CollectionID != "" && spec.Kind != KindHook && (len(spec.Argv) > 0) != (spec.Kind != "") {
 		return nil, errors.New("a workspace run is a pipe, a workspace command has a kind")
 	}
-	if spec.Kind != "" && (spec.Kind != "setup" && spec.Kind != "archive" && spec.Kind != "action" && spec.Kind != KindHook && spec.Kind != KindRunner || spec.TerminalID != "" || spec.ShareWith != "") {
+	if spec.Kind != "" && (spec.Kind != "setup" && spec.Kind != "archive" && spec.Kind != "action" && spec.Kind != KindHook && spec.Kind != KindRunner && spec.Kind != "verification" || spec.TerminalID != "" || spec.ShareWith != "") {
 		return nil, errors.New("invalid workspace command")
 	}
 	if spec.StopGraceMs < 0 || spec.StopGraceMs > 60_000 {

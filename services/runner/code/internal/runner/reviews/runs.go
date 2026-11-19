@@ -48,10 +48,11 @@ type ReviewInput struct {
 
 // Run is one agent review.
 type Run struct {
-	ID             string        `json:"id"`
-	TemplateID     string        `json:"templateId,omitempty"`
-	Input          []ReviewInput `json:"input,omitempty"`
-	ResultArtifact string        `json:"resultArtifact,omitempty"`
+	Verification   []VerificationCheck `json:"verification,omitempty"`
+	ID             string              `json:"id"`
+	TemplateID     string              `json:"templateId,omitempty"`
+	Input          []ReviewInput       `json:"input,omitempty"`
+	ResultArtifact string              `json:"resultArtifact,omitempty"`
 	// The reviewer: its conversation (session and conversation id, which
 	// outlives a resumed session), title, how people name the agent, and the
 	// subscription it runs on.
@@ -251,7 +252,7 @@ func (s *Store) CreateRun(workspace string, run Run) (Run, error) {
 	_, err := s.update(workspace, func(r *Review) error {
 		// The oldest finished reviews make room; their findings stay.
 		for len(r.Runs) >= runsLimit {
-			i := slices.IndexFunc(r.Runs, func(x Run) bool { return x.State != RunRunning })
+			i := slices.IndexFunc(r.Runs, func(x Run) bool { return x.State != RunRunning && !x.Active() })
 			if i < 0 {
 				return fmt.Errorf("at most %d agent reviews per workspace", runsLimit)
 			}

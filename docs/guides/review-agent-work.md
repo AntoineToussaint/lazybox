@@ -113,19 +113,52 @@ agent reviews, and the review's card says so in a quiet line.
 
 ### Verify behavior with another agent
 
-In the workspace's **New tab** menu, choose **Behavior verification**. The
-reviewer receives a captured snapshot including uncommitted changes, derives
-acceptance criteria from the goal, and chooses an independent behavioral check.
-It reports each criterion as passed, failed, or unverified, with expected and
-observed results, revision, and output references. For bug fixes it attempts the
-same scenario on base and candidate when the available tools support it.
+In the workspace's **New tab** menu, choose **Behavior verification**. This
+starts an independent reviewer and an automatic repair loop, bounded by the
+configured review round limit. The reviewer derives acceptance criteria from
+the goal and registers independent executable checks.
 
-Findings appear in the Review tray. The findings artifact retains the full
-verification report alongside the captured input revisions. This is an agent's
-account of evidence. Runtime checks require an environment that preserves the
-captured revision during execution. When that environment is unavailable, the
-reviewer records the runtime gap as unverified. Later edits require a fresh
-Behavior verification run. This template runs one pass per snapshot.
+The reviewer runs a check with the managed-command tool's **verify** action,
+or through the CLI available to every agent backend.
+
+```sh
+lazybox review verify --name "restart recovery" --member api \
+  --expected "existing tasks survive a failed poll and restart" \
+  --regression "retain this scenario in the provider recovery suite" \
+  -- go test ./provider -run TestPollRecovery
+```
+
+The Runner creates independent Git checkouts of the captured base and candidate,
+including captured uncommitted changes, and executes the same command in each.
+Dependencies and setup belong in the command recipe. The checkout is separate
+from the author's files. Commands retain the host's execution privileges, so
+recipes must use fixture data and avoid external side effects. Each execution
+is capped at fifteen minutes. Managed output survives Runner restarts.
+
+The recipe is frozen once registered. Repeating it returns the same round's
+command IDs. Changing its assertion or command requires a new criterion. The
+**Acceptance checks** section in the Review tray shows each round's revisions,
+exit results, state, and buttons to open base and candidate output. The report
+artifact retains the reviewer account and Runner-recorded results, with one
+version per completed round.
+
+The reviewer files actionable failures as blockers. Lazybox sends them and the
+recorded reproduction recipes to the author, asking it to repair the behavior
+and retain confirmed reproductions in the existing regression suite. When the
+author changes files, Lazybox captures a new candidate and reruns the frozen
+checks. The reviewer inspects the output and resolves or reopens findings.
+Regression proposals remain attached to the checks for the reviewer to follow up.
+
+A successful verification requires current passing executions and resolved
+blockers. Zero checks, incomplete snapshots, interrupted execution and missing
+results produce **Acceptance verification incomplete · needs you**. Repeated
+blockers, a repair turn without changes, and the round limit also escalate.
+The report identifies ambiguous intent and remaining coverage gaps for the
+person to decide. Passing commands establish only the assertions they execute.
+
+Pause holds later rounds, Resume continues a pending recheck, and Cancel ends
+running verification commands and the review. Checkouts are retained with the
+review conversation and removed when its checkpoints are deleted.
 
 ## Undo a turn: checkpoints
 

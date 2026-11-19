@@ -620,10 +620,13 @@ func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution,
 		}
 		rounds = prefs.MaxRounds
 	}
-	if req.TemplateID != "" {
+	if req.TemplateID == reviews.VerificationTemplate {
+		mode = reviews.LoopAuto
+	} else if req.TemplateID != "" {
 		mode = reviews.LoopOff
 	}
 	reviews.StartLoop(&run, mode, rounds, time.Now().Unix())
+	run.Rounds[0].Input = run.Input
 	run, err = b.Reviews.CreateRun(workspace.ID, run)
 	if err != nil {
 		_ = e.Engine.Close()
@@ -775,7 +778,7 @@ func (b *Bench) reviewTurnEnded(e *Execution, operation string) {
 
 // reviewerTurnEnded records what a reviewer's turn found.
 func (b *Bench) reviewerTurnEnded(m reviews.Match, operation, reply string) {
-	if m.Run.TemplateID != "" && operation != m.Run.BriefOperation {
+	if m.Run.TemplateID != "" && m.Run.TemplateID != reviews.VerificationTemplate && operation != m.Run.BriefOperation {
 		return
 	}
 	review, err := b.Reviews.Load(m.Workspace)
@@ -800,6 +803,11 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match, operation, reply string) {
 			first = r.State == reviews.RunRunning
 		}
 		var err error
+		for i := range rv.Runs {
+			if rv.Runs[i].ID == m.Run.ID && rv.Runs[i].TemplateID == reviews.VerificationTemplate {
+				b.refreshVerification(&rv.Runs[i])
+			}
+		}
 		if action, err = reviews.RoundEnded(rv, m.Run.ID, time.Now().Unix()); err != nil {
 			return err
 		}
@@ -809,7 +817,8 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match, operation, reply string) {
 				if r.TemplateID != "" {
 					if err := b.publishReviewResult(m.Workspace, *r, rv.Comments, reviewCoverage(reply), reply); err != nil {
 						r.State, r.Detail = reviews.RunFailed, "Could not publish review result: "+err.Error()
-						action = reviews.Action{}
+						r.StopReason, r.Phase = reviews.StopError, reviews.PhaseDone
+						action = reviews.Action{Escalate: r.Detail}
 						run = *r
 						break
 					}
@@ -825,6 +834,9 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match, operation, reply string) {
 	})
 	if err != nil || endedByHand {
 		return
+	}
+	if !run.Active() {
+		b.cancelVerification(run)
 	}
 	defer b.reviewAct(m.Workspace, run, action)
 	if first {
@@ -866,6 +878,9 @@ func (b *Bench) maybeAutoReview(e *Execution, operation string, matches []review
 // ReviewRunView is a run as it stands now: a review whose reviewer
 // conversation has ended or failed before its turn ended says so.
 func (b *Bench) ReviewRunView(run reviews.Run) reviews.Run {
+	if run.TemplateID == reviews.VerificationTemplate {
+		b.refreshVerification(&run)
+	}
 	if run.State != reviews.RunRunning {
 		return run
 	}

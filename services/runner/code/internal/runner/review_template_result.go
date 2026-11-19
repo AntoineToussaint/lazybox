@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/artifacts"
@@ -11,13 +12,14 @@ import (
 )
 
 type reviewResult struct {
-	Schema       string                `json:"schema"`
-	Run          string                `json:"run"`
-	Template     string                `json:"template"`
-	Input        []reviews.ReviewInput `json:"input"`
-	Verification string                `json:"verification,omitempty"`
-	Coverage     string                `json:"coverage"`
-	Findings     []reviewResultFinding `json:"findings"`
+	Checks       []reviews.VerificationCheck `json:"checks,omitempty"`
+	Schema       string                      `json:"schema"`
+	Run          string                      `json:"run"`
+	Template     string                      `json:"template"`
+	Input        []reviews.ReviewInput       `json:"input"`
+	Verification string                      `json:"verification,omitempty"`
+	Coverage     string                      `json:"coverage"`
+	Findings     []reviewResultFinding       `json:"findings"`
 }
 
 type reviewResultFinding struct {
@@ -60,6 +62,7 @@ func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments 
 	result := reviewResult{Schema: "lazybox.review-findings/v1", Run: run.ID, Template: run.TemplateID, Input: run.Input, Coverage: coverage, Findings: []reviewResultFinding{}}
 	if run.TemplateID == reviews.VerificationTemplate {
 		result.Verification = strings.TrimSpace(reply)
+		result.Checks = run.Verification
 	}
 	for _, f := range comments {
 		if f.ReviewID == run.ID {
@@ -73,6 +76,14 @@ func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments 
 	}
 	var body strings.Builder
 	fmt.Fprintf(&body, "# %s\n\n%d findings filed against the captured changes. \n\n**Coverage** %s\n\n", run.ReviewerTitle, len(result.Findings), coverage)
+	if len(result.Checks) > 0 {
+		body.WriteString("## Recorded acceptance checks\n\n| Criterion | Expected behavior | Round | State | Base exit | Candidate exit | Command output IDs |\n| --- | --- | --- | --- | --- | --- | --- |\n")
+		for _, check := range result.Checks {
+			for _, receipt := range check.Runs {
+				fmt.Fprintf(&body, "| %s | %s | %d | %s | %v | %v | %s, %s |\n", verificationCell(check.Name), verificationCell(check.Expected), receipt.Round, receipt.State, verificationExit(receipt.BaseExit), verificationExit(receipt.CandidateExit), receipt.BaseCommand, receipt.CandidateCommand)
+			}
+		}
+	}
 	if result.Verification != "" {
 		fmt.Fprintf(&body, "## Verification report\n\n%s\n\n", result.Verification)
 	}
@@ -81,6 +92,17 @@ func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments 
 	}
 	fmt.Fprintf(&body, "\n```json\n%s\n```\n", data)
 	_, err = b.Artifacts.PublishReview(workspace, run.ID, run.ReviewerTitle, body.String(), result.Schema,
-		artifacts.Source{Kind: "agent", SessionID: run.ReviewerSession, ConversationID: run.ReviewerConversation})
+		artifacts.Source{Kind: "agent", SessionID: run.ReviewerSession, ConversationID: run.ReviewerConversation, TurnID: fmt.Sprintf("review-round-%d", run.Round)})
 	return err
+}
+
+func verificationExit(code *int) string {
+	if code == nil {
+		return "unverified"
+	}
+	return strconv.Itoa(*code)
+}
+
+func verificationCell(text string) string {
+	return strings.NewReplacer("|", "\\|", "\n", " ", "\r", " ").Replace(text)
 }

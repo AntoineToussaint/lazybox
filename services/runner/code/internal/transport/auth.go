@@ -114,6 +114,10 @@ var agentRPCs = map[string]func(agents AgentCredentials, who principal, req any)
 		r, ok := req.(*pb.LinkItemRequest)
 		return ok && r.SessionId != "" && r.SessionId == who.session && r.CollectionId == ""
 	},
+	pb.RunnerService_RunReviewVerification_FullMethodName: func(_ AgentCredentials, who principal, req any) bool {
+		r, ok := req.(*pb.RunReviewVerificationRequest)
+		return ok && r.SessionId != "" && r.SessionId == who.session
+	},
 	pb.RunnerService_AddReviewFinding_FullMethodName: func(_ AgentCredentials, who principal, req any) bool {
 		r, ok := req.(*pb.AddReviewFindingRequest)
 		return ok && r.SessionId != "" && r.SessionId == who.session

@@ -109,6 +109,9 @@ func TestGitHubRepositoryRegistrationUnifiesClonesAndPreservesWorkspace(t *testi
 	first, second := repoTest(t), repoTest(t)
 	gitTest(t, first.Path, "remote", "add", "origin", "git@github.com:Team/API.git")
 	gitTest(t, second.Path, "remote", "add", "origin", "https://github.com/team/api.git")
+	for _, repo := range []Repository{first, second} {
+		gitTest(t, repo.Path, "update-ref", "refs/remotes/origin/main", "HEAD")
+	}
 	root := t.TempDir()
 	m := newTest(t, root)
 	one, err := m.AddLocalRepository(context.Background(), first.Path, "")
@@ -139,6 +142,9 @@ func TestLegacyGitHubAliasesStayResolvableButListOnce(t *testing.T) {
 	first.ID, second.ID = "old-one", "old-two"
 	gitTest(t, first.Path, "remote", "add", "origin", "https://github.com/team/api.git")
 	gitTest(t, second.Path, "remote", "add", "origin", "git@github.com:team/api.git")
+	for _, repo := range []Repository{first, second} {
+		gitTest(t, repo.Path, "update-ref", "refs/remotes/origin/main", "HEAD")
+	}
 	m := newTest(t, t.TempDir(), first, second)
 	if len(m.Repositories()) != 1 || m.RepositoryIdentity(first.ID) != m.RepositoryIdentity(second.ID) {
 		t.Fatal("legacy aliases exposed as different repositories")

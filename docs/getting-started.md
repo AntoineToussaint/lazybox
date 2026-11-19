@@ -151,13 +151,11 @@ active, then all of them. Type to filter (or a branch name it does not show
 yet), `↑`/`↓` and `↵` to choose, `Esc` to close. Lazybox fetches that branch
 first, so the workspace starts from it as it is on origin now.
 
-The choice is **remembered per repository**: the next New task (and Add
-repository, Start from an issue, `lazybox new`) starts that repository from
-the same branch without asking, and the chip says so — **from feat/v2**.
-Choose the default branch again to go back. Offline, the workspace starts from
-the branch as last fetched, and says so. **Add repositories…** and **New
-workspace** have the same chips. From the command line: `lazybox new <name>
---repo R --start-from feat/v2`.
+Each new workspace selects the repository's default branch again. Earlier
+choices remain in *Recent* for when you want to select them. Offline, Lazybox
+uses the last known commit of the selected branch and says so. **Add
+repositories…** and **New workspace** have the same chips. From the command
+line, use `lazybox new <name> --repo R --start-from feat/v2`.
 
 ## Your first workspace
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { commandCore, doneMessage, globalLogin, homeOffers, inHome, isLogin, matchRepository, needsTerminal, placeFor, placeLabel, type HomeRepository } from '../packages/surfaces/src/home-run';
+import { commandCore, doneMessage, explicitHomeTarget, globalLogin, homeOffers, inHome, isLogin, matchRepository, needsTerminal, placeFor, placeLabel, reviewTerminalCommand, type HomeRepository } from '../packages/surfaces/src/home-run';
 
 const repositories: HomeRepository[] = [
   { repositoryId: 'github-1', name: 'api', identity: 'github:acme/api', home: '/u/lazybox/repos/acme/api' },
@@ -17,6 +17,16 @@ test('the briefing’s words name the place for certain', () => {
     { command: 'gcloud auth application-default login', target: { kind: 'user' }, explicit: true },
   ]);
   assert.deepEqual(homeOffers('Run in the **acme/web** home: `npm run dev`')[0].target, { kind: 'repository', repository: 'acme/web' });
+});
+
+test('a fenced command carries its named destination and a compound login needs review', () => {
+  const command = 'git fetch origin main && git switch main && env -u TOKEN bin/tool login prod';
+  const message = ['Run in the home checkout of `api`:', '', '```sh', command, '```'].join('\n');
+  assert.deepEqual(explicitHomeTarget(message, command), { kind: 'repository', repository: 'api' });
+  assert.equal(explicitHomeTarget(message, 'git status'), undefined);
+  assert.ok(reviewTerminalCommand(command));
+  assert.ok(!reviewTerminalCommand('env -u TOKEN bin/tool login prod'));
+  assert.ok(!reviewTerminalCommand('git fetch origin main && git status'));
 });
 
 test('a command handed to the person is offered; one the agent ran is not, nor one for later', () => {

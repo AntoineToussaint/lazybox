@@ -38,8 +38,8 @@ type startPlan struct {
 // resolveStart fetches what a repository's new branch starts from and returns
 // the base ref for its member: "HEAD" for origin's default branch (refreshed
 // by refreshBase, resolved by collections/base.go), else refs/remotes/origin/<branch>.
-// branch is the person's choice in this request when chosen, else the
-// repository's remembered one ("" for none).
+// An empty branch uses the default. The branch picker retains explicit choices
+// as recent suggestions for later requests.
 func (b *Bench) resolveStart(ctx context.Context, identity, repositoryID, name, branch string, chosen bool, progress func(string, string) error) (string, startPlan, error) {
 	plan := startPlan{repositoryID: repositoryID, branch: branch, chosen: chosen}
 	if branch == "" {
@@ -47,15 +47,6 @@ func (b *Bench) resolveStart(ctx context.Context, identity, repositoryID, name, 
 		return "HEAD", plan, b.refreshBase(ctx, identity, repositoryID, name, progress)
 	}
 	ref, isDefault, err := b.refreshStart(ctx, identity, repositoryID, name, branch, progress)
-	if err != nil && !chosen && errors.Is(err, gitpublish.ErrNoBranch) {
-		// The remembered branch is gone from origin (merged and deleted):
-		// origin's default again, said once, and forgotten.
-		if err = progress(identity, fmt.Sprintf("%s is no longer on origin; %s starts from its default branch", branch, name)); err != nil {
-			return "", plan, err
-		}
-		plan.branch, plan.chosen, plan.isDefault = "", true, true
-		return "HEAD", plan, b.refreshBase(ctx, identity, repositoryID, name, progress)
-	}
 	if err != nil {
 		return "", plan, err
 	}
@@ -201,7 +192,7 @@ func (b *Bench) RepositoryBranches(ctx context.Context, identity string, remote 
 		return out, nil
 	}
 	start := b.Collections.StartFrom(repositoryID)
-	out.StartFrom, out.Recent = start.Branch, start.Recent
+	out.Recent = start.Recent
 	if def, err := b.Collections.DefaultBase(ctx, repositoryID); err == nil {
 		out.DefaultBranch = def.Branch
 	}

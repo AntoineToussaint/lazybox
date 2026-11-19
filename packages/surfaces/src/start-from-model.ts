@@ -10,19 +10,10 @@ import { fuzzyMatch } from './fuzzy';
 /** What the Runner says about one repository's branches (RepositoryBranches). */
 export type BranchesInfo = {
   defaultBranch: string;
-  startFrom: string;
   recent: readonly string[];
   branches: readonly { name: string; committedAtUnixMillis: bigint | number | string }[];
   unregistered?: boolean;
 };
-
-/**
- * The branch a repository starts from: the person's choice in this sheet,
- * else the one the Runner remembers for it; "" is origin's default branch.
- */
-export function effectiveStart(chosen: string | undefined, info: Pick<BranchesInfo, 'startFrom'> | undefined): string {
-  return chosen ?? info?.startFrom ?? '';
-}
 
 /** The branch's name as the chip shows it: the default by its name when known. */
 export function startLabel(branch: string, info: Pick<BranchesInfo, 'defaultBranch'> | undefined): string {
@@ -86,10 +77,11 @@ export function validBranchName(name: string): boolean {
 /**
  * The start_from map a preparation sends: only what the person chose in this
  * sheet, for the repositories it creates. A repository not named starts from
- * its remembered branch, which the Runner applies itself.
+ * its default. Send an explicit default for each selected repository so an
+ * older Runner cannot fill in a remembered branch.
  */
 export function startsFor(identities: readonly string[], chosen: Readonly<Record<string, string>>): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const identity of identities) if (chosen[identity] !== undefined) out[identity] = chosen[identity];
+  for (const identity of identities) out[identity] = chosen[identity] ?? '';
   return out;
 }

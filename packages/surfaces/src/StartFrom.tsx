@@ -10,8 +10,7 @@ import './start-from.css';
  * workspace branches from. Each chosen repository shows a small chip, "from
  * main ▾"; clicking it or ⌥B opens a searchable picker of origin's branches,
  * asked of origin only when the picker opens and kept for a minute. The
- * Runner remembers the last choice per repository, so the chip already says
- * "from feat/x" next time.
+ * picker offers recent branches. A new sheet selects the default.
  */
 
 type Entry = { info?: RepositoryBranches; remoteAt?: number; loading?: Promise<void>; asking?: Promise<RepositoryBranches> };

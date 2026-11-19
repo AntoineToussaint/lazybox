@@ -135,7 +135,7 @@ func (c *cli) newWorkspace(args []string) error {
 	var repos multiFlag
 	f.Var(&repos, "repo", "a repository: owner/name, its catalog name, identity or path (repeat for several)")
 	branch := f.String("branch", "", "the branch for every repository (default: the Runner's)")
-	startFrom := f.String("start-from", "", "the branch of origin every repository starts from, fetched first (default: the one last chosen for it, else origin's default branch); remembered for the next workspace")
+	startFrom := f.String("start-from", "", "the branch of origin every repository starts from, fetched first (default: each repository's default branch)")
 	from := f.String("from", "", "start from an issue: its link or owner/name#N (the workspace, its branch and the agent's first message come from it)")
 	name := f.String("name", "", "with --from: the workspace's name (default: the issue's title)")
 	profile := f.String("profile", "", "with --from: the agent subscription (default: Claude's)")

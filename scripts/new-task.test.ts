@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { modeOf, nameFromPrompt, NO_CHOICES, parseTaskChoices, rankRepositories, rememberTask, TASK_MODES, taskBranch, taskName, taskProblem } from '../packages/surfaces/src/new-task-model.ts';
-import { effectiveStart, isDefaultStart, rankBranches, startLabel, startsFor, validBranchName } from '../packages/surfaces/src/start-from-model.ts';
+import { isDefaultStart, rankBranches, startLabel, startsFor, validBranchName } from '../packages/surfaces/src/start-from-model.ts';
 
 test('a task is named from its first message, at a word, capitalized', () => {
   assert.equal(nameFromPrompt('fix the login redirect loop when the session expires after a deploy'), 'Fix the login redirect loop');
@@ -94,17 +94,13 @@ test('modes map to the Runner\'s permission and workflow', () => {
   assert.equal(modeOf('nonsense').id, 'default');
 });
 
-test('start from: the choice made here, else the remembered one, else the default; the chip names the default', () => {
+test('start from: the choice made here, else the default; the chip names the default', () => {
   const info = { defaultBranch: 'main', startFrom: 'feat/v2', recent: ['feat/v2'], branches: [] };
-  assert.equal(effectiveStart(undefined, info), 'feat/v2');
-  assert.equal(effectiveStart('release/1.4', info), 'release/1.4');
-  assert.equal(effectiveStart('', info), '', 'choosing the default here overrides the remembered branch');
-  assert.equal(effectiveStart(undefined, undefined), '');
   assert.equal(startLabel('', info), 'main');
   assert.equal(startLabel('', undefined), 'default branch');
   assert.equal(startLabel('feat/v2', info), 'feat/v2');
   assert.ok(isDefaultStart('main', info) && isDefaultStart('', info) && !isDefaultStart('feat/v2', info));
-  assert.deepEqual(startsFor(['a', 'b'], { a: 'feat/x', c: 'y' }), { a: 'feat/x' }, 'only chosen repositories of this task are sent');
+  assert.deepEqual(startsFor(['a', 'b'], { a: 'feat/x', c: 'y' }), { a: 'feat/x', b: '' }, 'every selected repository uses an explicit choice or the default');
 });
 
 test('start from: the default first, then recent, the most active, then all by name; a search ranks matches and offers a typed name', () => {

@@ -225,12 +225,8 @@ func (b *Bench) prepareWorkspace(ctx context.Context, key, workspaceID, name, br
 		} else if err = b.replacedCopy(ctx, id, row.Name, repoID); err != nil {
 			return collections.Collection{}, fmt.Errorf("could not prepare %s: %w", row.Name, err)
 		}
-		// The new branch starts from origin's default branch as it is now, or
-		// from the branch chosen (or last chosen) to start from, fetched first.
+		// Recent branches are suggestions. Only this request can override the default.
 		start, chosen := starts[id]
-		if !chosen {
-			start = b.Collections.StartFrom(repoID).Branch
-		}
 		base, plan, err := b.resolveStart(ctx, id, repoID, row.Name, strings.TrimSpace(start), chosen, progress)
 		if err != nil {
 			return collections.Collection{}, err

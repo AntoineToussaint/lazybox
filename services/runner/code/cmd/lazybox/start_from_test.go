@@ -21,8 +21,8 @@ func gitFixture(t *testing.T, dir string, args ...string) string {
 
 // `lazybox new --start-from B`: every repository starts from origin's B,
 // fetched first (here origin moved on after the person's clone), and B is
-// remembered for the repository's next workspace. A branch origin does not
-// have fails with what to do.
+// available in Recent. The next workspace without a choice starts from main.
+// A branch origin does not have fails with what to do.
 func TestNewStartsFromAChosenBranch(t *testing.T) {
 	r := newTestRunner(t)
 	upstream := t.TempDir()
@@ -60,8 +60,25 @@ func TestNewStartsFromAChosenBranch(t *testing.T) {
 		t.Fatalf("the workspace starts at %s, want origin's feat/v2 %s", head, fresh)
 	}
 	branches, err := r.service.ListRepositoryBranches(context.Background(), &pb.ListRepositoryBranchesRequest{RepositoryIdentity: added.Repository.GitIdentity})
-	if err != nil || branches.StartFrom != "feat/v2" || branches.DefaultBranch != "main" {
-		t.Fatalf("remembered: %+v %v", branches, err)
+	if err != nil || branches.StartFrom != "" || branches.DefaultBranch != "main" || len(branches.Recent) != 1 || branches.Recent[0] != "feat/v2" {
+		t.Fatalf("recent choices: %+v %v", branches, err)
+	}
+
+	gitFixture(t, upstream, "commit", "--allow-empty", "-m", "main advances")
+	main := gitFixture(t, upstream, "rev-parse", "HEAD")
+	out = r.cli(r.owner(), "", "new", "Default", "--repo", added.Repository.GitIdentity, "--json")
+	if out.code != 0 {
+		t.Fatalf("new with default base: %+v %v", out, out.err)
+	}
+	if err := json.Unmarshal([]byte(out.stdout), &created); err != nil {
+		t.Fatal(out.stdout, err)
+	}
+	got, err = r.service.GetCollection(context.Background(), &pb.CollectionRequest{CollectionId: created.ID})
+	if err != nil || len(got.Collection.Members) != 1 {
+		t.Fatal(got, err)
+	}
+	if head := gitFixture(t, got.Collection.Members[0].Path, "rev-parse", "HEAD"); head != main {
+		t.Fatalf("the next workspace starts at %s, want current origin/main %s", head, main)
 	}
 
 	if out = r.cli(r.owner(), "", "new", "Beta", "--repo", added.Repository.GitIdentity, "--start-from", "feat/typo"); out.code == 0 || !strings.Contains(out.err.Error(), "has no branch feat/typo on origin") {

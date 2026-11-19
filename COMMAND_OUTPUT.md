@@ -203,8 +203,11 @@ output lines are dropped) has a **Run** split button beside Copy
 (`code-runs.tsx`, rules in `code-run.ts`):
 
 - **Run** (also Enter on the focused block) runs it in a shell of the
-  Terminal panel; see "Run is the terminal" below. **Paste in terminal (don't
-  run)**, in the ▾ menu, types it there without Return, to edit first.
+  Terminal panel. When the message explicitly names a home checkout, the
+  block's button shows that destination and opens its shell. A named checkout
+  that cannot be resolved stays unavailable. Compound sign-in commands are
+  typed for review so you can check the directory before pressing Return.
+  **Paste in terminal (don't run)** in the ▾ menu does the same for any command.
 - **Ask the agent to run it (no terminal)**, in the ▾ menu, sends the agent
   "Run this and tell me the result:" and the block, fenced, as its own message: the draft in the
   message box is untouched. The agent runs it with `lazybox run`, so it sees a
@@ -266,8 +269,10 @@ terminal (`needsTerminal` in `home-run.ts`: a login, `auth`, a sign-in,
 `--no-launch-browser`). The shell marks each command line's end (OSC
 133;D;<status>, agentshell's zsh integration); the Runner counts the marks on
 the terminal (`TerminalStatus.command_ends`, `last_command_status`), so the
-block says *Finished · exit N* and offers **Tell Claude it's done** without
-the window following the output itself.
+block says *Finished · exit N*. A handoff started by **Run** sends the
+command and exit status to the conversation automatically. **Tell the agent
+it’s done** is available for edited or pasted commands and for a report that
+could not be delivered. The report contains no terminal output.
 
 Inline code that reads as a command (`make lint`, `bin/devbox check`, or a
 bare subcommand such as `build` next to a program the message runs by path,

@@ -7,10 +7,14 @@ import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 
+// Exercise the desktop image policy with the shared surface in Chromium.
+const desktop = JSON.parse(await readFile(new URL('../apps/desktop/src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
+const imagePolicy = desktop.app.security.csp.split(';').find(directive => directive.trim().startsWith('img-src '));
+assert.ok(imagePolicy, 'desktop declares an image policy');
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
 const VIEWPORT = { width: 1280, height: 800 };
@@ -52,6 +56,10 @@ try {
   const open = async (view, session = 'alpha-session', collection = 'alpha') => {
     const context = await browser.newContext({ viewport: VIEWPORT, permissions: ['clipboard-read', 'clipboard-write'] });
     await context.addInitScript(trackObjectUrls);
+    await context.route(base + '/?*', async route => {
+      const response = await route.fetch();
+      await route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': imagePolicy.trim() } });
+    });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
     page.on('pageerror', error => errors.push(String(error)));
     await page.goto(`${base}/?view=${view}&session=${session}&collection=${collection}#token=${fixture.token}`);
@@ -93,6 +101,7 @@ try {
   await expect(preview).toBeVisible();
   await expect(preview).toContainText('Pasted image');
   await expect(preview).toContainText('1600 × 900');
+  await expect.poll(() => preview.locator('img').evaluate(img => img.naturalWidth)).toBe(1600);
   await settle(page);
   const shown = await preview.locator('img').boundingBox(), card = await preview.boundingBox();
   assert.ok(card.width <= VIEWPORT.width * 0.6 + 1 && card.height <= VIEWPORT.height * 0.6 + 1 && card.width >= VIEWPORT.width * 0.6 - 4, `the preview card uses 60% of the window: ${JSON.stringify(card)}`);

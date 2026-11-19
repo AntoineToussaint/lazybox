@@ -24,7 +24,7 @@ import { modeOf, parseTaskChoices, rankRepositories, rememberTask, TASK_CHOICES_
 import { itemBranch, itemMessage, itemReference, itemSafeMode, itemTaskName, type ItemLike } from './item-context';
 import { ItemPicker, ItemSource, StartedNotice, useItemDetail, useStartedFrom } from './WorkItems';
 import { forgetStarts, StartFromChip, StartFromPicker, useRepositoryStarts } from './StartFrom';
-import { effectiveStart, startsFor } from './start-from-model';
+import { startsFor } from './start-from-model';
 import type { ViewTarget } from './workspace-model';
 import './new-task.css';
 
@@ -218,7 +218,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
   // Where each repository's new branch starts ("from main ▾"; ⌥B).
   const [starts, setStartInfo] = useRepositoryStarts(api, draft.empty ? [] : draft.identities);
   const [startPicker, setStartPicker] = useState<string>();
-  const startOf = (identity: string) => effectiveStart(draft.starts?.[identity], starts[identity]);
+  const startOf = (identity: string) => draft.starts?.[identity] ?? '';
   const openStart = (identity: string) => { setListOpen(false); setStartPicker(identity); };
   const closeStart = (identity: string) => { setStartPicker(undefined); requestAnimationFrame(() => ref.current?.querySelector<HTMLElement>(`[data-start-from="${CSS.escape(identity)}"]`)?.focus()); };
   const label = (identity: string) => { const entry = entries.find(e => e.identity === identity); return entry ? repositoryLabel({ gitIdentity: entry.identity, name: entry.name }) : identity.replace(/^github:/, ''); };

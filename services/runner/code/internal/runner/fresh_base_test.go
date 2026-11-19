@@ -175,6 +175,33 @@ func TestOfflineWorkspaceStartsFromLastKnownDefaultBranch(t *testing.T) {
 	}
 }
 
+func TestOfflineCheckoutNeverUsesItsFeatureBranchAsTheRemoteDefault(t *testing.T) {
+	upstream := upstreamOn(t, "main")
+	checkout := t.TempDir()
+	if out, err := exec.Command("git", "clone", "--quiet", upstream, checkout).CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	main := gitIn(t, checkout, "rev-parse", "refs/remotes/origin/main")
+	gitIn(t, checkout, "switch", "--quiet", "-c", "feature/old-work")
+	advance(t, checkout, "only on the feature branch")
+	gitIn(t, checkout, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+	gitIn(t, checkout, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing.git"))
+
+	b := freshBench(t, collections.Repository{ID: "web", Name: "web", Path: checkout})
+	identity := b.Collections.RepositoryIdentity("web")
+	var p progressLog
+	ws, err := b.PrepareWorkspace(context.Background(), "cached-main", "", "Cached main", "", []string{identity}, p.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startsAt(t, ws, "web", main)
+
+	gitIn(t, checkout, "update-ref", "-d", "refs/remotes/origin/main")
+	if _, err := b.PrepareWorkspace(context.Background(), "no-default", "", "No default", "", []string{identity}, p.record); err == nil || !strings.Contains(err.Error(), "no default starting commit") {
+		t.Fatalf("wanted an actionable error when the default is unknown, got %v", err)
+	}
+}
+
 // An explicit base (a branch to continue, a PR head, an orchestrator's parent
 // branch) is used as given, not replaced by origin's default branch.
 func TestExplicitBaseIsHonoured(t *testing.T) {

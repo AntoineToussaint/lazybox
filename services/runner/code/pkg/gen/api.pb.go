@@ -17170,10 +17170,8 @@ type PrepareWorkspaceRequest struct {
 	Item *ItemRef `protobuf:"bytes,7,opt,name=item,proto3" json:"item,omitempty"`
 	// The branch each repository starts from, by repository identity
 	// (WORKSPACES.md, "Start from"): fetched from origin first, then the new
-	// branch starts at origin/<branch>. A repository not named starts from the
-	// branch last chosen for it, else origin's default branch; one named with
-	// "" or origin's default branch starts there and forgets the last choice.
-	// A repository named here is remembered for the next workspace.
+	// branch starts at origin/<branch>. An omitted repository or an empty
+	// branch uses origin's default. Explicit branches are offered in Recent.
 	StartFrom     map[string]string `protobuf:"bytes,8,rep,name=start_from,json=startFrom,proto3" json:"start_from,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -17386,8 +17384,8 @@ type RepositoryBranches struct {
 	RepositoryIdentity string                 `protobuf:"bytes,1,opt,name=repository_identity,json=repositoryIdentity,proto3" json:"repository_identity,omitempty"`
 	// Origin's default branch: as origin names it (remote), else as last fetched; empty when unknown.
 	DefaultBranch string `protobuf:"bytes,2,opt,name=default_branch,json=defaultBranch,proto3" json:"default_branch,omitempty"`
-	// The branch new workspaces of this repository start from when none is
-	// chosen: the person's last choice; empty for the default branch.
+	// Legacy last choice. New Runners leave this empty and use the default
+	// branch unless a request explicitly selects a different starting point.
 	StartFrom string `protobuf:"bytes,3,opt,name=start_from,json=startFrom,proto3" json:"start_from,omitempty"`
 	// Branches chosen lately, newest first.
 	Recent []string `protobuf:"bytes,4,rep,name=recent,proto3" json:"recent,omitempty"`

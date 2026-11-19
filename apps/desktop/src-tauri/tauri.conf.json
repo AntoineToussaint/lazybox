@@ -5,7 +5,7 @@
   "build": { "frontendDist": "../dist" },
   "app": {
     "windows": [],
-    "security": { "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; worker-src 'self' blob:; frame-src http://127.0.0.1:*" }
+    "security": { "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; frame-src http://127.0.0.1:*" }
   },
   "bundle": { "active": true, "targets": ["app"], "icon": ["icons/icon.icns", "icons/icon.png"], "category": "DeveloperTool", "macOS": { "minimumSystemVersion": "12.0" } },
   "plugins": { "http": { "scopeRedirects": true } }

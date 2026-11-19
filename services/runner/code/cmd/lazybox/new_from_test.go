@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -32,7 +33,17 @@ func fromIssueRunner(t *testing.T) *testRunner {
 	r := newTestRunner(t)
 	ctx := context.Background()
 	repo := t.TempDir()
-	for _, args := range [][]string{{"init", "-b", "main"}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "initial"}, {"remote", "add", "origin", "https://github.com/team/api.git"}} {
+	origin := filepath.Join(t.TempDir(), "api.git")
+	const remoteURL = "https://github.com/team/api.git"
+	// Keep the GitHub identity used by the issue lookup, while serving Git
+	// operations from a fixture with a real remote default branch.
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "initial"},
+		{"clone", "--bare", ".", origin},
+		{"remote", "add", "origin", remoteURL},
+		{"config", "url." + origin + ".insteadOf", remoteURL},
+	} {
 		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git: %v %s", err, out)
 		}

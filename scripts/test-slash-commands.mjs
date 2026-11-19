@@ -69,11 +69,11 @@ try{
  await expect(chat.locator('.command-line').filter({hasText:'Permissions: YOLO'})).toBeVisible();
  assert.equal(await chat.locator('.message.operation_accepted').filter({hasText:'/permissions'}).count(),0,'no fake user message');
 
- // /model: the provider's models (the Runner's list, then what the agent listed), the current one marked; a live switch.
+ // /model: the provider's models in display order, the current one marked; a live switch.
  await page.keyboard.type('/model ');
  const models=chat.getByRole('listbox',{name:'/model choices'});
- await expect(models.getByRole('option')).toHaveText([/Opus 5\.5.*Current/,/Sonnet 5\.5.*claude-sonnet-5-5/,/Haiku 5\.5/,/Fable 5\.2/,/^Sonnet 5claude-sonnet-5/]);
- await expect(models.getByRole('option',{selected:true})).toContainText('Sonnet 5.5','the current model is not offered first');
+ await expect(models.getByRole('option')).toHaveText([/Opus 5\.5.*Current/,/Fable 5\.2/,/Haiku 5\.5/,/^Sonnet 5claude-sonnet-5/,/Sonnet 5\.5.*claude-sonnet-5-5/]);
+ await expect(models.getByRole('option',{selected:true})).toContainText('Fable 5.2','keyboard selection starts on the first alternative');
  await page.screenshot({path:'.cache/slash-model.png'});
  // Choosing the current model does nothing: the menu closes, no card, nothing applied.
  const appliedBefore=applies().length;
@@ -82,7 +82,7 @@ try{
  await expect(models).toBeHidden();await expect(message).toHaveValue('');
  await expect(chat.locator('.restart-model')).toHaveCount(0);
  assert.equal(applies().length,appliedBefore,'choosing the current model applies nothing');
- await page.keyboard.type('/model ');await expect(models.getByRole('option',{selected:true})).toContainText('Sonnet 5.5','a menu opened again starts on its best entry');
+ await page.keyboard.type('/model sonnet 5.5');await expect(models.getByRole('option',{selected:true})).toContainText('Sonnet 5.5');
  await page.keyboard.press('Enter');
  await expect.poll(()=>applies().at(-1)?.body.model?.model).toBe('claude-sonnet-5-5');
  await expect(chat.locator('.command-line').filter({hasText:'Switched model to claude-sonnet-5-5'})).toBeVisible();
@@ -191,11 +191,11 @@ try{
  await page.keyboard.press('Enter');
  await expect(models).toBeVisible();await expect(message).toBeFocused();await expect(message).toHaveValue('/model ');
  await expect(models.getByRole('option').filter({hasText:'Current'})).toContainText('Opus 5.5');
- await expect(models.getByRole('option',{selected:true})).toContainText('Sonnet 5.5');
+ await expect(models.getByRole('option',{selected:true})).toContainText('Fable 5.2');
  await page.keyboard.press('ArrowDown');await expect(models.getByRole('option',{selected:true})).toContainText('Haiku 5.5');
- await page.keyboard.press('ArrowUp');await expect(models.getByRole('option',{selected:true})).toContainText('Sonnet 5.5');
+ await page.keyboard.press('ArrowUp');await expect(models.getByRole('option',{selected:true})).toContainText('Fable 5.2');
  await page.keyboard.press('Enter');
- await expect.poll(()=>applies().at(-1)?.body.model?.model).toBe('claude-sonnet-5-5');
+ await expect.poll(()=>applies().at(-1)?.body.model?.model).toBe('claude-fable-5-2');
  await expect(models).toBeHidden();await expect(message).toHaveValue('');await expect(message).toBeFocused();
  // Space on it does the same.
  for(let i=0;i<15&&!(await infoModel.evaluate(node=>node===document.activeElement));i++)await page.keyboard.press('Tab');
@@ -232,10 +232,10 @@ try{
  await expect(permissionCard).toHaveCount(0);await expect(betaMessage).toBeFocused();
  await page.keyboard.type('/model ');
  const betaModels=betaChat.getByRole('listbox',{name:'/model choices'});
- await expect(betaModels.getByRole('option')).toHaveText([/Opus 5\.5.*Current/,/Sonnet 5\.5/,/Haiku 5\.5/,/Fable 5\.2/]);
+ await expect(betaModels.getByRole('option')).toHaveText([/Opus 5\.5.*Current/,/Fable 5\.2/,/Haiku 5\.5/,/Sonnet 5\.5/]);
  await page.keyboard.press('ArrowUp');await page.keyboard.press('Enter');
  await expect(betaModels).toBeHidden();await expect(betaChat.locator('.restart-model')).toHaveCount(0,'the current model asks nothing');
- await page.keyboard.type('/model ');await expect(betaModels.getByRole('option',{selected:true})).toContainText('Sonnet 5.5');
+ await page.keyboard.type('/model sonnet 5.5');await expect(betaModels.getByRole('option',{selected:true})).toContainText('Sonnet 5.5');
  await page.keyboard.press('Enter');
  const restart=betaChat.getByRole('alert').filter({hasText:'Switch to Sonnet 5.5?'});
  await expect(restart).toHaveText(/^Switch to Sonnet 5\.5\? An older Lazybox started this conversation's agent, so switching restarts it and your conversation continues\./);
@@ -263,7 +263,7 @@ try{
  await expect(codexMessage).toBeEnabled();
  await codexMessage.click();await page.keyboard.type('/model ');
  const codexModels=codexChat.getByRole('listbox',{name:'/model choices'});
- await expect(codexModels.getByRole('option')).toHaveText([/GPT-6\.1-Sol.*Current/,/GPT-6-Astra/,/GPT-6-Luna/,/GPT-5\.5/]);
+ await expect(codexModels.getByRole('option')).toHaveText([/GPT-6\.1-Sol.*Current/,/GPT-5\.5/,/GPT-6-Astra/,/GPT-6-Luna/]);
  await page.keyboard.press('ArrowUp');await page.keyboard.press('Enter');
  await expect(codexModels).toBeHidden();await expect(codexChat.locator('.restart-model')).toHaveCount(0);
  assert.equal(applies().filter(m=>m.body.sessionId==='codex-session').length,0,'the current Codex model applies nothing');

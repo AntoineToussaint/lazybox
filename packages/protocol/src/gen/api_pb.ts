@@ -8741,10 +8741,8 @@ export type PrepareWorkspaceRequest = Message$1<"lazybox.bench.v1.PrepareWorkspa
   /**
    * The branch each repository starts from, by repository identity
    * (WORKSPACES.md, "Start from"): fetched from origin first, then the new
-   * branch starts at origin/<branch>. A repository not named starts from the
-   * branch last chosen for it, else origin's default branch; one named with
-   * "" or origin's default branch starts there and forgets the last choice.
-   * A repository named here is remembered for the next workspace.
+   * branch starts at origin/<branch>. An omitted repository or an empty
+   * branch uses origin's default. Explicit branches are offered in Recent.
    *
    * @generated from field: map<string, string> start_from = 8;
    */
@@ -8831,8 +8829,8 @@ export type RepositoryBranches = Message$1<"lazybox.bench.v1.RepositoryBranches"
   defaultBranch: string;
 
   /**
-   * The branch new workspaces of this repository start from when none is
-   * chosen: the person's last choice; empty for the default branch.
+   * Legacy last choice. New Runners leave this empty and use the default
+   * branch unless a request explicitly selects a different starting point.
    *
    * @generated from field: string start_from = 3;
    */

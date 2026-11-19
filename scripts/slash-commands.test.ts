@@ -133,6 +133,21 @@ test('models resolve by id, name or prefix; an id the list lacks is kept as type
 const claudeListed=[{value:'default',displayName:'Default (recommended)',description:'Opus 5.5 · Best for everyday, complex tasks'},{value:'opus',displayName:'Opus 5.5',description:'For complex work'},{value:'claude-fable-5-2',displayName:'Fable 5.2',description:'Toughest'},{value:'sonnet',displayName:'Sonnet 5.5',description:'Efficient'},{value:'haiku',displayName:'Haiku 5.5',description:'Fastest'},{value:'fable',displayName:'Fable 5.1',description:'Longest'},{value:'claude-opus-4-8',displayName:'Opus 4.8',description:''}];
 const claudeBuiltIn=[{value:'claude-opus-5-5',displayName:'Opus 5.5',description:''},{value:'claude-sonnet-5-5',displayName:'Sonnet 5.5',description:''},{value:'claude-haiku-5-5',displayName:'Haiku 5.5',description:''},{value:'claude-fable-5-2',displayName:'Fable 5.2',description:''}];
 
+test('/model pins the current model and sorts by name regardless of catalog order', () => {
+ const models = [
+  {value:'gpt-10',displayName:'GPT-10',description:''},
+  {value:'gpt-2',displayName:'GPT-2',description:''},
+  {value:'gpt-6',displayName:'GPT-6',description:''},
+ ];
+ for (const listed of [models, [...models].reverse()]) {
+  const menu = slashMenu('/model ', lazyboxCommands(ctx({provider:'codex', model:'gpt-6', models:listed})));
+  assert.equal(menu?.kind, 'choices');
+  if (menu?.kind !== 'choices') throw new Error('Expected model choices');
+  assert.deepEqual(menu.items.map(item => item.value), ['gpt-6', 'gpt-2', 'gpt-10']);
+  assert.equal(menu.items[menu.best].value, 'gpt-2');
+ }
+});
+
 test('/model lists the provider\'s models, the Runner\'s first, then what the agent listed, each once',()=>{
  const merged=mergeModels(claudeBuiltIn,claudeListed);
  assert.deepEqual(merged.map(m=>m.value),['claude-opus-5-5','claude-sonnet-5-5','claude-haiku-5-5','claude-fable-5-2','default','fable','claude-opus-4-8'],'an alias of a listed model (by name) is listed once');

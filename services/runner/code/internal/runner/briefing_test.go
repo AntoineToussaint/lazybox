@@ -25,7 +25,7 @@ func TestEachBuiltinSectionTextIsPinnedToItsVersion(t *testing.T) {
 		version int
 		sum     string
 	}{
-		"workspace":     {5, "0da12c2ae8ec8cb0"},
+		"workspace":     {6, "86ace5f1722e27aa"},
 		"run":           {3, "5e6c4cdceaa73f01"},
 		"documents":     {4, "44325355139f999d"},
 		"conversations": {2, "9eef1f6b082a54f4"},
@@ -121,7 +121,7 @@ func TestANewConversationIsUpToDateAndRecordsItsVersions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "5" {
+	if saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "6" {
 		t.Fatalf("versions not recorded at the start: %v", saved.Briefing)
 	}
 	if !strings.Contains(saved.Context, "--provider codex") || !strings.Contains(saved.Context, "never changes its provider") || !strings.Contains(saved.Context, "only starts copies of yourself") {
@@ -165,7 +165,7 @@ func TestAnOldConversationHearsWhatLazyboxAddedOnceWithItsNextMessage(t *testing
 	}
 	journaled(t, e, `"briefing_updated"`, `"operationId":"m1"`, `"status":"features"`, `"conversations":"2"`, `with any agent`)
 	saved, err := b.History.Get(t.Context(), e.ID)
-	if err != nil || saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "5" {
+	if err != nil || saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "6" {
 		t.Fatalf("the versions it now has are durable: %v %v", err, saved.Briefing)
 	}
 
@@ -190,8 +190,8 @@ func TestAConversationBehindHearsOnlyTheChangesItMissed(t *testing.T) {
 		t.Fatalf("sections %v", u.Sections)
 	}
 	lines := strings.Split(strings.TrimPrefix(u.Text, briefingPreamble+"\n"), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("workspace versions 3 to 5 and the conversation line, one line each:\n%s", u.Text)
+	if len(lines) != 5 || !strings.Contains(lines[3], "interactive action") {
+		t.Fatalf("workspace versions 3 to 6 and the conversation line, one line each:\n%s", u.Text)
 	}
 	if want := "`\"" + filepath.Join(b.Config.CLIDir, "lazybox") + "\"`"; !strings.Contains(lines[0], want) {
 		t.Fatalf("a note names this Runner's CLI: %q", lines[0])

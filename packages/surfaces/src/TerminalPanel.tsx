@@ -78,7 +78,10 @@ function logicalLine(view: Terminal, y: number): { first: number; rows: Terminal
   return { first, rows };
 }
 
-const exitText = (status: TerminalStatus) => status.error || (status.signal ? `Shell ended by ${status.signal}` : status.exitCode === undefined ? 'Shell ended' : `Shell exited with code ${status.exitCode}`);
+function exitText(status: TerminalStatus) {
+  const program = status.place === 'interactive-command' ? 'Command' : 'Shell';
+  return status.error || (status.signal ? `${program} ended by ${status.signal}` : status.exitCode === undefined ? `${program} ended` : `${program} exited with code ${status.exitCode}`);
+}
 
 export function TerminalPanel({ workspaceId, collections, viewState, onClosePanel, sessionId = '', onShowSession }: { workspaceId: string; collections: Collection[]; viewState?: ViewStateStore; onClosePanel?(): void; /** The page's conversation: where Send selection to agent goes. */ sessionId?: string; onShowSession?(target: ViewTarget): void }) {
   const conversation = useWorkConversation(workspaceId, sessionId);
@@ -161,7 +164,7 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
     requested.delete(workspaceId);
     const live = listed.current.filter(terminal => !terminal.done);
     let next = selectedRef.current;
-    if (wanted && live.some(terminal => terminal.id === wanted)) next = wanted;
+    if (wanted && listed.current.some(terminal => terminal.id === wanted)) next = wanted;
     else if (!live.length) { if (!wanted) void open(); return; }
     else if (!live.some(terminal => terminal.id === selectedRef.current)) next = live.at(-1)!.id;
     // A shell newly chosen takes focus as its view mounts (focusView is still the one it replaces); the one shown takes it now.
@@ -183,7 +186,7 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
       <div className="terminal-tabs" role="tablist" aria-label="Terminals">
         {terminals.map(terminal => <span key={terminal.id} className={'terminal-tab' + (terminal.id === selected ? ' selected' : '') + (terminal.done ? ' exited' : '')}
           onContextMenu={contextMenu('terminal-tab', () => [{ label: 'New terminal', icon: 'plus', disabled: !ready || opening, run: () => void open() }, 'separator', { label: terminal.done ? 'Remove terminal' : 'Close terminal', icon: 'close', danger: !terminal.done, run: () => void close(terminal.id) }], { terminalId: terminal.id, workspaceId })}>
-          <button role="tab" aria-selected={terminal.id === selected} title={terminal.place ? terminal.cwd : terminal.title} onClick={() => choose(terminal.id)}>{terminal.place && <Icon name="home" size={12}/>}{terminalLabel(terminal)}{terminal.done ? ' · exited' : ''}</button>
+          <button role="tab" aria-selected={terminal.id === selected} title={terminal.place ? terminal.cwd : terminal.title} onClick={() => choose(terminal.id)}>{terminal.place && <Icon name={terminal.place === 'interactive-command' ? 'terminal' : 'home'} size={12}/>}{terminalLabel(terminal)}{terminal.done ? ' · exited' : ''}</button>
           <button className="terminal-close" aria-label={`Close terminal ${terminalLabel(terminal)}`} title={terminal.done ? 'Remove' : 'Close (hangs up the shell)'} onClick={() => void close(terminal.id)}>×</button>
         </span>)}
         <span className="terminal-new">
@@ -195,7 +198,7 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
           <button aria-label="New terminal" title="New terminal" disabled={!ready || opening} onClick={() => void open()}><Icon name="plus" size={14}/><span>New terminal</span></button>
         </span>
       </div>
-      {current ? <TerminalView key={current.id} api={api} terminal={current} focusRef={focusView} workspaceId={workspaceId} canSend={!!conversation} onSendToAgent={sendToAgent} onNewTerminal={ready ? () => void open() : undefined} onCloseTerminal={() => void close(current.id)} onCleanExit={() => void exitedCleanly(current.id)} onSize={value => { size.current = value; }} onError={setError}/>
+      {current ? <TerminalView key={current.id} api={api} terminal={current} focusRef={focusView} workspaceId={workspaceId} canSend={!!conversation} onSendToAgent={sendToAgent} onNewTerminal={ready ? () => void open() : undefined} onCloseTerminal={() => void close(current.id)} onCleanExit={current.place === 'interactive-command' ? undefined : () => void exitedCleanly(current.id)} onSize={value => { size.current = value; }} onError={setError}/>
         : <p className="module-empty">{ready ? 'No terminal is open in this workspace. A terminal runs your login shell on the Runner, in the directory you choose, and keeps running when the Runner restarts.' : 'The workspace is not ready for a terminal.'}{ready && <><br/><button className="primary" disabled={opening} onClick={() => void open()}>Start terminal</button></>}</p>}
     </>}
   </section>;
@@ -321,7 +324,7 @@ function TerminalView({ api, terminal, focusRef, onSize, onError, onCleanExit, w
         { label: 'Select all', icon: 'selectAll', run: () => { view?.selectAll(); view?.focus(); } },
         { label: 'Clear', icon: 'clear', run: () => { view?.clear(); view?.focus(); } },
         'separator',
-        { label: 'Send selection to agent', icon: 'send', disabled: !selection ? 'Select text in the terminal first' : !canSend && 'No conversation in this workspace yet', run: () => onSendToAgent(selection) },
+        ...(terminal.place === 'interactive-command' ? [] : [{ label: 'Send selection to agent', icon: 'send' as const, disabled: !selection ? 'Select text in the terminal first' : !canSend && 'No conversation in this workspace yet', run: () => onSendToAgent(selection) }]),
         'separator',
         onNewTerminal && { label: 'New terminal', icon: 'plus', run: onNewTerminal },
         { label: live ? 'Close terminal' : 'Remove terminal', icon: 'close', danger: live, run: onCloseTerminal },

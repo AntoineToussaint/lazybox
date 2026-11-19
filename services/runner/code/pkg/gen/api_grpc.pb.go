@@ -242,6 +242,7 @@ const (
 	RunnerService_ClearBrowserData_FullMethodName             = "/lazybox.bench.v1.RunnerService/ClearBrowserData"
 	RunnerService_InstallBrowser_FullMethodName               = "/lazybox.bench.v1.RunnerService/InstallBrowser"
 	RunnerService_DeleteTheme_FullMethodName                  = "/lazybox.bench.v1.RunnerService/DeleteTheme"
+	RunnerService_DecideTerminalHandoff_FullMethodName        = "/lazybox.bench.v1.RunnerService/DecideTerminalHandoff"
 )
 
 // RunnerServiceClient is the client API for RunnerService service.
@@ -769,6 +770,7 @@ type RunnerServiceClient interface {
 	// install already running.
 	InstallBrowser(ctx context.Context, in *InfoRequest, opts ...grpc.CallOption) (*CommandStatus, error)
 	DeleteTheme(ctx context.Context, in *DeleteThemeRequest, opts ...grpc.CallOption) (*ThemeFolder, error)
+	DecideTerminalHandoff(ctx context.Context, in *DecideTerminalHandoffRequest, opts ...grpc.CallOption) (*TerminalStatus, error)
 }
 
 type runnerServiceClient struct {
@@ -3053,6 +3055,16 @@ func (c *runnerServiceClient) DeleteTheme(ctx context.Context, in *DeleteThemeRe
 	return out, nil
 }
 
+func (c *runnerServiceClient) DecideTerminalHandoff(ctx context.Context, in *DecideTerminalHandoffRequest, opts ...grpc.CallOption) (*TerminalStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TerminalStatus)
+	err := c.cc.Invoke(ctx, RunnerService_DecideTerminalHandoff_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunnerServiceServer is the server API for RunnerService service.
 // All implementations must embed UnimplementedRunnerServiceServer
 // for forward compatibility.
@@ -3578,6 +3590,7 @@ type RunnerServiceServer interface {
 	// install already running.
 	InstallBrowser(context.Context, *InfoRequest) (*CommandStatus, error)
 	DeleteTheme(context.Context, *DeleteThemeRequest) (*ThemeFolder, error)
+	DecideTerminalHandoff(context.Context, *DecideTerminalHandoffRequest) (*TerminalStatus, error)
 	mustEmbedUnimplementedRunnerServiceServer()
 }
 
@@ -4253,6 +4266,9 @@ func (UnimplementedRunnerServiceServer) InstallBrowser(context.Context, *InfoReq
 }
 func (UnimplementedRunnerServiceServer) DeleteTheme(context.Context, *DeleteThemeRequest) (*ThemeFolder, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteTheme not implemented")
+}
+func (UnimplementedRunnerServiceServer) DecideTerminalHandoff(context.Context, *DecideTerminalHandoffRequest) (*TerminalStatus, error) {
+	return nil, status.Error(codes.Unimplemented, "method DecideTerminalHandoff not implemented")
 }
 func (UnimplementedRunnerServiceServer) mustEmbedUnimplementedRunnerServiceServer() {}
 func (UnimplementedRunnerServiceServer) testEmbeddedByValue()                       {}
@@ -8229,6 +8245,24 @@ func _RunnerService_DeleteTheme_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_DecideTerminalHandoff_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DecideTerminalHandoffRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).DecideTerminalHandoff(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_DecideTerminalHandoff_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).DecideTerminalHandoff(ctx, req.(*DecideTerminalHandoffRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunnerService_ServiceDesc is the grpc.ServiceDesc for RunnerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -9099,6 +9133,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteTheme",
 			Handler:    _RunnerService_DeleteTheme_Handler,
+		},
+		{
+			MethodName: "DecideTerminalHandoff",
+			Handler:    _RunnerService_DecideTerminalHandoff_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

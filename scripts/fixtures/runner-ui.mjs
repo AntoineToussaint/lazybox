@@ -924,6 +924,17 @@ actions:
         const events = [{ cursor: '1', offset: '0', channel: 'stdout', data: Buffer.from(command?.output || 'fixture retained output\n').toString('base64'), status: command && wireCommand(command) }];
         res.writeHead(200, { 'Content-Type': 'application/connect+json' }); res.end(stream(events.filter(value => BigInt(value.cursor) > BigInt(body.after || 0)))); return;
       }
+      case 'DecideTerminalHandoff': {
+        mutations.push({method,body});
+        const channel=eventStreams.get('alpha-session');
+        const request=channel?.events.find(record=>record.event.type==='terminal_handoff'&&record.event.requestId===body.handoffId)?.event;
+        if(!request)return error('not_found','Handoff missing');
+        if(!body.accept){channel.push({...request,status:'declined',text:''});return json({});}
+        const t={id:'interactive-'+body.handoffId,collectionId:request.name,place:'interactive-command',cwd:request.text,directory:'',title:'Interactive command',cols:100,rows:30,createdAt:Date.now(),output:Buffer.alloc(0),line:'',ready:true,input:[],resizes:[],done:false,clients:new Set()};
+        terminals.set(t.id,t);terminalOutput(t,'Enter device code: ');
+        channel.push({...request,status:'running',text:t.id});
+        return json(terminalStatus(t));
+      }
       case 'OpenTerminal': {
         mutations.push({method,body});const collection=collections.find(c=>c.id===body.collectionId);if(!collection)return error('not_found','Workspace missing');
         if(body.directory&&!collection.members.some(m=>m.spec.name===body.directory))return error('failed_precondition','terminal directory must be inside the workspace');

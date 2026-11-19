@@ -10,8 +10,8 @@ import (
 
 // OpenTerminal starts the user's login shell in a workspace: at its root, or in
 // the workspace-relative directory given (a member repository, for example).
-// Only a person reaches this, through the authenticated Runner API; agents have
-// no terminal tool. The shell gets the user's environment, this Runner's CLI
+// Only a person reaches this, through the authenticated Runner API.
+// The shell gets the user's environment, this Runner's CLI
 // first on PATH and the terminal's own credential (terminal_credentials.go),
 // so `lazybox log` and `lazybox run` publish to the workspace without flags.
 func (b *Bench) OpenTerminal(collectionID, directory string, cols, rows uint16, requestKey string) (*terminals.Terminal, error) {

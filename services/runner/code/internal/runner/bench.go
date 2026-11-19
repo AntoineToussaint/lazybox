@@ -205,6 +205,7 @@ type Bench struct {
 	Accounts            *accounts.State
 	Commands            *commands.Manager
 	terminalStart       sync.Mutex
+	terminalHandoffs    sync.Map
 	Terminals           *terminals.Manager
 	Attachments         *attachments.Store
 	Collections         *collections.Manager
@@ -1085,7 +1086,13 @@ func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args
 		return "", err
 	}
 	var value any
-	if p.Action == "actions" || p.Action == "start_action" {
+	if p.Action == agent.InteractiveCommandAction {
+		v, err := b.requestTerminalHandoff(ctx, e, p.Argv, p.Cwd, pinnedEnv)
+		if err != nil {
+			return "", err
+		}
+		value = v
+	} else if p.Action == "actions" || p.Action == "start_action" {
 		v, err := b.agentAction(ctx, e, p.Action, p.Name, p.Restart)
 		if err != nil {
 			return "", err

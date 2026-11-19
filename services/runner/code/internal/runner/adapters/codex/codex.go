@@ -683,6 +683,15 @@ func (s *session) read() {
 						_ = s.p.Reject(m.ID, "unknown dynamic tool")
 						return
 					}
+					if agent.IsInteractiveCommand(call.Tool, call.Arguments) {
+						if m.Redelivered {
+							_ = s.p.Reject(m.ID, toolOutcomeUnknown)
+							return
+						}
+						// The Runner presents the command in its own handoff card.
+						go s.runTool(m.ID, "", call.Tool, call.Arguments)
+						return
+					}
 					title := toolApproval(call.Tool)
 					switch {
 					case title == "":

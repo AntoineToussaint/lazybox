@@ -6,6 +6,19 @@ import "encoding/json"
 // managed commands.
 const CommandTool = "lazybox_command"
 
+const InteractiveCommandAction = "interactive"
+
+// IsInteractiveCommand identifies the command action whose approval the Runner owns.
+func IsInteractiveCommand(name string, args json.RawMessage) bool {
+	if name != CommandTool {
+		return false
+	}
+	var call struct {
+		Action string `json:"action"`
+	}
+	return json.Unmarshal(args, &call) == nil && call.Action == InteractiveCommandAction
+}
+
 // SettingsReadTool and SettingsUpdateTool are the Runner tools through which the
 // help assistant reads and proposes changes to Lazybox's own settings. Only the
 // help assistant has them; every update is put to the user before it runs.

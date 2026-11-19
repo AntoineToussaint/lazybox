@@ -525,6 +525,8 @@ service RunnerService {
   // install already running.
   rpc InstallBrowser(InfoRequest) returns (CommandStatus);
   rpc DeleteTheme(DeleteThemeRequest) returns (ThemeFolder);
+
+  rpc DecideTerminalHandoff(DecideTerminalHandoffRequest) returns (TerminalStatus);
 }
 
 message InfoRequest {}
@@ -1984,7 +1986,7 @@ message TerminalStatus {
   string signal = 12;
   string error = 13;
   int64 created_at_unix_millis = 14;
-  // "" in the workspace; repository-home or user-home outside it.
+  // "" for a workspace shell; repository-home, user-home or interactive-command.
   string place = 15;
   // The repository whose home it runs in (place repository-home).
   string repository_id = 16;
@@ -4299,3 +4301,9 @@ message PendingDeletion {
 message ListPendingDeletionsRequest {}
 message ListPendingDeletionsResponse { repeated PendingDeletion deletions = 1; }
 message UndoDeletionRequest { string id = 1; }
+
+// An owner decision on the exact command the Runner showed in the conversation.
+message DecideTerminalHandoffRequest {
+  string handoff_id = 1;
+  bool accept = 2;
+}

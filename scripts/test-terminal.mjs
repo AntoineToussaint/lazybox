@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 
 const fixture=await startRunnerFixture();
+const chatEvents=fixture.openEvents('alpha-session');
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 const calls=method=>fixture.calls.filter(call=>call.method===method);
 let browser;
@@ -194,6 +195,26 @@ try {
  await last.click();await page.keyboard.type('exit');await page.keyboard.press('Enter');
  await expect(page.locator('.panel-terminal')).toHaveCount(0);
  await expect(page.locator('.panel-chat')).toBeVisible();
+ // A handoff in chat opens a PTY only after the owner reviews and accepts.
+ const handoff={type:'terminal_handoff',status:'pending',name:'alpha',text:'/fixture/collections/alpha',providerDataJson:Buffer.from(JSON.stringify(['acme','login'])).toString('base64')};
+ chatEvents.push({...handoff,requestId:'declined'});
+ const declined=page.getByRole('article',{name:'Interactive command'}).last();
+ await expect(declined).toContainText('["acme","login"]');
+ await declined.getByRole('button',{name:'Decline',exact:true}).click();
+ await expect(declined).toContainText('Interactive command declined');
+ await expect(panel).toHaveCount(0);
+ chatEvents.push({...handoff,requestId:'accepted'});
+ const accepted=page.getByRole('article',{name:'Interactive command'}).last();
+ await expect(accepted.getByRole('button',{name:'Run and take over'})).toBeVisible();
+ assert.equal(calls('DecideTerminalHandoff').length,1);
+ await accepted.getByRole('button',{name:'Run and take over'}).click();
+ await expect(screen).toContainText('Enter device code');
+ await expect(screen.locator('textarea')).toBeFocused();
+ await page.keyboard.type('fixture');
+ await expect.poll(()=>fixture.terminals.get('interactive-accepted')?.input.join('')).toBe('fixture');
+ chatEvents.push({...handoff,requestId:'accepted',status:'finished',text:'interactive-accepted'});
+ await expect(accepted).toContainText('Interactive command finished');
+ assert.equal(calls('OpenTerminal').length,opened,'handoff reused the PTY started by the owner decision');
  assert.deepEqual(errors,[]);
- console.log('PASS terminal: a wrapped sign-in URL is one link (pointer and underline on hover, a click opens the whole address, a drag does not, the right-click menu offers it), exit closes the tab and panel, header opens a shell docked right, focuses rather than duplicates, fitted size, ordered input, member directory, close, re-attach after reload, × close and reopen, dock via menu and keyboard, layout survives reload, remembered dock side, drag a tab below the chat with a drop preview, neighbours stay mounted, reopen from Panels, phone close.');
+ console.log('PASS terminal: an agent handoff requires approval, focuses the PTY and receives owner input; a wrapped sign-in URL is one link (pointer and underline on hover, a click opens the whole address, a drag does not, the right-click menu offers it), exit closes the tab and panel, header opens a shell docked right, focuses rather than duplicates, fitted size, ordered input, member directory, close, re-attach after reload, × close and reopen, dock via menu and keyboard, layout survives reload, remembered dock side, drag a tab below the chat with a drop preview, neighbours stay mounted, reopen from Panels, phone close.');
 } finally {await browser?.close();await server.close();await fixture.close();}

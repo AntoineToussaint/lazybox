@@ -87,7 +87,7 @@ test('a whole QR link names its gateway and its offer (the iPhone app scans or i
   assert.deepEqual(parsePairingLink('https://mac.tail1234.ts.net:8443/?view=remote#pair=offer.secret-value&grants=read%2Crespond'),
     { baseUrl: 'https://mac.tail1234.ts.net:8443', offer: { pairing: 'offer', secret: 'secret-value', grants: ['read', 'respond'] } });
   assert.equal(parsePairingLink('  http://127.0.0.1:60319/#pair=o.s\n')?.baseUrl, 'http://127.0.0.1:60319', 'pasted with spaces; the loopback fixture');
-  for (const bad of ['', 'mac.ts.net/#pair=o.s', 'https://mac.ts.net/?view=remote', 'https://mac.ts.net/#grants=read', 'javascript:alert(1)#pair=o.s', 'https://mac ts.net/#pair=o.s']) assert.equal(parsePairingLink(bad), undefined, bad);
+  for (const bad of ['http://mac.local/#pair=o.s', 'http://localhost@mac.local/#pair=o.s', 'http://127.0.0.1.example/#pair=o.s', '', 'mac.ts.net/#pair=o.s', 'https://mac.ts.net/?view=remote', 'https://mac.ts.net/#grants=read', 'javascript:alert(1)#pair=o.s', 'https://mac ts.net/#pair=o.s']) assert.equal(parsePairingLink(bad), undefined, bad);
 });
 
 test('the iPhone app pairs with its own P-256 key and the gateway verifies it unchanged', async () => {

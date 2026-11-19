@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { FlatList, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, FlatList, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import { useHeaderHeight } from 'expo-router/react-navigation';
 import type { Session } from '@lazybox/protocol';
@@ -106,13 +106,16 @@ export default function ConversationScreen() {
   </>;
 
   return <KeyboardAvoidingView behavior="padding" keyboardVerticalOffset={headerHeight} style={{ flex: 1, backgroundColor: theme.bg }}>
-    <Stack.Screen options={{ headerTitle: () => <View style={styles.title}>
+    <Stack.Screen options={{ headerTitle: () => <Pressable style={styles.title} accessibilityRole="button"
+      accessibilityLabel={[conversationName(session, 'Conversation'), workspace, connection.label].filter(Boolean).join(', ')}
+      accessibilityHint="Shows conversation details"
+      onPress={() => Alert.alert(conversationName(session, 'Conversation'), [workspace, connection.label, sessionStatus(session)].filter(Boolean).join(' · '))}>
       <Text style={[styles.titleText, { color: theme.textStrong }]} numberOfLines={1}>{conversationName(session, 'Conversation')}</Text>
       <View style={styles.subtitle}>
         <LiveDot tone={connection.tone} label={connection.label}/>
         <Text style={[styles.subtitleText, { color: theme.muted }]} numberOfLines={1}>{[workspace, sessionStatus(session)].filter(Boolean).join(' · ')}</Text>
       </View>
-    </View> }}/>
+    </Pressable> }}/>
     {connection.banner && <ConnectionBanner label={connection.label} detail={connection.detail} onRetry={() => { void refresh(); reader?.retry(); }}/>}
     {transcript?.error ? <ConnectionBanner label="This conversation could not be loaded" detail={transcript.error} onRetry={() => reader?.retry()}/> : null}
     <FlatList

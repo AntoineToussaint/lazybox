@@ -6,6 +6,8 @@ type Phase = 'idle' | 'starting' | 'listening' | 'finishing';
 type Capture = { transcript: string; started: boolean };
 
 export function useDictation(enabled: boolean, insert: (text: string) => void) {
+  const insertLatest = useRef(insert);
+  insertLatest.current = insert;
   const active = useRef<Capture | undefined>(undefined);
   const [phase, setPhase] = useState<Phase>('idle');
   const [preview, setPreview] = useState('');
@@ -26,7 +28,9 @@ export function useDictation(enabled: boolean, insert: (text: string) => void) {
     }
     const subscription = AppState.addEventListener('change', state => {
       if (state !== 'background') return;
+      const transcript = active.current?.transcript;
       cancel();
+      if (transcript) insertLatest.current(transcript);
       setPhase('idle');
       setPreview('');
     });

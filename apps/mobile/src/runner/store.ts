@@ -30,7 +30,7 @@ export async function loadPairing(): Promise<Pairing | undefined> {
 }
 
 export async function clearPairing(): Promise<void> {
-  await SecureStore.deleteItemAsync(KEY, OPTIONS).catch(() => undefined);
+  await SecureStore.deleteItemAsync(KEY, OPTIONS);
 }
 
 /** The DeviceStore `pairDevice` saves into, for a pairing with the Runner at `baseUrl`. */

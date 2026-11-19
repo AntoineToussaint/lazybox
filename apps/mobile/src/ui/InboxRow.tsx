@@ -42,7 +42,7 @@ export const InboxRow = memo(function InboxRow({ row, deferred, handlers }: { ro
       {deferred ? <Progress state={deferred} onUndo={() => handlers.undo(row)}/>
         : plan.kind === 'approval' ? <>
           <View style={[styles.what, { backgroundColor: theme.codeBg, borderColor: theme.lineSubtle }]}>
-            <Text style={[styles.code, { color: theme.codeText }]} numberOfLines={3} selectable>{plan.what}</Text>
+            <Text style={[styles.code, { color: theme.codeText }]} selectable>{plan.what}</Text>
           </View>
           {plan.risks.map(risk => <View key={risk.kind} style={styles.risk}><Icon name="exclamationmark.triangle.fill" size={12} color={theme.warn}/><Text style={[styles.riskText, { color: theme.warn }]}>{risk.text}</Text></View>)}
           {plan.allow ? <View style={styles.buttons}>

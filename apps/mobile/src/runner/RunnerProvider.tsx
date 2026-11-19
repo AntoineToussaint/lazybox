@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { PairingLifecycle } from './lifecycle';
 import { AppState } from 'react-native';
 import { fetch as expoFetch } from 'expo/fetch';
 import {
@@ -27,7 +28,7 @@ export type Phase =
   | { kind: 'revoked' }
   | { kind: 'signing-in'; pairing: Pairing }
   | { kind: 'offline'; pairing: Pairing; message: string }
-  | { kind: 'ready'; pairing: Pairing; session: DeviceSession };
+  | { kind: 'ready'; pairing: Pairing; session: DeviceSession; ticket: number };
 
 export type RunnerState = {
   phase: Phase;
@@ -65,32 +66,58 @@ function useForeground(): boolean {
 export function RunnerProvider({ children }: { children: ReactNode }) {
   const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
   const foreground = useForeground();
-  const signIn = useCallback(async (pairing: Pairing) => {
-    setPhase(current => current.kind === 'ready' ? current : { kind: 'signing-in', pairing });
-    try { setPhase({ kind: 'ready', pairing, session: await openDeviceSession({ baseUrl: pairing.baseUrl, stored: pairing.stored, fetch: fetcher }) }); }
+  const [life] = useState(() => new PairingLifecycle());
+  const revoke = useCallback(async (ticket: number, pairing: Pairing) => {
+    try {
+      await life.write(ticket, clearPairing);
+      if (life.owns(ticket)) setPhase({ kind: 'revoked' });
+    } catch {
+      if (life.owns(ticket)) setPhase({ kind: 'offline', pairing, message: 'This pairing was revoked. Tap Forget this pairing to remove its key.' });
+    }
+  }, [life]);
+  const signIn = useCallback(async (pairing: Pairing, ticket: number) => {
+    if (!life.owns(ticket)) return;
+    setPhase({ kind: 'signing-in', pairing });
+    try {
+      const session = await openDeviceSession({ baseUrl: pairing.baseUrl, stored: pairing.stored, fetch: fetcher });
+      if (life.owns(ticket)) setPhase({ kind: 'ready', pairing, session, ticket });
+    }
     catch (error) {
-      if (error instanceof DeviceRevoked) { await clearPairing(); setPhase({ kind: 'revoked' }); return; }
+      if (!life.owns(ticket)) return;
+      if (error instanceof DeviceRevoked) { await revoke(ticket, pairing); return; }
       setPhase({ kind: 'offline', pairing, message: error instanceof Error ? error.message : String(error) });
     }
-  }, []);
-  useEffect(() => { void loadPairing().then(pairing => pairing ? signIn(pairing) : setPhase({ kind: 'unpaired' })); }, [signIn]);
+  }, [life, revoke]);
+  useEffect(() => {
+    const ticket = life.begin();
+    void loadPairing().then(pairing => {
+      if (!life.owns(ticket)) return;
+      if (pairing) void signIn(pairing, ticket);
+      else setPhase({ kind: 'unpaired' });
+    });
+    return () => { life.begin(); };
+  }, [life, signIn]);
 
   const ready = phase.kind === 'ready' ? phase : undefined;
   const pairing = ready?.pairing;
-  // One link per pairing: clients made from it adopt each renewed credential, open streams included.
-  const renewing = useRef<Promise<DeviceSession | undefined> | undefined>(undefined);
-  const latest = useRef(phase); latest.current = phase;
-  const renew = useCallback(async () => {
-    const current = latest.current;
-    if (current.kind !== 'ready') return undefined;
-    renewing.current ??= openDeviceSession({ baseUrl: current.pairing.baseUrl, stored: current.pairing.stored, fetch: fetcher })
-      .then(session => { setPhase({ kind: 'ready', pairing: current.pairing, session }); return session; },
-        async error => { if (error instanceof DeviceRevoked) { await clearPairing(); setPhase({ kind: 'revoked' }); } return undefined; })
-      .finally(() => { renewing.current = undefined; });
-    const next = await renewing.current;
-    return next && { baseUrl: current.pairing.baseUrl, token: next.token };
-  }, []);
-  // A renewed token is adopted by the same link (below), never a new link: open streams keep their client.
+  const ticket = ready?.ticket ?? life.current;
+  const renew = useMemo(() => {
+    let pending: Promise<DeviceSession | undefined> | undefined;
+    return async () => {
+      if (!pairing || !life.owns(ticket)) return undefined;
+      pending ??= openDeviceSession({ baseUrl: pairing.baseUrl, stored: pairing.stored, fetch: fetcher })
+        .then(session => {
+          if (!life.owns(ticket)) return undefined;
+          setPhase({ kind: 'ready', pairing, session, ticket });
+          return session;
+        }, async error => {
+          if (error instanceof DeviceRevoked && life.owns(ticket)) await revoke(ticket, pairing);
+          return undefined;
+        }).finally(() => { pending = undefined; });
+      const session = await pending;
+      return session && life.owns(ticket) ? { baseUrl: pairing.baseUrl, token: session.token } : undefined;
+    };
+  }, [pairing, life, ticket, revoke]);
   const link = useMemo(() => pairing && ready ? new RunnerLink({ baseUrl: pairing.baseUrl, token: ready.session.token }, { fetch: fetcher, renew }) : undefined, [pairing, renew]);
   useEffect(() => { if (link && ready) link.adopt({ baseUrl: ready.pairing.baseUrl, token: ready.session.token }); }, [link, ready?.session.token]);
   const api = useMemo(() => link?.client(), [link]);
@@ -107,21 +134,25 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [error, setError] = useState('');
   const [answeredAt, setAnsweredAt] = useState(0);
+  const polls = useRef({ started: 0, settled: 0 });
   const poll = useCallback(async (signal?: AbortSignal) => {
     if (!api) return;
+    const request = ++polls.current.started;
     try {
       const next = await api.info({}, { signal, timeoutMs: 8000 });
-      if (signal?.aborted) return;
+      if (signal?.aborted || !life.owns(ticket) || request < polls.current.settled) return;
+      polls.current.settled = request;
       setInfo(next); setError(''); setAnsweredAt(Date.now());
     } catch (failure) {
-      if (signal?.aborted) return;
+      if (signal?.aborted || !life.owns(ticket) || request < polls.current.settled) return;
+      polls.current.settled = request;
       setError(humanError(ConnectError.from(failure)));
     }
-  }, [api]);
+  }, [api, life, ticket]);
   const loadCollections = useCallback(async (signal?: AbortSignal) => {
     if (!api) return;
-    try { const result = await api.listCollections({}, { signal, timeoutMs: 10000 }); if (!signal?.aborted) setCollections(result.collections); } catch { /* the next poll says it */ }
-  }, [api]);
+    try { const result = await api.listCollections({}, { signal, timeoutMs: 10000 }); if (!signal?.aborted && life.owns(ticket)) setCollections(result.collections); } catch { /* the next poll says it */ }
+  }, [api, life, ticket]);
   useEffect(() => {
     if (!api || !foreground) return;
     const control = new AbortController();
@@ -136,12 +167,31 @@ export function RunnerProvider({ children }: { children: ReactNode }) {
   const pair = useCallback(async (text: string, name: string) => {
     const parsed = parsePairingLink(text);
     if (!parsed) throw new Error('That is not a Lazybox pairing link. On your computer, open Settings → Devices → Pair a phone, and scan or copy its code.');
-    const stored = await pairDevice({ baseUrl: parsed.baseUrl, offer: parsed.offer, name, store: pairingStore(parsed.baseUrl), fetch: fetcher, keyProvider });
-    void signIn({ baseUrl: parsed.baseUrl, stored });
-    return stored.device;
-  }, [signIn]);
-  const retry = useCallback(() => { const current = latest.current; if (current.kind === 'offline') void signIn(current.pairing); }, [signIn]);
-  const forget = useCallback(async () => { await clearPairing(); setPhase({ kind: 'unpaired' }); }, []);
+    const ticket = life.begin();
+    const store = pairingStore(parsed.baseUrl);
+    try {
+      const stored = await pairDevice({ baseUrl: parsed.baseUrl, offer: parsed.offer, name,
+        store: { ...store, save: value => life.write(ticket, () => store.save(value)) }, fetch: fetcher, keyProvider });
+      void signIn({ baseUrl: parsed.baseUrl, stored }, ticket);
+      return stored.device;
+    } catch (error) {
+      if (life.owns(ticket) && 'pairing' in phase) void signIn(phase.pairing, ticket);
+      throw error;
+    }
+  }, [life, phase, signIn]);
+  const retry = useCallback(() => {
+    if (phase.kind === 'offline') void signIn(phase.pairing, life.begin());
+  }, [phase, life, signIn]);
+  const forget = useCallback(async () => {
+    const ticket = life.begin();
+    try {
+      await life.write(ticket, clearPairing);
+      if (life.owns(ticket)) setPhase({ kind: 'unpaired' });
+    } catch (error) {
+      if (life.owns(ticket) && 'pairing' in phase) setPhase({ kind: 'offline', pairing: phase.pairing, message: 'Could not remove the saved key. Unlock your phone and try Forget this pairing again.' });
+      throw error;
+    }
+  }, [life, phase]);
 
   const device = phase.kind === 'ready' ? phase.session.device : phase.kind === 'signing-in' || phase.kind === 'offline' ? phase.pairing.stored.device : undefined;
   const value: RunnerState = { phase, device, api, info, collections, error, answeredAt, foreground, refresh, pair, retry, forget };

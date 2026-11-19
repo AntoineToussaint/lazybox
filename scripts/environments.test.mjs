@@ -366,3 +366,18 @@ test('Dev rebuilds the CLI agents run whenever the Runner source changes, never 
   assert.deepEqual((await readdir(bin)).filter(name => name !== 'lazybox'), [], 'no temporary build is left behind');
   await watch.close();
 });
+
+test('managed Dev waits for its own native desktop receipt and detects an exited build', async t => {
+  const { waitForDesktop } = await import('./environments.mjs');
+  const root = await mkdtemp(join(tmpdir(), 'lazybox-desktop-ready-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const receipt = join(root, 'desktop-ready');
+  const desktop = { pid: 1, exitCode: null };
+  let done = false;
+  const waiting = waitForDesktop(receipt, desktop, () => false).then(() => { done = true; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(done, false);
+  await writeFile(receipt, 'ready');
+  await waiting;
+  await assert.rejects(waitForDesktop(receipt, { ...desktop, exitCode: 1 }, () => false), /did not finish/);
+});

@@ -221,7 +221,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Measured here, on the main thread, before any window is built.
             title_bar::buttons();
             attention::setup(app.handle())?;
-            host::setup(app)
+            host::setup(app)?;
+            #[cfg(debug_assertions)]
+            if let Some(receipt) = std::env::var_os("LAZYBOX_DEV_DESKTOP_READY") {
+                std::fs::write(receipt, b"ready")?;
+            }
+            Ok(())
         })
         .on_window_event(host::window_event)
         .on_menu_event(|app, event| host::menu_event(app, event.id().as_ref()))

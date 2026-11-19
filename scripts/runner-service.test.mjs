@@ -47,6 +47,7 @@ test('plan pins public config and assets without reading or serializing credenti
   assert.deepEqual(Object.keys(plan.publicEnv).sort(), ['GOFLAGS', 'GOMAXPROCS', 'PATH']);
   assert.ok(!JSON.stringify(plan).includes('secret-token'));
   assert.ok(plan.args.includes('--temporary-ports'));
+  assert.ok(plan.args.includes('runner:LAZYBOX_V2_ENVIRONMENTS=' + f.root));
   assert.equal(f.calls.length, 0);
   await writeFile(join(f.source, 'workers/claude-sdk/dist/main.js'), '// changed build');
   assert.notEqual(plan.version, (await servicePlan(f.root, f.options)).version);

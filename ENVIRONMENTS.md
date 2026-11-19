@@ -315,3 +315,21 @@ started, waits a bounded grace period, and force-stops watchers that ignore
 termination. This prevents orphaned watchers from rebuilding a window against
 an old Vite origin. Dependency changes still require a Dev relaunch; avoid
 reinstalling dependencies underneath a running development environment.
+
+### Rebuild Dev and stage Working from a conversation
+
+Request the workspace action `lazybox/rebuild-dev-working` from a conversation
+in the Lazybox repository. Review its script in the workspace Actions panel.
+The Runner supplies the configured repository home and its environment root.
+Both the Runner and the source on main must include managed-build support.
+
+The action fast-forwards a clean main checkout. Dev launches from that home
+detached from the action console. It reports the revision after the new Runner
+answers Info and the rebuilt desktop opens its window. A running Dev launcher
+accepts a shutdown request through its private lock receipt. For the
+first upgrade from a launcher without this receipt, close that launcher
+yourself. Once the Dev attempt finishes, Working stages a Git archive of the
+same commit through the release gates. Each channel reports its outcome in the action console. Promotion is a
+separate explicit operation. An interrupted action can leave
+`managed-build.lock` in the environment root. Confirm the build has ended
+before removing that lock and retrying.

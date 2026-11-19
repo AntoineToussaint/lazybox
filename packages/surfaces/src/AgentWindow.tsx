@@ -35,7 +35,7 @@ import { useComposerAttachments } from './useComposerAttachments';
 import { usePromptRecall } from './usePromptRecall';
 import { useSessionRefresh, useSessionWorkspace } from './useSessionPolling';
 import { useFileDrop } from './useFileDrop';
-import { NewSessionForm, useSessionLauncher } from './NewSessionForm';
+import { NewSessionForm, useSessionLauncher, type ConversationCopy } from './NewSessionForm';
 import { agentTitle } from './providers';
 import { ChatHeader, ChatStatus, SessionHeader, SessionInspection, WindowTopbar, type HeaderStats } from './ChatHeader';
 import { ReviewChatButton, useChatReview } from './ReviewFromChat';
@@ -85,6 +85,7 @@ export type AgentWindowProps = {
   assistantContext?: string;
   /** Initial choices. Starting a session always requires an explicit click. */
   agent?: 'claude' | 'codex';
+  copy?: ConversationCopy;
   workingDirectory?: string;
   emptyWorkspace?: boolean;
   initialSessionId?: string;
@@ -102,7 +103,7 @@ export type AgentWindowProps = {
   onViewChange?: (target: SurfaceTarget) => void | Promise<void>;
   onOpenHandoff?: OpenHandoffConversation;
   onChatTitle?(title: PanelTitle): void;
-  onSessionChange?: (sessionId: string) => void;
+  onSessionChange?: (sessionId: string, collectionId?: string) => void;
   onOpenViewer?: (sessionId: string, commandId: string) => void | Promise<void>;
   /** Shows one of this conversation's managed commands in the host's command console. */
   onOpenCommand?: (commandId: string) => void;
@@ -132,7 +133,7 @@ export function AgentWindow(props: AgentWindowProps) {
   </RunnerProvider>;
 }
 
-export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, workingDirectory = '', emptyWorkspace = false, initialSessionId = '', collectionId = '', embedded = false, showCommands = true, allowStart = true, autoStart = false, onOpenChat, initialCommandId = '', initialCommandsOpen, mode = 'agent', viewState, onViewChange, onSessionChange, onOpenViewer, onOpenCommand, onShowBrowser, onOpenHandoff, onChatTitle, keyboardHint = null }: Omit<AgentWindowProps, 'connection'> & { keyboardHint?: KeyHint | null }) {
+export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, copy, workingDirectory = '', emptyWorkspace = false, initialSessionId = '', collectionId = '', embedded = false, showCommands = true, allowStart = true, autoStart = false, onOpenChat, initialCommandId = '', initialCommandsOpen, mode = 'agent', viewState, onViewChange, onSessionChange, onOpenViewer, onOpenCommand, onShowBrowser, onOpenHandoff, onChatTitle, keyboardHint = null }: Omit<AgentWindowProps, 'connection'> & { keyboardHint?: KeyHint | null }) {
   const { api, info, connecting, error: connectionError, refresh, revision } = useRunner();
   const keymap = useKeymap(viewState);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -243,9 +244,9 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, wo
     onSuccessor: next => { setSessionID(next.id); onSessionChange?.(next.id); },
   });
   const launcher = useSessionLauncher({
-    api, info, viewState, agent, workingDirectory, purpose, assistantContext, collectionId, emptyWorkspace, allowStart, autoStart, sessionID, lifetime,
+    api, info, viewState, agent, copy, workingDirectory, purpose, assistantContext, collectionId, emptyWorkspace, allowStart, autoStart, sessionID, lifetime,
     onError: setError,
-    onStarted: id => { setSessionID(id); setCommand(''); onSessionChange?.(id); },
+    onStarted: (id, workspace) => { setSessionID(id); setCommand(''); onSessionChange?.(id, workspace); },
   });
 
   const send = async (event?: FormEvent, snippetText?: string) => {

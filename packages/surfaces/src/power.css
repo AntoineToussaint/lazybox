@@ -18,8 +18,8 @@
 
 .power-picker{width:min(560px,calc(100vw - 32px));font-family:var(--font-ui)}
 .power-picker>input{margin:0 0 8px}
-.power-picker-list{display:flex;flex-direction:column;gap:2px;max-height:min(50vh,420px);overflow:auto}
-.power-picker-list button{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;text-align:left;background:transparent;border-color:transparent;white-space:normal}
+.power-picker-list{display:flex;flex-direction:column;gap:2px;height:min(320px,45dvh);overflow:auto;scrollbar-gutter:stable;overscroll-behavior:contain}
+.power-picker-list button{flex:none;display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;text-align:left;background:transparent;border-color:transparent;white-space:normal}
 .power-picker-list button[aria-selected=true]{background:var(--accent-bg);border-color:var(--accent-line-subtle)}
 .power-picker-list span{flex:1;min-width:0;display:flex;flex-direction:column}
 .power-picker-list small{color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

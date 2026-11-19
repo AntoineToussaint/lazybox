@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { ViewStateStore } from "@lazybox/platform";
 import type { Collection } from "@lazybox/protocol";
 import { DraggableDialog, DialogHeader } from "./DraggableDialog";
 import { RepositoryBrowser } from "./RepositoryBrowser";
@@ -8,10 +9,14 @@ import { useRunnerSettings } from "./RunnerSettings";
 import { branchForName, suggestWorkspaceName } from "./repository-model";
 import { Icon } from "./Icons";
 import { forgetStarts, StartFromChip, StartFromPicker, useRepositoryStarts } from "./StartFrom";
+import { parseTaskChoices, rememberTask, TASK_CHOICES_PREFERENCE } from "./new-task-model";
+import { readPreference, writePreference } from "./view-state";
 import { effectiveStart, startsFor } from "./start-from-model";
 /** One selection workflow for creating a workspace and adding to an existing one. */
 export function WorkspaceRepositoryDialog({
   workspace,
+  copy,
+  viewState,
   onClose,
   onSaved,
   chooseRepositoryFolder,
@@ -21,6 +26,8 @@ export function WorkspaceRepositoryDialog({
   intro,
 }: {
   workspace?: Collection;
+  copy?: Collection;
+  viewState?: ViewStateStore;
   onClose(): void;
   onSaved(workspace: Collection): void;
   chooseRepositoryFolder?(): Promise<string | null>;
@@ -42,9 +49,13 @@ export function WorkspaceRepositoryDialog({
     generated = useRef("");
   if (!generated.current && settings?.suggestedName)
     generated.current = settings.suggestedName;
-  const [selected, setSelected] = useState(() => new Set<string>(preselected)),
-    [customName, setCustomName] = useState<string>(),
-    [empty, setEmpty] = useState(false),
+  const [remembered] = useState(() => {
+    try { return parseTaskChoices(readPreference(viewState, TASK_CHOICES_PREFERENCE)); }
+    catch { return parseTaskChoices(null); }
+  });
+  const [selected, setSelected] = useState(() => new Set<string>(workspace || copy || preselected.length ? preselected : remembered.identities)),
+    [customName, setCustomName] = useState<string | undefined>(copy ? `${copy.name.slice(0, 100)} copy` : undefined),
+    [empty, setEmpty] = useState(copy ? !copy.members.length : !workspace && !preselected.length && !!remembered.empty),
     [busy, setBusy] = useState(false),
     [progress, setProgress] = useState(""),
     [error, setError] = useState("");
@@ -76,13 +87,32 @@ export function WorkspaceRepositoryDialog({
   const [startInfo, setStartInfo] = useRepositoryStarts(api, empty ? [] : chosen);
   const [starts, setStarts] = useState<Record<string, string>>({}),
     [startPicker, setStartPicker] = useState<string>();
+  const [copyLoaded, setCopyLoaded] = useState(!copy?.members.length);
+  const [copyError, setCopyError] = useState("");
+  useEffect(() => {
+    if (!copy || !catalog || copyLoaded) return;
+    const next: Record<string, string> = {};
+    for (const member of copy.members) {
+      const entry = catalog.entries.find(value => value.repositoryId === member.spec?.repositoryId);
+      if (!entry) {
+        setCopyError(`Could not find ${member.spec?.name || "a repository"} in this Runner’s catalog.`);
+        return;
+      }
+      const base = member.spec?.baseRef || "";
+      next[entry.identity] = base === "HEAD" ? "" : base.replace(/^refs\/(remotes\/origin|heads)\//, "");
+    }
+    setCopyError("");
+    setSelected(new Set(Object.keys(next)));
+    setStarts(next);
+    setCopyLoaded(true);
+  }, [copy, catalog, copyLoaded]);
   const repositoryName = (identity: string) =>
     catalog?.entries.find((r) => r.identity === identity)?.name || identity.replace(/^github:/, "");
   const closeStart = (identity: string) => {
     setStartPicker(undefined);
     requestAnimationFrame(() => dialog.current?.querySelector<HTMLElement>(`[data-start-from="${CSS.escape(identity)}"]`)?.focus());
   };
-  const canSave = !!(selected.size || empty) && !!(workspace || name.trim());
+  const canSave = copyLoaded && !!(selected.size || empty) && !!(workspace || name.trim());
   // A double-clicked repository is added, then the dialog finishes on the next
   // render, once the name suggestion reflects the new selection.
   const [finishSoon, setFinishSoon] = useState(false);
@@ -121,6 +151,12 @@ export function WorkspaceRepositoryDialog({
         throw Error(
           "Preparation ended before the Runner confirmed the workspace. Retry to check the same request.",
         );
+      if (!workspace) {
+        try {
+          const previous = parseTaskChoices(readPreference(viewState, TASK_CHOICES_PREFERENCE));
+          writePreference(viewState, TASK_CHOICES_PREFERENCE, JSON.stringify(rememberTask(previous, { ...previous, identities: request.repositoryIdentities, empty })));
+        } catch { /* The workspace has already been created. */ }
+      }
       forgetStarts(api, request.repositoryIdentities);
       await reload();
       onSaved(result);
@@ -135,7 +171,7 @@ export function WorkspaceRepositoryDialog({
     <DraggableDialog
       ref={dialog}
       className="workspace-repository-dialog unified-workspace-dialog"
-      aria-label={workspace ? "Add repository to workspace" : "New workspace"}
+      aria-label={workspace ? "Add repository to workspace" : copy ? "Clone workspace" : "New workspace"}
       onKeyDownCapture={(e) => {
         // ⌥B: where the branch starts — the focused repository's, else the first chosen.
         if (!e.altKey || e.metaKey || e.ctrlKey || e.code !== "KeyB" || busy || empty || !chosen.length) return;
@@ -154,13 +190,13 @@ export function WorkspaceRepositoryDialog({
           <h2>
             {workspace
               ? `Add repositories to ${workspace.name}`
-              : "New workspace"}
+              : copy ? "Clone workspace" : "New workspace"}
           </h2>
           <p>
             {intro ??
               (workspace
                 ? "Choose the repositories to include in this workspace."
-                : "Choose repositories for this workspace.")}
+                : copy ? "Choose a name for the copy. Each repository gets a fresh branch." : "Choose repositories for this workspace.")}
           </p>
         </div>
         <button
@@ -171,11 +207,12 @@ export function WorkspaceRepositoryDialog({
           ×
         </button>
       </DialogHeader>
+      {copy && !copyLoaded && <p role="status">{copyError || "Loading the workspace’s repositories…"}</p>}
       <div className="workspace-picker-body">
       <RepositoryBrowser
         selected={selected}
         included={included}
-        disabled={busy}
+        disabled={busy || !copyLoaded}
         initialQuery={initialQuery}
         onSelected={(value) => {
           setSelected(value);
@@ -236,7 +273,7 @@ export function WorkspaceRepositoryDialog({
             <input
               type="checkbox"
               checked={empty}
-              disabled={busy}
+              disabled={busy || !copyLoaded}
               onChange={(e) => {
                 setEmpty(e.target.checked);
                 if (e.target.checked) setSelected(new Set());

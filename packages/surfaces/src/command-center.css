@@ -1,7 +1,7 @@
 /* Command palette, shortcuts overlay and toasts (CommandCenter.tsx). */
 .command-palette kbd,.shortcuts-overlay kbd,.toast-hint{display:inline-flex;align-items:center;justify-content:center;min-width:18px;padding:0 5px;border:1px solid var(--line-strong);border-bottom-width:2px;border-radius:4px;background:var(--surface-active);color:var(--text-secondary);font:calc(10.5px * var(--text-scale))/1.6 var(--font-mono,ui-monospace,monospace);white-space:nowrap}
 
-dialog.command-palette{position:fixed;top:12vh;margin:0 auto;width:min(680px,calc(100vw - 32px));max-height:min(600px,78vh);padding:0;border:1px solid var(--accent-line-subtle);border-radius:12px;background:var(--surface-raised);color:var(--text,var(--text));box-shadow:0 24px 70px color-mix(in srgb,var(--shadow) calc(67% * var(--shadow-strength)),transparent);overflow:hidden}
+dialog.command-palette{position:fixed;top:12vh;margin:0 auto;width:min(680px,calc(100vw - 32px));height:min(460px,78dvh);padding:0;border:1px solid var(--accent-line-subtle);border-radius:12px;background:var(--surface-raised);color:var(--text,var(--text));box-shadow:0 24px 70px color-mix(in srgb,var(--shadow) calc(67% * var(--shadow-strength)),transparent);overflow:hidden}
 dialog.command-palette[open]{display:flex;flex-direction:column}
 dialog.command-palette::backdrop,dialog.shortcuts-overlay::backdrop{background:color-mix(in srgb,var(--shadow) calc(40% * var(--shadow-strength)),transparent)}
 .command-palette-field{position:relative;display:flex;align-items:center;gap:8px;flex:none;padding:10px 14px;border-bottom:1px solid var(--line-subtle);color:var(--text-muted)}
@@ -12,7 +12,7 @@ dialog.command-palette::backdrop,dialog.shortcuts-overlay::backdrop{background:c
 .command-palette-prefixes button{display:inline-flex;align-items:center;gap:6px;padding:3px 9px 3px 4px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--text-tertiary);font-size:calc(11.5px * var(--text-scale));cursor:pointer}
 .command-palette-prefixes button:hover,.command-palette-prefixes button:focus-visible{border-color:var(--focus);color:var(--text)}
 .command-palette-heading{display:block;padding:10px 12px 3px;color:var(--text-faint);font-size:calc(10.5px * var(--text-scale));text-transform:uppercase;letter-spacing:.06em}
-.command-palette-results{flex:1;min-height:0;overflow:auto;padding:2px 6px 8px}
+.command-palette-results{flex:1;min-height:0;overflow:auto;scrollbar-gutter:stable;overscroll-behavior:contain;padding:2px 6px 8px}
 .command-palette-row{display:flex;align-items:center;gap:10px;min-height:34px;padding:5px 10px;border-radius:7px;cursor:pointer;font-size:calc(13px * var(--text-scale))}
 .command-palette-row[aria-selected="true"]{background:var(--accent-bg-strong)}
 .command-palette-icon{display:inline-flex;flex:none;width:18px;justify-content:center;color:var(--text-subtle)}
@@ -28,13 +28,14 @@ dialog.command-palette::backdrop,dialog.shortcuts-overlay::backdrop{background:c
 .command-palette-footer>span,.command-palette-legend>span{display:inline-flex;align-items:center;gap:4px}
 .command-palette-legend{display:inline-flex;gap:10px;margin-left:auto}
 
-dialog.shortcuts-overlay{position:fixed;top:8vh;margin:0 auto;width:min(920px,calc(100vw - 32px));max-height:84vh;padding:0;border:1px solid var(--accent-line-subtle);border-radius:12px;background:var(--surface-raised);color:var(--text,var(--text));box-shadow:0 24px 70px color-mix(in srgb,var(--shadow) calc(67% * var(--shadow-strength)),transparent);overflow:hidden}
+dialog.shortcuts-overlay{position:fixed;top:8vh;margin:0 auto;width:min(920px,calc(100vw - 32px));height:min(620px,84dvh);padding:0;border:1px solid var(--accent-line-subtle);border-radius:12px;background:var(--surface-raised);color:var(--text,var(--text));box-shadow:0 24px 70px color-mix(in srgb,var(--shadow) calc(67% * var(--shadow-strength)),transparent);overflow:hidden}
 dialog.shortcuts-overlay[open]{display:flex;flex-direction:column}
 .shortcuts-overlay header{display:flex;align-items:center;gap:12px;flex:none;padding:12px 14px;border-bottom:1px solid var(--line-subtle)}
 .shortcuts-overlay h2{display:flex;align-items:center;gap:8px;margin:0;font-size:calc(14px * var(--text-scale));white-space:nowrap}
 .shortcuts-overlay header input{flex:1;min-width:0;padding:6px 10px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface-sunken);color:var(--text);font-size:calc(13px * var(--text-scale));outline:none}
 .shortcuts-overlay header input:focus{border-color:var(--focus)}
-.shortcuts-groups{flex:1;min-height:0;overflow:auto;padding:6px 16px 14px;columns:2 340px;column-gap:28px}
+.shortcuts-results{flex:1;min-height:0;overflow:auto;scrollbar-gutter:stable;overscroll-behavior:contain}
+.shortcuts-groups{padding:6px 16px 14px;columns:2 340px;column-gap:28px}
 .shortcuts-groups section{break-inside:avoid;padding-top:10px}
 .shortcuts-groups h3{margin:0 0 4px;color:var(--text-faint);font-size:calc(10.5px * var(--text-scale));font-weight:600;text-transform:uppercase;letter-spacing:.06em}
 .shortcuts-groups dl{margin:0}

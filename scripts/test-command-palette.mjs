@@ -79,6 +79,11 @@ try {
   await expect(palette.getByRole('group', {name: 'Needs you'}).getByRole('option')).toHaveText([/Ship release notes/]);
   await expect(palette.getByRole('group', {name: 'Actions'}).getByRole('option').filter({hasText: 'New conversation'}).locator('kbd')).toHaveText(['⇧⌘N']);
   await page.screenshot({path: '/tmp/lazybox-palette-empty.png'});
+  const paletteBounds = () => Promise.all([palette, palette.locator('footer')].map(locator => locator.boundingBox()));
+  const unfiltered = await paletteBounds();
+  await search.fill('zzqxyunmatched');
+  await expect(palette.getByText(/Nothing matches/)).toBeVisible();
+  assert.deepEqual(await paletteBounds(), unfiltered, 'filtering must not move the palette or its footer');
   // ⌘K again closes it, and focus goes back where it was.
   await page.keyboard.press(`${mod}+k`);
   await expect(palette).toHaveCount(0);
@@ -144,6 +149,10 @@ try {
   await expect(overlay.locator('[data-action="palette.open"] dd')).toContainText('⌘K');
   await expect(overlay.locator('[data-action="workspace.select"] dd')).toContainText('⌘1…⌘9');
   await expect(overlay.getByRole('heading', {name: 'Go to'})).toBeVisible();
+  const shortcutsBounds = await overlay.boundingBox();
+  await overlay.getByRole('searchbox', {name: 'Filter shortcuts'}).fill('zzqxyunmatched');
+  await expect(overlay.getByText(/No shortcut matches/)).toBeVisible();
+  assert.deepEqual(await overlay.boundingBox(), shortcutsBounds);
   await overlay.getByRole('searchbox', {name: 'Filter shortcuts'}).fill('needs you');
   await expect(overlay.locator('.shortcut-row')).toHaveCount(2);
   await page.screenshot({path: '/tmp/lazybox-shortcuts.png'});

@@ -33,6 +33,10 @@ test('a step says its command, or what it does in words', () => {
 test('the running managed command is this conversation\'s own, newest first', () => {
   const command = (id: string, done: boolean, sessionId = 's', origin = '') => create(CommandStatusSchema, { id, done, sessionId, origin });
   assert.equal(runningCommand([command('a', false), command('b', true), command('c', false)], 's')?.id, 'c');
+  const newer = { ...command('a', false), startedAtUnixMillis: 20n };
+  const older = { ...command('c', false), startedAtUnixMillis: 10n };
+  assert.equal(runningCommand([newer, older], 's')?.id, 'a');
+  assert.equal(runningCommand([older, newer], 's')?.id, 'a');
   assert.equal(runningCommand([command('a', false, 'other'), command('w', false, 's', 'action')], 's'), undefined, 'workspace runs and other conversations are not this turn\'s');
   // A server `lazybox run` moved to the background is not the turn's step any more.
   assert.equal(runningCommand([command('a', false), create(CommandStatusSchema, { id: 'bg', done: false, sessionId: 's', background: true })], 's')?.id, 'a');

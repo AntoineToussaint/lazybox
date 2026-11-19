@@ -21,6 +21,15 @@ const tabs = (page: WorkspacePage) => chats(page).map(panel => `${resolveTarget(
 const front = (page: WorkspacePage, panelID: string) => groupOf(page, panelID)!.active === panelID;
 const open = (page: WorkspacePage, sessionId: string, mode: 'preview' | 'tab' | 'background', extra = {}) => openConversation(page, target(sessionId), { mode, ...extra }, id);
 
+test('the first conversation reuses a kept workspace starter tab', () => {
+  const page = settleChats(defaultLayout(target('')).pages[0], false);
+  const starter = chats(page)[0];
+  const opened = open(page, 'first', 'tab');
+  assert.equal(opened.id, starter.id);
+  assert.deepEqual(tabs(opened.page), ['first']);
+  assert.deepEqual(tabs(open(opened.page, 'second', 'tab').page), ['first', 'second']);
+});
+
 test('a single click shows the preview tab, and the next single click replaces it', () => {
   let page = work('a');
   assert.deepEqual(tabs(page), ['a P'], 'the default page has one chat: its preview tab');

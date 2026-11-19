@@ -42,6 +42,10 @@ try{
  await page.getByRole('button',{name:'Your prompts',exact:true}).click();
  const list=page.getByRole('dialog',{name:'Jump to a prompt'});
  await expect(list.getByRole('searchbox',{name:'Find a prompt'})).toBeFocused();
+ const promptBounds=await list.boundingBox();
+ await list.getByRole('searchbox').fill('zzqxyunmatched');
+ await expect(list.getByText('No prompt matches.')).toBeVisible();
+ assert.deepEqual(await list.boundingBox(),promptBounds,'the prompt picker keeps its bounds as results disappear');
  await list.getByRole('searchbox').fill('Question 3:');
  await page.keyboard.press('Enter');
  await expect(list).toHaveCount(0);

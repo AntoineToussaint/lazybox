@@ -312,11 +312,16 @@ export function useSlashCommands(o: Options) {
       return true;
     }
     if (menu.kind === 'hint') return false;
+    const unavailable = menu.kind === 'commands'
+      ? menu.items[selected]?.command.disabled
+      : menu.items[selected]?.disabled;
     if (event.key === 'Tab' && !event.altKey && !event.metaKey && !event.ctrlKey) {
+      if (unavailable) { setDismissed(true); return false; }
       if (event.shiftKey) return move(-1);
       event.preventDefault(); choose(selected, true); return true;
     }
     if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
+      if (unavailable) { setDismissed(true); return false; }
       event.preventDefault(); choose(selected); return true;
     }
     return false;

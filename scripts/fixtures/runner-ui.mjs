@@ -993,7 +993,7 @@ actions:
         mutations.push({ method, body });
         if (body.emptyWorkspace) { const session = {id:`empty-${sessions.length}`,profileId:body.profileId,workingDirectory:`/fixture/workspaces/${sessions.length}`,status:'ready',capabilities:{files:true},pending:[]};sessions.push(session);return json({session}); }
         const collection = collections.find(value => value.id === body.collectionId); if (!collection) return error('failed_precondition', 'Fixture Collection required');
-        const session = { id: `started-${sessions.length}`, collectionId: collection.id, workId: collection.id, profileId: body.profileId, capabilities: { files: true }, pending: [] }; sessions.push(session); collection.ownerExecutionId = session.id;
+        const session = { id: `started-${sessions.length}`, collectionId: collection.id, workId: collection.id, profileId: body.profileId, model: body.options?.model, permission: body.options?.permission, workflow: body.options?.workflow, capabilities: { files: true }, pending: [] }; sessions.push(session); collection.ownerExecutionId = session.id;
         if (runner.journalMessages) openEvents(session.id);
         return json({ session });
       }

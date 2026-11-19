@@ -43,6 +43,7 @@ export function WorkspaceRow({
   selected,
   onSelect,
   onDelete,
+  onClone,
   onManage,
   onAdd,
   onSaved,
@@ -73,6 +74,7 @@ export function WorkspaceRow({
   selected: boolean;
   onSelect(): void;
   onDelete(): void;
+  onClone?(): void;
   onManage(): void;
   onAdd(): void;
   onSaved(): void;
@@ -107,6 +109,7 @@ export function WorkspaceRow({
     "separator",
     { label: "Add repositories…", icon: "repository", run: onAdd },
     { label: "Manage repositories…", icon: "sliders", run: onManage },
+    !!onClone && { label: "Clone workspace…", icon: "plus", disabled: workspace.state !== "ready" && "The workspace is not ready", run: onClone },
     { label: "Rename workspace", icon: "pencil", shortcut: "F2", run: rename },
     workspaceTerminalItem(api, workspace.id),
     "separator",

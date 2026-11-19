@@ -50,7 +50,16 @@ try {
     .getByRole("button", { name: "New workspace", exact: true })
     .click();
   let d = page.getByRole("dialog", { name: "New workspace", exact: true });
-  await d.getByRole("searchbox", { name: "Find repositories" }).fill("data");
+  const search = d.getByRole("searchbox", { name: "Find repositories" });
+  const nameField = d.getByRole("textbox", { name: "Workspace name" });
+  const create = d.getByRole("button", { name: "Create workspace", exact: true });
+  await expect(d.getByRole("checkbox", { name: "codefly-dev/module-datasource", exact: true })).toBeVisible();
+  const bounds = () => Promise.all([d, search, nameField, create].map(locator => locator.boundingBox()));
+  const unfiltered = await bounds();
+  await search.fill("no-such-repository");
+  await expect(d.getByText("No matches in the current catalog")).toBeVisible();
+  assert.deepEqual(await bounds(), unfiltered, "a zero-result search must leave the dialog and its controls in place");
+  await search.fill("data");
   await expect(
     d.getByRole("checkbox", {
       name: "codefly-dev/module-datasource",
@@ -60,6 +69,7 @@ try {
   await expect(
     d.getByText("Add repositories to library", { exact: false }),
   ).toHaveCount(0);
+  assert.deepEqual(await bounds(), unfiltered, "one match uses the same space as the unfiltered catalog");
   assert.equal(f.mutations.length, 0, "discovery must not import or clone");
   await d
     .getByRole("checkbox", {
@@ -191,7 +201,11 @@ try {
   for(let i=0;i<20;i++) await d.getByRole('checkbox',{name:`large-team/service-with-a-long-name-${i}`,exact:true}).check();
   const action=d.getByRole('button',{name:'Create workspace',exact:true});
   assert.ok(await action.evaluate(el=>{const r=el.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight&&el.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}), 'primary action stays visible after selecting many repositories');
+  const phoneBounds = () => Promise.all([d, action].map(locator => locator.boundingBox()));
+  const phoneUnfiltered = await phoneBounds();
   await d.getByRole('searchbox',{name:'Find repositories'}).fill('no-such-repository');
+  await expect(d.getByText("No matches in the current catalog")).toBeVisible();
+  assert.deepEqual(await phoneBounds(), phoneUnfiltered, "the phone dialog and its primary action stay put as results disappear");
   await d.getByRole('button',{name:'Clear search',exact:true}).click();
   await expect(d.getByRole('searchbox',{name:'Find repositories'})).toHaveValue('');
   for(const width of [320,390]) {
@@ -221,6 +235,8 @@ try {
   const before=f.mutations.filter(m=>m.method==='PrepareWorkspace').length;
   await page.getByRole('button',{name:'New workspace',exact:true}).click();
   const quick=page.getByRole('dialog',{name:'New workspace',exact:true});
+  const selected = quick.getByRole('button', {name: /^Unselect /});
+  while (await selected.count()) await selected.first().click();
   await quick.getByRole('searchbox',{name:'Find repositories'}).fill('fixture-team/api');
   await quick.locator('.repository-browser-row label').filter({has:page.getByRole('checkbox',{name:'fixture-team/api',exact:true})}).dblclick();
   await expect(quick).toHaveCount(0);

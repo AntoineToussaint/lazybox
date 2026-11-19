@@ -20,9 +20,11 @@
   padding: 7px 10px;
 }
 .repository-browser-results {
-  max-height: 32dvh;
+  /* Keep the search field, name and footer in place while results change. */
+  box-sizing: border-box;
+  height: min(260px, 30dvh);
   overscroll-behavior: contain;
-  min-height: 100px;
+  scrollbar-gutter: stable;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;

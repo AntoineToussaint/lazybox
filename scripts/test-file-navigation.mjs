@@ -117,7 +117,13 @@ try{
  await page.keyboard.press('Meta+p');
  const finder=page.getByRole('dialog',{name:'Go to file'});await expect(finder).toBeVisible();
  await expect(finder).toContainText('Recently opened');
- await page.keyboard.type('rts');
+ const finderBounds = () => Promise.all([finder, finder.locator('footer')].map(locator => locator.boundingBox()));
+ const recentBounds = await finderBounds();
+ const fileSearch = finder.getByRole('combobox', {name:'File name'});
+ await fileSearch.fill('zzqxyunmatched');
+ await expect(finder.getByText('No matching files.')).toBeVisible();
+ assert.deepEqual(await finderBounds(), recentBounds, 'Go to file keeps its bounds and footer through async search');
+ await fileSearch.fill('rts');
  await expect(finder.getByRole('option').first()).toContainText('routes.ts');
  await expect(finder.getByRole('option').first().locator('mark')).not.toHaveCount(0);
  await page.keyboard.press('ArrowDown');await page.keyboard.press('Enter');

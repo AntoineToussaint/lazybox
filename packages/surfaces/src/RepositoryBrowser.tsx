@@ -1,4 +1,4 @@
-import { createContext, Fragment, useContext, useState } from "react";
+import { createContext, Fragment, useContext, useEffect, useRef, useState } from "react";
 import type { WorkspaceHost } from "@lazybox/platform";
 import { useRunner } from "./RunnerContext";
 import { useRepositoryCatalog } from "./repository-catalog";
@@ -48,6 +48,8 @@ export function RepositoryBrowser({
     [removing, setRemoving] = useState<string>(),
     [replacing, setReplacing] = useState<string>(),
     [replacedNote, setReplacedNote] = useState("");
+  const results = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (results.current) results.current.scrollTop = 0; }, [query]);
   const entries = [...(catalog?.entries || [])].sort(compareRepositories),
     visible = entries.filter((r) =>
       r.name.toLowerCase().includes(query.trim().toLowerCase()),
@@ -78,6 +80,8 @@ export function RepositoryBrowser({
           autoFocus
           data-autofocus
           type="search"
+          spellCheck={false}
+          autoComplete="off"
           aria-label="Find repositories"
           placeholder="Search organization or repository…"
           value={query}
@@ -169,6 +173,7 @@ export function RepositoryBrowser({
           </p>
         ))}
       <div
+        ref={results}
         className="repository-browser-results"
         role="region"
         aria-label="Available repositories"

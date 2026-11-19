@@ -38,6 +38,7 @@ import { useWorkspaceCommands } from './useWorkspaceCommands';
 import { builtinPanels, sentence, type PanelModule, type PanelTitle } from './PanelRegistry';
 import { WorkspaceHeader } from './WorkspaceHeader';
 import { OtherWindows, type OtherWindow } from './OtherWindows';
+import type { ConversationCopy } from './NewSessionForm';
 import { NewConversationDialog } from './NewConversationDialog';
 import { NewTaskHost } from './NewTaskSheet';
 import { useHandoffMenus, useTerminalAction } from './handoff';
@@ -210,6 +211,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const [settings, setSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('subscriptions');
   const [newSession, setNewSession] = useState(false);
+  const [conversationCopy, setConversationCopy] = useState<ConversationCopy>();
   const [quickStart, setQuickStart] = useState(false);
   const narrow = useNarrow();
   /** Titles panels give themselves (a web page's), shown on their tabs. */
@@ -529,15 +531,15 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     if (output && group && group.active === output.id && !group.minimized) { setMinimized(group.id, true); return; }
     showModule('console');
   }, () => !!workspaceID && !settings);
-  const beginConversation = (collectionId = workspaceID) => {
+  const beginConversation = (collectionId = workspaceID, copy?: ConversationCopy) => {
     if (collectionId !== workspaceID) select({ collectionId, sessionId: '', commandId: '' });
-    setNavigatorOpen(false); setQuickStart(false); setNewSession(true);
+    setNavigatorOpen(false); setQuickStart(false); setConversationCopy(copy); setNewSession(true);
   };
   /** The group whose `+` started the conversation being created: it shows there. */
   const conversationGroup = useRef('');
   /** A conversation just started: a tab of its own, in front (in the group whose + started it), as a new file opens in an editor. */
-  const showNewSession = (sessionId: string) => {
-    const target = { collectionId: workspaceID || info?.sessions.find(s => s.id === sessionId)?.collectionId || '', sessionId, commandId: '' };
+  const showNewSession = (sessionId: string, createdIn?: string) => {
+    const target = { collectionId: createdIn || workspaceID || info?.sessions.find(s => s.id === sessionId)?.collectionId || '', sessionId, commandId: '' };
     const group = conversationGroup.current; conversationGroup.current = '';
     if (target.collectionId !== workspaceID) showSession(target, 'tab');
     // Started either way: on a full page it waits in the sidebar while the page offers room.
@@ -797,6 +799,16 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     togglePin,
     moveToNewPage: panel => tabs.newPage(resolveTarget(panel, livePage().selection), titleOf(panel)),
     closeTabs: tabs.closeTabs,
+    cloneConversation: panel => {
+      const sessionId = resolveTarget(panel, livePage().selection).sessionId;
+      const session = info?.sessions.find(value => value.id === sessionId);
+      const provider = session && conversationProvider(session, info?.profiles || []);
+      if (!session || !provider || session.collectionId !== workspaceID) return;
+      return () => {
+        conversationGroup.current = groupOf(livePage(), panel.id)?.id || '';
+        beginConversation(session.collectionId, { provider, model: session.model, title: `${(conversationTitle(session) || 'Conversation').slice(0, 100)} copy` });
+      };
+    },
   };
   const newConversationKeys = bindings(keymap['conversation.new'])[0];
   const addCommands: AddCommands = {
@@ -1011,7 +1023,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     {!settings && <OtherWindows windows={otherWindows} putBackKeys={putBackKeys} onPutAllBack={putAllBack}/>}
     {repositoryWorkspace && <WorkspaceRepositories workspace={collections.find(value => value.id === repositoryWorkspace.id) || repositoryWorkspace} onClose={() => setRepositoryWorkspace(undefined)} onSaved={refreshCatalog} chooseRepositoryFolder={host?.chooseRepositoryFolder}/>}
     {!fixedWorkspaceId && <NewTaskHost viewState={viewState} onStarted={target => { refreshCatalog(); refreshRunner(); showSession(target, target.sessionId ? 'tab' : 'preview'); }}/>}
-    <NewConversationDialog open={newSession} quickStart={quickStart} workspaceID={workspaceID} workspaceName={collections.find(value => value.id === workspaceID)?.name} viewState={sessionStore}
+    <NewConversationDialog open={newSession} quickStart={quickStart} copy={conversationCopy} workspaceID={workspaceID} workspaceName={collections.find(value => value.id === workspaceID)?.name} viewState={sessionStore}
       onQuickStart={() => setQuickStart(true)} onClose={() => { setNewSession(false); conversationGroup.current = ''; }} onStarted={showNewSession}/>
     <RestartNotice/>
     {/* A restart the person asked for explains the dropped connection; RestartNotice says so instead. */}
@@ -1089,6 +1101,6 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       onShowPanel={(kind, target) => kind === 'terminal' ? showTerminal() : kind === 'changes' ? showChanges() : showPanelFor(kind, { ...target, commandId: '' })}
       onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }} onQuickLook={(path, line) => setQuickLook({ path, line })}
       describe={target => [collections.find(c => c.id === target.collectionId)?.name, info?.sessions.find(s => s.id === target.sessionId)?.title].filter(Boolean).join(' · ') || 'the workspace'}/>
-    {navigatorOpen && <WorkspaceNavigator target={page.selection} onTarget={target => target.sessionId ? showSession(target) : select(target)} collections={collections} error={catalogError} loaded={catalogLoaded} refresh={refreshCatalog} chooseRepositoryFolder={host?.chooseRepositoryFolder} onNewConversation={beginConversation} onClose={() => setNavigatorOpen(false)}/>}
+    {navigatorOpen && <WorkspaceNavigator viewState={viewState} target={page.selection} onTarget={target => target.sessionId ? showSession(target) : select(target)} collections={collections} error={catalogError} loaded={catalogLoaded} refresh={refreshCatalog} chooseRepositoryFolder={host?.chooseRepositoryFolder} onNewConversation={beginConversation} onClose={() => setNavigatorOpen(false)}/>}
   </main></WorkbenchContext.Provider>;
 }

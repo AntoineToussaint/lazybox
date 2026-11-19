@@ -64,6 +64,9 @@ export function PromptNavigator({ messages, paneRef, onReveal }: { messages: Tra
  }, [prompts, query]);
  useEffect(() => { if (open) { setActive(0); requestAnimationFrame(() => search.current?.focus()); } }, [open]);
  useEffect(() => setActive(0), [query]);
+ useEffect(() => {
+  if (open) panel.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+ }, [active, filtered, open]);
  // A press outside or Escape closes the list; focus goes back where it was (the message box).
  useDismiss(open, () => setOpen(false), [panel, toggle]);
  if (prompts.length < 2) return null;

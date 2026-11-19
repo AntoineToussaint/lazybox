@@ -43,13 +43,17 @@ try{
  const out=bar.locator('.live-bar-output');
  await expect(out).toContainText('No output yet.');
  const commandRow = bar.locator('.live-bar-code');
+ const compactHeight = await out.evaluate(node => node.getBoundingClientRect().height);
  await commandRow.dblclick();
  await expect(out).toHaveAttribute('data-expanded','true');
+ const expandedHeight = await out.evaluate(node => node.getBoundingClientRect().height);
+ assert.ok(expandedHeight > compactHeight);
  await commandRow.dblclick();
  await expect(out).not.toHaveAttribute('data-expanded','true');
  checkCommand.write(output);
  await expect(out).toContainText('CHECK_TAIL_LINE');
  await expect(out).not.toContainText('[32m');
+ assert.equal(await out.evaluate(node => node.getBoundingClientRect().height), compactHeight, 'compact output does not grow as lines arrive');
  assert.equal((await out.textContent()).split('\n').length,3,'three lines until more is asked for');
  await bar.locator('.live-bar-code').dblclick();
  await expect(bar.getByRole('button',{name:'Less output'})).toHaveAttribute('aria-expanded','true');
@@ -57,6 +61,7 @@ try{
  await expect(bar.getByRole('button',{name:'More output'})).toHaveAttribute('aria-expanded','false');
  await bar.getByRole('button',{name:'More output'}).click();
  await expect(out).toContainText('check step 1');
+ assert.equal(await out.evaluate(node => node.getBoundingClientRect().height), expandedHeight, 'expanded output does not grow as lines arrive');
  await expect(bar.getByRole('button',{name:'Less output'})).toHaveAttribute('aria-expanded','true');
  // Esc in the expanded output folds it back to its last lines.
  await out.focus();await page.keyboard.press('Escape');
@@ -117,6 +122,7 @@ try{
  f.commands.push({id:'cmd-dev',sessionId:session.id,title:'npm run dev',argv:['npm','run','dev'],mode:'pipe',done:false,canBackground:true,ports:[5173],offset:String(devOutput.length),output:devOutput});
  const move=bar.getByRole('button',{name:'Move to background'});
  await expect(move).toBeVisible({timeout:5000});
+ await expect(bar.getByRole('button',{name:'Less output'})).toHaveAttribute('aria-expanded','true');
  await expect(bar.getByRole('button',{name:'Stop command'})).toBeVisible();
  await page.screenshot({path:'.cache/live-bar-move.png'});
  await move.click();

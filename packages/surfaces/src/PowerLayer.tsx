@@ -216,12 +216,16 @@ function ConfirmAction({ action, onRun, onCancel }: { action: UserAction; onRun(
 /** Every action, filterable: type to narrow, arrows to move, Enter to run. */
 export function ActionPicker({ onRun, onClose, onSettings }: { onRun(command: UserCommand): void; onClose(): void; onSettings(): void }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const list = useRef<HTMLDivElement>(null);
   const all = useUserCommands();
   const [query, setQuery] = useState(''), [index, setIndex] = useState(0);
   useEffect(() => { const node = dialog.current; node?.showModal(); const focus = () => node?.querySelector<HTMLElement>("[data-autofocus]")?.focus(); focus(); const frame = requestAnimationFrame(focus); return () => cancelAnimationFrame(frame); }, []);
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const shown = all.filter(c => words.every(w => `${c.label} ${c.id} ${c.description} ${c.summary}`.toLowerCase().includes(w)));
   const selected = shown[Math.min(index, shown.length - 1)];
+  useEffect(() => {
+    list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+  }, [selected]);
   return <DraggableDialog ref={dialog} className="power-picker" aria-label="Run an action" onCancel={event => { event.preventDefault(); onClose(); }}
     onKeyDown={event => {
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setIndex(i => Math.max(0, Math.min(shown.length - 1, i + (event.key === 'ArrowDown' ? 1 : -1)))); }
@@ -229,14 +233,14 @@ export function ActionPicker({ onRun, onClose, onSettings }: { onRun(command: Us
     }}>
     <DialogHeader><h2>Run an action</h2><button aria-label="Close actions" onClick={onClose}>×</button></DialogHeader>
     <input data-autofocus autoFocus type="search" aria-label="Find actions" placeholder="Search your actions…" value={query} onChange={event => { setQuery(event.target.value); setIndex(0); }}/>
-    <div role="listbox" aria-label="Actions" className="power-picker-list">
+    <div ref={list} role="listbox" aria-label="Actions" className="power-picker-list">
       {shown.map((c, i) => <button type="button" role="option" key={c.id} aria-selected={c === selected} onMouseEnter={() => setIndex(i)} onClick={() => onRun(c)}>
         <Icon name={c.icon} size={15}/>
         <span><strong>{c.label}</strong><small>{c.summary}</small></span>
         {c.key && c.where.includes('menu') && <kbd>]] {c.key}</kbd>}
       </button>)}
+      {!shown.length && <p className="power-empty" role="status">{all.length ? 'No matching actions.' : 'No actions yet. Declare them in your actions file.'}</p>}
     </div>
-    {!shown.length && <p className="power-empty">{all.length ? 'No matching actions.' : 'No actions yet. Declare them in your actions file.'}</p>}
     <footer><small>Enter to run · Esc to close</small><button type="button" onClick={onSettings}><Icon name="sliders" size={13}/> Actions & hooks</button></footer>
   </DraggableDialog>;
 }

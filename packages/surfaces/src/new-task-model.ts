@@ -19,7 +19,7 @@ export type TaskMode = (typeof TASK_MODES)[number]['id'];
 export const modeOf = (id: string) => TASK_MODES.find(mode => mode.id === id) || TASK_MODES[0];
 
 /** What the sheet starts with next time: the last repositories, agent, account and mode. */
-export type TaskChoices = { identities: string[]; recent: string[]; provider: string; profile: string; mode: TaskMode };
+export type TaskChoices = { identities: string[]; empty?: boolean; recent: string[]; provider: string; profile: string; mode: TaskMode };
 export const NO_CHOICES: TaskChoices = { identities: [], recent: [], provider: '', profile: '', mode: 'default' };
 const RECENT = 12;
 
@@ -30,16 +30,18 @@ export function parseTaskChoices(text: string | null | undefined): TaskChoices {
   const list = (raw: unknown, limit: number) => Array.isArray(raw) ? [...new Set(raw.filter((v): v is string => typeof v === 'string' && v.length > 0 && v.length < 512))].slice(0, limit) : [];
   const text_ = (raw: unknown) => typeof raw === 'string' && raw.length < 256 ? raw : '';
   return {
-    identities: list(value.identities, 32), recent: list(value.recent, RECENT),
+    identities: list(value.identities, 64), ...(value.empty === true ? { empty: true } : {}), recent: list(value.recent, RECENT),
     provider: text_(value.provider), profile: text_(value.profile),
     mode: TASK_MODES.some(mode => mode.id === value.mode) ? value.mode as TaskMode : 'default',
   };
 }
 
 /** The choices after starting a task: its repositories go to the front of the recent ones. */
-export function rememberTask(previous: TaskChoices, used: { identities: readonly string[]; provider: string; profile: string; mode: TaskMode }): TaskChoices {
+export const TASK_CHOICES_PREFERENCE = 'new-task';
+
+export function rememberTask(previous: TaskChoices, used: Pick<TaskChoices, 'empty' | 'provider' | 'profile' | 'mode'> & { identities: readonly string[] }): TaskChoices {
   const identities = [...used.identities];
-  return { identities, recent: [...new Set([...identities, ...previous.recent])].slice(0, RECENT), provider: used.provider, profile: used.profile, mode: used.mode };
+  return { identities, ...(used.empty ? { empty: true } : {}), recent: [...new Set([...identities, ...previous.recent])].slice(0, RECENT), provider: used.provider, profile: used.profile, mode: used.mode };
 }
 
 const TRAILING = new Set(['a', 'an', 'the', 'to', 'of', 'for', 'and', 'or', 'in', 'on', 'at', 'by', 'with', 'when', 'that', 'so', 'it', 'is', 'we', 'i', 'but', 'from', 'into', 'as', 'if', 'then']);

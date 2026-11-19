@@ -1,4 +1,5 @@
 import type { ViewStateStore } from '@lazybox/platform';
+import type { InfoResponse } from '@lazybox/protocol';
 import { isAcp } from './providers';
 
 /** A file of a saved draft. A pasted text box keeps its text, so it comes back after a reload; any other file is attached again. */
@@ -60,14 +61,26 @@ export function writePreference(store: ViewStateStore | undefined, name: string,
 
 export type LaunchChoices = { provider: string; profile: string; model: string; gateway: string; behaviorProfile?: string };
 export function readLaunchChoices(store?: ViewStateStore): Partial<LaunchChoices> {
-  if (!store) return {};
   try {
-    const raw = store.getItem(`${store.scope || store.key}:launch-choices`);
+    const raw = readPreference(store, 'launch-choices') ?? store?.getItem(`${store.scope || store.key}:launch-choices`);
     const data = raw && raw.length < 4096 ? JSON.parse(raw) : {};
-    if (!data || !(['claude', 'codex'].includes(data.provider) || isAcp(data.provider))) return {};
+    if (!data || typeof data.provider !== 'string' || !(['claude', 'codex'].includes(data.provider) || isAcp(data.provider))) return {};
     return Object.fromEntries(['provider', 'profile', 'model', 'gateway', 'behaviorProfile'].filter(k => typeof data[k] === 'string' && data[k].length < 512).map(k => [k, data[k]]));
   } catch { return {}; }
 }
+/** Seed older installations from their latest coding conversation on this Runner. */
+export function conversationDefaults(store?: ViewStateStore, info?: InfoResponse): Partial<LaunchChoices> {
+  const remembered = readLaunchChoices(store);
+  if (remembered.provider && (!info || info.profiles.some(profile => profile.provider === remembered.provider))) return remembered;
+  const latest = info?.sessions.reduce<InfoResponse['sessions'][number] | undefined>((best, candidate) => {
+    if (candidate.purpose && candidate.purpose !== 'coding') return best;
+    if (!info.profiles.some(profile => profile.id === candidate.profileId)) return best;
+    return !best || candidate.createdAtUnixMillis > best.createdAtUnixMillis ? candidate : best;
+  }, undefined);
+  if (!latest) return {};
+  return { provider: info?.profiles.find(profile => profile.id === latest.profileId)?.provider, profile: latest.profileId, model: latest.model };
+}
+
 export function writeLaunchChoices(store: ViewStateStore | undefined, choices: LaunchChoices): void {
-  store?.setItem(`${store.scope || store.key}:launch-choices`, JSON.stringify(choices));
+  writePreference(store, 'launch-choices', JSON.stringify(choices));
 }

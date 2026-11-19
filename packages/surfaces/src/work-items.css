@@ -65,7 +65,7 @@
 .new-task-sheet .item-started .link-button{margin-left:0}
 
 /* The picker, over the sheet below the message (it never moves the sheet). */
-.item-picker{position:absolute;z-index:45;left:0;right:0;top:calc(100% + 4px);display:flex;flex-direction:column;max-height:min(420px,56dvh);border:1px solid var(--line-strong);border-radius:10px;background:var(--surface-hover);box-shadow:0 14px 36px color-mix(in srgb,var(--shadow) calc(50% * var(--shadow-strength)),transparent);overflow:hidden}
+.item-picker{position:absolute;z-index:45;left:0;right:0;top:calc(100% + 4px);display:flex;flex-direction:column;height:min(310px,45dvh);border:1px solid var(--line-strong);border-radius:10px;background:var(--surface-hover);box-shadow:0 14px 36px color-mix(in srgb,var(--shadow) calc(50% * var(--shadow-strength)),transparent);overflow:hidden}
 .item-picker-search{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);color:var(--text-muted)}
 .new-task-sheet .item-picker-search input{flex:1;min-width:0;padding:4px 0;border:0;background:transparent;box-shadow:none;font-size:calc(13px * var(--text-scale));color:var(--text)}
 .new-task-sheet .item-picker-search input:focus{outline:0}
@@ -73,7 +73,7 @@
 .item-picker-scopes button{padding:3px 9px;border:0;border-radius:999px;background:transparent;color:var(--text-subtle);font-size:calc(11.5px * var(--text-scale))}
 .item-picker-scopes button[aria-selected=true]{background:var(--accent-bg);color:var(--text)}
 .item-picker-scopes small{margin-left:auto;color:var(--text-faint);font-size:calc(11px * var(--text-scale))}
-.item-picker-list{flex:1;min-height:0;margin:0;padding:4px;overflow:auto;list-style:none}
+.item-picker-list{flex:1;min-height:0;margin:0;padding:4px;overflow:auto;scrollbar-gutter:stable;overscroll-behavior:contain;list-style:none}
 .item-picker-list li{display:grid;grid-template-columns:7px auto auto minmax(0,1fr) auto auto;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;font-size:calc(12.5px * var(--text-scale));color:var(--text-soft);cursor:pointer}
 .item-picker-list li.active{background:var(--accent-bg);color:var(--text)}
 .item-picker-repo{color:var(--text-muted);font-size:calc(11.5px * var(--text-scale))}

@@ -237,7 +237,10 @@
 .inline-editor-actions{display:flex;justify-content:flex-end;gap:6px}.inline-editor-actions button{flex:0 0 auto;min-height:30px;white-space:nowrap;padding:5px 12px;border-radius:5px;font-size:calc(12px * var(--text-scale))}.inline-editor-actions .rename-save{background:var(--accent);color:var(--on-accent)}.inline-editor-actions .rename-save:disabled{opacity:.5}
 .workspace-inline-rename input{font-weight:600}.workspace-inline-rename p{font-size:calc(12px * var(--text-scale));color:var(--danger,var(--danger-strong))}
 
-.conversation-history-dialog{width:min(640px,calc(100vw - 32px));max-height:80dvh;overflow:auto}
+.conversation-history-dialog[open]{display:flex;flex-direction:column;width:min(640px,calc(100vw - 32px));height:min(520px,80dvh);overflow:hidden}
+.conversation-history-dialog>.conversation-navigation{display:flex;flex-direction:column;flex:1;min-height:0}
+.conversation-history-dialog .conversation-navigation>nav{min-height:0;overflow:auto;scrollbar-gutter:stable;overscroll-behavior:contain}
+.conversation-history-dialog .conversation-navigation>:not(nav){flex:none}
 .conversation-history-dialog>p{margin:12px 0;color:var(--muted,var(--text-tertiary));line-height:1.5}
 .conversation-history-dialog .conversation-filter{margin-bottom:12px}
 .transcript-notice{padding:12px 20px;border-bottom:1px solid var(--line,var(--line-strong));display:flex;gap:12px;align-items:center;flex-wrap:wrap}

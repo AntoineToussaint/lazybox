@@ -800,6 +800,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     moveToNewPage: panel => tabs.newPage(resolveTarget(panel, livePage().selection), titleOf(panel)),
     closeTabs: tabs.closeTabs,
     cloneConversation: panel => {
+      if (panel.kind !== 'chat') return;
       const sessionId = resolveTarget(panel, livePage().selection).sessionId;
       const session = info?.sessions.find(value => value.id === sessionId);
       const provider = session && conversationProvider(session, info?.profiles || []);

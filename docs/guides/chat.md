@@ -154,7 +154,10 @@ runs and `Esc` closes it and leaves your text. It works in Vim insert mode too.
   message box opens the same `/model` choices (`Tab` to it, `Enter`). A
   switch that restarts the agent asks in a card that has the keyboard:
   `Enter` restarts (or restarts after this turn), `Esc` cancels, and the
-  message box has the keyboard back.
+  message box has the keyboard back. If the provider rejects the model but
+  the agent is still running, choose another model before retrying your message.
+  Lazybox resolves known model names such as `Fable 5.2` to their provider IDs.
+  For a model outside the built-in list, use the full ID from your provider.
 - **The agent's own** commands — Claude's built-ins and your project's or your
   own `.claude/commands` — with their descriptions and argument hints. Choosing
   one completes `/name ` for its arguments; `Enter` sends it as the prompt and

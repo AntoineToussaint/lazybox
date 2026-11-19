@@ -66,8 +66,8 @@ func TestEveryAgentIsToldHowToStartAConversation(t *testing.T) {
 func TestAnAgentAsksThePersonToStartAConversation(t *testing.T) {
 	f, asker := startFixture(t)
 	ctx := context.Background()
-	r := f.askStart(t, ConversationStartAsk{Title: "Review every module", Brief: "Review each module; done when each has a findings list.", Reason: "the person asked for it in chat"})
-	if r.State != StartPending || r.Mode != "same" || r.Profile != "claude-default" || r.Provider != "claude" || r.SharedWith != 1 || r.From == "" {
+	r := f.askStart(t, ConversationStartAsk{Title: "Review every module", Brief: "Review each module; done when each has a findings list.", Reason: "the person asked for it in chat", Model: "fable-5.2"})
+	if r.State != StartPending || r.Mode != "same" || r.Profile != "claude-default" || r.Provider != "claude" || r.Model != "claude-fable-5-2" || r.SharedWith != 1 || r.From == "" {
 		t.Fatalf("request: %+v", r)
 	}
 	if pending := f.b.PendingConversationStarts(f.agent); len(pending) != 1 || pending[0].ID != r.ID {
@@ -112,8 +112,8 @@ func TestAnAgentAsksThePersonToStartAConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.CollectionID != f.workspace.ID || e.Options.Permission != f.agent.Options.Permission {
-		t.Fatalf("peer: workspace %s permission %q", e.CollectionID, e.Options.Permission)
+	if e.CollectionID != f.workspace.ID || e.Options.Permission != f.agent.Options.Permission || e.Options.Model != "claude-fable-5-2" {
+		t.Fatalf("peer: workspace %s permission %q model %q", e.CollectionID, e.Options.Permission, e.Options.Model)
 	}
 	// A peer, not a child: no lineage.
 	if f.b.Work != nil {

@@ -814,6 +814,9 @@ func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gate
 			return nil, errors.New("unknown gateway for selected provider")
 		}
 	}
+	if options.Model, err = availability.ResolveModel(selected.Provider, options.Model); err != nil {
+		return nil, err
+	}
 	if err = options.Validate(); err != nil {
 		return nil, err
 	}

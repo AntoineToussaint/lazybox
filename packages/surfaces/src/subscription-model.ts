@@ -208,6 +208,7 @@ export function switchedLine(note: SwitchNote, nameFor: (id: string) => string, 
 const looksLikeCode = (text: string) => /^[a-z0-9_.:-]+$/i.test(text.trim());
 const codeSentences: Record<string, string> = {
   rate_limit: 'The provider is limiting requests right now.',
+  model_not_found: 'The provider could not find this model. Choose another model and send your message again.',
   context_full: 'The conversation no longer fits in the model’s context window. Start a new conversation to continue.',
   context_length_exceeded: 'The conversation no longer fits in the model’s context window. Start a new conversation to continue.',
   budget_exceeded: 'This conversation reached its turn or spending limit.',

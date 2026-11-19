@@ -19,6 +19,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/artifacts"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/availability"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 )
@@ -400,6 +401,9 @@ func (b *Bench) RequestConversationStart(ctx context.Context, ask ConversationSt
 	if r.Model == "" && profile.Provider == e.Profile.Provider {
 		r.Model = e.Options.Model
 	}
+	if r.Model, err = availability.ResolveModel(r.Provider, r.Model); err != nil {
+		return ConversationStart{}, err
+	}
 	if id := strings.TrimSpace(ask.Artifact); id != "" {
 		if e.CollectionID == "" || b.Artifacts == nil {
 			return ConversationStart{}, fmt.Errorf("%w: this conversation has no workspace artifacts", ErrInvalidConversationStart)
@@ -470,7 +474,7 @@ func (b *Bench) startUnderGrant(ctx context.Context, e *Execution, r Conversatio
 		}
 		brief = strings.TrimSpace(brief + "\n\n" + ref)
 	}
-	spawn := SpawnRequest{Session: e.ID, Title: r.Title, Brief: brief, Model: strings.TrimSpace(ask.Model), Workspace: r.Mode, StartFrom: r.StartFrom}
+	spawn := SpawnRequest{Session: e.ID, Title: r.Title, Brief: brief, Model: r.Model, Workspace: r.Mode, StartFrom: r.StartFrom}
 	if ask.Profile != "" || ask.Provider != "" {
 		spawn.Profile = r.Profile
 	}
@@ -645,8 +649,13 @@ func (b *Bench) editConversationStart(r *ConversationStart, a ConversationStartA
 		r.Profile, r.Provider = profile.ID, profile.Provider
 	}
 	if a.Model != "" {
-		r.Model = strings.TrimSpace(a.Model)
+		r.Model = a.Model
 	}
+	model, err := availability.ResolveModel(r.Provider, r.Model)
+	if err != nil {
+		return err
+	}
+	r.Model = model
 	return nil
 }
 

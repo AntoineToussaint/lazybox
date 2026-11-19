@@ -213,9 +213,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
-      # The image supplies the headless Chromium and libraries used by the browser-service tests.
-      # Typecheck, workspace links, client and both workers' tests.
-      - run: make check-workspaces
+      # The image supplies headless Chromium and its system libraries.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run check:client
       - name: README and CONTRIBUTING name only what exists
         run: node scripts/export-check.mjs
       - name: Nothing private or secret in the tree

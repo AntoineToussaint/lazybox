@@ -52,6 +52,17 @@ func (s *Service) OpenTerminal(ctx context.Context, r *pb.OpenTerminalRequest) (
 	return wireTerminal(t.Status()), nil
 }
 
+func (s *Service) DecideTerminalHandoff(_ context.Context, r *pb.DecideTerminalHandoffRequest) (*pb.TerminalStatus, error) {
+	t, err := s.Bench.DecideTerminalHandoff(r.HandoffId, r.Accept)
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	if t == nil {
+		return &pb.TerminalStatus{}, nil
+	}
+	return wireTerminal(t.Status()), nil
+}
+
 func (s *Service) ListTerminals(ctx context.Context, r *pb.ListTerminalsRequest) (*pb.ListTerminalsResponse, error) {
 	w := &pb.ListTerminalsResponse{}
 	for _, t := range s.Bench.Terminals.List(r.CollectionId) {

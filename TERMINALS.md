@@ -1,9 +1,8 @@
 # Workspace terminals
 
 A terminal is your login shell, running on the Runner, in a workspace: at its
-root or in one of its repositories. It is for you, not for agents: agents run
-managed commands (`lazybox_command`), and no agent tool can open, read or type
-into a terminal.
+root or in one of its repositories. The workspace Terminal panel also hosts
+interactive commands handed off by an agent.
 
 ## Use it
 
@@ -35,6 +34,25 @@ into a terminal.
   sign-in URL of several hundred characters) is one link, opened whole. A
   drag that selects text, a right-click and ⌃-click on a Mac open nothing.
   Hyperlinks a program prints (OSC 8) open the same way.
+
+### Take over an agent’s interactive command
+
+When Codex or Claude needs a TTY for a sign-in or another prompt, it can call
+`lazybox_command` with `action: "interactive"` and the executable and arguments
+in `argv`. The conversation shows the exact arguments and working directory.
+Choose **Run and take over** to launch the command and focus its terminal, or
+**Decline** to tell the agent to continue without it. This decision is required
+even in full-access mode.
+
+You handle the keyboard for the lifetime of the command. When it exits, the
+tool returns the exit status or signal to the agent so it can continue. The
+tool gives the agent no access to the terminal stream or your input. The
+command runs in the conversation's workspace and environment, with terminal
+variables added and Lazybox credentials stripped. Closing its terminal hangs
+up the command. Undecided requests expire after ten minutes or a Runner
+restart. An approved terminal survives a Runner restart and can be reopened
+from the workspace panel. A restart during the tool call can leave the
+agent without the exit status.
 
 ### Run a command for you
 

@@ -251,7 +251,7 @@ func TestATerminalOpensInTheHomeOrTheHomeFolder(t *testing.T) {
 }
 
 func TestTheBriefingSaysAHomeIsThePersons(t *testing.T) {
-	for _, want := range []string{"home checkout", "read-only for you", "never edit files, commit, reset, stash, pull, switch branches", "run in the home checkout of <repository>: `<command>`", "run in your home folder: `<command>`", "lazybox repo home <name>", "do not make temporary clones", "it has no TTY", "say so explicitly", "`env -u VAR …`", "--update`"} {
+	for _, want := range []string{"home checkout", "read-only for you", "never edit files, commit, reset, stash, pull, switch branches", "run in the home checkout of <repository>: `<command>`", "run in your home folder: `<command>`", "lazybox repo home <name>", "do not make temporary clones", "it has no TTY", "use the home-checkout or home-folder handoff below", "`env -u VAR …`", "--update`"} {
 		if !strings.Contains(commandBriefing, want) {
 			t.Fatalf("the briefing lacks %q", want)
 		}

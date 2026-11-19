@@ -28,7 +28,10 @@ export type TranscriptMessage = { id: string; type: string; text: string; turnId
   /** A `failure`: what the provider said, when the line says it in plain words instead. */
   detail?: string;
   /** A queued message given to the agent inside its running turn (Steer), shown where it was. */
-  steered?: boolean };
+  steered?: boolean;
+  terminalHandoff?: TerminalHandoff };
+
+export type TerminalHandoff = { id: string; workspaceId: string; cwd: string; argv: string[]; status: string; terminalId?: string };
 /** One line about an agent tree, as the Runner recorded it (runner/orchestrator.go). */
 export type LineageNote = { kind: string; conversation: string; session: string; mission: string; direction: string; plan: string };
 /** An agent review of this conversation's work (the Runner's review_started /
@@ -218,6 +221,24 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
       const index = restartMarker(current);
       if (index >= 0) replaceAt(index, { ...current[index], count: (current[index].count || 1) + 1, ...when });
       else add({ id: record.cursor.toString(), type: 'reattached', text: '', turnId: event.turnId, count: 1, ...when });
+      continue;
+    }
+    if (event.type === 'terminal_handoff') {
+      if (event.status === 'pending') {
+        let argv: unknown;
+        try { argv = JSON.parse(new TextDecoder().decode(event.providerDataJson)); } catch { continue; }
+        if (!Array.isArray(argv) || argv.some(value => typeof value !== 'string')) continue;
+        add({ id: record.cursor.toString(), type: event.type, text: '', turnId: event.turnId,
+          terminalHandoff: { id: event.requestId, workspaceId: event.name, cwd: event.text, argv, status: 'pending' } });
+        next.appendToLast = false;
+      } else {
+        const current = messages ?? state.messages;
+        const index = current.findLastIndex(message => message.terminalHandoff?.id === event.requestId);
+        const handoff = current[index]?.terminalHandoff;
+        if (handoff) replaceAt(index, { ...current[index], terminalHandoff: {
+          ...handoff, status: event.status, terminalId: event.text || handoff.terminalId,
+        } });
+      }
       continue;
     }
     if (event.type === 'question' || event.type === 'approval') {

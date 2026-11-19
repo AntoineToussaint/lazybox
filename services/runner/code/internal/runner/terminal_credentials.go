@@ -16,6 +16,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/sessionstore"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/terminals"
 )
 
 // A workspace terminal is the person's own shell, but anything started in it
@@ -73,7 +74,7 @@ func (b *Bench) TerminalScope(token string) (terminal, workspace string, err err
 		return "", "", errors.New("terminal credential revoked")
 	}
 	state := t.Status()
-	if state.Done || state.Spec.CollectionID == "" {
+	if state.Done || state.Spec.CollectionID == "" || state.Spec.Place == terminals.InteractiveCommandPlace {
 		return "", "", errors.New("terminal credential revoked")
 	}
 	if b.Collections == nil {
@@ -151,7 +152,7 @@ func (b *Bench) writeTerminalEndpoint(id, collectionID string) error {
 func (b *Bench) refreshTerminalEndpoints() {
 	live := map[string]bool{}
 	for _, t := range b.Terminals.List("") {
-		if !t.Done && validExecutionID(t.ID) {
+		if !t.Done && t.Spec.Place != terminals.InteractiveCommandPlace && validExecutionID(t.ID) {
 			live[t.ID] = true
 			_ = b.writeTerminalEndpoint(t.ID, t.Spec.CollectionID)
 		}

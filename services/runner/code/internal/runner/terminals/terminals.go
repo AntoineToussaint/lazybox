@@ -30,7 +30,9 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sessionhost"
 )
 
-// Spec is what a terminal runs and where. Env is never persisted.
+const InteractiveCommandPlace = "interactive-command"
+
+// Spec is what a terminal runs and where. Env and Args are never persisted.
 type Spec struct {
 	CollectionID string `json:"collectionId"`
 	// Directory is the workspace-relative directory ("" for the root).
@@ -39,8 +41,10 @@ type Spec struct {
 	Title     string   `json:"title"`
 	Shell     string   `json:"shell"`
 	Env       []string `json:"-"`
-	Cols      uint16   `json:"cols"`
-	Rows      uint16   `json:"rows"`
+	// Args selects one command in place of a login shell.
+	Args []string `json:"-"`
+	Cols uint16   `json:"cols"`
+	Rows uint16   `json:"rows"`
 	// Prepare runs once the terminal has its id, before the shell starts, and
 	// returns variables added to Env (the terminal's own Runner credential).
 	Prepare func(id string) ([]string, error) `json:"-"`
@@ -351,7 +355,7 @@ func ValidSize(cols, rows uint16) bool {
 	return cols > 0 && rows > 0 && cols <= 1000 && rows <= 500
 }
 
-// Start runs spec.Shell as a login shell in a new terminal host. A repeated
+// Start runs a login shell or an explicit command in a new terminal host. A repeated
 // non-empty requestKey returns the terminal it already started.
 func (m *Manager) Start(spec Spec, requestKey string) (*Terminal, error) {
 	if !filepath.IsAbs(spec.Shell) || !filepath.IsAbs(spec.Cwd) || spec.CollectionID == "" {
@@ -398,9 +402,9 @@ func (m *Manager) Start(spec Spec, requestKey string) (*Terminal, error) {
 	if err != nil {
 		return nil, fmt.Errorf("terminal host failed to start: %w", err)
 	}
-	spec.PromptMarks = promptMarks(spec.Shell, spec.Env)
+	spec.PromptMarks = len(spec.Args) == 0 && promptMarks(spec.Shell, spec.Env)
 	r := record{ID: rand.Text(), Host: host.ID(), Spec: spec, CreatedAt: time.Now().UTC()}
-	r.Spec.Env, r.Spec.Prepare = nil, nil
+	r.Spec.Env, r.Spec.Prepare, r.Spec.Args = nil, nil, nil
 	// Recorded before the shell runs: a Runner that dies at any point leaves a
 	// record its successor adopts or cleans up.
 	if err = m.save(r); err != nil {
@@ -426,7 +430,11 @@ func (m *Manager) Start(spec Spec, requestKey string) (*Terminal, error) {
 		}
 		env = append(append([]string(nil), env...), extra...)
 	}
-	err = host.Spawn(ctx, sessionhost.Spec{Path: spec.Shell, Argv0: "-" + filepath.Base(spec.Shell), Env: env, Cwd: spec.Cwd, Terminal: &sessionhost.Size{Cols: spec.Cols, Rows: spec.Rows}})
+	argv0 := ""
+	if len(spec.Args) == 0 {
+		argv0 = "-" + filepath.Base(spec.Shell)
+	}
+	err = host.Spawn(ctx, sessionhost.Spec{Path: spec.Shell, Argv0: argv0, Args: spec.Args, Env: env, Cwd: spec.Cwd, Terminal: &sessionhost.Size{Cols: spec.Cols, Rows: spec.Rows}})
 	if err != nil {
 		return fail(fmt.Errorf("shell failed to start: %w", err))
 	}

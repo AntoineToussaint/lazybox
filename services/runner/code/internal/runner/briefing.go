@@ -56,6 +56,7 @@ var builtinBriefings = []builtinBriefing{
 		{version: 3, since: "means Lazybox's own CLI", note: "If `lazybox --version` does not name Lazybox V2, another lazybox comes first on your PATH: run Lazybox's CLI by its full path, `\"" + cliPlaceholder + "\"`."},
 		{version: 4, since: "Lazybox tracks the pull requests you open", note: "Lazybox tracks the pull requests you open and shows the person their checks and reviews. For one opened some other way, run `lazybox link <URL>`; `lazybox items` lists them."},
 		{version: 5, since: "it has no TTY", note: "A repository may have a home checkout, the person's own clone (`lazybox repo home <name>`): read-only for you. Run a repository's own tools at latest main there; for logins and other commands that need a terminal, ask the person, written as: run in the home checkout of <repository>: `<command>`."},
+		{version: 6, since: "takes over its terminal", note: "If your managed command tool offers the interactive action, use it with the command argv for a workspace login. The person reviews the command and enters credentials in its terminal. The tool returns the exit status."},
 	}},
 	{id: "run", text: runBriefing, changes: []briefingChange{
 		{version: 1, since: "## Running commands in Lazybox", note: "Run tests, builds and other noisy commands as `lazybox run -- <command>`: the person sees the full output; you get a compact view that keeps the failures."},

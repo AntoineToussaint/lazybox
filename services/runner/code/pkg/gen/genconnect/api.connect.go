@@ -691,6 +691,9 @@ const (
 	// RunnerServiceDeleteThemeProcedure is the fully-qualified name of the RunnerService's DeleteTheme
 	// RPC.
 	RunnerServiceDeleteThemeProcedure = "/lazybox.bench.v1.RunnerService/DeleteTheme"
+	// RunnerServiceDecideTerminalHandoffProcedure is the fully-qualified name of the RunnerService's
+	// DecideTerminalHandoff RPC.
+	RunnerServiceDecideTerminalHandoffProcedure = "/lazybox.bench.v1.RunnerService/DecideTerminalHandoff"
 )
 
 // RunnerServiceClient is a client for the lazybox.bench.v1.RunnerService service.
@@ -1216,6 +1219,7 @@ type RunnerServiceClient interface {
 	// install already running.
 	InstallBrowser(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.CommandStatus], error)
 	DeleteTheme(context.Context, *connect.Request[gen.DeleteThemeRequest]) (*connect.Response[gen.ThemeFolder], error)
+	DecideTerminalHandoff(context.Context, *connect.Request[gen.DecideTerminalHandoffRequest]) (*connect.Response[gen.TerminalStatus], error)
 }
 
 // NewRunnerServiceClient constructs a client for the lazybox.bench.v1.RunnerService service. By
@@ -2561,6 +2565,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("DeleteTheme")),
 			connect.WithClientOptions(opts...),
 		),
+		decideTerminalHandoff: connect.NewClient[gen.DecideTerminalHandoffRequest, gen.TerminalStatus](
+			httpClient,
+			baseURL+RunnerServiceDecideTerminalHandoffProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("DecideTerminalHandoff")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -2788,6 +2798,7 @@ type runnerServiceClient struct {
 	clearBrowserData             *connect.Client[gen.ClearBrowserDataRequest, gen.BrowserSettings]
 	installBrowser               *connect.Client[gen.InfoRequest, gen.CommandStatus]
 	deleteTheme                  *connect.Client[gen.DeleteThemeRequest, gen.ThemeFolder]
+	decideTerminalHandoff        *connect.Client[gen.DecideTerminalHandoffRequest, gen.TerminalStatus]
 }
 
 // ListSnippets calls lazybox.bench.v1.RunnerService.ListSnippets.
@@ -3900,6 +3911,11 @@ func (c *runnerServiceClient) DeleteTheme(ctx context.Context, req *connect.Requ
 	return c.deleteTheme.CallUnary(ctx, req)
 }
 
+// DecideTerminalHandoff calls lazybox.bench.v1.RunnerService.DecideTerminalHandoff.
+func (c *runnerServiceClient) DecideTerminalHandoff(ctx context.Context, req *connect.Request[gen.DecideTerminalHandoffRequest]) (*connect.Response[gen.TerminalStatus], error) {
+	return c.decideTerminalHandoff.CallUnary(ctx, req)
+}
+
 // RunnerServiceHandler is an implementation of the lazybox.bench.v1.RunnerService service.
 type RunnerServiceHandler interface {
 	ListSnippets(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.SnippetCatalog], error)
@@ -4423,6 +4439,7 @@ type RunnerServiceHandler interface {
 	// install already running.
 	InstallBrowser(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.CommandStatus], error)
 	DeleteTheme(context.Context, *connect.Request[gen.DeleteThemeRequest]) (*connect.Response[gen.ThemeFolder], error)
+	DecideTerminalHandoff(context.Context, *connect.Request[gen.DecideTerminalHandoffRequest]) (*connect.Response[gen.TerminalStatus], error)
 }
 
 // NewRunnerServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -5764,6 +5781,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(runnerServiceMethods.ByName("DeleteTheme")),
 		connect.WithHandlerOptions(opts...),
 	)
+	runnerServiceDecideTerminalHandoffHandler := connect.NewUnaryHandler(
+		RunnerServiceDecideTerminalHandoffProcedure,
+		svc.DecideTerminalHandoff,
+		connect.WithSchema(runnerServiceMethods.ByName("DecideTerminalHandoff")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/lazybox.bench.v1.RunnerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case RunnerServiceListSnippetsProcedure:
@@ -6210,6 +6233,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceInstallBrowserHandler.ServeHTTP(w, r)
 		case RunnerServiceDeleteThemeProcedure:
 			runnerServiceDeleteThemeHandler.ServeHTTP(w, r)
+		case RunnerServiceDecideTerminalHandoffProcedure:
+			runnerServiceDecideTerminalHandoffHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -7105,4 +7130,8 @@ func (UnimplementedRunnerServiceHandler) InstallBrowser(context.Context, *connec
 
 func (UnimplementedRunnerServiceHandler) DeleteTheme(context.Context, *connect.Request[gen.DeleteThemeRequest]) (*connect.Response[gen.ThemeFolder], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.DeleteTheme is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) DecideTerminalHandoff(context.Context, *connect.Request[gen.DecideTerminalHandoffRequest]) (*connect.Response[gen.TerminalStatus], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.DecideTerminalHandoff is not implemented"))
 }

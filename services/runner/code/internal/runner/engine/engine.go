@@ -339,7 +339,8 @@ func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, 
 	// it is delivered, once, when the conversation continues on another
 	// subscription or after the reset.
 	// After a provider error ends a turn, the next message continues the
-	// conversation (and clears the error); nothing else may run before it.
+	// conversation and clears the error. Allow recovery controls, including
+	// changing a model that the provider rejected, before that retry.
 	if e.state.Closed || (e.state.Fault != "" && !(unblockedByProviderFault(op.Kind) && (agent.LimitFault(e.state.Fault) || agent.TurnFault(e.state.Fault)))) {
 		e.mu.Unlock()
 		return agent.Receipt{}, errors.New("session is closed or faulted")

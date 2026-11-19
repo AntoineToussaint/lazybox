@@ -27,7 +27,7 @@ func (e *Engine) control(op agent.Operation) (agent.Receipt, error) {
 // asked. Only the Runner's own faults hold them.
 func unblockedByProviderFault(kind agent.Kind) bool {
 	switch kind {
-	case agent.Message, agent.Interrupt, agent.Answer, agent.Approve, agent.RevokeGrant:
+	case agent.Message, agent.Model, agent.Interrupt, agent.Answer, agent.Approve, agent.RevokeGrant:
 		return true
 	}
 	return false

@@ -38,6 +38,11 @@ func TestModelSwitchNeedsTheCapabilityAndAValidName(t *testing.T) {
 			t.Fatalf("%q accepted as a model: %v", bad, err)
 		}
 	}
+	// The provider can reject the original model without closing the worker.
+	// The next prompt needs the corrected model before it can succeed.
+	s.Events <- agent.Event{Type: "failure", Status: "unknown", Text: "model_not_found"}
+	eventually(t, "provider model rejection", func() bool { return e.Snapshot().Fault == "unknown" })
+
 	if _, err := e.Apply(ctx, agent.Operation{ID: "m", Kind: agent.Model, Model: "claude-opus-5-5"}); err != nil {
 		t.Fatal(err)
 	}

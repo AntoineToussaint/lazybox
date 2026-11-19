@@ -120,6 +120,8 @@ var BuiltinModels = map[string][]agent.ModelChoice{
 		{Value: "claude-fable-5-2", DisplayName: "Fable 5.2", Description: "For your toughest challenges"},
 	},
 	"codex": {
+		{Value: "gpt-6.2-sol", DisplayName: "GPT-6.2 Sol", Description: "For everyday coding and professional work"},
+		{Value: "gpt-6.2-astra", DisplayName: "GPT-6.2 Astra", Description: "For demanding reasoning and coding"},
 		{Value: "gpt-6.1-sol", DisplayName: "GPT-6.1-Sol", Description: "Workhorse model for coding and everyday work"},
 		{Value: "gpt-6-astra", DisplayName: "GPT-6-Astra", Description: "Frontier intelligence for the most demanding work"},
 		{Value: "gpt-6.1-terra", DisplayName: "GPT-6.1 Terra", Description: "Balanced model for straightforward work"},

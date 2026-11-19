@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/availability"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/sessionstore"
 )
 
@@ -107,7 +108,11 @@ func (b *Bench) restart(ctx context.Context, e *Execution) (*Execution, error) {
 // Asked for during a turn, the change waits for that turn to end (the
 // adapters apply it to the next one), and the conversation says so.
 func (b *Bench) SetModel(ctx context.Context, e *Execution, operationID, model string) (agent.Receipt, error) {
-	if err := agent.ValidModel(model); err != nil {
+	model, err := availability.ResolveModel(e.Profile.Provider, model)
+	if err != nil {
+		return agent.Receipt{}, err
+	}
+	if err = agent.ValidModel(model); err != nil {
 		return agent.Receipt{}, err
 	}
 	when := "live"
@@ -129,7 +134,11 @@ func (b *Bench) SetModel(ctx context.Context, e *Execution, operationID, model s
 // switch live: the agent is ended between turns and the same provider
 // conversation resumes in a new agent started with that model.
 func (b *Bench) RestartWithModel(ctx context.Context, e *Execution, model string) (*Execution, error) {
-	if err := agent.ValidModel(model); err != nil {
+	model, err := availability.ResolveModel(e.Profile.Provider, model)
+	if err != nil {
+		return nil, err
+	}
+	if err = agent.ValidModel(model); err != nil {
 		return nil, err
 	}
 	if err := restartable(e); err != nil {

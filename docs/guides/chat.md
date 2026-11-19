@@ -16,8 +16,9 @@ it did.
 
 ## Send, steer and stop
 
-- `Enter` sends, `Shift+Enter` starts a new line. A message sent while the agent
-  works is **queued** and delivered when the turn ends. Queued messages wait
+- By default, `Enter` sends and `Shift+Enter` starts a new line. To send with
+  `Shift+Enter`, assign it to **Send message** in **Settings → Shortcuts**. A message sent
+  while the agent works is **queued** and delivered when the turn ends. Queued messages wait
   above the message box (*Queued — Claude is busy (Running a command · 5m)*),
   each with **Send now**, which stops the agent's current step and sends yours
   next in one click (its tooltip names the step it stops), and, for

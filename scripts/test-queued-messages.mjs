@@ -199,6 +199,25 @@ try{
  await expect.poll(()=>sentAs('Thanks, that is all.')).toBeTruthy();
  await expect(composer).toHaveValue('');
  assert.equal(deliveries().length,delivered,'no Send now');assert.equal(codex.interrupted,undefined,'nothing interrupted');
+ // A custom send shortcut takes precedence over the default newline key.
+ await page.getByRole('button',{name:'Settings',exact:true}).click();
+ await page.getByRole('tab',{name:'Shortcuts'}).click();
+ await page.getByRole('textbox',{name:'Send message',exact:true}).fill('Shift+Enter');
+ await page.getByRole('button',{name:'Save shortcuts'}).click();
+ await expect(page.getByRole('status').filter({hasText:'Shortcuts saved.'})).toBeVisible();
+ await page.getByRole('button',{name:'Work',exact:true}).click();
+ await open(codex);
+ await expect(hint).toHaveText('Shift+Enter to send');
+ busy(codex,'codex');
+ for (const text of ['Shift queue first', 'Shift queue second', 'Shift queue third']) {
+   await composer.fill(text);
+   await composer.press('Shift+Enter');
+   await expect.poll(() => sentAs(text)).toBeTruthy();
+   await expect(composer).toHaveValue('');
+ }
+ assert.deepEqual(codex.queuedMessages.filter(message => message.text.startsWith('Shift queue')).map(message => message.text),
+   ['Shift queue first', 'Shift queue second', 'Shift queue third']);
+ assert.equal(deliveries().length,delivered,'the custom send shortcut queues without interrupting');
  assert.deepEqual(errors,[]);
  console.log('PASS queued messages: a message sent during a busy turn shows as queued with what the agent is busy with, from the stream at once even while the session poll lags, and its ticking time is not announced; once delivered it is never also in a stale poll\'s strip; it is in the strip only, never also a bubble in the running turn; Send now delivers it in one click (interrupt, then next), said once after the stop, also after a reload, and its tooltip names the step it stops; Steer for Codex delivers into the running turn; Claude says it cannot be steered; several collapse and hide; phone width. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

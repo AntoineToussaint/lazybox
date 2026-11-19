@@ -89,6 +89,6 @@ export const RichContent=memo(function RichContent({text,onOpenFile,document:doc
   const file=href&&fileReference(href);return file&&onOpenFile?<button className="file-reference" title={fileTitle} onPointerEnter={preloadEditor} onClick={event=>onOpenFile(file,event)} onContextMenu={fileMenu(file)}>{children}</button>:components.a({href,children});},
  code:({children,className,node})=>{const file=!className&&typeof children==='string'?fileReference(children,'automatic'):undefined;if(file&&onOpenFile)return <button className="file-reference inline-file" title={fileTitle} onPointerEnter={preloadEditor} onClick={event=>onOpenFile(file,event)} onContextMenu={fileMenu(file)}>{children}</button>;
   const command=run&&!className&&typeof children==='string'?inlineCommand(children,programAt(programs,node?.position?.start.offset)):'';
-  return <code className={className} onContextMenu={command?contextMenu('inline-code',()=>inlineRunItems(run!.host,run!.messageId,command),{text:children,command}):undefined}>{children}</code>;}
+  return <code className={className} onContextMenu={command?contextMenu('inline-code',()=>inlineRunItems(run!.host,run!.messageId,command,run!.text),{text:children,command}):undefined}>{children}</code>;}
  }}>{text}</Markdown>}</div>;
 });

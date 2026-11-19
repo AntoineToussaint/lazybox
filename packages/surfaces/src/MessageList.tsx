@@ -77,7 +77,7 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
         {m.type === 'message_delta' && validActivityTime(m.at) && <ActivityTime at={m.at} className="message-time"/>}
       </div>}
     {/* Only an agent's own words offer to run their commands. */}
-    {m.type === 'message_delta' ? <RunMessageContext.Provider value={m.id}><RichContent text={m.text} onOpenFile={onOpenFile}/><InlineRuns messageId={m.id}/></RunMessageContext.Provider> : <PersonText text={m.text} quoted={m.type === 'operation_accepted'} onOpenFile={onOpenFile}/>}
+    {m.type === 'message_delta' ? <RunMessageContext.Provider value={m}><RichContent text={m.text} onOpenFile={onOpenFile}/><InlineRuns messageId={m.id}/></RunMessageContext.Provider> : <PersonText text={m.text} quoted={m.type === 'operation_accepted'} onOpenFile={onOpenFile}/>}
     {m.files?.length ? <SentAttachments files={m.files}/> : null}
     {/* What the provider said, for whoever reports it: never the line itself. */}
     {m.type === 'failure' && m.detail ? <details className="failure-detail"><summary>Details</summary><pre>{m.detail}</pre></details> : null}

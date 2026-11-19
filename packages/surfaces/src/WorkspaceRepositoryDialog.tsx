@@ -11,7 +11,7 @@ import { Icon } from "./Icons";
 import { forgetStarts, StartFromChip, StartFromPicker, useRepositoryStarts } from "./StartFrom";
 import { parseTaskChoices, rememberTask, TASK_CHOICES_PREFERENCE } from "./new-task-model";
 import { readPreference, writePreference } from "./view-state";
-import { effectiveStart, startsFor } from "./start-from-model";
+import { startsFor } from "./start-from-model";
 /** One selection workflow for creating a workspace and adding to an existing one. */
 export function WorkspaceRepositoryDialog({
   workspace,
@@ -288,14 +288,14 @@ export function WorkspaceRepositoryDialog({
           {/* Always one line, so choosing the first repository does not move the dialog under the pointer. */}
           <div className="workspace-start-from" role="group" aria-label="Start from">
             <span className="workspace-start-from-label"><Icon name="branch" size={13} />Start from</span>
-            {!chosen.length && <small>each repository's last choice, else origin's default branch</small>}
+            {!chosen.length && <small>each repository's default branch</small>}
             {chosen.map((identity) => (
               <span key={identity} className="workspace-start-from-repo">
                 {repositoryName(identity)}
                 <StartFromChip
                   identity={identity}
                   repository={repositoryName(identity)}
-                  branch={effectiveStart(starts[identity], startInfo[identity])}
+                  branch={starts[identity] ?? ""}
                   info={startInfo[identity]}
                   disabled={busy}
                   expanded={startPicker === identity}
@@ -310,7 +310,7 @@ export function WorkspaceRepositoryDialog({
               identity={startPicker}
               repository={repositoryName(startPicker)}
               info={startInfo[startPicker]}
-              current={effectiveStart(starts[startPicker], startInfo[startPicker])}
+              current={starts[startPicker] ?? ""}
               onInfo={(info) => setStartInfo(startPicker, info)}
               onClose={() => closeStart(startPicker)}
               onPick={(picked) => {

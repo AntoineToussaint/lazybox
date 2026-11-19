@@ -139,6 +139,16 @@ export type SlashMenuState =
   /** After any other command: what it takes. */
   | { kind: 'hint'; command: SlashCommand; args: string };
 
+const modelOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+
+/** Keep the current model visible and sort the other names independently of catalog order. */
+function orderedModelChoices(choices: readonly SlashChoice[]): SlashChoice[] {
+  return [...choices].sort((a, b) =>
+    Number(!!b.current) - Number(!!a.current) || modelOrder.compare(a.label, b.label) ||
+    modelOrder.compare(a.value, b.value) || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0),
+  );
+}
+
 /**
  * What the menu shows for the message box's text, or null for no menu: the
  * box does not start with a command, holds more than one line, the person
@@ -157,7 +167,8 @@ export function slashMenu(text: string, commands: readonly SlashCommand[], dismi
   const command = findCommand(commands, input.name);
   if (!command || command.group === 'snippet') return null;
   if (command.choices?.length) {
-    const { items, best } = rankChoices(input.args, command.choices);
+    const choices = command.key === 'lazybox:model' ? orderedModelChoices(command.choices) : command.choices;
+    const { items, best } = rankChoices(input.args, choices);
     if (items.length) return { kind: 'choices', command, query: input.args, items, best };
   }
   return command.argumentHint ? { kind: 'hint', command, args: input.args } : null;

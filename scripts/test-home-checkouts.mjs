@@ -6,8 +6,7 @@
 // home checkout of api: `make playground`" — runs there, exactly as written,
 // in a shell already idle there or a new one, never sent to the agent; Paste
 // types it without running. A shell that starts slowly gets nothing before
-// its prompt: the command shows once and runs. Once it ended, "Tell Claude
-// it's done" sends how. Everything is reachable from the keyboard.
+// its prompt: the command shows once and runs. When a handoff run ends, Lazybox reports its exit automatically. Everything is reachable from the keyboard.
 // Settings → Repositories lists the homes.
 // WebKit by default (the desktop app's engine); TEST_CHROMIUM=1 runs Chromium.
 import {testViteCache} from './fixtures/vite-cache.mjs';
@@ -20,6 +19,8 @@ import {mkdir} from 'node:fs/promises';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 
 const fixture=await startRunnerFixture();
+fixture.library.push({id:'infra',name:'infra-base',path:'/fixture/repos/infra-base',gitIdentity:'github:fixture-team/infra-base'});
+fixture.homes.set('infra',{path:'/fixture/home/src/infra-base'});
 const session=fixture.sessions.find(s=>s.id==='alpha-session');session.agents=[];session.status='ready';session.busy=false;
 const channel=fixture.openEvents(session.id);
 const push=event=>channel.push({turnId:'t1',...event});
@@ -141,13 +142,11 @@ try {
  await expect.poll(()=>first.input.join('')).toBe('\x15env -u ACME_TOKEN ./bin/acme login staging\r');
  assert.equal(calls('OpenTerminal').length,1,'the idle shell in api home is reused');
  await expect(screen).toContainText('ran: env -u ACME_TOKEN ./bin/acme login staging');
- assert.equal(applies().length,0,'nothing went to the agent');
  const loginStatus=offers.locator('.home-run-row').nth(0).getByRole('status').first();
  await expect(loginStatus).toHaveText('Finished in api home · exit 0');
  await expect(screen.locator('textarea')).toBeFocused();
  await page.screenshot({path:`${shots}/home-checkouts-run.png`});
- // Tell Claude it's done: the command and its exit, sent to the conversation.
- await offers.locator('.home-run-row').nth(0).getByRole('button',{name:'Tell Claude it’s done'}).click();
+ // The exit reaches the conversation without another click.
  await expect.poll(()=>applies().length).toBe(1);
  assert.equal(applies()[0].body.message.text,'Done: `env -u ACME_TOKEN ./bin/acme login staging` finished (exit 0).');
  await expect(offers.locator('.home-run-row').nth(0)).toContainText('Told Claude');
@@ -164,6 +163,8 @@ try {
  // The person runs it in the terminal; the shell marks its end, and the offer says so.
  await screen.click();await page.keyboard.press('Enter');
  await expect(loginStatus).toHaveText('Finished in api home · exit 0');
+ await expect(offers.locator('.home-run-row').nth(0).getByRole('button',{name:'Tell Claude it’s done'})).toBeVisible();
+ assert.equal(applies().length,1,'an editable pasted command only reports after manual confirmation');
 
  // ── The offer's ⌄: paste, another home, the person's own terminal, Copy.
  await offers.getByRole('button',{name:'Other ways to run make playground'}).click();
@@ -184,9 +185,27 @@ try {
  await expect.poll(()=>homeShell.input.join('')).toBe('gcloud auth application-default login\r');
  await expect(panel.getByRole('tab',{name:'~',exact:true})).toHaveAttribute('aria-selected','true');
  // Run again: the shell there is idle, so it is the one used; no third tab.
- await expect(offers.locator('.home-run-row').nth(2).getByRole('status').first()).toHaveText('Finished in your home folder · exit 0');
+ const homeRun=offers.locator('.home-run-row').nth(2);
+ await expect(homeRun).toContainText('Told Claude');
+ assert.equal(applies().length,2,'gcloud completion is sent without clicking Tell');
+ assert.equal(applies().at(-1).body.message.text,'Done: `gcloud auth application-default login` finished (exit 0).');
+ let failedReportId;
+ await page.route('**/Apply',async route=>{
+  const body=route.request().postDataJSON();
+  if (!failedReportId) {
+   failedReportId=body.operationId;
+   await route.fulfill({status:400,json:{code:'failed_precondition',message:'Fixture report could not be sent'}});
+  } else {
+   assert.equal(body.operationId,failedReportId,'the manual retry cannot deliver a duplicate report');
+   await route.continue();
+  }
+ });
  await runLogin.click();
  await expect.poll(()=>homeShell.input.join('')).toBe('gcloud auth application-default login\r\x15gcloud auth application-default login\r');
+ await homeRun.getByRole('button',{name:'Tell Claude it’s done'}).click();
+ await expect(homeRun).toContainText('Told Claude');
+ await page.unroute('**/Apply');
+ assert.equal(applies().length,3,'one completion report per run');
  assert.equal(calls('OpenTerminal').length,2,'the second Run reuses the idle shell');
  await expect(panel.getByRole('tab',{name:'~',exact:true})).toHaveCount(1);
 
@@ -216,7 +235,7 @@ try {
  await expect(screen).toContainText('ran: make seed');
  assert.equal((await screen.innerText()).split('make seed').length-1,2,'the command shows once, then its output');
  await expect(block.locator('.code-run-chip').first()).toHaveText('Finished in the workspace · exit 0');
- assert.equal(applies().length,1,'Run sent nothing to the agent');
+ assert.equal(applies().length,3,'ordinary workspace commands send nothing to the agent');
  fixture.terminalStartDelayMs=0;
 
  // ── A busy shell is never typed into: the watcher keeps the workspace shell running, so the next Run opens another.
@@ -231,6 +250,22 @@ try {
  // The new last message takes the offers; the earlier one no longer shows them.
  await expect(chat.getByRole('group',{name:'Commands for you to run'})).toHaveCount(1);
  await expect(chat.getByRole('group',{name:'Commands for you to run'}).locator('.home-run').first()).toHaveText(/Run in api home\s*make seed/);
+
+ // A named checkout also routes the fence's own Run button. A compound
+ // login must wait for Return so the Git steps cannot execute on click.
+ const updateAndLogin = 'git fetch origin main && git switch main && env -u ACME_TOKEN bin/acme login staging';
+ push({turnId:'t3',type:'operation_accepted',text:'Can I sign in from infra-base?'});
+ push({turnId:'t3',type:'message_delta',text:['Run in the home checkout of infra-base:', '', '```sh', updateAndLogin, '```'].join('\n')});
+ const addressed=chat.locator('.code-block.is-runnable').filter({hasText:updateAndLogin}).last();
+ const openCount=calls('OpenTerminal').length;
+ await addressed.getByRole('button',{name:'Review in infra-base home',exact:true}).click();
+ await expect(addressed.getByRole('status').first()).toHaveText('Typed in the terminal (infra-base home): review and press Return');
+ assert.equal(calls('OpenTerminal').length,openCount+1);
+ assert.equal(calls('OpenTerminal').at(-1).body.repositoryHome,'infra','resolved the named registered home outside the workspace');
+ const addressedShell=[...fixture.terminals.values()].at(-1);
+ await expect.poll(()=>addressedShell.line).toBe(updateAndLogin);
+ assert.ok(!addressedShell.input.join('').includes('\r'),'no Return was sent');
+ assert.equal(applies().length,3,'the pasted login did not send a completion report');
 
  // ── Settings → Repositories lists every home with its state.
  await page.getByRole('button',{name:'Settings',exact:true}).click();

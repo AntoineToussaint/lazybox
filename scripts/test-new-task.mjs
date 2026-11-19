@@ -5,7 +5,7 @@
 // Escape keeps an unsent message; the palette and the empty states open it;
 // "Start without a repository" makes an empty workspace; each repository's "from
 // main ▾" chip (or ⌥B) picks the branch it starts from, which the Runner
-// remembers for next time; ⌘⇧N still opens the
+// offers in Recent next time; ⌘⇧N still opens the
 // quick New conversation in the workspace in front. Screenshots in
 // .cache/new-sheet-*.png, dark and light. WebKit, the desktop app's engine.
 import { testViteCache } from './fixtures/vite-cache.mjs';
@@ -133,7 +133,7 @@ try {
       assert.equal(prepare.name, 'Add a response cache to the API');
       assert.deepEqual(prepare.repositoryIdentities, ['github:fixture-team/api', 'github:fixture-team/web']);
       assert.equal(prepare.branch, 'feature/response-cache');
-      assert.deepEqual(prepare.startFrom, { 'github:fixture-team/api': 'feat/v2-command-output' }, 'only the choice made is sent; web keeps its default');
+      assert.deepEqual(prepare.startFrom, { 'github:fixture-team/api': 'feat/v2-command-output', 'github:fixture-team/web': '' }, 'web explicitly uses its default');
       assert.ok(prepare.requestKey);
       const created = f.collections.at(-1);
       assert.equal(open.collectionId, created.id);
@@ -155,10 +155,9 @@ try {
       await expect(sheet.locator('.new-task-chip-name')).toHaveText(['fixture-team/api', 'fixture-team/web']);
       await expect(sheet.getByRole('combobox', { name: 'Mode' })).toHaveValue('plan');
       await expect(prompt).toHaveValue('');
-      // The choice is remembered per repository by the Runner: api starts from it again, plainly
-      // shown; web says its default by name now it is on the Runner.
-      await expect(apiStart).toHaveText(/from\s*feat\/v2-command-output/);
-      await expect(apiStart).not.toHaveAttribute('data-default');
+      // The previously chosen branch remains available, while the new sheet defaults to main.
+      await expect(apiStart).toHaveText(/from\s*main/);
+      await expect(apiStart).toHaveAttribute('data-default');
       await expect(webStart).toHaveText(/from\s*main/);
       await expect(webStart).toHaveAttribute('data-default');
       assert.equal(f.branchListings.length, 0, 'still not asked: no picker opened');
@@ -340,5 +339,5 @@ try {
   assert.ok(!started.resumeReference);
   await context.close();
 
-  console.log('PASS: ⌘N sheet — workspace, conversation and message in one step, remembered choices, start-from branch (chip, ⌥B, remembered), background start, kept draft, palette and empty state, empty workspace, ⌘⇧N unchanged. Fixture only.');
+  console.log('PASS: ⌘N sheet — workspace, conversation and message in one step, remembered choices, start-from branch (chip, ⌥B, default reset), background start, kept draft, palette and empty state, empty workspace, ⌘⇧N unchanged. Fixture only.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

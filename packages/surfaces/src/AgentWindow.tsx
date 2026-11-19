@@ -462,15 +462,16 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   useEffect(() => codeRuns?.attach(), [codeRuns]);
   const openCommand = onOpenCommand || (showCommands ? (commandId: string) => { setCommand(commandId); setCommandsOpen(true); } : onOpenViewer ? (commandId: string) => void onOpenViewer(sessionID, commandId) : undefined);
   // A Run request goes as its own message, beside any draft: at once, or queued behind the turn in progress.
-  const sendRunRequest = async (text: string): Promise<'sent' | 'drafted'> => {
+  const sendRunRequest = async (text: string, reportId?: string): Promise<'sent' | 'drafted'> => {
     const ready = !!session && !session.closed && (!session.fault || limited || continuesAfterError);
     if (!ready) {
-      if (!canCompose) throw new Error(session ? 'This conversation cannot take a message.' : 'Still connecting to this conversation…');
+      if (reportId || !canCompose) throw new Error(session ? 'This conversation cannot take a message.' : 'Still connecting to this conversation…');
       addToDraft(text, 'Added to your message: sending it continues the conversation and asks to run it.');
       return 'drafted';
     }
-    await api.apply({ sessionId: sessionID, operationId: crypto.randomUUID(), operation: { case: 'message', value: { text, attachments: [] } } }, { signal: AbortSignal.any([lifetime.current!.signal, AbortSignal.timeout(30_000)]) });
-    jumpToLatest(); refreshSession();
+    await api.apply({ sessionId: sessionID, operationId: reportId || crypto.randomUUID(), operation: { case: 'message', value: { text, attachments: [] } } }, { signal: reportId ? AbortSignal.timeout(30_000) : AbortSignal.any([lifetime.current!.signal, AbortSignal.timeout(30_000)]) });
+    if (!reportId) jumpToLatest();
+    refreshSession();
     return 'sent';
   };
   const runActions: RunActions = {
@@ -497,7 +498,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     if (why) { showMenuNotice(why); return; }
     scroll.revealMessage(block.messageId);
     // Run opens the Terminal panel with the command at the prompt, as the block's own Run does; never a message to the agent.
-    if (myself) codeRuns.openConfirm(block.messageId, block.script); else void codeRuns.runIn(block.messageId, block.script, { kind: 'here' });
+    if (myself) codeRuns.openConfirm(block.messageId, block.script); else void codeRuns.runLastTerminal(block.messageId, block.script);
   };
   const canRunLast = () => !!codeRuns && activity.current() && !!lastBlock.current;
   useActions({

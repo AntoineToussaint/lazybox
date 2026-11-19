@@ -90,16 +90,13 @@ origin instead (`internal/runner/start_from.go`):
   lists nothing; a typed branch still works.
 - **Add repository** and **New workspace** show the same chips under the
   repository list, with the same picker and `⌥B`.
-- **Remembered per repository.** The Runner keeps the last choice by
-  repository identity (beside the workspace records, in
-  `.lazybox-collections/start-from.json`; it survives a restart). The next
-  workspace of that repository starts there without asking: New task's chip
-  already says **from feat/v2-command-output**, plainly where a default
-  reads quietly, and Add repository, Start from an issue, an agent's
-  repository request and `lazybox new` use it too. Choosing origin's default
-  branch again forgets it. A remembered branch that origin has since deleted
-  (merged) starts from the default branch instead, says so once (*feat/x is no
-  longer on origin; api starts from its default branch*) and is forgotten.
+- **Default every time.** A new workspace starts from the repository's
+  default branch, typically `main`. A branch chosen in an earlier workspace
+  appears under *Recent* and must be selected again to use it. A repository
+  with an unreachable origin can use the last known default, with a progress
+  notice. If the Runner has no known remote default, it asks you to choose a
+  branch. A local-only repository prefers `main`, then `master`, then its
+  current branch if neither exists.
 - **Fresh, with the same offline fallback.** The chosen branch is fetched
   first into `refs/remotes/origin/<branch>` (`gitpublish.RefreshBranch`;
   `origin/HEAD` is left alone) and the workspace branches from that commit.
@@ -110,8 +107,8 @@ origin instead (`internal/runner/start_from.go`):
   *api has no branch feat/x on origin: choose another to start from* — neither
   is guessed.
 - **Elsewhere.** `PrepareWorkspace.start_from` maps repository identity to
-  branch (a repository not named uses its remembered branch; `""` or the
-  default branch's name means origin's default). `lazybox new … --start-from
+  branch (an omitted repository, `""`, or the default branch's name uses
+  origin's default). `lazybox new … --start-from
   B` (with `--from` for an issue too) applies B to every repository.
   `lazybox conversation new --workspace new --start-from B` starts the new
   workspace's repositories from origin's B, fetched first, instead of the
@@ -246,9 +243,10 @@ offers **Paste in terminal (don't run)**, the other places, the person's own
 terminal app (`open` at the folder, the command copied) and Copy. A repository without a home gets one first ("Create api home
 and run"). A global tool's login (`gcloud`, `aws`, `gh`…) goes to the home
 folder. When the shell's command-end mark arrives (`TerminalStatus.command_ends`,
-see [command output](COMMAND_OUTPUT.md)), the button says *Finished · exit N*
-and offers **Tell <agent> it's done**, which sends "Done: `<cmd>` finished
-(exit N)." to the conversation.
+see [command output](COMMAND_OUTPUT.md)), the button says *Finished · exit N*.
+A command launched directly by the handoff’s Run button sends its exit status
+to the conversation automatically. Pasted commands and unsuccessful reports
+offer **Tell the agent it’s done**.
 
 **Update to latest main.** `UpdateRepositoryHome` (owner only; the row, its ⋯
 menu, `lazybox repo home <name> --update`) fetches origin with the person's own

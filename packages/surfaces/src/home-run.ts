@@ -156,11 +156,21 @@ export function homeOffers(markdown: string, limit = 3): HomeOffer[] {
     // The text before it on its line, from the sentence it is in.
     const line = markdown.slice(markdown.lastIndexOf('\n', at - 1) + 1, at);
     const sentence = line.split(/(?<=[.!?])\s+(?=[A-Z])/).pop() || line;
-    items.push({ at, run: () => add(command, targetOf(sentence.replace(/`[^`]*`/g, 'x'), command)) });
+    items.push({ at, run: () => add(command, targetOf(sentence, command)) });
   }
   for (const item of items.sort((a, b) => a.at - b.at)) item.run();
   return out;
 }
+
+/** An explicit destination also applies to the command's own Run button. */
+export function explicitHomeTarget(markdown: string, command: string): HomeTarget | undefined {
+  if (!/\bhome\b/i.test(markdown)) return undefined;
+  return homeOffers(markdown, Infinity).find(offer => offer.explicit && offer.command === command)?.target;
+}
+
+/** Paste compound sign-in commands for review before any step can run. */
+export const reviewTerminalCommand = (command: string): boolean =>
+  needsTerminal(command) && /&&|\|\||;/.test(command);
 
 /** A workspace repository and its home, as the chat knows it. */
 export type HomeRepository = { repositoryId: string; name: string; identity: string; home: string };

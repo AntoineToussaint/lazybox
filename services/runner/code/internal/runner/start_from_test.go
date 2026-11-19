@@ -38,10 +38,9 @@ func hasBranch(list []*pb.RepositoryBranch, name string) bool {
 
 // A base other than origin's default is fetched first and used: the
 // workspace starts from origin/<branch> as it is now, never from the source
-// copy's stale copy of it. The choice is remembered for the repository: the
-// next workspace (no choice given, as `lazybox new` or an agent's request
-// sends) starts there too, fetched again; choosing origin's default forgets it.
-func TestChosenBaseIsFetchedAndRememberedPerRepository(t *testing.T) {
+// copy's stale copy of it. The choice is offered in Recent, but the
+// next workspace without an explicit base starts from the current default.
+func TestChosenBaseIsFetchedAndOfferedWithoutChangingDefault(t *testing.T) {
 	upstream := upstreamOn(t, "main")
 	onBranch(t, upstream, "main", "feat/v2-command-output", "v2 starts")
 	source := sourceCopy(t, upstream)
@@ -79,22 +78,22 @@ func TestChosenBaseIsFetchedAndRememberedPerRepository(t *testing.T) {
 		t.Fatalf("choosing a branch recorded origin/HEAD: %s", head)
 	}
 
-	// Remembered: the next workspace without a choice starts from the branch, fetched again.
-	later := onBranch(t, upstream, "main", "feat/v2-command-output", "and again")
-	ws, err = b.PrepareWorkspace(context.Background(), "remembered", "", "Remembered", "", []string{api}, p.record)
+	// Another workspace fetches main even though the feature branch still exists.
+	main := advance(t, upstream, "main moves")
+	ws, err = b.PrepareWorkspace(context.Background(), "default-after-choice", "", "Default", "", []string{api}, p.record)
 	if err != nil {
 		t.Fatal(err)
 	}
-	startsAt(t, ws, "api", later)
+	startsAt(t, ws, "api", main)
 	branches, err = b.RepositoryBranches(context.Background(), api, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if branches.StartFrom != "feat/v2-command-output" || len(branches.Recent) != 1 || branches.Recent[0] != "feat/v2-command-output" || branches.Remote {
+	if branches.StartFrom != "" || len(branches.Recent) != 1 || branches.Recent[0] != "feat/v2-command-output" || branches.Remote {
 		t.Fatalf("remembered choice: %+v", branches)
 	}
-	// Adding the repository to an existing workspace (Add repository) starts there as well.
-	gitIn(t, upstream, "commit", "--allow-empty", "-m", "main moves")
+	// Adding a repository also uses the current default.
+	later := advance(t, upstream, "main moves again")
 	ws, err = b.PrepareWorkspace(context.Background(), "add", ws.ID, "", "", []string{api}, p.record)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +101,7 @@ func TestChosenBaseIsFetchedAndRememberedPerRepository(t *testing.T) {
 	startsAt(t, ws, "api-2", later)
 
 	// Choosing origin's default branch forgets the choice; the recent list stays.
-	main := gitIn(t, upstream, "rev-parse", "refs/heads/main")
+	main = later
 	ws, err = b.PrepareWorkspaceFrom(context.Background(), "default", "", "Default", "", []string{api}, map[string]string{api: "main"}, p.record)
 	if err != nil {
 		t.Fatal(err)
@@ -190,9 +189,8 @@ func TestOfflineChosenBaseStartsFromLastFetch(t *testing.T) {
 	}
 }
 
-// A branch origin does not have fails a choice made now, with what to do;
-// a remembered one that origin deleted since (merged) falls back to the
-// default branch, says so, and is forgotten.
+// A branch origin does not have fails a choice made now. A deleted recent
+// branch has no effect on preparation using the default.
 func TestMissingStartBranch(t *testing.T) {
 	upstream := upstreamOn(t, "main")
 	onBranch(t, upstream, "main", "feat/merged", "work")
@@ -214,11 +212,9 @@ func TestMissingStartBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	startsAt(t, ws, "api", main)
-	if !strings.Contains(p.text(), "feat/merged is no longer on origin; api starts from its default branch") {
-		t.Fatalf("progress: %s", p.text())
-	}
-	if start := b.Collections.StartFrom("api"); start.Branch != "" {
-		t.Fatalf("a deleted branch is still remembered: %+v", start)
+	_, err = b.PrepareWorkspaceFrom(context.Background(), "deleted-explicitly", "", "Deleted branch", "", []string{api}, map[string]string{api: "feat/merged"}, p.record)
+	if !errors.Is(err, gitpublish.ErrNoBranch) {
+		t.Fatalf("explicit choice of the deleted branch: %v", err)
 	}
 }
 

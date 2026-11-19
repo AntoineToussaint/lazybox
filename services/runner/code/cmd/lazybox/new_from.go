@@ -137,13 +137,10 @@ func (c *cli) newFromItem(o fromItem) error {
 }
 
 // startsFor is --start-from for every repository of a new workspace; nil
-// without it, so each starts from its remembered branch (WORKSPACES.md, "Start from").
+// without it, send the empty default explicitly for compatibility with older Runners.
 func startsFor(identities []string, branch string) map[string]string {
 	branch = strings.TrimSpace(branch)
-	if branch == "" {
-		return nil
-	}
-	starts := map[string]string{}
+	starts := make(map[string]string, len(identities))
 	for _, identity := range identities {
 		starts[identity] = branch
 	}

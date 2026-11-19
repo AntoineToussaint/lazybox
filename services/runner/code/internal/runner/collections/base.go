@@ -19,7 +19,8 @@ import (
 //  2. in a source copy (bare clone), the branch its HEAD names, from
 //     refs/remotes/origin/<branch> when fetched, else the copy's own branch,
 //     which is origin's as of the clone;
-//  3. HEAD, only for a repository with neither: one without origin.
+//  3. origin/main if a regular checkout lacks origin/HEAD;
+//  4. local main, then master, then HEAD for a repository without origin.
 //
 // An explicit base (a branch, a commit, an orchestrator's parent branch) is
 // used as given. A branch the person chose to start from ("Start from",
@@ -129,6 +130,19 @@ func (m *Manager) defaultBase(ctx context.Context, repo string) Base {
 			if resolves(head) {
 				return Base{Ref: head, Branch: branch}
 			}
+		}
+	}
+	if remote, _ := m.git(ctx, repo, "config", "--get", "remote.origin.url"); remote != "" {
+		if resolves("refs/remotes/origin/main") {
+			return Base{Ref: "refs/remotes/origin/main", Branch: "main"}
+		}
+		// Without a known remote default, any checked-out branch could be
+		// unrelated work. Let planning explain how to choose a usable base.
+		return Base{Ref: "refs/remotes/origin/HEAD"}
+	}
+	for _, branch := range []string{"main", "master"} {
+		if ref := "refs/heads/" + branch; resolves(ref) {
+			return Base{Ref: ref, Branch: branch}
 		}
 	}
 	return Base{Ref: "HEAD"}

@@ -29579,7 +29579,7 @@ type Artifact struct {
 	Title        string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
 	// plan, report, spec, notes or other.
 	Kind string `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
-	// markdown (mermaid fences render as diagrams).
+	// markdown (including Mermaid diagrams) or html.
 	Format              string `protobuf:"bytes,5,opt,name=format,proto3" json:"format,omitempty"`
 	CreatedAtUnixMillis int64  `protobuf:"varint,6,opt,name=created_at_unix_millis,json=createdAtUnixMillis,proto3" json:"created_at_unix_millis,omitempty"`
 	UpdatedAtUnixMillis int64  `protobuf:"varint,7,opt,name=updated_at_unix_millis,json=updatedAtUnixMillis,proto3" json:"updated_at_unix_millis,omitempty"`
@@ -29997,7 +29997,9 @@ type PutArtifactRequest struct {
 	// Artifacts of the same workspace this one replaces: once it is saved, each
 	// is retired as superseded by it (RetireArtifact's rules apply to each, and
 	// all are checked before anything is written).
-	Supersedes    []string `protobuf:"bytes,9,rep,name=supersedes,proto3" json:"supersedes,omitempty"`
+	Supersedes []string `protobuf:"bytes,9,rep,name=supersedes,proto3" json:"supersedes,omitempty"`
+	// Empty defaults to markdown on create and preserves format on update.
+	Format        string `protobuf:"bytes,10,opt,name=format,proto3" json:"format,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -30093,6 +30095,13 @@ func (x *PutArtifactRequest) GetSupersedes() []string {
 		return x.Supersedes
 	}
 	return nil
+}
+
+func (x *PutArtifactRequest) GetFormat() string {
+	if x != nil {
+		return x.Format
+	}
+	return ""
 }
 
 type TrackArtifactFileRequest struct {
@@ -39134,7 +39143,7 @@ const file_api_proto_rawDesc = "" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12\x1f\n" +
 	"\vartifact_id\x18\x02 \x01(\tR\n" +
 	"artifactId\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\rR\aversion\"\xd9\x02\n" +
+	"\aversion\x18\x03 \x01(\rR\aversion\"\xf1\x02\n" +
 	"\x12PutArtifactRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12\x1f\n" +
 	"\vartifact_id\x18\x02 \x01(\tR\n" +
@@ -39147,7 +39156,9 @@ const file_api_proto_rawDesc = "" +
 	"\x05links\x18\b \x03(\v2\x1e.lazybox.bench.v1.ArtifactLinkR\x05links\x12\x1e\n" +
 	"\n" +
 	"supersedes\x18\t \x03(\tR\n" +
-	"supersedes\"}\n" +
+	"supersedes\x12\x16\n" +
+	"\x06format\x18\n" +
+	" \x01(\tR\x06format\"}\n" +
 	"\x18TrackArtifactFileRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x14\n" +

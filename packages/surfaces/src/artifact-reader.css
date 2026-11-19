@@ -215,3 +215,17 @@ html[data-motion=reduce] .doc-anchor,html[data-motion=reduce] .doc-toc li a{tran
 
 .doc-toc details>summary{cursor:pointer}
 .doc-toc details>summary::marker{color:var(--text-muted)}
+
+.artifact-html-preview {
+  display: block;
+  width: 100%;
+  min-height: 65vh;
+  border: 1px solid var(--border);
+  background: white;
+}
+
+.artifact-html-source {
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

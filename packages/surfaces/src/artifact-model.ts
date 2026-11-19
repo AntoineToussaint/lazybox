@@ -157,8 +157,7 @@ export function updatedLine(artifact: Artifact, now = Date.now()): string {
  * What "Send to agent" puts in a message box: the reference an agent can fetch
  * with the CLI, and a short outline so the person sees what they are sending.
  */
-export function agentReference(artifact: Pick<Artifact, 'id' | 'title' | 'kind' | 'versions'>, content: string, budget = 1200): string {
-  const version = artifact.versions.at(-1)?.number ?? 1;
+export function agentReference(artifact: Pick<Artifact, 'id' | 'title' | 'kind' | 'versions'>, content: string, budget = 1200, version = artifact.versions.at(-1)?.number ?? 1): string {
   const outline: string[] = [];
   let fenced = false, used = 0;
   for (const line of content.split('\n')) {
@@ -169,7 +168,7 @@ export function agentReference(artifact: Pick<Artifact, 'id' | 'title' | 'kind' 
     if (!item || used + item.length > budget) continue;
     outline.push(item); used += item.length + 1;
   }
-  const lines = [`Artifact “${artifact.title}” (${kindLabel[asKind(artifact.kind)].toLowerCase()}, v${version}). Read it in full with \`lazybox artifact get ${artifact.id}\`.`];
+  const lines = [`Artifact “${artifact.title}” (${kindLabel[asKind(artifact.kind)].toLowerCase()}, v${version}). Read it in full with \`lazybox artifact get ${artifact.id} --version ${version}\`.`];
   if (outline.length) lines.push('', 'Outline:', ...outline);
   else if (content.trim()) lines.push('', shorten(content.trim().split('\n').slice(0, 6).join('\n'), budget));
   lines.push('', '');

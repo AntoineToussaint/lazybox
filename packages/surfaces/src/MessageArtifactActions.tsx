@@ -54,6 +54,7 @@ export function conversationArtifacts(artifacts: Artifact[], scope: MessageScope
   return artifacts.filter(a => (scope.conversationId && a.originConversationId === scope.conversationId) || a.originSessionId === scope.sessionId);
 }
 const newerThanLatest = (artifact: Artifact, scope: MessageScope, message: TranscriptMessage) => {
+  if (artifact.format && artifact.format !== 'markdown') return false;
   const source = artifact.versions.at(-1)?.source;
   if (source?.kind !== 'message' || source.sessionId !== scope.sessionId) return true;
   try { return BigInt(message.id) > BigInt(source.messageId); } catch { return message.id !== source.messageId; }

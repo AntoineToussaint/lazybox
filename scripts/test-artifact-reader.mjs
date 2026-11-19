@@ -16,7 +16,7 @@ import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
@@ -25,6 +25,13 @@ import { designDocV2, seedDesignDoc } from './fixtures/artifact-sample.mjs';
 const fixture = await startRunnerFixture();
 const session = fixture.sessions[0];
 const doc = seedDesignDoc(fixture, { sessionId: session.id });
+const htmlSource = '<!doctype html><html><head><style>h2 { color: rgb(12, 34, 56) }</style></head><body>' +
+  '<h2>Deploy preview</h2><details><summary>Metrics</summary>Latency</details>' +
+  '<script>document.body.textContent = "script ran"</script>' +
+  '<a href="https://example.invalid/">External link</a><img src="https://example.invalid/pixel">' +
+  '<iframe src="https://example.invalid/frame"></iframe></body></html>';
+const html = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Deploy preview', format: 'html', content: htmlSource });
+fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, artifactId: html.id, content: htmlSource.replace('Latency', 'Throughput') });
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
 let browser;
 try {
@@ -37,6 +44,44 @@ try {
   // The system print dialog is stubbed: the print sheet stays for the print media checks.
   await context.addInitScript(() => { window.__printed = 0; window.print = () => { window.__printed++; }; });
   const page = await context.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', e => errors.push(String(e)));
+  await page.goto(standalone.replace(doc.id, html.id));
+  const preview = page.frameLocator('iframe[title="HTML artifact preview"]');
+  await expect(preview.getByRole('heading', { name: 'Deploy preview' })).toHaveCSS('color', 'rgb(12, 34, 56)');
+  await preview.getByText('Metrics').click();
+  await expect(preview.getByText('Throughput')).toBeVisible();
+  await expect(preview.locator('script, iframe, [href], [src]')).toHaveCount(0);
+  await expect(page.locator('iframe[title="HTML artifact preview"]')).toHaveAttribute('sandbox', '');
+  await page.getByRole('tab', { name: 'Source' }).click();
+  await expect(page.locator('.artifact-html-source')).toContainText('<script>');
+  await page.getByRole('tab', { name: 'Changes' }).click();
+  await expect(page.getByRole('region', { name: 'Changes from v1 to v2' })).toContainText('Throughput');
+  await page.getByRole('tab', { name: 'Preview' }).click();
+  await page.getByLabel('Version', { exact: true }).selectOption('1');
+  await expect(preview.getByText('Latency')).toHaveCount(1);
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.getByRole('tab', { name: 'Source' }).click();
+  await page.locator('.artifact-html-source').evaluate(node => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+  });
+  await page.getByRole('button', { name: 'Send selection to agent' }).click();
+  const reference = await page.evaluate(() => navigator.clipboard.readText());
+  assert.match(reference, /--version 1/);
+  assert.match(reference, /Selected excerpt:\n> .*Latency/);
+  await page.getByRole('tab', { name: 'Preview' }).click();
+  await page.getByLabel('Export', { exact: true }).click();
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Download .html' }).click();
+  const download = await downloadPromise;
+  assert.equal(download.suggestedFilename(), 'deploy-preview.html');
+  assert.equal(await readFile(await download.path(), 'utf8'), htmlSource);
+  await page.getByRole('button', { name: 'Republish v1' }).click();
+  await expect(page.getByLabel('Version', { exact: true })).toHaveValue('3');
+  await page.getByRole('tab', { name: 'Source' }).click();
+  await expect(page.locator('.artifact-html-source')).toHaveText(htmlSource);
+
   await page.goto(standalone);
   const article = page.getByRole('article', { name: 'Datasource migration' });
   const reader = article.locator('.artifact-scroll');

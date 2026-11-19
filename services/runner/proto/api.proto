@@ -3499,7 +3499,7 @@ message Artifact {
   string title = 3;
   // plan, report, spec, notes or other.
   string kind = 4;
-  // markdown (mermaid fences render as diagrams).
+  // markdown (including Mermaid diagrams) or html.
   string format = 5;
   int64 created_at_unix_millis = 6;
   int64 updated_at_unix_millis = 7;
@@ -3564,6 +3564,8 @@ message PutArtifactRequest {
   // is retired as superseded by it (RetireArtifact's rules apply to each, and
   // all are checked before anything is written).
   repeated string supersedes = 9;
+  // Empty defaults to markdown on create and preserves format on update.
+  string format = 10;
 }
 message TrackArtifactFileRequest {
   string collection_id = 1;

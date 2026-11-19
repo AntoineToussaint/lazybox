@@ -42,11 +42,7 @@ check-generated: deps
 check-go:
 	cd $(GO_ROOT) && go vet ./...
 check-workspaces: deps
-	npm run typecheck
-	npm run check:workspaces
-	npm run test:client
-	npm run test:worker
-	npm run test:browser-service
+	npm run check:client
 build: build-go build-worker build-web
 build-go:
 	mkdir -p bin

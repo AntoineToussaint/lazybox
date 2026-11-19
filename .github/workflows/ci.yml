@@ -201,7 +201,10 @@ jobs:
 
   typescript:
     name: typescript (typecheck, client, worker)
+    needs: plan
     runs-on: ubuntu-24.04
+    container:
+      image: ${{ needs.plan.outputs.playwright-image }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -210,19 +213,15 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
-      # The agent browser's Chromium (Playwright's headless shell) and its
-      # system libraries: the browser-service tests launch it.
-      - run: make deps
-      - uses: ./.github/actions/playwright
-        with:
-          browsers: chromium
-          chromium-shell-only: 'true'
-      # Typecheck, workspace links, client and both workers' tests.
-      - run: make check-workspaces
+      # The image supplies headless Chromium and its system libraries.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run check:client
       - name: README and CONTRIBUTING name only what exists
         run: node scripts/export-check.mjs
       - name: Nothing private or secret in the tree
-        run: node scripts/check-private.mjs
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          node scripts/check-private.mjs
 
   desktop:
     needs: plan

@@ -119,7 +119,7 @@ test('the list line says who changed it last', () => {
 test('send to agent gives a fetchable reference and an outline, not the whole text', () => {
   const content = '# Plan\n\nIntro\n\n## Step one\n```\n# not a heading\n```\n## Step two\n' + 'filler\n'.repeat(500);
   const text = agentReference({ id: 'ART1', title: 'Plan', kind: 'plan', versions: [{ number: 3 }] as never }, content);
-  assert.match(text, /^Artifact “Plan” \(plan, v3\)\. Read it in full with `lazybox artifact get ART1`\./);
+  assert.match(text, /^Artifact “Plan” \(plan, v3\)\. Read it in full with `lazybox artifact get ART1 --version 3`\./);
   assert.match(text, /Outline:\n- Plan\n {2}- Step one\n {2}- Step two\n/);
   assert.doesNotMatch(text, /not a heading|filler/);
 });

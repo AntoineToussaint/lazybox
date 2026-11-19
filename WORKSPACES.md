@@ -882,6 +882,11 @@ Keys in the Changes page: `n`/`p` next and previous hunk, `Shift+N`/`Shift+P`
 next and previous file, `v` toggles Viewed (and moves on to the next file still
 to review), `s` switches unified and split.
 
+### Queued messages
+
+Use **Delete** on a queued message to remove it before the agent receives it.
+The running turn and the order of the other queued messages are preserved.
+
 ### Per-turn checkpoints and revert
 
 Before each agent turn starts, and again when it ends, the Runner saves every

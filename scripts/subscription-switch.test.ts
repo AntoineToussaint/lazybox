@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { backAt, backWhen, bestChoice, comeback, exitFault, failureSentence, faultSentence, limitHeadline, limitStatus, resetTime, sessionLimit, signInDefault, subscriptionChoices, subscriptionName, switchedLine, switchesItself, switchLabel, switchNote, transportFault, turnFault, untilText } from '../packages/surfaces/src/subscription-model.ts';
 import { foldTranscript, emptyTranscript } from '../packages/surfaces/src/transcript-model.ts';
 import { liveStatus } from '../packages/surfaces/src/live-status.ts';
+import { continuationPrompt } from '../packages/surfaces/src/continuation-prompt.ts';
 import { deriveAttention } from '../packages/surfaces/src/attention.ts';
 
 const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
@@ -150,4 +151,20 @@ test('an agent process that ended is not a turn fault the next message continues
   assert.equal(transportFault('provider_process_exit'), false);
   assert.equal(exitFault('provider stream ended: EOF'), false);
   assert.match(faultSentence('provider_process_exit'), /stopped unexpectedly\. Resume/);
+});
+
+test('long Codex handoff keeps the opening, latest decisions, and pending follow-ups', () => {
+  const messages = [
+    { id: 'opening', turnId: '1', type: 'operation_accepted', text: 'Open by validating the migration plan.' },
+    ...Array.from({ length: 20 }, (_, index) => ({ id: String(index), turnId: String(index), type: 'message_delta', text: 'Long earlier output '.repeat(800) })),
+    { id: 'latest', turnId: '22', type: 'operation_accepted', text: 'Keep backwards compatibility.' },
+    { id: 'result', turnId: '22', type: 'message_delta', text: 'The migration passes. Rollback tests remain.' },
+  ];
+  const prompt = continuationPrompt('Migration', messages, [{ operationId: 'next', text: 'Check staging too.' }], 'Use the test account.');
+  assert.match(prompt, /Open by validating the migration plan/);
+  assert.match(prompt, /Keep backwards compatibility/);
+  assert.match(prompt, /Rollback tests remain/);
+  assert.match(prompt, /Check staging too[.].*Use the test account/s);
+  assert.match(prompt, /older exchanges omitted/);
+  assert.ok(prompt.length < 60_000);
 });

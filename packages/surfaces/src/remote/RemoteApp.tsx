@@ -11,6 +11,8 @@ import { sessionStatus } from '../agent-status';
 import { useTranscript } from '../useTranscript';
 import { ConversationLoading, MessageList } from '../MessageList';
 import { RequestCard } from '../session-parts';
+import { QueuedMessages, useQueuedDelivery } from '../QueuedMessages';
+import { queuedMessages } from '../transcript-model';
 import { LiveIndicator, useLiveStatus } from '../LiveIndicator';
 import { Icon } from '../Icons';
 import { useComposerDictation } from '../voice/ComposerDictation';
@@ -262,6 +264,8 @@ function PhoneConversation({ sessionId, commandId, device, collections, go }: { 
   const respond = device.grants.includes('respond'), start = device.grants.includes('start');
   const workspace = collections.find(value => value.id === session?.collectionId)?.name || '';
   const status = useLiveStatus(session, transcript.recent);
+  const queued = queuedMessages(session?.queuedMessages, transcript);
+  const queueDelivery = useQueuedDelivery(api, sessionId, queued);
   // The phone asks before allowing what the computer flags; the computer shows the same flags.
   const confirmAllow = useCallback((approval: Approval) => new Promise<boolean>(resolve => setConfirming({ approval, resolve })), []);
   const voice = useVoiceState();
@@ -294,6 +298,8 @@ function PhoneConversation({ sessionId, commandId, device, collections, go }: { 
       <div ref={end}/>
     </div>
     {error && session && <p className="remote-error remote-floating" role="alert">{error}<button aria-label="Dismiss" onClick={() => setError('')}>×</button></p>}
+    {respond && !transcript.error && <QueuedMessages session={session} queued={queued} turnRunning={transcript.turnRunning}
+      live={status} agentName={agentName} activity={transcript.activity} delivery={queueDelivery}/>}
     {session && <PhoneComposer key={session.id} session={session} respond={respond} start={start} onError={setError}/>}
     {confirming && <ConfirmSheet title="Allow this?" tone="primary" confirm="Allow"
       detail={<><code className="remote-sheet-code">{confirming.approval.command || confirming.approval.file || confirming.approval.description || confirming.approval.tool}</code><ul className="remote-risks">{confirming.approval.risks.map(risk => <li key={risk.kind}><Icon name="alert" size={12}/>{risk.text}</li>)}{confirming.approval.defaultToNo && !confirming.approval.risks.length && <li><Icon name="alert" size={12}/>{agentName} suggests saying no unless you are sure</li>}</ul></>}

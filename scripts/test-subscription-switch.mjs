@@ -32,7 +32,7 @@ for(const event of [{type:'operation_accepted',text:'Write the release notes for
 f.collections.push({id:'delta',name:'Delta notes',workId:'delta',root:'/fixture/collections/delta',state:'ready',ownerExecutionId:'delta-session',members:[{spec:{name:'api',repositoryId:'backend',baseRef:'main',branch:'lazybox/delta/api'},path:'/fixture/collections/delta/api',baseCommit:'c'.repeat(40),ready:true}]});
 f.sessions.push({id:'delta-session',collectionId:'delta',workId:'delta',title:'Draft the notes',provider:'claude',profileId:'work-2',gatewayId:'direct',workingDirectory:'/fixture/collections/delta',capabilities:{files:true,images:true,resume:true,livePermission:true},permission:'ask',pending:[],status:'failed',fault:'exhausted',rotationProfileIds:[],account:{state:'exhausted',resetAt:String(reset)},agents:[{id:'root',status:'failed',lastTurnStatus:'failed'}]});
 const delta=f.openEvents('delta-session');
-for(const event of [{type:'operation_accepted',text:'Draft the notes'},limitEvent(reset),{type:'turn_ended',status:'failed'}])delta.push(event);
+for(const event of [{type:'operation_accepted',text:'Draft the notes'},{type:'turn_started'},{type:'message_delta',text:'I found the deployment checklist in docs/runbook.md.'},{type:'turn_ended',status:'completed'},{type:'operation_accepted',text:'Include the rollback procedure.'},limitEvent(reset),{type:'turn_ended',status:'failed'}])delta.push(event);
 
 // Gamma waits for a reset a few seconds away.
 const soon=Math.floor(Date.now()/1000)+6;
@@ -177,7 +177,7 @@ try{
  await dialog.getByRole('button',{name:'Cancel'}).click();
 
  // When every Claude account is limited, the card offers a fresh Codex
- // conversation in the same workspace, with text ready to review.
+ // conversation in the same workspace and sends the handoff.
  for (const profile of f.profiles.filter(p=>p.provider==='claude')) profile.availability={state:'exhausted',resetAt:String(reset)};
  const limited=f.sessions.find(s=>s.id==='delta-session');
  Object.assign(limited,{status:'failed',fault:'exhausted',account:{state:'exhausted',resetAt:String(reset)}});
@@ -189,12 +189,34 @@ try{
  await page.emulateMedia({colorScheme:'dark'});
  await page.waitForTimeout(400);
  await page.screenshot({path:'.cache/subscription-codex-fallback-dark.png'});
+ limited.queuedMessages=[{operationId:'queued-verify',text:'Verify the staging environment.'}];
+ limited.queued=1;
+ await expect(deltaCard).toContainText('Your message is saved');
+ await chat.getByRole('textbox',{name:'Message',exact:true}).fill('Keep the notes concise.');
  const writes=f.mutations.filter(m=>m.method==='Apply').length;
  await fallback.focus();
  await page.keyboard.press('Enter');
  await expect.poll(()=>f.mutations.findLast(m=>m.method==='OpenSession')?.body).toMatchObject({collectionId:'delta',profileId:'codex-work'});
- await expect(chat.getByRole('textbox',{name:'Message',exact:true})).toHaveValue('Draft the notes');
- assert.equal(f.mutations.filter(m=>m.method==='Apply').length,writes,'the draft waits for the person to send');
+ await expect.poll(()=>f.mutations.findLast(m=>m.method==='Apply')?.body?.message?.text).toContain('Include the rollback procedure.');
+ const handoff=f.mutations.findLast(m=>m.method==='Apply').body;
+ assert.match(handoff.message.text,/Draft the notes/);
+ assert.match(handoff.message.text,/deployment checklist in docs\/runbook\.md/);
+ assert.match(handoff.message.text,/Verify the staging environment/);
+ assert.match(handoff.message.text,/Keep the notes concise/);
+ assert.equal(handoff.sessionId,f.sessions.at(-1).id);
+ assert.equal(f.mutations.filter(m=>m.method==='Apply').length,writes+1,'the handoff sends once');
+ const refreshPage=await browser.newPage({viewport:{width:1440,height:900}});
+ refreshPage.on('pageerror',error=>errors.push(String(error)));
+ await refreshPage.goto(`${base}/?view=workspace&collection=delta&session=delta-session#token=${f.token}`);
+ const refreshCard=refreshPage.locator('.embedded-chat:visible').getByRole('region',{name:'Subscription limit'});
+ const checkedBefore=f.calls.filter(call=>call.method==='RefreshSubscription').length;
+ const switchesBefore=f.mutations.filter(m=>m.method==='SwitchSubscription').length;
+ await refreshCard.getByRole('button',{name:'Refresh',exact:true}).click();
+ await expect(refreshCard).toContainText('is available again');
+ await expect(refreshCard.getByRole('button',{name:/Continue on Work/})).toBeEnabled();
+ const checked=f.calls.filter(call=>call.method==='RefreshSubscription').slice(checkedBefore);
+ assert.equal(checked.length,3);
+ assert.equal(f.mutations.filter(m=>m.method==='SwitchSubscription').length,switchesBefore,'refresh does not switch or resume the execution');
  assert.deepEqual(errors,[]);
  console.log('PASS automatic switch line, one limit card in words (Switch to the best subscription, picker of the same provider in order, wait), the header chip opens Switch subscription, nothing switches by itself without an account policy, a message sent while limited goes once, wait-for-reset resumes once, ⋯ Switch subscription; with Subscription rotation allowed: Always switch automatically and the everywhere question. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

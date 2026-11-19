@@ -35,7 +35,7 @@ export function useConversationIndex() {
         for (let offset = 0; ; offset += 100) {
           const page = await api.listHistory(
             { limit: 100, offset },
-            { signal: control.signal, timeoutMs: 5000 },
+            { signal: control.signal, timeoutMs: 15000 },
           );
           rows.push(...page.sessions);
           if (!page.hasMore) break;

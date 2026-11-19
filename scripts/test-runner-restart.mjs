@@ -21,6 +21,8 @@ try {
   await page.addInitScript(() => localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'));
   let historyTimedOut = false;
   await page.route('**/ListHistory', async route => {
+    if (route.request().postDataJSON()?.limit !== 100) { await route.continue(); return; }
+    assert.equal(route.request().headers()['connect-timeout-ms'], '15000');
     if (historyTimedOut) { await route.continue(); return; }
     await route.fulfill({ status: 504, json: { code: 'deadline_exceeded', message: 'Fixture history was slow' } });
     historyTimedOut = true;
@@ -39,7 +41,10 @@ try {
   await mkdir('.cache', { recursive: true });
 
   const infoRpc = '**/Info';
-  await page.route(infoRpc, route => route.fulfill({ status: 504, json: { code: 'deadline_exceeded', message: 'Fixture Runner was slow' } }));
+  await page.route(infoRpc, route => {
+    assert.equal(route.request().headers()['connect-timeout-ms'], '15000');
+    return route.fulfill({ status: 504, json: { code: 'deadline_exceeded', message: 'Fixture Runner was slow' } });
+  });
   await expect(indicator).toHaveText('Slow to respond');
   await expect(page.getByText('Runner disconnected.', { exact: true })).toHaveCount(0);
   await page.screenshot({ path: '.cache/runner-health-slow.png' });

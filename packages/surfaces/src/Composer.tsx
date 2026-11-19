@@ -112,7 +112,10 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
   });
   const sendLabel = sending ? 'Sending…' : session?.busy ? 'Queue follow-up' : 'Send message';
 
-  const sendKey = bindings(keymap['chat.send'])[0] || 'Enter';
+  const sendKeys = bindings(keymap['chat.send']);
+  const sendKey = sendKeys[0] || 'Enter';
+  const newlineHint = sendKeys.includes('Shift+Enter') || bindings(keymap['chat.send-now']).includes('Shift+Enter')
+    ? '' : ' · Shift+Enter for a new line';
   // While the agent works, a message queues behind its turn; Send now's key (⌘↵) stops the turn for it.
   const sendNowKey = bindings(keymap['chat.send-now'])[0];
   const busyHint = session?.busy && !session.closed && sendNowKey ? `${displayBinding(sendKey).join(' ')} queues · ${displayBinding(sendNowKey).join(' ')} sends now` : '';
@@ -164,7 +167,7 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
       <button type="button" className="icon-button" aria-label="Snippets" title={`Snippets · ${keymap['snippets.open']}`} disabled={!canCompose || sending} onClick={onOpenSnippets}><Icon name="snippets"/></button>
       <button type="button" className="attachment" aria-label={embedded ? 'Attach files' : undefined} disabled={!canAttach} onClick={() => fileInput.current?.click()}>{embedded ? <><Icon name="attach"/> <span className="attachment-label">Attach</span></> : '+ Attach files'}</button>
       <input ref={fileInput} hidden aria-label="Attach files" type="file" multiple onChange={e => { onSelectFiles(e.target.files); e.target.value = ''; }}/>
-      <small className="composer-hint keyboard-hint">{vim.mode === 'insert' ? `${busyHint || `${sendKey} to send`} · Esc for normal mode` : vim.mode ? vim.hint : busyHint || `${sendKey} to send · Shift+Enter for a new line`}</small>
+      <small className="composer-hint keyboard-hint">{vim.mode === 'insert' ? `${busyHint || `${sendKey} to send`} · Esc for normal mode` : vim.mode ? vim.hint : busyHint || `${sendKey} to send${newlineHint}`}</small>
       {!interruptInBar && (!embedded || session?.busy) && <button type="button" onClick={onInterrupt} disabled={!session?.busy || session.closed}>Interrupt</button>}
       <div className="composer-send-actions">
         {dictation.supported && <button type="button" className={'icon-button composer-mic' + (dictation.active ? ' is-active' : '')} aria-label={dictation.active ? 'Stop dictation' : 'Dictate'} title={dictation.active ? 'Stop and keep the draft' : dictateHint} disabled={!canCompose || sending} onClick={dictation.active ? dictation.stop : dictation.start}><Icon name={dictation.active ? 'stop' : 'mic'}/></button>}

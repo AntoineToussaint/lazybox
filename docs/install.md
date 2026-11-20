@@ -344,7 +344,19 @@ at boot; without it (a container) the Runner runs, but you start it.
 **Add a computer** (Settings → Runners, or `lazybox remote add <ssh-host>`)
 does all of this over SSH ([guide](guides/remote-computers.md)). By hand:
 
-**Install.** Download the tarball for your architecture (`x64` or `arm64`)
+**Homebrew.** Once a stable release publishes the Linux formula, install it
+from the Lazybox tap and register the service under your user account:
+
+```sh
+brew install AntoineToussaint/lazybox/lazybox-runner
+lazybox service install
+lazybox doctor
+```
+
+After a Homebrew upgrade, run `lazybox service install` again to refresh the
+service. For a prerelease, use the tarball below.
+
+**Tarball.** Download the tarball for your architecture (`x64` or `arm64`)
 and its checksum from the
 [releases](https://github.com/AntoineToussaint/lazybox/releases), check it,
 unpack it, and set up the service:

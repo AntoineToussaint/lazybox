@@ -2,6 +2,10 @@ import { useEffect, useState } from 'react';
 import type { JournalEvent, Session } from '@lazybox/protocol';
 import { liveStatus, type LiveStatus, type LiveTone } from './live-status';
 import './live-status.css';
+import { Icon } from './Icons';
+import { useRunner } from './RunnerContext';
+import { agentIcon, agentTitle } from './providers';
+import { conversationProvider } from './conversation-model';
 
 // One clock for every live row in the window, ticking only while one is shown.
 // Rows read the same instant, so the same elapsed time never reads two ways
@@ -52,4 +56,14 @@ export function LiveStatusLabel({ session, className = '', hideIdle = false }: {
   const status = useLiveStatus(session);
   if (hideIdle && (status.tone === 'idle' || status.tone === 'saved')) return null;
   return <span className={`live-status ${className}`} data-tone={status.tone}><LiveIndicator tone={status.tone}/><span className="live-status-text">{status.text}</span></span>;
+}
+
+/** The provider mark is separate from the conversation's activity indicator. */
+export function ConversationProviderIcon({ session }: { session: Session }) {
+  const { info } = useRunner();
+  const provider = conversationProvider(session, info?.profiles || []);
+  const label = agentTitle(provider, info?.profiles, 'Unknown agent');
+  return <span className="conversation-type-icon" role="img" aria-label={label} title={label}>
+    <Icon name={agentIcon(provider)} size={14}/>
+  </span>;
 }

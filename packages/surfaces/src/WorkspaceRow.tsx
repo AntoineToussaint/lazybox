@@ -12,7 +12,7 @@ import { Icon } from "./Icons";
 import { useRunner } from "./RunnerContext";
 import { workspaceTerminalItem } from "./handoff";
 import { useUnread } from "./useAttention";
-import { SessionMark, useLiveStatus } from "./LiveIndicator";
+import { ConversationProviderIcon, SessionMark, useLiveStatus } from "./LiveIndicator";
 import { generatedName, repositoryGroups, suggestWorkspaceName } from "./repository-model";
 import { useWorkspaceHover, WorkspaceHoverCard } from "./WorkspaceHover";
 import { OwnershipDialog } from "./OwnershipPanel";
@@ -200,6 +200,7 @@ export function WorkspaceRow({
               <small className="workspace-agent" title={line.tooltip}>
                 <SessionMark session={featured} unread={marker} />
                 {marker && <span className="sr-only">{marker === "failed" ? "Failed, unread" : "Ready for review, unread"}</span>}
+                <ConversationProviderIcon session={featured} />
                 <span className="workspace-agent-label">{line.title}</span>
                 {line.more && <span className="workspace-agent-more" title={`${conversationCount} conversations`}>{line.more}</span>}
                 <AgentStatus session={featured} />

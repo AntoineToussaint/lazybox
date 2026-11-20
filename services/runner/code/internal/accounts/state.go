@@ -124,11 +124,48 @@ func (s *State) Observation(id string) agent.AccountObservation {
 	return value
 }
 
-// Eligible returns accounts that can be probed. An elapsed native reset opens
-// a probe; it is not an assertion that the subscription has capacity.
-func (s *State) Eligible(id string, now time.Time) bool {
+// Capacity is the account's standing for automatic rotation.
+type Capacity uint8
+
+const (
+	Unavailable Capacity = iota
+	ProbeAllowed
+	CapacityReported
+)
+
+// RotationCapacity considers both the account status and its usage windows.
+// An elapsed reset permits a probe because the provider has yet to confirm capacity.
+func (s *State) RotationCapacity(id string, now time.Time) Capacity {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	value, ok := s.observations[id]
-	return !ok || value.State == "available" || ((value.State == "exhausted" || value.State == "throttled") && value.ResetAt > 0 && value.ResetAt <= now.Unix())
+	if !ok {
+		return ProbeAllowed
+	}
+	unix := now.Unix()
+	capacity := CapacityReported
+	switch value.State {
+	case "available":
+	case "exhausted", "throttled":
+		if value.ResetAt <= 0 || value.ResetAt > unix {
+			return Unavailable
+		}
+		capacity = ProbeAllowed
+	default:
+		return Unavailable
+	}
+	for _, window := range value.Windows {
+		if window.UsedPercent >= 100 {
+			if window.ResetAt <= 0 || window.ResetAt > unix {
+				return Unavailable
+			}
+			capacity = ProbeAllowed
+		}
+	}
+	return capacity
+}
+
+// Eligible reports whether automatic rotation may try the account.
+func (s *State) Eligible(id string, now time.Time) bool {
+	return s.RotationCapacity(id, now) != Unavailable
 }

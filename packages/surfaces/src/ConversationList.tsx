@@ -8,9 +8,8 @@ import { Code, ConnectError } from '@lazybox/client-core';
 import type { Session } from '@lazybox/protocol';
 import { useRunner } from './RunnerContext';
 import { sessionStatus } from './agent-status';
-import { SessionMark } from './LiveIndicator';
-import { agentIcon, agentTitle } from './providers';
-import { conversationDetails, conversationName, conversationProvider, mergeConversations } from './conversation-model';
+import { ConversationProviderIcon, SessionMark } from './LiveIndicator';
+import { conversationDetails, conversationName, mergeConversations } from './conversation-model';
 import { activityAt, ageLabel } from './attention';
 import { archivedAt, isArchivedAway, isPinned, pinnedAt } from './agents-model';
 import { InlineConversationRename, useConversationActions } from './ConversationActions';
@@ -90,8 +89,6 @@ export function ConversationList({ collectionId = '', target, onTarget, compact 
       const marker = unread(session), title = conversationName(session), status = sessionStatus(session), archived = archivedAt(session) > 0, pinned = isPinned(session);
       const items = actions.items(session, { rename: () => setRenaming(session.id) }), at = activityAt(session);
       const details = [allWorkspaces || !compact ? workspaceName?.(session.collectionId) : '', conversationDetails(session, info?.profiles || [])].filter(Boolean).join(' · ');
-      const provider = conversationProvider(session, info?.profiles || []);
-      const agent = agentTitle(provider, info?.profiles, 'Unknown agent');
       return <div className="conversation-row" data-unread={marker || undefined} data-pinned={pinned || undefined} data-archived={archived || undefined} key={session.id}
         onContextMenu={contextMenu('conversation', () => items, { sessionId: session.id, workspaceId: session.collectionId }, `Conversation ${title}`)}
         onKeyDown={event => { if (event.key === 'F2' && renaming !== session.id) { event.preventDefault(); setRenaming(session.id); } }}>
@@ -102,9 +99,7 @@ export function ConversationList({ collectionId = '', target, onTarget, compact 
               {...conversationRowGestures({ collectionId: session.collectionId, sessionId: session.id, commandId: '' }, () => open(session))}>
               <SessionMark session={session} unread={marker} title={marker ? (marker === 'failed' ? 'Failed · unread' : 'Ready for review · unread') : status}/>
               <span className="sr-only">{marker ? (marker === 'failed' ? 'Failed, unread' : 'Ready for review, unread') : status}{pinned ? ', pinned' : ''}{archived ? ', archived' : ''}: </span>
-              <span className="conversation-type-icon" role="img" aria-label={agent} title={agent}>
-                <Icon name={agentIcon(provider)} size={14}/>
-              </span>
+              <ConversationProviderIcon session={session}/>
               <span className="conversation-label">
                 <strong>{title}</strong>
                 {!compact && <small className="conversation-agent">{details}</small>}

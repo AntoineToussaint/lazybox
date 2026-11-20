@@ -57,6 +57,7 @@ try{
  await expect(agent.locator('.workspace-agent-label')).toHaveText('Harden the request handler against slow clients');
  await expect(agent).toHaveAttribute('title',/Claude · claude-opus-5-5/);
  await expect(agent).not.toContainText('Claude ·');
+ await expect(agent.getByRole('img',{name:'Claude',exact:true})).toBeVisible();
  await expect(agent.locator('.workspace-agent-words')).toBeVisible();
  // No "C.": at the default sidebar width the title shows a real phrase and the status is whole.
  const label=await agent.locator('.workspace-agent-label').evaluate(n=>({width:n.getBoundingClientRect().width}));
@@ -129,13 +130,17 @@ try{
 
  // A second conversation: both are listed under the card, one line each. Folded,
  // the row speaks for the one at work and counts the rest, at the same height as every row.
- fixture.sessions.push({...structuredClone({...alphaSession,agents:undefined}),id:'alpha-second',title:'Write the release notes',status:'',busy:false,closed:true,createdAtUnixMillis:'1'});
+ fixture.sessions.push({...structuredClone({...alphaSession,agents:undefined}),id:'alpha-second',title:'Write the release notes',provider:'codex',profileId:'codex-default',status:'',busy:false,closed:true,createdAtUnixMillis:'1'});
  await page.reload();
  await expect(alpha.locator('xpath=..').locator('.workspace-conversations .conversation-row')).toHaveCount(2);
+ const expanded=alpha.locator('xpath=..').locator('.workspace-conversations');
+ await expect(expanded.getByRole('img',{name:'Claude',exact:true})).toBeVisible();
+ await expect(expanded.getByRole('img',{name:'Codex',exact:true})).toBeVisible();
  await expect(agent).toHaveCount(0);
  await alpha.getByRole('button',{name:/^Fold the 2 conversations/}).click();
  await expect(agent.locator('.workspace-agent-label')).toHaveText('Harden the request handler against slow clients');
  await expect(agent.locator('.workspace-agent-more')).toHaveText('+1');
+ await expect(agent.getByRole('img',{name:'Claude',exact:true})).toBeVisible();
  measured=await heights();
  assert.equal(new Set(measured).size,1,`rows keep one height with several conversations: ${measured}`);
 

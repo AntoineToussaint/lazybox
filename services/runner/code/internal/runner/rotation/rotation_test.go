@@ -44,7 +44,7 @@ func fixtureWith(t *testing.T, eligible []string, switching func() bool) (agent.
 		t.Fatal(err)
 	}
 	native := nativeAdapter{opened: make(chan *nativeSession, 8)}
-	adapter := Adapter{Native: native, Profiles: []accounts.Profile{{ID: "a", Provider: "claude", Isolation: "environment"}, {ID: "b", Provider: "claude", Isolation: "environment"}}, Eligible: eligible, State: state, Resolve: func(p accounts.Profile, o agent.Open) (agent.Open, error) {
+	adapter := Adapter{Native: native, Profiles: []accounts.Profile{{ID: "a", Provider: "claude", Isolation: "environment"}, {ID: "b", Provider: "claude", Isolation: "environment"}, {ID: "c", Provider: "claude", Isolation: "environment"}, {ID: "d", Provider: "claude", Isolation: "environment"}}, Eligible: eligible, State: state, Resolve: func(p accounts.Profile, o agent.Open) (agent.Open, error) {
 		o.Env = []string{"ACCOUNT=" + p.ID}
 		return o, nil
 	}, Evidence: func() string { return `{"retainedCommandIds":["build-1"]}` }, Switching: switching}
@@ -227,7 +227,7 @@ func TestCloseCancelsAccountStartupWithoutWaitingForRotationMutex(t *testing.T) 
 	first := &nativeSession{Session: &agenttest.Session{Ref: "first", Events: make(chan agent.Event, 4), Applied: make(chan agent.Operation, 4)}}
 	starting := make(chan struct{})
 	var calls atomic.Int32
-	adapter := Adapter{State: state, Profiles: []accounts.Profile{{ID: "a", Provider: "claude", Isolation: "environment"}, {ID: "b", Provider: "claude", Isolation: "environment"}}, Eligible: []string{"b"}, Switching: always, Resolve: func(p accounts.Profile, o agent.Open) (agent.Open, error) { return o, nil }, Native: adapterFunc(func(ctx context.Context, o agent.Open) (agent.Session, error) {
+	adapter := Adapter{State: state, Profiles: []accounts.Profile{{ID: "a", Provider: "claude", Isolation: "environment"}, {ID: "b", Provider: "claude", Isolation: "environment"}, {ID: "c", Provider: "claude", Isolation: "environment"}, {ID: "d", Provider: "claude", Isolation: "environment"}}, Eligible: []string{"b"}, Switching: always, Resolve: func(p accounts.Profile, o agent.Open) (agent.Open, error) { return o, nil }, Native: adapterFunc(func(ctx context.Context, o agent.Open) (agent.Session, error) {
 		if calls.Add(1) == 1 {
 			return first, nil
 		}
@@ -305,7 +305,7 @@ func TestRotationAfterReattachHandsOverTheRecordedConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	native := nativeAdapter{opened: make(chan *nativeSession, 8)}
-	adapter := Adapter{Native: native, Profiles: []accounts.Profile{{ID: "a", Provider: "claude", Isolation: "environment"}, {ID: "b", Provider: "claude", Isolation: "environment"}}, Eligible: []string{"a", "b"}, Switching: always, State: state, Resolve: func(p accounts.Profile, o agent.Open) (agent.Open, error) {
+	adapter := Adapter{Native: native, Profiles: []accounts.Profile{{ID: "a", Provider: "claude", Isolation: "environment"}, {ID: "b", Provider: "claude", Isolation: "environment"}, {ID: "c", Provider: "claude", Isolation: "environment"}, {ID: "d", Provider: "claude", Isolation: "environment"}}, Eligible: []string{"a", "b"}, Switching: always, State: state, Resolve: func(p accounts.Profile, o agent.Open) (agent.Open, error) {
 		o.Env = []string{"ACCOUNT=" + p.ID}
 		return o, nil
 	}}
@@ -335,7 +335,7 @@ func TestReplayedReplyTextIsHandedOverOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	native := nativeAdapter{opened: make(chan *nativeSession, 8)}
-	adapter := Adapter{Native: native, Profiles: []accounts.Profile{{ID: "a", Provider: "claude", Isolation: "environment"}, {ID: "b", Provider: "claude", Isolation: "environment"}}, Eligible: []string{"a", "b"}, Switching: always, State: state, Resolve: func(p accounts.Profile, o agent.Open) (agent.Open, error) {
+	adapter := Adapter{Native: native, Profiles: []accounts.Profile{{ID: "a", Provider: "claude", Isolation: "environment"}, {ID: "b", Provider: "claude", Isolation: "environment"}, {ID: "c", Provider: "claude", Isolation: "environment"}, {ID: "d", Provider: "claude", Isolation: "environment"}}, Eligible: []string{"a", "b"}, Switching: always, State: state, Resolve: func(p accounts.Profile, o agent.Open) (agent.Open, error) {
 		o.Env = []string{"ACCOUNT=" + p.ID}
 		return o, nil
 	}}
@@ -359,5 +359,31 @@ func TestReplayedReplyTextIsHandedOverOnce(t *testing.T) {
 	handoff := <-next.Applied
 	if n := strings.Count(handoff.Text, "Halfway-unique-phrase"); n != 1 || !strings.Contains(handoff.Text, "Done.") {
 		t.Fatalf("replayed text handed over %d times:\n%s", n, handoff.Text)
+	}
+}
+
+func TestRotationPrefersReportedCapacityAndSkipsFullWindows(t *testing.T) {
+	s, native, state := fixture(t, []string{"b", "c", "d"})
+	first := <-native.opened
+	now := time.Now()
+	// b has an elapsed immediate limit, but its longer window is still full.
+	err := state.Observe("b", agent.AccountObservation{State: "exhausted", ResetAt: now.Add(-time.Minute).Unix(), Windows: []agent.UsageWindow{
+		{Name: "weekly", UsedPercent: 100, ResetAt: now.Add(time.Hour).Unix()},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// c has no quota report. d is confirmed available and should precede it.
+	if err = state.Observe("d", agent.AccountObservation{State: "available", Windows: []agent.UsageWindow{{Name: "weekly", UsedPercent: 70}}}); err != nil {
+		t.Fatal(err)
+	}
+	first.Events <- agent.Event{Type: "failure", Account: &agent.AccountObservation{State: "exhausted"}}
+	if ev := receive(t, s, "profile_changed"); ev.Text != "d" {
+		t.Fatalf("rotation selected %q, want d", ev.Text)
+	}
+	second := <-native.opened
+	second.Events <- agent.Event{Type: "failure", Account: &agent.AccountObservation{State: "exhausted"}}
+	if ev := receive(t, s, "profile_changed"); ev.Text != "c" {
+		t.Fatalf("rotation selected %q, want c", ev.Text)
 	}
 }

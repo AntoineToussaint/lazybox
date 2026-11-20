@@ -68,7 +68,9 @@ The page follows new versions by itself. Rename by double-clicking the title.
   to bring that window forward. In that window, **Discuss in chat** opens a
   resizable chat with the selected version or excerpt ready in the draft.
   Choose the source conversation, another workspace conversation, or start a
-  new one. You decide when to send.
+  new one. You decide when to send. When a new revision arrives, **Review
+  update** compares it with the version you started discussing and keeps the
+  chat beside the diff. **Read latest** returns to the updated document.
 - In a chat you moved to its own window, an artifact opens **beside the chat,
   in that window**. Drag its edge to resize it; × or Esc closes it, and **Open
   in main window** shows it in the workspace.

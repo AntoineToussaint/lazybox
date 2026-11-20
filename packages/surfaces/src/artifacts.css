@@ -190,6 +190,10 @@
 .artifact-main{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0}
 .artifact-scroll{flex:1;min-height:0;overflow:auto;container-type:inline-size;container-name:artifact-reader;overscroll-behavior:contain}
 .artifact-scroll:focus-visible{outline:none}
+.artifact-update-banner{display:flex;align-items:center;flex-wrap:wrap;gap:8px 10px;padding:9px 16px;border-bottom:1px solid var(--accent-line-subtle);background:var(--accent-bg);color:var(--accent-strong)}
+.artifact-update-banner>span{display:grid;gap:2px;flex:1;min-width:140px;color:var(--text);font-size:calc(12px * var(--text-scale))}
+.artifact-update-banner small{color:var(--text-subtle)}
+.artifact-update-banner button{white-space:nowrap}
 .artifact-old-version{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin:-.4em 0 1.5em;padding:8px 12px;border-radius:10px;background:var(--accent-bg);border:1px solid var(--accent-line-subtle);font:calc(13px * var(--text-scale)) var(--font-reading);color:var(--text-secondary)}
 .artifact-old-version svg{color:var(--accent)}
 .artifact-old-version span{margin-right:auto}

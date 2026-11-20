@@ -38,7 +38,7 @@ func (s *State) IntegrationReview(t *Task) *Recorded {
 	for i := len(t.Evidence) - 1; i >= 0; i-- {
 		r := &t.Evidence[i]
 		if r.Attempt == t.Current().ID && r.Kind == EvidenceReview && r.ContractDigest != "" {
-			if r.Outcome == OutcomePass && r.State != "stale" && r.Blockers == 0 {
+			if r.Outcome == OutcomePass && !reviewStale(t, r) && r.Blockers == 0 {
 				return r
 			}
 			return nil

@@ -204,3 +204,15 @@ field of version 4, so no version change: records without it load as before,
 and a request key's fingerprint covers only the item's provider and key, so a
 retry that read the item again is the same request. A Runner that predates the
 field reads such a record and drops the field if it rewrites it.
+
+## Reusing a collection definition
+
+From an owner CLI, save the repository membership and starting refs of an existing workspace. Give each independent realization its own request key. Reusing a key with the same request resumes that creation.
+
+```sh
+lazybox workspace export-definition "Alpha feature" > alpha.collection.json
+lazybox workspace realize alpha.collection.json --key alpha-search --name "Search work"
+lazybox workspace realize alpha.collection.json --key alpha-review --name "Review work"
+```
+
+The collection.v1 file is suitable for version control. Member names distinguish multiple checkouts of one registered repository. The Runner creates new worktrees and destination branches. A base ref selects a starting revision and may move between realizations. Export records the configured starting ref, so edits and commits made on the source workspace branch are outside this definition. Repository IDs must be registered on the target Runner.

@@ -140,6 +140,34 @@ try {
   assert.match(JSON.stringify(discussion.body.message), /Workspace note.*Could you check this/);
   assert.equal(fixture.sessions.find(item => item.id === discussion.body.sessionId)?.collectionId, 'alpha');
 
+  // A discussion pins its source revision and keeps the chat beside the diff.
+  const reviewDoc = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Revision review', content: '## Scope\n\nKeep the original wording.' });
+  await page.goto(standalone.replace(doc.id, reviewDoc.id));
+  const reviewPage = page.getByRole('article', { name: 'Revision review' });
+  await reviewPage.getByRole('button', { name: 'Discuss in chat' }).click();
+  await expect(draft).toHaveValue(/Revision review/);
+  await draft.fill('Could we make this clearer?');
+  const publishReview = wording => fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, artifactId: reviewDoc.id, content: '## Scope\n\n' + wording });
+  publishReview('Use clearer wording.');
+  await expect(reviewPage.getByRole('button', { name: 'Review update' })).toBeVisible({ timeout: 10000 });
+  await expect(reviewPage.locator('.artifact-document')).toContainText('Keep the original wording.');
+  await reviewPage.getByRole('button', { name: 'Review update' }).click();
+  const comparison = reviewPage.getByRole('region', { name: 'Rendered changes' });
+  await expect(reviewPage.getByRole('heading', { name: 'Changes', exact: true })).toBeFocused();
+  await expect(comparison).toContainText('Use clearer wording.');
+  await expect(comparison).toContainText('Keep the original wording.');
+  await expect(reviewPage.getByRole('combobox', { name: 'Compare with' })).toHaveValue('1');
+  await expect(draft).toHaveValue('Could we make this clearer?');
+  publishReview('Use the final wording.');
+  await expect(reviewPage.getByRole('button', { name: 'Review update' })).toBeVisible({ timeout: 10000 });
+  await expect(comparison).toContainText('Use clearer wording.');
+  await expect(comparison).not.toContainText('Use the final wording.');
+  await reviewPage.getByRole('button', { name: 'Review update' }).click();
+  await expect(comparison).toContainText('Use the final wording.');
+  await reviewPage.getByRole('button', { name: 'Read latest' }).click();
+  await expect(reviewPage.locator('.artifact-document')).toContainText('Use the final wording.');
+  await expect(draft).toHaveValue('Could we make this clearer?');
+
   await page.goto(standalone.replace(doc.id, shellDoc.id));
   const shellReviews = page.getByRole('button', { name: 'Review in terminal' });
   await expect(shellReviews).toHaveCount(3);
@@ -378,6 +406,14 @@ try {
   await panelPage.screenshot({ path: '.cache/artifact-reader-panel-list-1440-light.png' });
   await row.click();
   await expect(panelPage.getByRole('article', { name: 'Datasource migration' }).getByRole('heading', { level: 1 })).toBeVisible();
+  const panelDiagram = panelPage.getByRole('img', { name: 'Mermaid diagram' });
+  await expect.poll(() => panelDiagram.evaluate(img => img.complete && img.naturalWidth > 0).catch(() => false)).toBe(true);
+  const originalDiagram = await panelDiagram.elementHandle();
+  await panelPage.waitForResponse(response => response.url().endsWith('/ListCollections') && response.ok());
+  await panelPage.waitForResponse(response => response.url().endsWith('/ListCollections') && response.ok());
+  assert.ok(await originalDiagram.evaluate(img => img.isConnected && img.complete && img.naturalWidth > 0),
+    'workspace catalog refresh must keep the existing diagram mounted');
+  await originalDiagram.dispose();
   const back = panelPage.getByRole('button', { name: 'Back to artifacts' });
   if (await back.isVisible()) await back.click();
   await expect(row.getByRole('img', { name: 'Updated since you last looked' })).toHaveCount(0);

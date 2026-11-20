@@ -105,6 +105,8 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
     } finally { openingShell.current = false; }
   }, [api, collection, collectionId, library]);
   const [selected, setSelected] = useState(0); // 0 follows the latest version
+  const [discussionVersion, setDiscussionVersion] = useState<number>();
+  const [reviewingVersion, setReviewingVersion] = useState<number>();
   const [view, setView] = useState<'document' | 'source' | 'changes'>('document');
   const [diffMode, setDiffModeState] = useState<'rendered' | 'text'>(() => remembered(DIFF_KEY) === 'text' ? 'text' : 'rendered');
   const setDiffMode = (mode: 'rendered' | 'text') => { setDiffModeState(mode); remember(DIFF_KEY, mode); };
@@ -123,6 +125,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   const say = (text: string) => { setStatus(text); clearTimeout(statusTimer.current); statusTimer.current = window.setTimeout(() => setStatus(''), 4000); };
   useEffect(() => () => clearTimeout(statusTimer.current), []);
   const scroller = useRef<HTMLDivElement>(null);
+  const changesHeading = useRef<HTMLHeadingElement>(null);
   const [scrolled, setScrolled] = useState(false);
   const [pendingExport, setPendingExport] = useState<'print' | 'html'>();
   const exportNow = useRef<(format: 'print' | 'html') => void>(() => {});
@@ -154,6 +157,26 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   const latestNumber = versions.at(-1)?.number || 0;
   const shown = selected || latestNumber;
   const baseNumber = base || Math.max(0, shown - 1);
+  const updateReady = !!discussionVersion && latestNumber > (reviewingVersion || discussionVersion);
+  const inDiscussionReview = view === 'changes' && reviewingVersion === shown && baseNumber === discussionVersion;
+  const readLatest = () => {
+    setDiscussionVersion(undefined);
+    setReviewingVersion(undefined);
+    setSelected(0);
+    setBase(0);
+    setView('document');
+  };
+  const reviewUpdate = () => {
+    if (!discussionVersion || !updateReady) return;
+    setReviewingVersion(latestNumber);
+    setSelected(latestNumber);
+    setBase(discussionVersion);
+    setView('changes');
+    requestAnimationFrame(() => {
+      scroller.current?.scrollTo({ top: 0 });
+      changesHeading.current?.focus({ preventScroll: true });
+    });
+  };
   // A version asked for from outside (a chat card), each request once: after reading the
   // versions again, since the card may name one newer than the page has seen.
   const focused = useRef(0), focusAfter = useRef({ at: 0, loads: 0 });
@@ -270,6 +293,8 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
       const saved = await api.putArtifact({ collectionId, artifactId, content: body, expectedVersion: latestNumber }, { timeoutMs: 10000 });
       setContents(current => new Map(current).set(saved.contentVersion, saved.content));
       setArtifact(saved);
+      setDiscussionVersion(undefined);
+      setReviewingVersion(undefined);
       setSelected(0);
       setBase(0);
       artifactsChanged(collectionId);
@@ -354,7 +379,14 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   };
   const sendToAgent = () => {
     const text = discussionReference();
-    if (onDiscuss) { onDiscuss(artifact, text); return; }
+    if (onDiscuss) {
+      if (!discussionVersion && shown) {
+        setDiscussionVersion(shown);
+        setSelected(shown);
+      }
+      onDiscuss(artifact, text);
+      return;
+    }
     if (conversationId && onShowSession) {
       composeInConversation({ sessionId: conversationId, text });
       onShowSession({ collectionId, sessionId: conversationId, commandId: '' });
@@ -418,6 +450,12 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
       </div>
     </header>
     {error && <p className="artifact-error" role="alert">{error}<button type="button" className="link-button" onClick={() => setError('')}>Dismiss</button></p>}
+    {updateReady && <div className="artifact-update-banner">
+      <Icon name="history" size={16}/>
+      <span role="status"><strong>v{latestNumber} is ready to review</strong><small>Compare with v{discussionVersion}, the version you started discussing.</small></span>
+      <button type="button" className="primary" onClick={reviewUpdate}>Review update</button>
+      <button type="button" onClick={readLatest}>Read latest</button>
+    </div>}
     {artifact.retired && <div className="artifact-retired-banner" role="note" aria-label="Retired">
       <Icon name="archive" size={14}/>
       <span className="artifact-retired-text">
@@ -457,15 +495,29 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
                   </ActionMenu>}
                 </div>
               </header>
-              {shown !== latestNumber && <div className="artifact-old-version" role="note"><Icon name="history" size={14}/><span>You are viewing v{shown} of {latestNumber}.</span><button type="button" className="link-button" onClick={() => { setSelected(0); setBase(shown); setView('changes'); }}>What changed since</button><button type="button" className="link-button" onClick={() => { setSelected(0); setBase(0); }}>Back to latest</button>{!artifact.trackedPath && !artifact.retired && <button type="button" className="link-button" disabled={content === undefined || republishing} onClick={() => content !== undefined && void saveRevision(content, `Republished v${shown}.`)}>Republish v{shown}</button>}</div>}
+              {shown !== latestNumber && (!updateReady || (!artifact.trackedPath && !artifact.retired)) && <div className="artifact-old-version" role="note">
+                <Icon name="history" size={14}/><span>You are viewing v{shown} of {latestNumber}.</span>
+                {!updateReady && <>
+                  <button type="button" className="link-button" onClick={() => { setSelected(0); setBase(shown); setView('changes'); }}>What changed since</button>
+                  <button type="button" className="link-button" onClick={readLatest}>Back to latest</button>
+                </>}
+                {!artifact.trackedPath && !artifact.retired && <button type="button" className="link-button" disabled={content === undefined || republishing}
+                  onClick={() => content !== undefined && void saveRevision(content, `Republished v${shown}.`)}>Republish v{shown}</button>}
+              </div>}
               <div key={`${artifact.id}:${shown}:${view}`} ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <pre className="artifact-html-source">{content}</pre> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : <DocumentBody markdown={reading} headings={headings} scroller={scroller} onReviewShell={reviewShell}/>}</div>
             </div>
             {outline.length > 0 && <aside className="doc-toc-rail"><TableOfContents entries={outline} active={active} scroller={scroller}/></aside>}
           </div>
             : <div className="artifact-changes">
               <div className="artifact-changes-bar">
-                <h2>Changes</h2>
+                <h2 ref={changesHeading} tabIndex={-1}>Changes</h2>
                 {shown > 1 && <label className="artifact-compare">from <select aria-label="Compare with" value={baseNumber} onChange={event => setBase(Number(event.target.value))}>{versions.filter(v => v.number < shown).reverse().map(v => <option key={v.number} value={v.number}>v{v.number}{v.number === shown - 1 ? ' (previous)' : ''}</option>)}</select> to <strong>v{shown}</strong>{diff.length > 0 && <DiffStats lines={diff}/>}</label>}
+                {inDiscussionReview && <button type="button" className="link-button" onClick={() => {
+                  setSelected(discussionVersion || 0);
+                  setReviewingVersion(undefined);
+                  setView('document');
+                }}>Back to v{discussionVersion}</button>}
+                {inDiscussionReview && !updateReady && <button type="button" className="link-button" onClick={readLatest}>Read latest</button>}
                 {artifact.kind !== 'todo-list' && !Preview && <div className="artifact-segmented" role="radiogroup" aria-label="Show changes as">
                   <button type="button" role="radio" aria-checked={diffMode === 'rendered'} onClick={() => setDiffMode('rendered')}>Rendered</button>
                   <button type="button" role="radio" aria-checked={diffMode === 'text'} onClick={() => setDiffMode('text')}>Text</button>

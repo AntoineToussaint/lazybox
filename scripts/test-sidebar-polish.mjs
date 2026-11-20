@@ -17,17 +17,20 @@ await row.locator('summary').click();const r=await row.boundingBox(),a=await row
 await row.getByRole('button',{name:'Delete conversation…'}).click();const dialog=page.getByRole('dialog',{name:'Delete conversation',exact:true});await expect(dialog.getByRole('button',{name:'Cancel',exact:true})).toBeFocused();await expect(dialog.locator('header')).not.toHaveAttribute('title');assert.ok((await dialog.boundingBox()).width<=450);await expect(dialog.getByRole('button',{name:'Delete conversation',exact:true})).toBeEnabled();await page.screenshot({path:'/tmp/lazybox-sidebar-delete.png'});await dialog.getByRole('button',{name:'Cancel',exact:true}).click();assert.equal(f.mutations.length,0);
 // A timed-out history refresh must retain saved entries and the next successful retry clears the warning.
 let historyReads = 0;
+let transientFailure = true;
 let historyFails = false;
 await page.route('**/ListHistory', route => {
   const request = route.request().postDataJSON();
-  if (request.limit !== 100 || request.collectionId) return route.continue();
+  if (request.limit !== 50 || request.collectionId) return route.continue();
   historyReads++;
+  if (transientFailure) { transientFailure = false; return route.fulfill({ status: 503, json: { code: 'unavailable', message: 'fixture briefly unavailable' } }); }
   if (!historyFails) return route.fulfill({ json: { sessions: [...f.sessions, { id: 'saved-only', collectionId: 'alpha', title: 'Saved history entry', historical: true, closed: true }] } });
   return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ code: 'unavailable', message: 'fixture history unavailable' }) });
 });
-await expect.poll(() => historyReads, { timeout: 20000 }).toBeGreaterThan(0);
+await expect.poll(() => historyReads, { timeout: 20000 }).toBeGreaterThan(1);
+await expect(page.getByText('Could not refresh conversation history.', { exact: true })).toHaveCount(0);
 historyFails = true;
-const warning = page.getByRole('alert').filter({ hasText: 'Could not refresh conversation history' });
+const warning = page.getByRole('status').filter({ hasText: 'Could not refresh conversation history' });
 await expect(warning).toBeVisible({ timeout: 20000 });
 await history.click();
 const savedEntry = page.getByText('Saved history entry', { exact: true });

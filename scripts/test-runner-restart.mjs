@@ -21,7 +21,7 @@ try {
   await page.addInitScript(() => localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'));
   let historyTimedOut = false;
   await page.route('**/ListHistory', async route => {
-    if (route.request().postDataJSON()?.limit !== 100) { await route.continue(); return; }
+    if (route.request().postDataJSON()?.limit !== 50) { await route.continue(); return; }
     assert.equal(route.request().headers()['connect-timeout-ms'], '15000');
     if (historyTimedOut) { await route.continue(); return; }
     await route.fulfill({ status: 504, json: { code: 'deadline_exceeded', message: 'Fixture history was slow' } });
@@ -46,11 +46,14 @@ try {
     return route.fulfill({ status: 504, json: { code: 'deadline_exceeded', message: 'Fixture Runner was slow' } });
   });
   await expect(indicator).toHaveText('Slow to respond');
+  await expect(page.getByText('Could not refresh conversation history.', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Runner disconnected.', { exact: true })).toHaveCount(0);
   await page.screenshot({ path: '.cache/runner-health-slow.png' });
   await expect(page.getByText('Runner is not responding.', { exact: true })).toBeVisible({ timeout: 10000 });
   await page.unroute(infoRpc);
+  const resumedHistory = page.waitForRequest(request => request.url().endsWith('/ListHistory') && request.postDataJSON()?.limit === 50);
   await expect(indicator).toHaveText('Connected');
+  await resumedHistory;
   await expect(page.getByText('Runner is not responding.', { exact: true })).toHaveCount(0);
   await expect(message).toHaveValue('draft that survives a Runner restart');
 

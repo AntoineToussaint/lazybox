@@ -1340,3 +1340,9 @@ to result (including approval/provider waits); it updates while a call is runnin
 Missing timestamp pairs remain unavailable, and turn completion never substitutes
 for a tool result. Older history with missing results has one explanatory note.
 Commands use syntax highlighting/copy; full input JSON is a separate disclosure.
+
+The Workspaces sidebar refreshes saved conversation history in pages and
+retries a temporary Runner failure before showing a warning. If the refresh
+still fails, existing entries remain visible and **Retry history refresh**
+appears below **History**. History polling pauses while the Runner is slow
+or disconnected and resumes automatically when it responds again.

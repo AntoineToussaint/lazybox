@@ -171,6 +171,14 @@ export function applyToolPayload(previous: ToolEntry | undefined, payload: Recor
     // Claude reports a failed command as "Exit code N" on the first line.
     const exit = /^Exit code (\d+)/.exec(text);
     if (exit) next.exitCode = Number(exit[1]);
+    if ((next.name === 'mcp__lazybox__command' || next.name === 'lazybox_command') && object(next.input).action === 'interactive') {
+      const reported = /^\s*\{\s*"exitCode"\s*:\s*(-?\d+)\s*\}\s*$/.exec(text);
+      if (reported) {
+        next.exitCode = Number(reported[1]);
+        if (next.exitCode !== 0) next.status = 'failed';
+        next.output = next.exitCode === 0 ? 'Completed successfully.' : `Exited with code ${next.exitCode}.`;
+      }
+    }
   }
   if (typeof payload.exitCode === 'number') next.exitCode = payload.exitCode;
   if (typeof payload.durationMs === 'number') next.durationMs = payload.durationMs;
@@ -212,7 +220,7 @@ export function kindOf(entry: Pick<ToolEntry, 'name' | 'actions' | 'input'>): To
     if (types.size === 1 && types.has('listFiles')) return 'list';
     // The managed command tool reads output too; only a start runs something.
     const input = object(entry.input);
-    if ((entry.name === 'mcp__lazybox__command' || entry.name === 'lazybox_command') && input.action && input.action !== 'start' && input.action !== 'start_action') return 'other';
+    if ((entry.name === 'mcp__lazybox__command' || entry.name === 'lazybox_command') && input.action && input.action !== 'start' && input.action !== 'start_action' && input.action !== 'interactive') return 'other';
   }
   if (kind) return kind;
   return entry.name.startsWith('mcp__') ? 'mcp' : 'other';
@@ -363,7 +371,7 @@ export function describeTool(entry: ToolEntry, root = ''): ToolTitle {
     case 'command': {
       const command = commandText(entry);
       if (!running) {
-        if (entry.exitCode !== undefined) meta.push(`exit ${entry.exitCode}`);
+        if (entry.exitCode !== undefined && (entry.exitCode !== 0 || i.action !== 'interactive')) meta.push(`exit ${entry.exitCode}`);
         // Under a second is not worth a word on every line.
         const ms = durationOf(entry);
         if (ms !== undefined && ms >= 1000) meta.push(shortDuration(ms));

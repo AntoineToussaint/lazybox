@@ -189,3 +189,18 @@ test('the end of a turn ends what it blocked on, never background work', () => {
   assert.deepEqual(listed.data, { backgrounded: true });
   assert.equal(level.normalize(message({ type: 'result', subtype: 'success', is_error: false, uuid: 'r', modelUsage: {} })).some(e => e.type === 'agent_status'), false);
 });
+
+test('managed command frames never create a forked agent', () => {
+  const status = new NativeStatus();
+  status.normalize(message({ type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', model: 'm', content: [
+    { type: 'tool_use', id: 'shell-1', name: 'mcp__lazybox__command', input: { action: 'interactive', argv: ['gcloud', 'auth', 'login'] } },
+  ] } }));
+  const child = status.normalize(message({ type: 'assistant', parent_tool_use_id: 'shell-1', message: { id: 'm2', model: 'm', content: [
+    { type: 'text', text: '{"exitCode":0}' },
+  ] } }));
+  assert.deepEqual(child, []);
+  const result = status.normalize(message({ type: 'user', parent_tool_use_id: null, message: { content: [
+    { type: 'tool_result', tool_use_id: 'shell-1', content: '{"exitCode":0}' },
+  ] } }));
+  assert.ok(result.some(event => event.type === 'tool_activity' && !event.agentId));
+});

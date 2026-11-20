@@ -105,7 +105,7 @@ test('where an offer runs', () => {
 });
 
 test('telling the agent it is done', () => {
-  assert.equal(doneMessage('acme login staging', 0), 'Done: `acme login staging` finished (exit 0).');
-  assert.equal(doneMessage('acme login staging'), 'Done: `acme login staging` finished.');
-  assert.equal(doneMessage('make a\nmake b', 2), 'Done: this finished (exit 2):\n```sh\nmake a\nmake b\n```');
+  assert.equal(doneMessage('acme login staging', 0), '`acme login staging` completed successfully.');
+  assert.equal(doneMessage('acme login staging'), '`acme login staging` finished.');
+  assert.equal(doneMessage('make a\nmake b', 2), 'The command failed (exit 2).\n\n```sh\nmake a\nmake b\n```');
 });

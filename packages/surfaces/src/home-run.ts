@@ -207,8 +207,8 @@ export function placeLabel(place: HomePlace): string {
 
 /** What "Tell <agent> it's done" sends: the command, and its exit status when the shell said. */
 export function doneMessage(command: string, exitCode?: number): string {
-  const how = exitCode === undefined ? 'finished' : `finished (exit ${exitCode})`;
-  if (!command.includes('\n') && !command.includes('`')) return `Done: \`${command}\` ${how}.`;
+  const how = exitCode === 0 ? 'completed successfully' : exitCode === undefined ? 'finished' : `failed (exit ${exitCode})`;
+  if (!command.includes('\n') && !command.includes('`')) return `\`${command}\` ${how}.`;
   const fence = command.includes('```') ? '````' : '```';
-  return `Done: this ${how}:\n${fence}sh\n${command}\n${fence}`;
+  return `The command ${how}.\n\n${fence}sh\n${command}\n${fence}`;
 }

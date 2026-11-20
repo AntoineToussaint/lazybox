@@ -230,7 +230,7 @@ function WorkspaceList({
   /** Under its Runner's header: no heading of its own. */
   embedded?: boolean;
 }) {
-  const { info, api, error: connectionError } = useRunner();
+  const { info, api, error: connectionError, slow: runnerSlow } = useRunner();
   const index = useConversationIndex();
   // An agent finishing (or starting) a turn changes its worktree: refresh the rows' git state soon after.
   const git = useGitSummaries(index.sessions.map(s => `${s.id}:${s.busy ? 1 : 0}:${s.status}`).join(","));
@@ -352,7 +352,6 @@ function WorkspaceList({
         </p>
       )}
       {index.unsupported&&<p className="module-empty">Live conversations · saved history requires a Runner update.</p>}
-      {index.error&&!connectionError&&<p className="error" role="alert">Could not refresh conversation history. Previously loaded entries are retained. <button type="button" onClick={index.refresh}>Retry history refresh</button></p>}
       {(creating || copy) && (
         <WorkspaceRepositoryDialog
           copy={copy}
@@ -462,6 +461,10 @@ function WorkspaceList({
         <Icon name="history" size={14} />
         History
       </button>
+      {index.error && !connectionError && !runnerSlow && <div className="history-refresh-error" role="status">
+        <span title={index.error}>Could not refresh conversation history.</span>
+        <button type="button" onClick={index.refresh}>Retry history refresh</button>
+      </div>}
       <PendingDeletions />
       {deletingConversation && (
         <DeleteConversationDialog

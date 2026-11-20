@@ -551,3 +551,18 @@ test('past the limit with everything still running, a new sub-agent is dropped a
   assert.ok(!t.subagents.byId['codex:extra']);
   assert.equal(t.subagents.truncated, true);
 });
+
+test('retained managed command events remain one command instead of a sub-agent card', () => {
+  const id = 'managed-1', agentId = 'attempt-0:claude-tool:' + id;
+  const started = fold(emptyTranscript(), record(0, { type: 'tool_activity', data: call(id, 'mcp__lazybox__command', 'running', { input: { action: 'interactive', argv: ['gcloud', 'auth', 'login'] } }) }));
+  const t = fold(started,
+    record(1, { type: 'agent_status', agentId, status: 'running', agentKind: 'mcp__lazybox__command', name: 'mcp__lazybox__command', data: { toolUseId: id } }),
+    record(2, { type: 'message_delta', agentId, text: '{"exitCode":0}' }),
+    record(3, { type: 'agent_status', agentId, status: 'done', data: { toolUseId: id } }),
+    record(4, { type: 'tool_activity', data: call(id, 'mcp__lazybox__command', 'completed', { output: '{"exitCode":0}' }) }),
+  );
+  assert.deepEqual(t.subagents.order, []);
+  const command = t.messages.flatMap(message => message.tools || []).find(tool => tool.id === id);
+  assert.equal(command?.output, 'Completed successfully.');
+  assert.deepEqual(describeTool(command!).meta, []);
+});

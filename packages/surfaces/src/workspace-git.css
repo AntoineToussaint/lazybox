@@ -38,7 +38,7 @@
 /* The agent line: one mark, the title, then the status and its elapsed time.
    The title gives way first (never below a few letters), then the status's
    words; the elapsed time is never cut. */
-.collection-list .workspace-agent{gap:6px;container-type:inline-size}
+.collection-list .workspace-agent{gap:3px;container-type:inline-size}
 .collection-list .workspace-agent .workspace-agent-label{flex:1 1000 auto;min-width:min(14ch,45%);overflow:hidden;text-overflow:ellipsis}
 /* The status's words and its elapsed time are items of the line itself: the
    words shrink, the time never does. */

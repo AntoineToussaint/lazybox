@@ -94,7 +94,13 @@ try{
  const sidebarWidth=()=>content('collections').evaluate(n=>Math.round(n.getBoundingClientRect().width));
  assert.equal(await sidebarWidth(),280);
  const edge=await page.getByRole('separator',{name:'Resize Workspaces sidebar'}).boundingBox();
- await page.mouse.move(edge.x+edge.width/2,edge.y+edge.height/2);await page.mouse.down();await page.mouse.move(edge.x+edge.width/2+60,edge.y+edge.height/2,{steps:6});await page.mouse.up();
+ await page.mouse.move(edge.x+edge.width/2,edge.y+edge.height/2);await page.mouse.down();
+ await expect(page.locator('html.is-dragging')).toHaveCount(1);
+ await page.mouse.move(edge.x+edge.width/2+60,edge.y+edge.height/2,{steps:6});
+ // Wait for the final move to reach the layout before releasing the pointer.
+ // WebKit can otherwise end the drag with the preceding interpolated move.
+ await expect.poll(sidebarWidth).toBeGreaterThan(330);
+ await page.mouse.up();
  await expect.poll(sidebarWidth).toBeGreaterThan(330);
  await expect.poll(()=>page.getByRole('separator',{name:'Resize Workspaces sidebar'}).getAttribute('aria-valuenow')).toBe(String(await sidebarWidth()));
  const widened=await sidebarWidth();

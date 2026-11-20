@@ -269,3 +269,8 @@ The reorder gate schedules a focus restoration and moves focus in the same
 JavaScript task, proving the old row cannot steal focus on the next frame.
 The latest-turn reload fixture waits for an explicit final event before
 expanding commands; a count of two can appear before their final updates.
+
+Hover-delay assertions use a paused browser clock: absence before the delay
+and presence afterward cannot depend on how long CI stalls between commands.
+Docking resize assertions wait for the final movement to reach the layout
+before releasing the pointer, then verify the width remains persisted.

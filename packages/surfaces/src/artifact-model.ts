@@ -3,11 +3,11 @@ import { fileReference } from './file-reference';
 
 /** Pure helpers for artifacts: titles, kinds, line diffs, summaries. No React, no Runner. */
 
-export const ARTIFACT_KINDS = ['plan', 'report', 'spec', 'notes', 'other'] as const;
+export const ARTIFACT_KINDS = ['plan', 'report', 'spec', 'notes', 'todo-list', 'other'] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
-export const kindLabel: Record<ArtifactKind, string> = { plan: 'Plan', report: 'Report', spec: 'Spec', notes: 'Notes', other: 'Document' };
+export const kindLabel: Record<ArtifactKind, string> = { plan: 'Plan', report: 'Report', spec: 'Spec', notes: 'Notes', 'todo-list': 'TODO list', other: 'Document' };
 /** An icon name from Icons.tsx for each kind. */
-export const kindIcon: Record<ArtifactKind, string> = { plan: 'checklist', report: 'report', spec: 'spec', notes: 'notes', other: 'file' };
+export const kindIcon: Record<ArtifactKind, string> = { plan: 'checklist', report: 'report', spec: 'spec', notes: 'notes', 'todo-list': 'checklist', other: 'file' };
 export const asKind = (value: string): ArtifactKind => (ARTIFACT_KINDS as readonly string[]).includes(value) ? value as ArtifactKind : 'other';
 
 const clean = (line: string) => line.replace(/[*_`~]|\[([^\]]*)\]\([^)]*\)/g, (_, text) => text ?? '').replace(/\s+/g, ' ').trim();

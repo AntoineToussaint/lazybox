@@ -138,6 +138,10 @@ func TestArtifactVerbPublishesReadsAndLists(t *testing.T) {
 		t.Fatalf("%q %v", out, err)
 	}
 
+	example, err := run("", "template", "spec")
+	if err != nil || !strings.Contains(example, "acceptanceCriteria") {
+		t.Fatal(example, err)
+	}
 	const html = "<h1>Preview</h1>"
 	if _, err = run(html, "put", "-", "--title", "Preview", "--format", "html"); err != nil {
 		t.Fatal(err)

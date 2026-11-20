@@ -386,6 +386,34 @@ func TestHTMLArtifactKeepsFormatAndSourceAcrossVersions(t *testing.T) {
 	}
 }
 
+func TestTodoSchemaAcrossVersions(t *testing.T) {
+	s, _ := open(t, t.TempDir())
+	first, err := s.Put("alpha", Put{Title: "Tasks", Kind: "todo-list", Content: `{"schema":"todo-list.v1","items":[]}`})
+	if err != nil || first.Versions[0].Schema != "todo-list.v1" {
+		t.Fatal(first, err)
+	}
+	if _, err := s.Put("alpha", Put{ID: first.ID, Content: `{"schema":"todo-list.v1","items":[{}]}`}); !errors.Is(err, ErrInvalid) {
+		t.Fatal(err)
+	}
+}
+
+func TestStructuredTemplatesCoverEveryKind(t *testing.T) {
+	s, _ := open(t, t.TempDir())
+	for _, kind := range Kinds {
+		body, err := Template(kind)
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc, err := s.Put("alpha", Put{Title: kind, Content: body})
+		if err != nil || doc.Versions[0].Schema != kind+".v1" {
+			t.Fatal(kind, err)
+		}
+		if _, err = s.Put("alpha", Put{ID: doc.ID, Content: "{}"}); !errors.Is(err, ErrInvalid) {
+			t.Fatal(kind, err)
+		}
+	}
+}
+
 func TestReviewRoundsPublishOnceAcrossReopen(t *testing.T) {
 	root := t.TempDir()
 	store, _ := open(t, root)

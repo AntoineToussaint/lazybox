@@ -33,7 +33,7 @@ const (
 )
 
 // Kinds an artifact may have; the first is the default.
-var Kinds = []string{"other", "plan", "report", "spec", "notes"}
+var Kinds = []string{"other", "plan", "report", "spec", "notes", "todo-list"}
 
 var (
 	// ErrInvalid wraps a request the Runner will never accept as written.
@@ -282,7 +282,7 @@ func (s *Store) document(a *Artifact, version uint32) (Document, error) {
 
 func (s *Store) dir(ws, id string) string { return filepath.Join(s.root, ws, id) }
 
-var formatExtensions = map[string]string{"markdown": ".md", "html": ".html"}
+var formatExtensions = map[string]string{"markdown": ".md", "html": ".html", "json": ".json"}
 
 func (s *Store) versionPath(a *Artifact, n uint32) string {
 	extension := formatExtensions[a.Format]
@@ -306,7 +306,7 @@ func validKind(kind string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("%w: kind must be plan, report, spec, notes or other", ErrInvalid)
+	return fmt.Errorf("%w: kind must be plan, report, spec, notes, todo-list or other", ErrInvalid)
 }
 
 func validContent(content string) error {
@@ -369,6 +369,9 @@ func (s *Store) Put(ws string, p Put) (Document, error) {
 		}
 	}
 	if p.Kind != "" {
+		if a.Format == "json" && p.Kind != a.Kind || (p.Kind == "todo-list") != (a.Kind == "todo-list") {
+			return Document{}, fmt.Errorf("%w: cannot change structured artifact kind", ErrInvalid)
+		}
 		if err = validKind(p.Kind); err != nil {
 			return Document{}, err
 		}
@@ -433,11 +436,32 @@ func (s *Store) createWithID(ws, id, title, kind, content string, author Author,
 	if err != nil {
 		return Document{}, err
 	}
+	// Recognize a template on the normal publish path, including stdin.
+	if format == "" && strings.HasPrefix(strings.TrimSpace(content), "{") {
+		var header struct{ Schema string }
+		if json.Unmarshal([]byte(content), &header) == nil {
+			for _, candidate := range Kinds {
+				if header.Schema == candidate+".v1" {
+					format = "json"
+					if kind == "" {
+						kind = candidate
+					}
+					break
+				}
+			}
+		}
+	}
 	if kind == "" {
 		kind = Kinds[0]
 	}
 	if err = validKind(kind); err != nil {
 		return Document{}, err
+	}
+	if kind == "todo-list" && format == "" {
+		format = "json"
+	}
+	if kind == "todo-list" && format != "json" {
+		return Document{}, fmt.Errorf("%w: todo-list requires JSON", ErrInvalid)
 	}
 	if format == "" {
 		format = "markdown"
@@ -464,6 +488,12 @@ func (s *Store) createWithID(ws, id, title, kind, content string, author Author,
 
 // append writes the next version's body, then the metadata naming it.
 func (s *Store) append(a *Artifact, content string, author Author, source Source, schema string) error {
+	if a.Format == "json" {
+		if err := validateStructured(a.Kind, content); err != nil {
+			return err
+		}
+		schema = a.Kind + ".v1"
+	}
 	if len(a.Versions) >= MaxVersions {
 		return fmt.Errorf("%q has reached %d versions; track a new artifact to keep going", a.Title, MaxVersions)
 	}
@@ -571,6 +601,9 @@ func (s *Store) Update(ws, id, title, kind string, stopTracking bool) (Artifact,
 		}
 	}
 	if kind != "" {
+		if a.Format == "json" && kind != a.Kind || (kind == "todo-list") != (a.Kind == "todo-list") {
+			return Artifact{}, fmt.Errorf("%w: cannot change structured artifact kind", ErrInvalid)
+		}
 		if err = validKind(kind); err != nil {
 			return Artifact{}, err
 		}
@@ -706,4 +739,22 @@ func clone(a *Artifact) Artifact {
 		out.Retired = &retired
 	}
 	return out
+}
+
+func validateTodoList(content string) error {
+	var list map[string]json.RawMessage
+	var schema string
+	var items []map[string]string
+	if json.Unmarshal([]byte(content), &list) != nil || json.Unmarshal(list["schema"], &schema) != nil || schema != "todo-list.v1" || json.Unmarshal(list["items"], &items) != nil || items == nil {
+		return fmt.Errorf("%w: expected todo-list.v1 and an items array", ErrInvalid)
+	}
+	seen := map[string]bool{}
+	for _, item := range items {
+		id := item["id"]
+		if strings.TrimSpace(id) == "" || seen[id] || strings.TrimSpace(item["text"]) == "" || (item["status"] != "todo" && item["status"] != "done") {
+			return fmt.Errorf("%w: items need unique ids, text and status todo or done", ErrInvalid)
+		}
+		seen[id] = true
+	}
+	return nil
 }

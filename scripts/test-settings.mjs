@@ -30,6 +30,11 @@ try {
  await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');
  await page.getByRole('combobox',{name:'Session',exact:true}).selectOption('alpha-session');
  await page.getByRole('textbox',{name:'Message',exact:true}).fill('draft preserved while editing settings');
+ let finishOpeningRefresh;
+ await page.route('**/RefreshSubscription', async route => {
+  await new Promise(resolve => { finishOpeningRefresh = resolve; });
+  await route.continue();
+ });
  await page.getByRole('button',{name:'Settings',exact:true}).click();
  await expect(page.getByRole('tab',{name:'Subscriptions',exact:true})).toHaveAttribute('aria-selected','true');
  await expect(page.getByRole('heading',{name:'Settings',exact:true})).toBeVisible();
@@ -38,7 +43,12 @@ try {
  await expect(codex).toContainText('45% used');await expect(codex).toContainText('60% used');
  await expect(codex.getByRole('progressbar',{name:'5-hour limit used'})).toHaveAttribute('value','45');
  assert.equal(fixture.mutations.length,0,'opening settings mutated execution');
- await codex.getByRole('button',{name:'Refresh usage',exact:true}).click();await expect(codex).toContainText('50% used');
+ await expect(codex.getByRole('button',{name:'Refreshing…',exact:true})).toBeDisabled();
+ await expect.poll(()=>!!finishOpeningRefresh).toBe(true);
+ finishOpeningRefresh();
+ await expect(codex).toContainText('50% used');
+ await page.unroute('**/RefreshSubscription');
+ await codex.getByRole('button',{name:'Refresh usage',exact:true}).click();await expect(codex).toContainText('55% used');
  // With an account policy on, every saved subscription is in automatic switching by default; one switch takes an account out, and back.
  const switching=codex.getByRole('switch',{name:'Automatic switching',exact:true});
  await expect(switching).toBeChecked();await switching.uncheck();await expect(switching).not.toBeChecked();
@@ -144,6 +154,8 @@ try {
  await page.emulateMedia({colorScheme:'dark'});await page.waitForTimeout(400);await page.screenshot({path:'.cache/settings-subscriptions-grouped-dark.png',fullPage:true});await page.emulateMedia({colorScheme:'light'});
  // Hold each refresh independently: refreshing one card must not disable its sibling.
  const held = new Map();
+ const savedCodexUsage = () => fixture.profiles.find(profile=>profile.id==='codex-saved').availability.windows[0].usedPercent;
+ const beforeManualUsage = savedCodexUsage();
  const beforeRefreshes = fixture.calls.filter(call=>call.method==='RefreshSubscription').length;
  await page.route('**/RefreshSubscription', async route => {
   const profileId=route.request().postDataJSON().profileId;
@@ -159,7 +171,7 @@ try {
  await expect(claude.getByRole('button',{name:'Refreshing…',exact:true})).toBeDisabled();
  await expect.poll(()=>held.size).toBe(2);
  held.get(fixture.profiles.find(p=>p.label==='Saved Codex').id)();
- await expect(codex).toContainText('55% used');
+ await expect(codex.getByRole('progressbar',{name:'5-hour limit used'})).toHaveAttribute('value',String(beforeManualUsage+5));
  await expect(codex.getByRole('button',{name:'Refresh usage',exact:true})).toBeEnabled();
  await expect(claude.getByRole('button',{name:'Refreshing…',exact:true})).toBeDisabled();
  held.get(fixture.profiles.find(p=>p.label==='Personal').id)();
@@ -169,6 +181,13 @@ try {
  await expect(codex.getByRole('alert')).toHaveCount(0);
  assert.equal(fixture.calls.filter(call=>call.method==='RefreshSubscription').length,beforeRefreshes+1,'unexpected refresh target or duplicate request');
  await page.unroute('**/RefreshSubscription');
+ const refreshCount = () => fixture.calls.filter(call=>call.method==='RefreshSubscription').length;
+ const beforeReopen = refreshCount();
+ await page.getByRole('tab',{name:'Appearance',exact:true}).click();
+ assert.equal(refreshCount(),beforeReopen);
+ await page.getByRole('tab',{name:'Subscriptions',exact:true}).click();
+ await expect.poll(refreshCount).toBe(beforeReopen+3);
+ await expect(codex.getByRole('progressbar',{name:'5-hour limit used'})).toHaveAttribute('value',String(beforeManualUsage+10));
  storage=await page.evaluate(()=>JSON.stringify(localStorage));assert.ok(!storage.includes('fixture-private-oauth-token'),'token persisted in client storage');
  // Lose a successful Claude Add acknowledgement, then recover by request key.
  let loseAck=true;

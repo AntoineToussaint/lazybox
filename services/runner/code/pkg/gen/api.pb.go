@@ -11998,7 +11998,7 @@ func (x *RevokeGrant) GetGrantId() string {
 // Delivers a queued message (Session.queued_messages) ahead of its turn.
 // how "now": the turn in progress is interrupted and this message is the next
 // turn. how "steer": the message goes into the running turn without
-// interrupting it (Capabilities.steer). Either way it leaves the queue once.
+// interrupting it (Capabilities.steer). how "delete": remove it before delivery.
 type DeliverQueued struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	OperationId   string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`

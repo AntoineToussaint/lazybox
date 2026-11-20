@@ -58,6 +58,7 @@ import { SubagentPanel } from './SubagentPanel';
 import { ConversationHandoff, type HandoffMessage, type OpenHandoffConversation } from './ConversationHandoff';
 import type { PanelTitle } from './PanelRegistry';
 import { revealMessage } from './artifact-events';
+import { continuationPrompt } from './continuation-prompt';
 import { ConfirmDialog } from './ConfirmDialog';
 import type { TranscriptMessage } from './transcript-model';
 import { MessageArea } from './MessageArea';
@@ -362,7 +363,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // Send now from the keyboard (⌘↵): the typed message, or with an empty box
   // the oldest queued one, interrupting the turn in progress. Idle, it is a send.
   // What waits behind the turn: the Runner's queue and the transcript's, merged (transcript-model.ts).
-  const queued = useMemo(() => queuedMessages(session?.queuedMessages, transcript), [session?.queuedMessages, transcript.pending, transcript.messages]);
+  const queued = useMemo(() => queuedMessages(session?.queuedMessages, transcript), [session?.queuedMessages, transcript.pending, transcript.messages, transcript.canceled]);
   const queuedDelivery = useQueuedDelivery(api, sessionID, queued);
   const sendNowAt = useRef(0);
   const sendNowBinding = bindings(keymap['chat.send-now'])[0];
@@ -522,14 +523,25 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
 
   // Review from the chat: the header's Review button, its ⋯ item, the right-click menu and `/review`.
   const chatReview = useChatReview({ session: assistant ? undefined : session, sessionID, onError: setError });
-  const openFreshConversation = async (source: Session, profileId: string, draft = '') => {
+  const openFreshConversation = async (source: Session, profileId: string, firstMessage = '') => {
     const sameAccount = source.profileId === profileId;
     const opened = await api.openSession({ profileId, collectionId: source.collectionId, cwd: source.collectionId ? '' : source.workingDirectory,
       options: { model: sameAccount ? source.model : '', permission: source.permission, workflow: source.workflow, gatewayId: sameAccount && source.gatewayId !== 'direct' ? source.gatewayId : '', rotationProfileIds: [], instructions: '', noRotation: false } });
     if (!opened.session) throw new Error('Runner did not return the new conversation');
-    if (draft) writeDraft(viewState, opened.session.id, { text: draft, files: [], operationId: '' });
+    let transferError = '';
+    if (firstMessage) {
+      const operationId = crypto.randomUUID();
+      try {
+        await api.apply({ sessionId: opened.session.id, operationId,
+          operation: { case: 'message', value: { text: firstMessage, attachments: [] } } }, { timeoutMs: 30_000 });
+      } catch (error) {
+        writeDraft(viewState, opened.session.id, { text: firstMessage, files: [], operationId });
+        transferError = `Codex could not confirm the handoff. The context is saved in the draft. ${humanError(error)}`;
+      }
+    }
     setSession(undefined); setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
     setSessionID(opened.session.id); onSessionChange?.(opened.session.id); refresh();
+    if (transferError) showMenuNotice(transferError);
   };
   const openBranch = async () => {
     if (!branchMessage || !branchSelection) return;
@@ -573,10 +585,10 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     }
   };
   const continueInCodex = session && allowStart && !assistant ? async (profileId: string) => {
-    const pending = queued.filter(entry => !entry.origin).map(entry => entry.text.trim()).filter(Boolean);
-    const lastRequest = conversation.findLast(entry => entry.type === 'operation_accepted' && !entry.origin)?.text.trim();
-    const draft = [...new Set([...(pending.length ? pending : [lastRequest]), message.trim()].filter(Boolean))].join('\n\n');
-    await openFreshConversation(session, profileId, draft);
+    const source = transcript.reader.getSnapshot();
+    if (source.loading || source.partial || source.error) throw new Error('The source conversation is still loading or could not be read. Try again once its history is available.');
+    const pending = queuedMessages(session.queuedMessages, source);
+    await openFreshConversation(session, profileId, continuationPrompt(session.title, source.messages, pending, message));
   } : undefined;
   // Slash commands: the menu over the message box, and Lazybox's own commands (useSlashCommands.tsx).
   const provider = activeProfile?.provider || session?.provider || launcher.provider;

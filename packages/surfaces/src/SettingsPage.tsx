@@ -311,9 +311,32 @@ export function SettingsPage({ app, zoom, viewState, openSignIn, copySignInCode,
   // A limit whose reported reset has passed is checked once, by itself: the
   // card says "checking" and then shows what the provider reports now.
   const autoChecked = useRef(new Set<string>());
+  const openingUsage = useRef(false);
+  const accountsLoaded = !!info;
+  // Once per visit, including a direct open before Runner info arrives.
+  // Keep capacity available for manual refreshes and other windows.
+  useEffect(() => {
+    if (tab !== 'subscriptions' || !accountsLoaded) return;
+    const targets = profiles.filter(profile => profile.isolation === 'environment');
+    let active = true;
+    openingUsage.current = true;
+    const timer = setTimeout(async () => {
+      for (let index = 0; active && index < targets.length; index += 2) {
+        await Promise.all(targets.slice(index, index + 2).map(profile => {
+          const back = comeback(profile, Date.now());
+          if (back.kind === 'due') autoChecked.current.add(`${profile.id}:${back.resetAt}`);
+          return updateUsage(profile);
+        }));
+      }
+      if (active) openingUsage.current = false;
+    }, 0);
+    return () => { active = false; clearTimeout(timer); openingUsage.current = false; };
+  }, [tab, api, accountsLoaded]);
   // Started from a timer, so an effect React runs twice in development starts it once.
   useEffect(() => {
+    if (tab !== 'subscriptions' || openingUsage.current) return;
     const timers = profiles.flatMap(profile => {
+      if (profile.isolation !== 'environment') return [];
       const back = comeback(profile, now);
       const key = back.kind === 'due' ? `${profile.id}:${back.resetAt}` : '';
       if (!key || autoChecked.current.has(key)) return [];

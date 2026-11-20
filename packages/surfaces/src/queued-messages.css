@@ -7,7 +7,7 @@
 .queued-messages button{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:6px;font-size:calc(11px * var(--text-scale));white-space:nowrap}
 .queued-messages .queued-toggle{flex:none;border-color:transparent;background:transparent;color:var(--text-tertiary)}
 .queued-messages .queued-toggle:hover{background:var(--surface-selected);color:var(--text)}
-.queued-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.queued-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;max-height:30vh;overflow-y:auto}
 .queued-message{display:flex;flex-direction:column;gap:6px;min-width:0}
 .queued-row{display:flex;align-items:center;gap:8px;min-width:0}
 .queued-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);quotes:"“" "”"}

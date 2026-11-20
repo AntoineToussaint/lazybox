@@ -93,3 +93,30 @@ make that content current while preserving the intervening history.
 Select text in the Markdown reader or HTML source to **Send selection to
 agent**. The draft includes the excerpt and a command to read the exact
 revision you had open. In a standalone window, Lazybox copies that draft.
+
+## Publish a TODO list
+
+Publish a JSON file with `lazybox artifact put tasks.json --title "Release tasks" --kind todo-list`.
+Each entry has a unique stable ID, text, and a status of `todo` or `done`. Array order is display order.
+
+```json
+{"schema":"todo-list.v1","items":[{"id":"verify","text":"Verify on phone","status":"todo"}]}
+```
+
+Checking an item saves a revision. Earlier revisions can be viewed and exported as Markdown checklists.
+
+## Build a structured artifact
+
+Run `lazybox artifact template plan > plan.json`, edit the example, then run
+`lazybox artifact put plan.json --kind plan --format json --title "Release plan"`.
+Publishing a version 1 template also infers its kind and JSON format when both flags are omitted. The template command accepts every artifact kind. Publish revisions with the same ID.
+The reader renders sections and ordered content, compares revisions and exports Markdown.
+
+| Kind | Fields in version 1 |
+| --- | --- |
+| Plan | Goal, steps, completion checks |
+| Spec | Problem, requirements, acceptance criteria |
+| Report | Scope, findings, evidence, verification gaps |
+| Notes | Topic, entries |
+| Other | Summary, sections |
+| TODO list | Ordered items with stable ID, text and status |

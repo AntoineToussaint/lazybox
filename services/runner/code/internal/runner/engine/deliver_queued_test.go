@@ -211,3 +211,38 @@ func TestDeliverNowRetrySendsAnotherInterrupt(t *testing.T) {
 		t.Fatalf("expected queued message once, got %+v", operation)
 	}
 }
+
+func TestDeleteQueuedLeavesCurrentTurnAndOrderingIntact(t *testing.T) {
+	e, s := bench(t, false)
+	ctx := contextFor(t)
+	send := func(id string) {
+		t.Helper()
+		if _, err := e.Apply(ctx, agent.Operation{ID: id, Kind: agent.Message, Text: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send("current")
+	applied(t, s)
+	send("first")
+	send("deleted")
+	send("last")
+	for range 2 {
+		r, err := e.DeliverQueued(ctx, "deleted", DeleteQueued)
+		if err != nil || r.Delivery != "canceled_before_delivery" {
+			t.Fatalf("delete receipt = %+v, %v", r, err)
+		}
+	}
+	if _, err := e.DeliverQueued(ctx, "current", DeleteQueued); !errors.Is(err, ErrNotQueued) {
+		t.Fatalf("delete current turn: %v", err)
+	}
+	if state := e.Snapshot(); !state.Busy || len(state.QueuedMessages) != 2 ||
+		state.QueuedMessages[0].OperationID != "first" || state.QueuedMessages[1].OperationID != "last" {
+		t.Fatalf("unexpected state: %+v", state)
+	}
+	for _, want := range []string{"first", "last"} {
+		s.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+		if op := applied(t, s); op.Kind != agent.Message || op.ID != want {
+			t.Fatalf("next operation = %+v, want message %q", op, want)
+		}
+	}
+}

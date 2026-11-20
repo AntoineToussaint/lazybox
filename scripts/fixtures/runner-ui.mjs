@@ -1203,6 +1203,11 @@ actions:
         if(session&&body.deliverQueued){
           const {operationId,how}=body.deliverQueued,queue=session.queuedMessages||[],index=queue.findIndex(m=>m.operationId===operationId);
           if(index<0)return error('failed_precondition','that message is no longer queued');
+          if(how==='delete'){
+            queue.splice(index,1);session.queued=queue.length;
+            eventStreams.get(session.id)?.push({type:'receipt',operationId,status:'canceled_before_delivery'});
+            return json({operationId,delivery:'canceled_before_delivery'});
+          }
           if(how==='steer'&&!session.capabilities?.steer)return error('unimplemented','operation unsupported by adapter');
           if(!session.busy)return error('failed_precondition','no active turn');
           queue.splice(index,1);session.queued=Math.max(0,(session.queued||1)-1);

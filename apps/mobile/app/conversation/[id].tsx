@@ -60,14 +60,14 @@ export default function ConversationScreen() {
 
   const busy = turnRunning(session, transcript);
   // What waits behind the turn: the Runner's queue and the transcript's, merged as on the computer.
-  const queued = useMemo(() => transcript ? queuedMessages(session?.queuedMessages, transcript) : [], [session?.queuedMessages, transcript?.pending, transcript?.messages]);
-  const [delivering, setDelivering] = useState('');
-  const sendNow = useCallback(async (operationId: string) => {
+  const queued = useMemo(() => transcript ? queuedMessages(session?.queuedMessages, transcript) : [], [session?.queuedMessages, transcript?.pending, transcript?.messages, transcript?.canceled]);
+  const [delivering, setDelivering] = useState<{ id: string; how: 'now' | 'delete' }>();
+  const actOnQueue = useCallback(async (operationId: string, how: 'now' | 'delete') => {
     if (!api || !session) return;
-    setDelivering(operationId);
-    try { await api.apply({ sessionId: session.id, operationId: randomUUID(), operation: { case: 'deliverQueued', value: { operationId, how: 'now' } } }, { timeoutMs: 30000 }); haptic.success(); void refresh(); }
+    setDelivering({ id: operationId, how });
+    try { await api.apply({ sessionId: session.id, operationId: randomUUID(), operation: { case: 'deliverQueued', value: { operationId, how } } }, { timeoutMs: 30000 }); haptic.success(); void refresh(); }
     catch (e) { haptic.error(); setError(humanError(e)); }
-    finally { setDelivering(''); }
+    finally { setDelivering(undefined); }
   }, [api, session, refresh]);
   const requests = session && !session.closed ? session.pending.map(requestView) : [];
   const decide = useCallback(async (requestId: string, accept: boolean, what: string, risks: Parameters<typeof confirmAllow>[0]['risks'], defaultToNo: boolean, confirm: boolean) => {
@@ -97,7 +97,8 @@ export default function ConversationScreen() {
       {queued.map(entry => <View key={entry.operationId} style={styles.queuedRow}>
         <Icon name="clock" size={13} color={theme.faint}/>
         <Text style={{ flex: 1, color: theme.text, fontSize: 15 }} numberOfLines={2}>{entry.text}</Text>
-        {busy && respond && <Button label="Send now" compact busy={delivering === entry.operationId} disabled={!!delivering} onPress={() => void sendNow(entry.operationId)}/>}
+        {busy && respond && <Button label="Send now" compact busy={delivering?.id === entry.operationId && delivering.how === 'now'} disabled={!!delivering} onPress={() => void actOnQueue(entry.operationId, 'now')}/>}
+        {respond && !session?.closed && <Button label="Delete" compact busy={delivering?.id === entry.operationId && delivering.how === 'delete'} disabled={!!delivering} onPress={() => void actOnQueue(entry.operationId, 'delete')}/>}
       </View>)}
     </View>}
     {error ? <Pressable onPress={() => setError('')} style={[styles.error, { backgroundColor: theme.dangerBg, borderColor: theme.dangerLine }]} accessibilityRole="alert">

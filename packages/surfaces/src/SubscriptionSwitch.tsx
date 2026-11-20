@@ -77,21 +77,31 @@ function ChoiceList({ choices, value, onChange, name, disabled }: { choices: Sub
 }
 
 function LimitCard({ session, profiles, provider, automatic, viewState, switchTo, onError, onContinueInCodex }: Pick<Props, 'session' | 'profiles' | 'viewState' | 'onError' | 'onContinueInCodex'> & { provider: string; automatic: boolean; switchTo(id: string, always: boolean): Promise<void> }) {
+  const { api, refresh } = useRunner();
+  const [updated, setUpdated] = useState<Record<string, Profile>>({});
+  const currentProfiles = useMemo(() => profiles.map(profile => {
+    const fresh = updated[profile.id];
+    return fresh && (fresh.availability?.observedAtUnixMillis ?? 0n) >= (profile.availability?.observedAtUnixMillis ?? 0n) ? fresh : profile;
+  }), [profiles, updated]);
+  const checkedCurrent = updated[session.profileId] && currentProfiles.find(profile => profile.id === session.profileId);
+  const currentReady = checkedCurrent?.availability?.state === 'available';
+  const targets = profiles.filter(profile => profile.provider === provider && profile.managed && profile.isolation === 'environment');
   const limit = sessionLimit(session) as Exclude<ReturnType<typeof sessionLimit>, ''>;
   const [now, setNow] = useState(Date.now);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(timer); }, []);
-  const choices = useMemo(() => subscriptionChoices(profiles, provider, session.profileId, now), [profiles, provider, session.profileId, now]);
+  const choices = useMemo(() => subscriptionChoices(currentProfiles, provider, session.profileId, now), [currentProfiles, provider, session.profileId, now]);
   const others = choices.filter(c => !c.current && c.ready);
   const [choice, setChoice] = useState('');
   const selected = others.find(c => c.id === choice) || others[0];
-  const codex = !selected && provider !== 'codex' && onContinueInCodex ? bestChoice(subscriptionChoices(profiles, 'codex', '', now)) : undefined;
+  const codex = !selected && !currentReady && provider !== 'codex' && onContinueInCodex ? bestChoice(subscriptionChoices(profiles, 'codex', '', now)) : undefined;
   // A pool only switches while an account policy covers the provider.
   const rotating = switchesItself(session, automatic ? [provider] : [], provider);
   const [always, setAlways] = useState(true);
   const [busy, setBusy] = useState('');
   const current = subscriptionName(profiles.find(p => p.id === session.profileId), session.profileId);
-  const resetAt = Number(session.account?.resetAt || 0n) * 1000;
-  const reset = resetTime(session.account?.resetAt, now);
+  const reportedReset = checkedCurrent?.availability?.resetAt || session.account?.resetAt;
+  const resetAt = Number(reportedReset || 0n) * 1000;
+  const reset = resetTime(reportedReset, now);
   const waitable = (limit === 'exhausted' || limit === 'throttled') && !!reset;
   const [waiting, setWaiting] = useState(() => { try { return Number(readPreference(viewState, waitKey(session.id)) || 0) === resetAt && resetAt > 0; } catch { return false; } });
   const act = async (label: string, work: () => Promise<void>) => {
@@ -100,6 +110,28 @@ function LimitCard({ session, profiles, provider, automatic, viewState, switchTo
     try { await work(); } catch (error) { onError(String(error)); } finally { setBusy(''); }
   };
   const forgetWait = () => { try { writePreference(viewState, waitKey(session.id), ''); } catch { /* nothing kept */ } };
+  const checkUsage = async () => {
+    let failures = 0;
+    for (let index = 0; index < targets.length; index += 2) {
+      const results = await Promise.allSettled(targets.slice(index, index + 2).map(profile =>
+        api.refreshSubscription({ profileId: profile.id }, { timeoutMs: 30_000 })));
+      setUpdated(previous => {
+        const next = { ...previous };
+        for (const result of results) if (result.status === 'fulfilled') next[result.value.id] = result.value;
+        return next;
+      });
+      failures += results.filter(result => result.status === 'rejected').length;
+    }
+    refresh();
+    if (failures) throw new Error('Some subscription usage could not be refreshed. The last reports are still shown.');
+  };
+  const refreshButton = targets.length > 0 && <button type="button" disabled={!!busy} onClick={() => void act('refresh', checkUsage)}>
+    {busy === 'refresh' ? 'Refreshing…' : 'Refresh'}
+  </button>;
+  const continueOnCurrent = currentReady && <button type="button" className="primary" disabled={!!busy}
+    onClick={() => void act('retry', async () => { forgetWait(); setWaiting(false); await switchTo(session.profileId, false); })}>
+    {busy === 'retry' ? 'Continuing…' : `Continue on ${current}`}
+  </button>;
   // Waiting resumes on its own at the reset while the conversation is open (or
   // the next time it is opened): the same request continues, once.
   const resumed = useRef(false);
@@ -111,28 +143,30 @@ function LimitCard({ session, profiles, provider, automatic, viewState, switchTo
     const timer = setTimeout(resume, Math.min(delay, 2 ** 31 - 1));
     return () => clearTimeout(timer);
   }, [waiting, resetAt]);
-  const headline = limitHeadline(current, limit, session.account?.resetAt, now);
+  const headline = currentReady ? `${current} is available again` : limitHeadline(current, limit, reportedReset, now);
   const continueWith = selected && <button type="button" className="primary" disabled={!!busy} onClick={() => void act('switch', async () => { forgetWait(); await switchTo(selected.id, automatic && always && !rotating); })}>{busy === 'switch' ? `Switching to ${selected.name}…` : switchLabel(selected.name)}</button>;
-  const continueInCodex = codex && onContinueInCodex && <button type="button" className="primary" disabled={!!busy} onClick={() => void act('codex', () => onContinueInCodex(codex.id))}>{busy === 'codex' ? 'Opening Codex…' : 'Continue in a new Codex conversation'}</button>;
+  const continueInCodex = codex && onContinueInCodex && <button type="button" className="primary" disabled={!!busy} onClick={() => void act('codex', async () => { forgetWait(); setWaiting(false); await onContinueInCodex(codex.id); })}>{busy === 'codex' ? 'Sending context to Codex…' : 'Continue in a new Codex conversation'}</button>;
   const queued = session.queued > 0 && <p className="limit-card-note">Your {session.queued === 1 ? 'message is' : `${session.queued} messages are`} saved and will be sent once, when the conversation continues.</p>;
-  if (waiting) return <section className="limit-card is-waiting" aria-label="Subscription limit" data-limit={limit}>
+  if (waiting && !currentReady) return <section className="limit-card is-waiting" aria-label="Subscription limit" data-limit={limit}>
     <p className="limit-card-line"><strong>Waiting for {current}: {backWhen(session.account?.resetAt, now)}.</strong> The conversation continues on its own then.</p>
     {queued}
-    <div className="limit-card-actions">{continueWith}{continueInCodex}<button type="button" disabled={!!busy} onClick={() => { forgetWait(); setWaiting(false); }}>Don’t wait</button></div>
+    <div className="limit-card-actions">{continueWith}{continueInCodex}{refreshButton}<button type="button" disabled={!!busy} onClick={() => { forgetWait(); setWaiting(false); }}>Don’t wait</button></div>
   </section>;
   return <section className="limit-card" aria-label="Subscription limit" data-limit={limit}>
     <h3>{headline}</h3>
-    {selected ? <p>Continue this conversation on {others.length > 1 ? 'another subscription' : selected.name}. The interrupted request picks up where it stopped.</p>
-      : <p>No other {providerName(provider)} subscription is available right now. {codex ? 'Open Codex in this workspace and review the draft before sending.' : 'Add another subscription in Settings → Subscriptions.'}</p>}
-    {others.length > 1 ? <ChoiceList choices={others} value={selected?.id || ''} onChange={setChoice} name={`limit-${session.id}`} disabled={!!busy}/> : selected && <p className="limit-card-detail">{selected.name} · {selected.detail}</p>}
+    {currentReady ? <p>Continue the interrupted request on this subscription.</p> : selected ? <p>Continue this conversation on {others.length > 1 ? 'another subscription' : selected.name}. The interrupted request picks up where it stopped.</p>
+      : <p>No other {providerName(provider)} subscription is available right now. {codex ? 'Send the conversation context to Codex and continue in this workspace.' : 'Add another subscription in Settings → Subscriptions.'}</p>}
+    {!currentReady && (others.length > 1 ? <ChoiceList choices={others} value={selected?.id || ''} onChange={setChoice} name={`limit-${session.id}`} disabled={!!busy}/> : selected && <p className="limit-card-detail">{selected.name} · {selected.detail}</p>)}
     {queued}
     <div className="limit-card-actions">
-      {continueWith}
+      {continueOnCurrent}
+      {!currentReady && continueWith}
       {continueInCodex}
-      {waitable ? <button type="button" disabled={!!busy} onClick={() => { try { writePreference(viewState, waitKey(session.id), String(resetAt)); } catch { /* waits while open */ } resumed.current = false; setWaiting(true); }}>Wait for reset</button>
-        : limit === 'throttled' || limit === 'exhausted' ? <button type="button" disabled={!!busy} onClick={() => void act('retry', () => switchTo(session.profileId, false))}>{busy === 'retry' ? 'Trying again…' : `Try again on ${current}`}</button> : null}
+      {refreshButton}
+      {!currentReady && (waitable ? <button type="button" disabled={!!busy} onClick={() => { try { writePreference(viewState, waitKey(session.id), String(resetAt)); } catch { /* waits while open */ } resumed.current = false; setWaiting(true); }}>Wait for reset</button>
+        : limit === 'throttled' || limit === 'exhausted' ? <button type="button" disabled={!!busy} onClick={() => void act('retry', () => switchTo(session.profileId, false))}>{busy === 'retry' ? 'Trying again…' : `Try again on ${current}`}</button> : null)}
     </div>
-    {others.length > 0 && automatic && !rotating && <label className="limit-card-auto"><input type="checkbox" checked={always} disabled={!!busy} onChange={event => setAlways(event.target.checked)}/>Always switch automatically</label>}
+    {!currentReady && others.length > 0 && automatic && !rotating && <label className="limit-card-auto"><input type="checkbox" checked={always} disabled={!!busy} onChange={event => setAlways(event.target.checked)}/>Always switch automatically</label>}
   </section>;
 }
 

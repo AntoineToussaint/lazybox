@@ -159,8 +159,13 @@ func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *j
 		return nil, errors.New("adoption requires session hosting")
 	}
 	queued := map[string]bool{}
+	var queue []agent.Operation
 	for _, op := range record.Queue {
+		if scan.receipts[op.ID].Delivery == "canceled_before_delivery" {
+			continue
+		}
 		queued[op.ID] = true
+		queue = append(queue, op)
 	}
 	// A queued message has not reached the agent yet; it joins the transcript
 	// when it is delivered. (One accepted but not queued, without a receipt,
@@ -192,7 +197,7 @@ func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *j
 		e.state.Agents = map[string]agent.Activity{}
 	}
 	e.state.Capabilities = s.Capabilities()
-	e.queue = append(e.queue, record.Queue...)
+	e.queue = queue
 	e.mu.Lock()
 	for _, id := range scan.order {
 		r, ok := scan.receipts[id]

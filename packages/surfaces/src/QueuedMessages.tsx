@@ -39,14 +39,14 @@ const clip = (text: string, length = 140) => { const line = text.replace(/\s+/g,
  * meanwhile: one state for the strip's buttons and for ⌘↵ in the message box.
  */
 export type QueuedDelivery = {
-  working?: { id: string; how: 'now' | 'steer'; acknowledged?: boolean };
+  working?: { id: string; how: 'now' | 'steer' | 'delete'; acknowledged?: boolean };
   error?: { id: string; text: string };
   /**
    * Delivers the queued message with this operation id. `justSent`: the
    * message was sent a moment ago, so one the Runner already took (the turn
    * ended meanwhile) went out as it should, and is no error.
    */
-  deliver(operationId: string, how: 'now' | 'steer', justSent?: boolean): Promise<void>;
+  deliver(operationId: string, how: 'now' | 'steer' | 'delete', justSent?: boolean): Promise<void>;
 };
 /** How long Send now or Steer may say it is at work before the strip gives the buttons back to try again. */
 export const DELIVERY_TIMEOUT_MS = 20_000;
@@ -68,11 +68,11 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
     if (!working) return;
     const timer = setTimeout(() => {
       setWorking(current => current === working ? undefined : current);
-      setError({ id: working.id, text: working.how === 'steer' ? 'The agent has not taken it yet. Steer again, or Send now.' : 'The current step has not stopped yet. Send now again to retry.' });
+      setError({ id: working.id, text: working.how === 'delete' ? 'Deletion was not confirmed. Try again.' : working.how === 'steer' ? 'The agent has not taken it yet. Steer again, or Send now.' : 'The current step has not stopped yet. Send now again to retry.' });
     }, DELIVERY_TIMEOUT_MS);
     return () => clearTimeout(timer);
   }, [working]);
-  const deliver = async (operationId: string, how: 'now' | 'steer', justSent = false) => {
+  const deliver = async (operationId: string, how: 'now' | 'steer' | 'delete', justSent = false) => {
     const attempt = { id: operationId, how };
     setError(undefined); setWorking(attempt);
     try {
@@ -82,7 +82,7 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
       setWorking(current => current === attempt ? undefined : current);
       const why = humanError(e);
       if (justSent && /no longer queued/.test(why)) return;
-      setError({ id: operationId, text: `${how === 'steer' ? 'Could not steer' : 'Could not send it now'}: ${why}` });
+      setError({ id: operationId, text: `${how === 'delete' ? 'Could not delete' : how === 'steer' ? 'Could not steer' : 'Could not send it now'}: ${why}` });
     }
   };
   return { working, error, deliver };
@@ -104,15 +104,16 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
 }) {
   const busy = (!!session?.busy || !!turnRunning) && !!session && !session.closed;
   const [collapsed, setCollapsed] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   const { working, error } = delivery;
   const step = useMemo(() => busy ? stepName(activity) : {}, [busy, activity]);
   const now = useNow(busy && queued.length > 0);
-  if (!busy || !queued.length) return null;
+  if (!session || session.closed || !queued.length) return null;
 
   const steer = !!session?.capabilities?.steer;
-  const deliver = (message: QueuedEntry, how: 'now' | 'steer') => delivery.deliver(message.operationId, how);
+  const deliver = (message: QueuedEntry, how: 'now' | 'steer' | 'delete') => delivery.deliver(message.operationId, how);
   const many = queued.length > 1;
-  const shown = collapsed ? [] : many && queued.length > 2 ? queued.slice(0, 2) : queued;
+  const shown = collapsed ? [] : !showAll && queued.length > 2 ? queued.slice(0, 2) : queued;
   // What the agent is busy with, as the live bar says it: the step and its time, else the status line.
   const stops = step.code ? `Stop ${step.code}` : step.words ? `Stop the running step (${step.words.charAt(0).toLowerCase() + step.words.slice(1)})` : `Stop what ${agentName} is doing`;
   // The time ticks every second: it is not part of what the status line announces, or a screen reader repeats the line each second.
@@ -122,7 +123,7 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
   return <section className="queued-messages" aria-label="Queued messages">
     <header className="queued-head">
       <Icon name="pending" size={12}/>
-      <span role="status"><strong>{many ? `${queued.length} messages queued` : 'Queued'}</strong> — {agentName} is busy ({busyWith}{busyFor && <span aria-hidden="true">{busyFor}</span>})</span>
+      <span role="status"><strong>{many ? `${queued.length} messages queued` : 'Queued'}</strong>{busy && <> — {agentName} is busy ({busyWith}{busyFor && <span aria-hidden="true">{busyFor}</span>})</>}</span>
       <button type="button" className="queued-toggle" aria-expanded={!collapsed} onClick={() => setCollapsed(value => !value)}
         title={collapsed ? 'Show the queued messages' : 'Hide them here; they still go after the current turn'}>
         <Icon name={collapsed ? 'expand' : 'collapse'} size={11}/><span>{collapsed ? 'Show' : 'Hide'}</span>
@@ -138,11 +139,13 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
             {event ? <span className="queued-text queued-event" title={message.text}><Icon name={event.icon} size={11}/><span>{clip(event.line)}</span>{event.detail && <small>{event.detail}</small>}</span>
               : <q className="queued-text" title={message.text}>{clip(message.text)}</q>}
             <span className="queued-actions">
-              {mine ? <span className="queued-working" role="status">{working!.how === 'steer' ? 'Steering…' : working!.acknowledged ? 'Waiting for the current turn to end…' : 'Stopping the current step…'}</span> : <>
-                {steer && <button type="button" onClick={() => void deliver(message, 'steer')}
+              {mine ? <span className="queued-working" role="status">{working!.how === 'delete' ? 'Deleting…' : working!.how === 'steer' ? 'Steering…' : working!.acknowledged ? 'Waiting for the current turn to end…' : 'Stopping the current step…'}</span> : <>
+                {busy && steer && <button type="button" onClick={() => void deliver(message, 'steer')}
                   title={`Give ${agentName} this message now, inside the running turn, without stopping it`}><Icon name="send" size={11}/>Steer</button>}
-                <button type="button" onClick={() => void deliver(message, 'now')}
-                  title={`${stops} and send this as the next turn${index === 0 && sendNowKey ? ` (${sendNowKey})` : ''}`}><Icon name="stop" size={11}/>Send now</button>
+                {busy && <button type="button" onClick={() => void deliver(message, 'now')}
+                  title={`${stops} and send this as the next turn${index === 0 && sendNowKey ? ` (${sendNowKey})` : ''}`}><Icon name="stop" size={11}/>Send now</button>}
+                <button type="button" onClick={() => void deliver(message, 'delete')}
+                  title="Delete this queued message">Delete</button>
               </>}
             </span>
           </div>
@@ -150,7 +153,7 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
         </li>;
       })}
     </ul>}
-    {!collapsed && queued.length > shown.length && <p className="queued-more">and {queued.length - shown.length} more, sent in order after these</p>}
-    {!collapsed && !steer && <p className="queued-note">{agentName} can’t take a message in the middle of a turn: <strong>Send now</strong>{sendNowKey ? ` (${sendNowKey})` : ''} stops its current step first, then sends yours.</p>}
+    {!collapsed && queued.length > shown.length && <button type="button" className="queued-more" onClick={() => setShowAll(true)}>Show {queued.length - shown.length} more</button>}
+    {!collapsed && busy && !steer && <p className="queued-note">{agentName} can’t take a message in the middle of a turn: <strong>Send now</strong>{sendNowKey ? ` (${sendNowKey})` : ''} stops its current step first, then sends yours.</p>}
   </section>;
 }

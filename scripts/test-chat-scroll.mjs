@@ -93,6 +93,19 @@ async function run(name,engine){
     last=top;
    }
   },`${name}: ${how}`);
+  // Observe actual DOM progress, including a larger delta every fifth line.
+  // Elapsed wall time alone says nothing about how far a busy browser got.
+  const afterStreamProgress=async(check,count=5)=>{
+   let observed=line;
+   for(let i=0;i<count;i++){
+    await page.waitForFunction(previous=>{
+     const text=document.querySelector('.messages-content')?.textContent ?? '';
+     return text.includes(`Streamed line ${previous+1}.`);
+    },observed);
+    await check();
+    observed=line;
+   }
+  };
   const holds=async(how,nudge=false)=>{
    // Wheel delivery is asynchronous. A quiet pane before the gesture lands
    // is not evidence that the gesture has finished.
@@ -101,13 +114,15 @@ async function run(name,engine){
    const held=await settle(how),grown=await pane.evaluate(node=>node.scrollHeight);
    if(!nudge)assert.ok(held<grown-(await pane.evaluate(node=>node.clientHeight))-200,`${how}: the reader is clearly away from the bottom`);
    await expect(latest,`${how}: the Latest pill offers the way back`).toBeVisible();
-   for(const end=Date.now()+2000;Date.now()<end;){await pause(100);const now=await top();assert.ok(Math.abs(now-held)<=4,`${name}: ${how} must hold the reading position while the stream continues (${held} → ${now})`);}
+   await afterStreamProgress(async()=>{
+    const now=await top();
+    assert.ok(Math.abs(now-held)<=4,`${name}: ${how} must hold the reading position while the stream continues (${held} → ${now})`);
+   });
    assert.ok(await pane.evaluate(node=>node.scrollHeight)>grown+50,`${how}: the stream kept writing while the reader held still`);
   };
   const follows=async how=>{
    await expect.poll(gap,{message:`${name}: ${how} resumes following`}).toBeLessThan(3);await expect(latest).toBeHidden();
-   for(const end=Date.now()+600;Date.now()<end;)await pause(100);
-   await expect.poll(gap,{message:`${name}: ${how}: following holds while the stream continues`}).toBeLessThan(3);
+   await afterStreamProgress(()=>expect.poll(gap,{message:`${name}: ${how}: following holds while the stream continues`}).toBeLessThan(3));
   };
   const box=await pane.boundingBox();
   // Mouse wheel / trackpad.
@@ -134,10 +149,17 @@ async function run(name,engine){
   // the bottom arrow instead of the thumb on Linux.
   await page.addStyleTag({content:'.messages::-webkit-scrollbar{width:16px}.messages::-webkit-scrollbar-track{background:#eee}.messages::-webkit-scrollbar-thumb{background:#777;min-height:40px;border:0}.messages::-webkit-scrollbar-button{display:none;width:0;height:0}'});
   await expect.poll(gap).toBeLessThan(3);
+  // The custom scrollbar changes the pane's content width. Wait until the
+  // prompt rail has consumed that resize before sampling the drag geometry.
+  await expect.poll(()=>pane.evaluate(node=>{
+   const edge=node.getBoundingClientRect().left+node.clientLeft+node.clientWidth;
+   const markers=[...node.parentElement.querySelectorAll('.prompt-rail button')];
+   return markers.length>0&&markers.every(marker=>marker.getBoundingClientRect().right<=edge);
+  }),{message:`${name}: prompt markers must leave the scrollbar gutter clear`}).toBe(true);
   // Dragging the scrollbar thumb.
   const bar=await pane.evaluate(node=>{const r=node.getBoundingClientRect(),thumb=Math.max(40,node.clientHeight*node.clientHeight/node.scrollHeight);return{x:r.right-Math.max(3,(node.offsetWidth-node.clientWidth)/2),y:Math.min(r.top+node.clientHeight-thumb/2,r.top+node.scrollTop/node.scrollHeight*node.clientHeight+thumb/2),native:node.offsetWidth>node.clientWidth};});
   if(name==='chromium')assert.ok(bar.native,'Chromium must exercise a real scrollbar drag');
-  if(bar.native)assert.ok(await pane.evaluate(node=>{const edge=node.getBoundingClientRect().left+node.clientLeft+node.clientWidth;return [...node.parentElement.querySelectorAll('.prompt-rail button')].every(marker=>marker.getBoundingClientRect().right<=edge);}), 'prompt markers must not intercept the native scrollbar');
+
   await page.mouse.move(bar.x,bar.y);await page.mouse.down();
   for(let step=1;step<=8;step++){await page.mouse.move(bar.x,bar.y-step*12);await pause(30);}
   // Headless macOS WebKit has no painted scrollbar, even with custom CSS.

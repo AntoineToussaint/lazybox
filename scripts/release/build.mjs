@@ -441,6 +441,17 @@ async function buildLinuxBundles({ version, out, stage, notices }) {
     }
     console.log(`  linux-${arch.name}: ${names.runner}, ${names.cli} (${packages} worker packages, without Claude Code)`);
   }
+  const template = await readFile(join(root, 'packaging/homebrew/lazybox-runner.rb.tmpl'), 'utf8');
+  const sums = new Map(artifacts);
+  let formula = template.replaceAll('__VERSION__', version);
+  for (const arch of LINUX_ARCHES) {
+    const sum = sums.get(linuxArtifactNames(version, arch.name).runner);
+    if (!/^[a-f0-9]{64}$/.test(sum)) throw new Error('Missing Linux Runner digest for ' + arch.name);
+    formula = formula.replaceAll('__' + arch.name.toUpperCase() + '__', sum);
+  }
+  const formulaName = 'lazybox-runner.rb';
+  await writeFile(join(out, formulaName), formula);
+  artifacts.push([formulaName, await sha256(join(out, formulaName))]);
   return artifacts;
 }
 

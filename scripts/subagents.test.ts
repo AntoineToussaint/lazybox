@@ -145,12 +145,14 @@ test('Codex sub-threads get a card from their status and keep their own messages
     record(10, { type: 'agent_status', agentId: thread, parentAgentId: 'root', nativeId: 'thread-b', agentKind: 'agent', status: 'running', name: 'Review the Go side', data: { toolUseId: 'item-7', prompt: 'Review the Go side' } }),
     record(20, { type: 'turn_started', agentId: thread, parentAgentId: 'root', turnId: 'tb1' }),
     record(30, { type: 'tool_activity', agentId: thread, data: call('cmd-1', 'Shell command', 'running', { input: ['go', 'vet', './...'] }) }),
-    record(40, { type: 'message_delta', agentId: thread, text: 'Looks fine.' }),
+    record(40, { type: 'message_delta', agentId: thread, text: 'Checking.', data: { itemId: 'progress' } }),
+    record(41, { type: 'message_delta', agentId: thread, text: 'Looks ', data: { itemId: 'answer' } }),
+    record(42, { type: 'message_delta', agentId: thread, text: 'fine.', data: { itemId: 'answer' } }),
   );
   const agent = t.subagents.byId[thread];
   assert.equal(t.messages.at(-1)?.agentId, thread);
   assert.equal(agent.type, '', 'a generic agent kind is no type');
-  assert.equal(agent.items.length, 2);
+  assert.deepEqual(agent.items.flatMap(item => item.kind === 'message' ? [item.text] : []), ['Checking.', 'Looks fine.']);
   t = fold(t, record(50, { type: 'turn_ended', agentId: thread, status: 'completed' }));
   assert.equal(t.subagents.byId[thread].status, 'done');
 });

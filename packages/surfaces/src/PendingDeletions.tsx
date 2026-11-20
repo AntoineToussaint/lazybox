@@ -9,8 +9,8 @@ export function announceDeletion(entry: PendingDeletion, undo: () => Promise<voi
     id: entry.id,
     tone: 'info',
     title: entry.sessionId ? 'Conversation moved to Recently deleted' : 'Workspace moved to Recently deleted',
-    body: 'You have five minutes to undo.',
-    timeout: Math.max(1, Number(entry.expiresAtUnixMillis) - Date.now()),
+    body: 'Undo here or from Recently deleted within five minutes.',
+    timeout: Math.min(60_000, Math.max(1, Number(entry.expiresAtUnixMillis) - Date.now())),
     button: { label: 'Undo', run: () => void undo().catch(reportUndoFailure) },
   });
 }
@@ -47,7 +47,8 @@ export function PendingDeletions() {
     return () => { controller.abort(); window.clearInterval(timer); };
   }, [api, revision]);
   if (!entries.length) return null;
-  const undo = async (id: string) => {
+  const undo = async (entry: PendingDeletion) => {
+    const { id } = entry;
     setUndoing(id);
     try {
       const response = await api.undoDeletion({ id });
@@ -55,7 +56,8 @@ export function PendingDeletions() {
       dismissToast(id);
       refresh();
     } catch (error) {
-      reportUndoFailure(error);
+      if (entry.failure) showToast({ tone: 'failed', title: 'Could not dismiss deletion failure', body: ConnectError.from(error).rawMessage });
+      else reportUndoFailure(error);
     } finally {
       setUndoing('');
     }
@@ -66,8 +68,11 @@ export function PendingDeletions() {
       const available = Number(entry.expiresAtUnixMillis) > now;
       return <li key={entry.id}>
         <span>{entry.title || (entry.sessionId ? 'Conversation' : 'Workspace')}</span>
-        {entry.failure ? <small role="status">Deletion failed. {entry.failure}</small> : available
-          ? <button type="button" disabled={!!undoing} onClick={() => void undo(entry.id)} aria-label={`Undo deletion of ${entry.title || 'item'}`}>Undo</button>
+        {entry.failure ? <>
+          <small role="status">Deletion failed. {entry.failure}</small>
+          <button type="button" disabled={!!undoing} onClick={() => void undo(entry)} aria-label={`Dismiss deletion failure for ${entry.title || 'item'}`}>Dismiss</button>
+        </> : available
+          ? <button type="button" disabled={!!undoing} onClick={() => void undo(entry)} aria-label={`Undo deletion of ${entry.title || 'item'}`}>Undo</button>
           : <small>Finishing deletion…</small>}
       </li>;
     })}</ul>

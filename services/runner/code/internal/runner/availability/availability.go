@@ -538,7 +538,7 @@ func (c *Cache) Cached() map[string]Program {
 func (c *Cache) Programs(ctx context.Context, refresh bool) (map[string]Program, time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.programs == nil || refresh {
+	if c.programs == nil || refresh || time.Since(c.checked) >= 6*time.Hour {
 		c.programs = c.Probe.Programs(ctx)
 		c.checked = time.Now()
 	}

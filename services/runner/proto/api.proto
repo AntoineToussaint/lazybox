@@ -763,6 +763,8 @@ message ProviderAvailabilityRequest {
   // Probe the provider programs again (path and version) instead of answering
   // from the last probe.
   bool refresh = 1;
+  // Include latest official stable releases from the Runner’s cached check.
+  bool check_updates = 2;
 }
 message ProviderAvailability {
   // Every provider the Runner knows, installed or not, in a fixed order.
@@ -798,6 +800,8 @@ message ProviderStatus {
   // agent's own list (its command_catalog event) is more precise; this is
   // the fallback for an agent that reports none. Empty for an ACP agent.
   repeated ProviderModel models = 12;
+  // Latest stable release if the optional update check succeeded.
+  string latest_version = 13;
 }
 // One model a provider offers, as the model picker lists it.
 message ProviderModel {

@@ -37,14 +37,14 @@ export function CallRow({call,now,nested=false,focused=false}:{call:ToolCall;now
  </details>;
 }
 
-export function ToolActivity({events,truncated=false}:{events:JournalEvent[];truncated?:boolean}){
+export function ToolActivity({events,truncated=false,sessionId}:{events:JournalEvent[];truncated?:boolean;sessionId?:string}){
  const {calls,available}=useMemo(()=>toolActivity(events),[events]);
  const [open,setOpen]=useState(false),[query,setQuery]=useState(''),[limit,setLimit]=useState(100),[filter,setFilter]=useState('all'),[now,setNow]=useState(Date.now);
  const dialog=useRef<HTMLDialogElement>(null);
  // "Open full details" on a conversation's tool line opens this dialog on that call.
  const [focus,setFocus]=useState('');
  const callsRef=useRef(calls);callsRef.current=calls;
- useEffect(()=>{const show=(event:Event)=>{const id=(event as CustomEvent<{id:string}>).detail?.id;const call=id&&callsRef.current.find(c=>c.id===`root:${id}`||c.id.endsWith(`:${id}`));if(!call)return;setQuery('');setFilter('all');setLimit(Number.MAX_SAFE_INTEGER);setFocus(call.id);setOpen(true);};window.addEventListener(TOOL_DETAILS_EVENT,show);return()=>window.removeEventListener(TOOL_DETAILS_EVENT,show);},[]);
+ useEffect(()=>{const show=(event:Event)=>{const request=(event as CustomEvent<{id:string;sessionId?:string}>).detail;if(request?.sessionId&&request.sessionId!==sessionId)return;const id=request?.id;const call=id&&callsRef.current.find(c=>c.id===`root:${id}`||c.id.endsWith(`:${id}`));if(!call)return;setQuery('');setFilter('all');setLimit(Number.MAX_SAFE_INTEGER);setFocus(call.id);setOpen(true);};window.addEventListener(TOOL_DETAILS_EVENT,show);return()=>window.removeEventListener(TOOL_DETAILS_EVENT,show);},[sessionId]);
  const running=calls.filter(c=>c.status==='Running').length,failed=calls.filter(c=>c.status==='Failed').length,unknown=calls.filter(c=>c.status==='Result not reported').length;
  useEffect(()=>{if(open){setNow(Date.now());dialog.current?.showModal();dialog.current?.querySelector<HTMLInputElement>('input')?.focus();}},[open]);
  useEffect(()=>{if(!open||!running)return;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[open,running]);

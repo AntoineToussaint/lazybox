@@ -164,7 +164,9 @@ func (b *Bench) UndoDeletion(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.entries[id]
-	if !ok || !time.Now().Before(entry.Expires) {
+	// A failed cleanup has already stopped. Clearing its record cancels the
+	// failed request without doing anything to the item or its files.
+	if !ok || (entry.Failure == "" && !time.Now().Before(entry.Expires)) {
 		return errors.New("the undo window has ended")
 	}
 	delete(s.entries, id)

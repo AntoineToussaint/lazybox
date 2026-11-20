@@ -68,3 +68,10 @@ func TestUnknownQuotaSentinelDoesNotBecomeZeroUsage(t *testing.T) {
 		t.Fatalf("invented quota: %+v", observation)
 	}
 }
+
+func TestSpawnRecipientsGetBriefBeforeAgentStates(t *testing.T) {
+	events := collaborationEvents(json.RawMessage(`{"item":{"id":"spawn","type":"collabAgentToolCall","tool":"spawnAgent","senderThreadId":"root","prompt":"Audit the transcript","receiverThreadIds":["child"]}}`), "root")
+	if len(events) != 1 || events[0].AgentID != "codex:child" || events[0].Name != "Audit the transcript" || events[0].Status != "starting" {
+		t.Fatalf("missing child brief or status: %+v", events)
+	}
+}

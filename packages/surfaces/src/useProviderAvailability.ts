@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ProviderAvailability } from '@lazybox/protocol';
+import { CHECK_EVERY_MS } from './update-model';
 import { useRunner } from './RunnerContext';
 
 /**
@@ -9,7 +10,7 @@ import { useRunner } from './RunnerContext';
  * programs again. A Runner without the RPC (an older one) reports nothing,
  * and the caller falls back to its own choices.
  */
-export function useProviderAvailability(enabled = true) {
+export function useProviderAvailability(enabled = true, checkUpdates = false) {
   const { api, info } = useRunner();
   const [report, setReport] = useState<ProviderAvailability>();
   const [error, setError] = useState('');
@@ -19,17 +20,22 @@ export function useProviderAvailability(enabled = true) {
     const call = ++latest.current;
     setChecking(true);
     try {
-      const next = await api.getProviderAvailability({ refresh });
+      const next = await api.getProviderAvailability({ refresh, checkUpdates });
       if (call === latest.current) { setReport(next); setError(''); }
     } catch (e) {
       if (call === latest.current) setError(String(e));
     } finally {
       if (call === latest.current) setChecking(false);
     }
-  }, [api]);
+  }, [api, checkUpdates]);
   // Profiles and their states, as Info reports them: a sign-in, a new
   // subscription or a limit reached elsewhere changes what can be used.
   const profiles = (info?.profiles || []).map(p => `${p.id}:${p.availability?.state || ''}:${p.availability?.resetAt || ''}`).join('|');
   useEffect(() => { if (enabled && info) void load(false); }, [enabled, !!info, profiles, load]);
+  useEffect(() => {
+    if (!checkUpdates || !enabled || !info) return;
+    const timer = setInterval(() => void load(false), CHECK_EVERY_MS);
+    return () => clearInterval(timer);
+  }, [checkUpdates, enabled, !!info, load]);
   return { report, error, checking, refresh: () => load(true) };
 }

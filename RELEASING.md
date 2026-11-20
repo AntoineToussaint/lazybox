@@ -315,12 +315,11 @@ locally needs (`release.json` records `"updaterKey": "test"`).
    test installs a uniquely named test launchd job, updates it to a second
    copy of the build, checks a terminal survived, and removes it).
 8. Tag `v2-v0.1.0` and push the tag.
-9. **Publish the docs.** The site is `docs/` rendered by VitePress
-   (`docs-site/`), the same Markdown the app's docs viewer shows. Preview it
-   first: `npm run docs:check` (builds into `.cache/docs-site` and fails on a
-   dead link or anchor), then `npm run docs:preview`; `npm run docs:dev`
-   reloads as you edit. The standalone repository deploys it to GitHub Pages
-   with its **Docs** workflow (`.github/workflows/docs.yml`).
+9. **Publish the public site.** Run `npm run site:build` to assemble the
+   homepage, VitePress guides and V1 archive in `.cache/site` and check
+   local links and anchors. See [the site build and domain cutover](site/README.md).
+   For live documentation edits run `npm run docs:dev`. The **Docs**
+   workflow (`.github/workflows/docs.yml`) uploads the combined site.
    It runs only on a `v2-v*` tag and by hand, never on a push to `main`.
    - Once, before the first deployment: make the repository public (step 5),
      then Settings → Pages → Build and deployment → Source: **GitHub

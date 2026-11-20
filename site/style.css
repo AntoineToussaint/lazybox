@@ -1,0 +1,43 @@
+:root {
+  color-scheme: light dark;
+  --bg: #18191d;
+  --fg: #f3f2f7;
+  --muted: #c0bec9;
+  --line: #45434e;
+  --accent: #c7baff;
+  font: 100%/1.6 system-ui, sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #faf9f7; --fg: #24232a; --muted: #55535e; --line: #d6d2dc; --accent: #5940a7; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+main, .mast, .foot { max-width: 76rem; margin: auto; padding-inline: clamp(1rem, 5vw, 4rem); }
+.mast, .foot, nav, .wordmark { display: flex; align-items: center; gap: .55rem; }
+.mast, .foot { justify-content: space-between; padding-block: 1.15rem; flex-wrap: wrap; }
+nav { gap: clamp(.8rem, 3vw, 2rem); }
+a { color: var(--accent); text-underline-offset: .2em; }
+.mast a { text-decoration: none; color: var(--fg); }
+.mast a:hover, .mast a[aria-current] { text-decoration: underline; }
+.wordmark { font-size: 1.35rem; font-weight: 720; text-decoration: none; color: var(--fg); }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+.skip { position: absolute; transform: translateY(-150%); background: var(--bg); padding: .6rem; }
+.skip:focus { transform: none; }
+.hero { padding-top: clamp(2rem, 4vw, 4.25rem); }
+.release { color: var(--muted); font: .95rem ui-monospace, monospace; }
+h1, h2 { line-height: 1.06; letter-spacing: -.045em; text-wrap: balance; }
+h1 { font-size: clamp(2.7rem, 7vw, 6.25rem); margin: .32em 0 .2em; }
+h2 { font-size: clamp(2rem, 4vw, 3.5rem); margin: 0; }
+p { max-width: 64ch; }
+.lead { max-width: 43rem; font-size: clamp(1.1rem, 2vw, 1.4rem); color: var(--muted); }
+.action { display: inline-block; padding: .68rem 1.1rem; color: var(--bg); background: var(--fg); border-radius: .45rem; text-decoration: none; font-weight: 650; }
+.hero picture { display: block; margin: 2.25rem 0; }
+.hero img, .feature img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: .6rem; }
+.feature { border-top: 1px solid var(--line); padding-block: clamp(2rem, 5vw, 4rem); display: grid; align-items: center; gap: 2rem; grid-template-columns: 2fr 3fr; }
+.install { border-top: 1px solid var(--line); padding-block: 3rem; }
+pre { width: fit-content; max-width: 100%; overflow-x: auto; padding: 1rem; border: 1px solid var(--line); border-radius: .45rem; }
+.foot { border-top: 1px solid var(--line); font-size: .95rem; }
+@media (max-width: 42rem) {
+  .feature { grid-template-columns: 1fr; }
+  pre { font-size: .82rem; }
+}

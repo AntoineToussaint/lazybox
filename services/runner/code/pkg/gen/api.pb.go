@@ -2752,7 +2752,9 @@ type ProviderAvailabilityRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Probe the provider programs again (path and version) instead of answering
 	// from the last probe.
-	Refresh       bool `protobuf:"varint,1,opt,name=refresh,proto3" json:"refresh,omitempty"`
+	Refresh bool `protobuf:"varint,1,opt,name=refresh,proto3" json:"refresh,omitempty"`
+	// Include latest official stable releases from the Runner’s cached check.
+	CheckUpdates  bool `protobuf:"varint,2,opt,name=check_updates,json=checkUpdates,proto3" json:"check_updates,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2790,6 +2792,13 @@ func (*ProviderAvailabilityRequest) Descriptor() ([]byte, []int) {
 func (x *ProviderAvailabilityRequest) GetRefresh() bool {
 	if x != nil {
 		return x.Refresh
+	}
+	return false
+}
+
+func (x *ProviderAvailabilityRequest) GetCheckUpdates() bool {
+	if x != nil {
+		return x.CheckUpdates
 	}
 	return false
 }
@@ -2876,7 +2885,9 @@ type ProviderStatus struct {
 	// the program lists (Codex's model/list), else a built-in list. A running
 	// agent's own list (its command_catalog event) is more precise; this is
 	// the fallback for an agent that reports none. Empty for an ACP agent.
-	Models        []*ProviderModel `protobuf:"bytes,12,rep,name=models,proto3" json:"models,omitempty"`
+	Models []*ProviderModel `protobuf:"bytes,12,rep,name=models,proto3" json:"models,omitempty"`
+	// Latest stable release if the optional update check succeeded.
+	LatestVersion string `protobuf:"bytes,13,opt,name=latest_version,json=latestVersion,proto3" json:"latest_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2993,6 +3004,13 @@ func (x *ProviderStatus) GetModels() []*ProviderModel {
 		return x.Models
 	}
 	return nil
+}
+
+func (x *ProviderStatus) GetLatestVersion() string {
+	if x != nil {
+		return x.LatestVersion
+	}
+	return ""
 }
 
 // One model a provider offers, as the model picker lists it.
@@ -37575,12 +37593,13 @@ const file_api_proto_rawDesc = "" +
 	"\x11restart_available\x18\t \x01(\bR\x10restartAvailable\x12\x1f\n" +
 	"\vinstance_id\x18\n" +
 	" \x01(\tR\n" +
-	"instanceId\"7\n" +
+	"instanceId\"\\\n" +
 	"\x1bProviderAvailabilityRequest\x12\x18\n" +
-	"\arefresh\x18\x01 \x01(\bR\arefresh\"\x8b\x01\n" +
+	"\arefresh\x18\x01 \x01(\bR\arefresh\x12#\n" +
+	"\rcheck_updates\x18\x02 \x01(\bR\fcheckUpdates\"\x8b\x01\n" +
 	"\x14ProviderAvailability\x12>\n" +
 	"\tproviders\x18\x01 \x03(\v2 .lazybox.bench.v1.ProviderStatusR\tproviders\x123\n" +
-	"\x16checked_at_unix_millis\x18\x02 \x01(\x03R\x13checkedAtUnixMillis\"\xb8\x03\n" +
+	"\x16checked_at_unix_millis\x18\x02 \x01(\x03R\x13checkedAtUnixMillis\"\xdf\x03\n" +
 	"\x0eProviderStatus\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x14\n" +
@@ -37594,7 +37613,8 @@ const file_api_proto_rawDesc = "" +
 	"\rsubscriptions\x18\n" +
 	" \x03(\v2*.lazybox.bench.v1.SubscriptionAvailabilityR\rsubscriptions\x120\n" +
 	"\x03acp\x18\v \x01(\v2\x1e.lazybox.bench.v1.AcpAgentInfoR\x03acp\x127\n" +
-	"\x06models\x18\f \x03(\v2\x1f.lazybox.bench.v1.ProviderModelR\x06models\"\x8f\x01\n" +
+	"\x06models\x18\f \x03(\v2\x1f.lazybox.bench.v1.ProviderModelR\x06models\x12%\n" +
+	"\x0elatest_version\x18\r \x01(\tR\rlatestVersion\"\x8f\x01\n" +
 	"\rProviderModel\x12\x14\n" +
 	"\x05value\x18\x01 \x01(\tR\x05value\x12!\n" +
 	"\fdisplay_name\x18\x02 \x01(\tR\vdisplayName\x12 \n" +

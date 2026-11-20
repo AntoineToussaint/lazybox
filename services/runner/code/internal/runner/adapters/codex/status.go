@@ -67,6 +67,7 @@ func collaborationEvents(raw json.RawMessage, root string) []agent.Event {
 		Item struct {
 			ID, Type, Tool, SenderThreadID string
 			Prompt                         *string
+			ReceiverThreadIDs              []string
 			AgentsStates                   map[string]struct {
 				Status  string
 				Message *string
@@ -78,19 +79,32 @@ func collaborationEvents(raw json.RawMessage, root string) []agent.Event {
 	}
 	// Only a spawn's prompt is the child's brief; a later sendInput is a message to it.
 	brief := ""
-	if p.Item.Prompt != nil && (p.Item.Tool == "" || p.Item.Tool == "spawnAgent") {
+	spawn := p.Item.Tool == "" || p.Item.Tool == "spawnAgent"
+	if p.Item.Prompt != nil && spawn {
 		brief = boundedRunes(*p.Item.Prompt, briefLimit)
 	}
-	ids := make([]string, 0, len(p.Item.AgentsStates))
+	children := make(map[string]bool)
+	if spawn {
+		for _, id := range p.Item.ReceiverThreadIDs {
+			children[id] = true
+		}
+	}
 	for id := range p.Item.AgentsStates {
-		if id != root {
+		children[id] = true
+	}
+	ids := make([]string, 0, len(children))
+	for id := range children {
+		if id != "" && id != root {
 			ids = append(ids, id)
 		}
 	}
 	sort.Strings(ids)
 	events := []agent.Event{}
 	for _, id := range ids {
-		state := p.Item.AgentsStates[id]
+		state, reported := p.Item.AgentsStates[id]
+		if !reported {
+			state.Status = "pendingInit"
+		}
 		ev := agent.Event{Type: "agent_status", AgentID: actorID(id, root), ParentAgentID: actorID(p.Item.SenderThreadID, root), NativeID: id, AgentKind: "agent", Status: collabStatus(state.Status)}
 		data := map[string]string{}
 		if p.Item.ID != "" {

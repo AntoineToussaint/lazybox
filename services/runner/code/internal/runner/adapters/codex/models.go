@@ -151,9 +151,7 @@ func (s *session) reportModels() {
 // scratch CODEX_HOME: what the installed Codex offers, read without any
 // account, so it never touches a sign-in.
 func ListModels(ctx context.Context, binary string, env []string, cwd string) ([]agent.ModelChoice, error) {
-	if binary == "" {
-		binary = "codex"
-	}
+	binary = codexProgram(binary)
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	p, err := jsonl.Start(ctx, binary, []string{"app-server", "--stdio"}, env, cwd)

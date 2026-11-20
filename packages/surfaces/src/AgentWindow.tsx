@@ -628,7 +628,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     onRenamed={renamed => { setSession(renamed); refresh(); }} onError={setError}/>;
   const status = <><ChatStatus session={session} live={live}/><BrowsingBadge session={session} agentName={agentName} onShow={onShowBrowser}/><SubagentAttention/></>;
   const inspection = <><BackgroundWorkButton/><SessionInspection sessionID={sessionID} session={session} activity={transcript.activity} activityTruncated={transcript.activityTruncated}/></>;
-  const stats: HeaderStats = { background: <BackgroundWorkButton/>, usage: <TelemetryPanel executionId={sessionID} conversationId={session?.conversationId} compact/>, tools: <ToolActivity events={transcript.activity} truncated={transcript.activityTruncated}/>,
+  const stats: HeaderStats = { background: <BackgroundWorkButton/>, usage: <TelemetryPanel executionId={sessionID} conversationId={session?.conversationId} compact/>, tools: <ToolActivity sessionId={sessionID} events={transcript.activity} truncated={transcript.activityTruncated}/>,
     artifacts: session?.collectionId ? <ArtifactsChip collectionId={session.collectionId} sessionId={sessionID} conversationId={session.conversationId} title={realTitle}/> : undefined };
   const lifecycle = <SessionLifecycleButton session={session} allowStart={allowStart} onNewSession={newSession} onClose={() => void close()}/>;
 

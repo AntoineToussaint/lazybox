@@ -26,6 +26,7 @@ import { useConversationTabs, useTabsSetting } from './useConversationTabs';
 import { openModeFor } from './conversation-tabs';
 import './workspace.css';
 import './workspace-shell.css';
+import { ProviderUpdateNotices } from './ProviderUpdates';
 import { SettingsPage, type SettingsTab } from './SettingsPage';
 import { RestartNotice } from './RunnerControl';
 import { AttentionScope } from './useAttention';
@@ -1109,6 +1110,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       </>}
     <PeekHost navigation={{ showSession, showModule: kind => void showModule(kind), showTerminal, openArtifact: (collectionId, artifactId) => { if (!openArtifact({ collectionId, artifactId })) showModule('artifacts'); },
       openFile: (collectionId, path, line) => { if (!workbench || collectionId !== workspaceID) return false; workbench.open(path, { line, focus: true }); return true; } }}/>
+    {!fixedWorkspaceId && <ProviderUpdateNotices store={viewState} onOpen={() => { setSettingsTab('agents'); setSettings(true); }}/> }
     <Onboarding viewState={viewState} collections={collections} collectionsLoaded={catalogLoaded} settingsOpen={settings} onWorkspace={id => select({ collectionId: id, sessionId: '', commandId: '' })} automatic={!fixedWorkspaceId} host={host} sessionId={page.selection.sessionId} onOpenSettings={tab => { if (fixedWorkspaceId) return; setSettingsTab(tab); setSettings(true); }}/>
     {quickOpen && workbench && <QuickOpen key={workbench.workspaceId} workbench={workbench} onClose={() => setQuickOpen(false)}/>}
     {quickLook && workspaceID && <FilePreview key={`${workspaceID}:${quickLook.path}`} workspaceId={workspaceID} reference={quickLook} viewState={viewState} onClose={() => setQuickLook(undefined)}/>}

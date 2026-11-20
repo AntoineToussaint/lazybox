@@ -23,7 +23,7 @@ export type SubagentStatus = 'starting' | 'running' | 'waiting' | 'done' | 'fail
 export const activeSubagent = (status: SubagentStatus) => status === 'starting' || status === 'running' || status === 'waiting';
 
 export type SubagentItem =
-  | { kind: 'message'; id: string; text: string }
+  | { kind: 'message'; id: string; text: string; itemId?: string }
   | { kind: 'tool'; id: string; call: ToolCall }
   /** A sub-agent this one spawned, at the point it spawned it. */
   | { kind: 'agent'; id: string; agentId: string };
@@ -474,11 +474,12 @@ export class SubagentFold {
         if (agent.status === 'starting') agent.status = 'running';
         this.phase(agent, 'responding', '', at);
         const items = agent.items, last = items.at(-1);
-        if (last?.kind === 'message') {
+        const itemId = text(payload(e.providerDataJson)?.itemId) || undefined;
+        if (last?.kind === 'message' && last.itemId === itemId) {
           if (last.text.length >= MAX_MESSAGE) return;
           const owned = this.items(agent);
           owned[owned.length - 1] = { ...last, text: last.text + e.text };
-        } else this.push(agent, { kind: 'message', id: `message:${record.cursor}`, text: e.text });
+        } else this.push(agent, { kind: 'message', id: `message:${record.cursor}`, text: e.text, ...(itemId ? { itemId } : {}) });
         return;
       }
       case 'activity':

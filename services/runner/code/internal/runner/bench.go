@@ -230,7 +230,8 @@ type Bench struct {
 	ports portCache
 	// Availability is the last probe of the provider programs
 	// (provider_availability.go); a test may replace its Probe.
-	Availability *availability.Cache
+	Availability     *availability.Cache
+	ProviderReleases availability.ReleaseCache
 	// Adapters is an injection boundary for deterministic conformance tests.
 	Adapters map[string]agent.Adapter
 	// ACP lists the ACP agents the Runner runs (acp_agents.go).

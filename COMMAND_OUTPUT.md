@@ -499,3 +499,9 @@ and `${LAZYBOX_V2_CLI}` as `lazybox`.
   shell tool after a move (the tests run the CLI directly), Codex's
   `workspace-write` sandbox around the follower, and Linux's `/proc` port
   lookup outside its unit test.
+
+Click the command in the running turn’s bar above the composer to inspect
+its output. Lazybox-managed commands open in the live console. A command
+run directly by the agent opens that tool call in Activity, where output
+appears as the provider reports it. Output redirected to a file stays in
+that file.

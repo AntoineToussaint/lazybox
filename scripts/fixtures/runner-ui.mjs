@@ -154,13 +154,13 @@ export async function startRunnerFixture() {
   const availabilityRank = { available: 0, unverified: 1, limited: 2, billing: 3, sign_in: 4 };
   // ACP agents (acp-ui-fake.mjs): none installed until a test says so.
   const acp = createAcpFake({ profiles, mutations });
-  const availabilityReport = () => ({ checkedAtUnixMillis: String(Date.now()), providers: ['claude', 'codex'].map(provider => {
+  const availabilityReport = (checkUpdates = false) => ({ checkedAtUnixMillis: String(Date.now()), providers: ['claude', 'codex'].map(provider => {
     const program = availability[provider];
     const subscriptions = profiles.filter(p => p.provider === provider).map(p => { const s = availability.states[p.id] || { state: 'available', detail: 'Signed in' }; return { profileId: p.id, label: p.label || '', isolation: p.isolation, managed: !!p.managed, state: s.state, resetAt: String(s.resetAt || 0), detail: s.detail || '' }; })
       .sort((a, b) => availabilityRank[a.state] - availabilityRank[b.state] || Number(b.managed) - Number(a.managed));
     const best = subscriptions[0]?.state;
     const state = !program.installed ? 'not_installed' : program.error ? 'unusable' : !best ? 'no_subscription' : best === 'available' || best === 'unverified' ? 'ready' : best;
-    return { provider, title: provider === 'claude' ? 'Claude Code' : 'Codex', state, installed: program.installed, path: program.installed ? program.path : '', version: program.installed ? program.version : '', source: program.installed ? program.source : '', error: program.installed ? program.error : `${provider === 'claude' ? 'Claude Code' : 'Codex'} is not installed on the Runner's computer.`, installCommand: program.installed ? '' : provider === 'claude' ? 'curl -fsSL https://claude.ai/install.sh | bash' : 'npm install -g @openai/codex', subscriptions, models: availability.models[provider] || [] };
+    return { provider, title: provider === 'claude' ? 'Claude Code' : 'Codex', state, installed: program.installed, path: program.installed ? program.path : '', version: program.installed ? program.version : '', latestVersion: checkUpdates ? program.latestVersion : undefined, source: program.installed ? program.source : '', error: program.installed ? program.error : `${provider === 'claude' ? 'Claude Code' : 'Codex'} is not installed on the Runner's computer.`, installCommand: program.installed ? '' : provider === 'claude' ? 'curl -fsSL https://claude.ai/install.sh | bash' : 'npm install -g @openai/codex', subscriptions, models: availability.models[provider] || [] };
   }).concat(acp.providers()) });
   const completeEnrollment = id => { const flow = enrollments.get(id); if (!flow) throw new Error('Unknown fixture enrollment'); if (flow.state === 'added') return; flow.state = 'added'; flow.signInUrl = ''; flow.userCode = ''; profiles.push({ id: flow.profileId, provider: flow.provider, label: flow.label, managed:true, isolation: 'environment', availability: flow.provider === 'codex' ? { state: 'available', plan: 'pro', observedAtUnixMillis: String(Date.now()), windows: [{ name: 'codex:primary', durationMinutes: '300', usedPercent: 73, resetAt: String(Math.floor(Date.now()/1000)+3600) }] } : { state: 'unknown' } }); };
   // The provider refused the sign-in: errorCode is what the client offers a way out of.
@@ -711,7 +711,7 @@ actions:
       case 'GetProviderAvailability': {
         if (device) return error('permission_denied', 'this device is not allowed to do that');
         if (body.refresh) availability.refreshes++;
-        return json(availabilityReport());
+        return json(availabilityReport(body.checkUpdates));
       }
       case 'Info': return json({ restartAvailable: runner.restartAvailable, instanceId: runner.instanceId, profiles, pendingEnrollments: [...enrollments.values()].filter(flow => flow.state === 'awaiting_login').map(({ id, state, provider, label, profileId }) => ({ id, state, provider, label, profileId })), sessions: visibleSessions(), attachmentLimits: { maxFiles: 4, maxFileBytes: '20971520', maxMessageBytes: '20971520' } });
       case 'AddSubscription': {

@@ -469,3 +469,37 @@ func TestReattachedSessionKeepsItsMeteringAttemptAndGetsAFreshRoute(t *testing.T
 		t.Fatal("metering attempt changed across re-attachment")
 	}
 }
+
+func TestCodexLongContextRequestIsPricedAndSplitWithoutDoubleCounting(t *testing.T) {
+	ctx := context.Background()
+	data := store(t)
+	sc := scope()
+	sc.Provider = "codex"
+	native := &agenttest.Adapter{}
+	adapter := Adapter{Native: native, Store: data, Prices: DefaultRates(), Scope: sc}
+	session, err := adapter.Open(ctx, agent.Open{ID: "execution", Profile: "account"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	event := agent.Event{Type: "usage", AgentID: "root", TurnID: "turn",
+		Data: json.RawMessage(`{"threadId":"fixture","model":"gpt-6.2-sol","tokenUsage":{"last":{"totalTokens":367100,"inputTokens":366000,"cachedInputTokens":300000,"outputTokens":1100,"reasoningOutputTokens":800},"modelContextWindow":475000,"total":{"inputTokens":366000,"cachedInputTokens":300000,"outputTokens":1100}}}`)}
+	for range 2 {
+		native.Session.Events <- event
+		if _, err := session.Receive(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report := read(t, data)
+	if len(report.Groups) != 1 || report.Groups[0].Records != 1 || value(report.Groups[0].Nanos) != 340500000 {
+		t.Fatalf("unexpected cost: %+v", report.Groups)
+	}
+	if len(report.Contexts) != 1 || len(report.Contexts[0].Categories) != 4 {
+		t.Fatalf("missing Codex token breakdown: %+v", report.Contexts)
+	}
+	for i, tokens := range []int64{66000, 300000, 800, 300} {
+		if value(report.Contexts[0].Categories[i].Tokens) != tokens {
+			t.Fatalf("unexpected category: %+v", report.Contexts[0].Categories[i])
+		}
+	}
+}

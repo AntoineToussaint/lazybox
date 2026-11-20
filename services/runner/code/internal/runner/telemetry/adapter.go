@@ -188,18 +188,27 @@ func (s *session) record(ctx context.Context, ev agent.Event) (bool, error) {
 		total := object(usage["total"])
 		// The adapter adds the model in force (Codex's own usage names none).
 		c := ContextSnapshot{Scope: s.scope, Agent: actor, Model: str(body["model"]), Source: "sdk", Used: count(last["totalTokens"]), Capacity: count(usage["modelContextWindow"])}
+		c.Categories = codexContextParts(last, c.Used)
+		if len(c.Categories) > 0 {
+			c.Source = "sdk_token_breakdown"
+		}
 		if err := s.adapter.Store.PutContext(ctx, c); err != nil {
 			return true, err
 		}
-		if !s.metered && len(total) > 0 {
-			input, cached := count(total["inputTokens"]), count(total["cachedInputTokens"])
-			if cached == nil {
-				cached = number(0)
+		if tokens, ok := codexTokens(total); !s.metered && ok {
+			r := Record{Scope: s.scope, Agent: actor, Parent: ev.ParentAgentID, Source: "sdk", ResponseID: str(body["threadId"]), Status: "complete", Tokens: tokens}
+			if latest, ok := codexTokens(last); ok && c.Model != "" && ev.TurnID != "" {
+				request := r
+				request.Model, request.Tokens = c.Model, latest
+				if value(count(last["cacheWriteInputTokens"])) > 0 || value(count(total["cacheWriteInputTokens"])) > 0 {
+					request.Reason = "Codex did not report cache write retention"
+				}
+				if s.adapter.Prices != nil {
+					request = s.adapter.Prices.Price(request)
+				}
+				r.latestRequest = &request
 			}
-			if input != nil && *input >= *cached {
-				r := Record{Scope: s.scope, Agent: actor, Parent: ev.ParentAgentID, Source: "sdk", ResponseID: str(body["threadId"]), Status: "complete", Tokens: Tokens{Input: number(*input - *cached), Output: count(total["outputTokens"]), CacheRead: cached, CacheWrite5m: number(0), CacheWrite1h: number(0)}}
-				return true, s.adapter.Store.PutCumulative(ctx, r, s.resumed)
-			}
+			return true, s.adapter.Store.PutCumulative(ctx, r, s.resumed)
 		}
 		return true, nil
 	}

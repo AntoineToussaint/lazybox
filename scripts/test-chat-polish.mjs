@@ -36,6 +36,7 @@ try{
  const chat=page.locator('.embedded-chat:visible').first(),header=chat.locator('.chat-heading');
  await expect(header.locator('.conversation-title')).toContainText('Fix the flaky login test');
  const reply=chat.locator('article.message_delta').filter({hasText:'Let me look at the test'});
+ await expect(reply.locator('.eyebrow')).toHaveCount(0);
  const replyTime=reply.getByRole('button',{name:/Show exact time/});
  await expect(chat.locator('.message-day').first()).toBeVisible();
  await expect(replyTime).toHaveCSS('opacity','0');

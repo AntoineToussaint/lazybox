@@ -279,8 +279,10 @@ pub fn start(
         CapabilityBuilder::new("local-runner")
             .webviews(APP_WEBVIEWS)
             .permission("core:default")
+            // Tauri forwards window.print() to the native print dialog on macOS.
+            .permission("core:webview:allow-print")
             // View → Zoom In / Zoom Out / Actual Size (Cmd+= / Cmd+- / Cmd+0)
-            // and Settings → Appearance set every window's webview zoom.
+            // set a window’s zoom. Settings → Appearance sets the app default.
             .permission("core:webview:allow-set-webview-zoom")
             // Context menus: Reveal in Finder for a workspace file.
             .permission("opener:allow-reveal-item-in-dir")
@@ -490,7 +492,7 @@ pub fn open(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     window
         .set_position(tauri::PhysicalPosition::new(placement.x, placement.y))
         .map_err(|e| e.to_string())?;
-    // Before it shows: a new window opens at the zoom every other one has.
+    // Before it shows: a new window opens at the saved app default.
     window
         .set_zoom(app.state::<crate::appearance::Zoom>().level())
         .map_err(|e| e.to_string())?;
@@ -765,7 +767,7 @@ fn build_menu(
         ],
     )?;
     menu.append(&surfaces)?;
-    // The UI zoom: one level for every window, kept across launches.
+    // Zoom shortcuts apply to the focused window.
     let zoom = Submenu::with_items(
         app,
         "Zoom",
@@ -954,12 +956,17 @@ fn popout_window(
         return tauri::webview::NewWindowResponse::Deny;
     }
     let label = format!("popout-{}", NEXT.fetch_add(1, Ordering::SeqCst));
+    let level = app
+        .try_state::<crate::appearance::Zoom>()
+        .map(|zoom| zoom.level())
+        .unwrap_or(1.0);
     let built = crate::title_bar::window(app, &label, WebviewUrl::External(url.clone()))
         .map(|builder| builder.window_features(features))
         .and_then(|builder| {
             builder
                 .disable_drag_drop_handler()
-                .zoom_hotkeys_enabled(true)
+                .zoom_hotkeys_enabled(false)
+                .initialization_script(crate::appearance::popout_zoom_script(level))
                 .title(title)
                 .min_inner_size(320.0, 200.0)
                 .build()
@@ -969,11 +976,8 @@ fn popout_window(
             if let Ok(mut openers) = POPOUT_OPENERS.lock() {
                 openers.insert(label, opener.to_string());
             }
-            // At the zoom every other window has, as `open` does: its tab bar
-            // leaves the window buttons room by that zoom (title_bar.rs).
-            if let Some(zoom) = app.try_state::<crate::appearance::Zoom>()
-                && let Err(error) = window.set_zoom(zoom.level())
-            {
+            // Open at the saved app default, with matching title-bar spacing.
+            if let Err(error) = window.set_zoom(level) {
                 report(app, format!("Could not zoom the panel's window: {error}"));
             }
             tauri::webview::NewWindowResponse::Create { window }
@@ -1115,6 +1119,11 @@ fn is_workspace_window(label: &str) -> bool {
 
 pub fn window_event(window: &tauri::Window, event: &WindowEvent) {
     crate::title_bar::window_event(window, event);
+    if matches!(event, WindowEvent::Destroyed)
+        && let Some(zoom) = window.try_state::<crate::appearance::Zoom>()
+    {
+        zoom.forget(window.label());
+    }
     // Popped-out panel windows belong to their opener, not to the window layout.
     if window.label().starts_with("popout-") {
         if matches!(event, WindowEvent::Destroyed)
@@ -1228,14 +1237,20 @@ pub fn menu_event(app: &tauri::AppHandle, id: &str) {
         "reopen-agent" => open(app, "main"),
         "reopen-closed" => reopen_closed(app.clone()),
         "zoom-in" | "zoom-out" | "zoom-reset" => {
-            let level = app.state::<crate::appearance::Zoom>().level();
             let direction = match id {
                 "zoom-in" => 1,
                 "zoom-out" => -1,
                 _ => 0,
             };
-            crate::appearance::apply_zoom(app, crate::appearance::step(level, direction))
-                .map(|_| ())
+            match app
+                .get_focused_window()
+                .and_then(|window| app.get_webview_window(window.label()))
+            {
+                Some(window) if app.try_state::<crate::appearance::Zoom>().is_some() => {
+                    crate::appearance::step_window_zoom(&window, direction)
+                }
+                _ => Ok(()),
+            }
         }
         "reload-view" => app
             .windows()

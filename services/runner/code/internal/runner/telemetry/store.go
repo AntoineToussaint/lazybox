@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -198,10 +199,14 @@ func (s *SQLite) PutCumulative(ctx context.Context, r Record, resumed bool) erro
 		if r.Tokens.Input == nil || r.Tokens.Output == nil {
 			return nil
 		} // Ignore stale/regressing counters.
-		// Lifetime deltas may span multiple models. Preserve counts but never price
-		// them using whichever model happened to be selected at the last update.
-		r.Nanos = nil
-		r.Reason = "Provider cumulative usage; per-request model price unavailable"
+		// Only a delta matching the latest attributed request can use its price.
+		// Replays and rate-limit notifications with unchanged totals add nothing.
+		if request := r.latestRequest; request != nil && reflect.DeepEqual(r.Tokens, request.Tokens) {
+			r.Model, r.Nanos, r.Costs, r.PriceVersion, r.Reason = request.Model, request.Nanos, request.Costs, request.PriceVersion, request.Reason
+		} else {
+			r.Nanos = nil
+			r.Reason = "Provider cumulative usage; per-request model price unavailable"
+		}
 		if *r.Tokens.Input+*r.Tokens.Output+value(r.Tokens.CacheRead) > 0 {
 			body, _ := json.Marshal(r)
 			if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO usage VALUES(?,?,?,?)", r.ID, r.Scope.Workspace, r.Scope.Execution, string(body)); err != nil {
@@ -339,7 +344,7 @@ func (s *SQLite) Report(ctx context.Context, q Query) (Report, error) {
 			}
 			seen[key] = true
 		}
-		if r.Nanos == nil && q.Prices != nil && (r.Reason == "" || r.Reason == "No exact model price" || r.Reason == "Incomplete rate card") {
+		if r.Nanos == nil && q.Prices != nil && (r.Reason == "" || r.Reason == "No exact model price" || r.Reason == "Incomplete rate card" || r.Reason == "Long-context price requires an explicit rate") {
 			r.Reason = ""
 			r = q.Prices.Price(r)
 		}

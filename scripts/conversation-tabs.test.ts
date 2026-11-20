@@ -149,6 +149,15 @@ test('closing a tab hands the front to its neighbour, whose conversation is sele
   assert.deepEqual(tabsToClose(work(), 'w-work-collections', 'others'), [], 'never the sidebar');
 });
 
+test('closing the last conversation leaves the workspace selected without a Chat tab', () => {
+  const page = work('a');
+  const closed = closeTab(page, chats(page)[0].id);
+  assert.deepEqual(chats(closed), []);
+  assert.equal(closed.selection.collectionId, page.selection.collectionId);
+  assert.equal(closed.selection.sessionId, '');
+  assert.equal(closed.selection.commandId, '');
+});
+
 test('a chat tab brought forward in the dock selects its conversation', () => {
   let page = keepTab(work('a'), chats(work('a'))[0].id);
   page = open(page, 'b', 'background').page;

@@ -192,6 +192,17 @@ try {
         assert.ok(px(await bar.evaluate(node => getComputedStyle(node).paddingLeft)) < 24, 'a popped-out window in full screen drops the room');
         await page.evaluate(() => window.fixtureTitleBar.popoutFullScreen(false));
         assert.equal(await bar.evaluate(node => getComputedStyle(node).paddingLeft), '85px');
+        // The native popout scale and its opener's scale are independent.
+        await popup.evaluate(() => document.documentElement.style.setProperty('--popout-page-zoom', '1.25'));
+        await expect.poll(() => bar.evaluate(node => getComputedStyle(node).paddingLeft)).toBe('68px');
+        const openerHeader = page.locator('.workspace-header');
+        await expect.poll(async () => (await measure(openerHeader)).padding).toBe('89px');
+        await page.evaluate(() => window.fixtureTitleBar.zoom(2));
+        await expect.poll(async () => (await measure(openerHeader)).padding).toBe('45px');
+        await expect.poll(() => bar.evaluate(node => getComputedStyle(node).paddingLeft)).toBe('68px');
+        await page.evaluate(() => window.fixtureTitleBar.zoom(1));
+        await popup.evaluate(() => document.documentElement.style.setProperty('--popout-page-zoom', '1'));
+
         const closed = popup.waitForEvent('close');
         await popup.locator('.dock-put-back').first().click();
         await closed;

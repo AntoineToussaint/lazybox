@@ -1,14 +1,13 @@
-//! Appearance the native host owns: the UI zoom of every window, kept across
-//! launches, and telling every window when an app-wide preference (theme,
-//! fonts, shortcuts) changed in one of them.
+//! Native zoom, with a saved app default and overrides for open windows.
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, EventTarget, Manager, State, WebviewWindow};
 
 /// The steps Zoom In / Zoom Out walk, like a browser's.
 pub const ZOOM_STEPS: [f64; 13] = [
@@ -22,10 +21,21 @@ struct Saved {
     zoom: f64,
 }
 
-/// The UI zoom shared by every window, saved in the app's data folder.
+/// The saved app-wide setting and temporary zoom overrides by native window.
 pub struct Zoom {
     path: PathBuf,
-    level: Mutex<f64>,
+    level: Mutex<ZoomLevels>,
+}
+
+struct ZoomLevels {
+    default: f64,
+    windows: HashMap<String, f64>,
+}
+
+impl ZoomLevels {
+    fn for_window(&self, label: &str) -> f64 {
+        self.windows.get(label).copied().unwrap_or(self.default)
+    }
 }
 
 impl Zoom {
@@ -39,11 +49,37 @@ impl Zoom {
             .unwrap_or(1.0);
         Self {
             path,
-            level: Mutex::new(level),
+            level: Mutex::new(ZoomLevels {
+                default: level,
+                windows: HashMap::new(),
+            }),
         }
     }
     pub fn level(&self) -> f64 {
-        self.level.lock().map(|l| *l).unwrap_or(1.0)
+        self.level
+            .lock()
+            .map(|levels| levels.default)
+            .unwrap_or(1.0)
+    }
+    fn level_for(&self, label: &str) -> f64 {
+        self.level
+            .lock()
+            .map(|levels| levels.for_window(label))
+            .unwrap_or(1.0)
+    }
+    fn remember_window(&self, label: &str, level: f64) -> Result<(), String> {
+        self.level
+            .lock()
+            .map_err(|e| e.to_string())?
+            .windows
+            .insert(label.to_owned(), level);
+        Ok(())
+    }
+
+    pub fn forget(&self, label: &str) {
+        if let Ok(mut levels) = self.level.lock() {
+            levels.windows.remove(label);
+        }
     }
     /// Sets and saves the zoom; returns the level actually kept.
     pub fn set(&self, level: f64) -> Result<f64, String> {
@@ -54,7 +90,9 @@ impl Zoom {
         file.write_all(&serde_json::to_vec(&Saved { zoom: level }).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         file.persist(&self.path).map_err(|e| e.to_string())?;
-        *self.level.lock().map_err(|e| e.to_string())? = level;
+        let mut levels = self.level.lock().map_err(|e| e.to_string())?;
+        levels.default = level;
+        levels.windows.clear();
         Ok(level)
     }
 }
@@ -85,19 +123,51 @@ pub fn step(level: f64, direction: i8) -> f64 {
     }
 }
 
-/// Saves `level` and applies it to every open window, then tells them (Settings shows it).
-pub fn apply_zoom(app: &tauri::AppHandle, level: f64) -> Result<f64, String> {
-    let zoom = app.state::<Zoom>();
-    let level = zoom.set(level)?;
-    for window in app.webview_windows().values() {
-        window.set_zoom(level).map_err(|e| e.to_string())?;
+/// Supply the native scale to the blank document Dockview draws via its opener.
+pub fn popout_zoom_script(level: f64) -> String {
+    format!(
+        "(() => {{ const apply = () => document.documentElement.style.setProperty('--popout-page-zoom', '{level}'); if (document.documentElement) apply(); else document.addEventListener('DOMContentLoaded', apply, {{once:true}}); }})()"
+    )
+}
+
+fn apply_window_zoom(window: &WebviewWindow, level: f64) -> Result<(), String> {
+    window.set_zoom(level).map_err(|e| e.to_string())?;
+    if window.label().starts_with("popout-") {
+        window
+            .eval(popout_zoom_script(level))
+            .map_err(|e| e.to_string())
+    } else {
+        window
+            .emit_to(EventTarget::webview(window.label()), "ui-zoom", level)
+            .map_err(|e| e.to_string())
     }
-    app.emit("ui-zoom", level).map_err(|e| e.to_string())?;
+}
+
+pub fn step_window_zoom(window: &WebviewWindow, direction: i8) -> Result<(), String> {
+    let zoom = window.state::<Zoom>();
+    let level = step(zoom.level_for(window.label()), direction);
+    apply_window_zoom(window, level)?;
+    zoom.remember_window(window.label(), level)
+}
+
+/// An explicit change in Appearance applies the saved setting to all windows.
+pub fn apply_zoom(app: &tauri::AppHandle, level: f64) -> Result<f64, String> {
+    let level = app.state::<Zoom>().set(level)?;
+    for window in app.webview_windows().values() {
+        apply_window_zoom(window, level)?;
+    }
+    app.emit("ui-default-zoom", level)
+        .map_err(|e| e.to_string())?;
     Ok(level)
 }
 
 #[tauri::command]
-pub fn ui_zoom(zoom: State<'_, Zoom>) -> f64 {
+pub fn ui_zoom(window: WebviewWindow, zoom: State<'_, Zoom>) -> f64 {
+    zoom.level_for(window.label())
+}
+
+#[tauri::command]
+pub fn default_ui_zoom(zoom: State<'_, Zoom>) -> f64 {
     zoom.level()
 }
 
@@ -137,6 +207,26 @@ mod tests {
         assert_eq!(zoom.set(f64::NAN).expect("save"), 1.0);
         fs::write(root.path().join("appearance.json"), b"not json").expect("corrupt");
         assert_eq!(Zoom::open(root.path()).level(), 1.0);
+    }
+
+    #[test]
+    fn window_zoom_does_not_change_other_windows_or_the_saved_default() {
+        let root = tempfile::tempdir().expect("fixture");
+        let zoom = Zoom::open(root.path());
+        zoom.set(1.2).expect("default");
+        zoom.remember_window("artifact-1", step(zoom.level_for("artifact-1"), 1))
+            .expect("zoom artifact");
+        assert_eq!(zoom.level_for("artifact-1"), 1.25);
+        assert_eq!(zoom.level_for("main"), 1.2);
+        assert_eq!(Zoom::open(root.path()).level(), 1.2);
+        zoom.remember_window("main", step(zoom.level_for("main"), -1))
+            .expect("zoom main");
+        assert_eq!(zoom.level_for("main"), 1.1);
+        assert_eq!(zoom.level_for("artifact-1"), 1.25);
+        zoom.forget("artifact-1");
+        assert_eq!(zoom.level_for("artifact-1"), 1.2);
+        zoom.set(0.9).expect("new app default");
+        assert_eq!(zoom.level_for("main"), 0.9);
     }
 
     #[test]

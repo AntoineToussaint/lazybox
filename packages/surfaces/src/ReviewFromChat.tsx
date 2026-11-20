@@ -53,7 +53,7 @@ export function useChatReview({ session, sessionID, onError }: { session?: Sessi
     ...(shown ? [{ label: `Review with ${launcher.choices[0].label}`, icon: 'review', disabled: !!launcher.busy && 'A review is starting', run: () => start() }] : []),
     ...(underWay ? [{ label: 'Cancel review', icon: 'stop', run: () => cancelling.request(underWay) }] : []),
   ];
-  return { launcher, shown, running, start, menuItems, workspaceId, underWay, dialog: cancelling.dialog };
+  return { launcher, shown, running, start, menuItems, workspaceId, asReviewer, underWay, dialog: cancelling.dialog };
 }
 export type ChatReview = ReturnType<typeof useChatReview>;
 

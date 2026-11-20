@@ -50,6 +50,8 @@ you are reaching it under another name or address.
 | `runners` | Registered Runners, live or not, and which one the CLI uses. |
 | `send <conversation> [text\|-]` | Send a message. Text from the arguments, or stdin with `-` or when piped. An ended conversation is resumed first. `--steer` steers the running turn. |
 | `open <workspace\|conversation\|file[:line]> [--panel KIND] [--workspace W]` | Show it in the Lazybox window in front (desktop preferred over a browser tab). A file opens in its workspace: `--workspace`, the terminal's, or the only one. |
+| `workspace export-definition [WORKSPACE]` | Print a reusable collection.v1 definition. |
+| `workspace realize FILE --key REQUEST [--name NAME]` | Create worktrees from a definition. Repeat the request key to recover the same workspace. |
 | `workspace repos [WORKSPACE]` | A workspace's repositories (name, path, branch) and the requests agents made that still wait. Inside an agent or a workspace terminal, its own workspace. |
 | `repos` | Every repository and the person's home checkout of it, with its branch and changed files ([WORKSPACES.md](../../../../WORKSPACES.md#home-checkouts)). An agent sees its own workspace's repositories. |
 | `repo home <name\|owner/repo> [--create [--path P] \| --adopt PATH \| --forget \| --update]` | Print a repository's home checkout (`cd "$(lazybox repo home api)"`; exit 3 when it has none). The person can create one (a clone at the suggested place or `--path`), adopt a checkout they have, forget it (no file changes), or `--update` it: fetch, then fast-forward the default branch only when it is checked out and clean, else say why. |

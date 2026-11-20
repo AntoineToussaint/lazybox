@@ -110,6 +110,19 @@ func (p *Prompts) Close() error {
 	return p.log.close()
 }
 
+// Submitted reports whether the Runner recorded this conversation operation
+// after the engine accepted it. Used when an assignment spans a Runner restart.
+func (p *Prompts) Submitted(conversation, operation string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := len(p.events) - 1; i >= 0; i-- {
+		if p.events[i].Type == PromptSubmitted && p.events[i].Idempotency == conversation+"/"+operation {
+			return true
+		}
+	}
+	return false
+}
+
 // Submit records a prompt and, when it is a snippet, the snippet sent with
 // the chain it offers next.
 func (p *Prompts) Submit(actor Actor, prompt PromptPayload, next []string) error {

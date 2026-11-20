@@ -46,9 +46,7 @@ func loginError(message string) error {
 }
 
 func OpenAccount(ctx context.Context, binary string, env []string, cwd string, isolated bool) (*AccountClient, error) {
-	if binary == "" {
-		binary = "codex"
-	}
+	binary = codexProgram(binary)
 	args := []string{"app-server", "--stdio"}
 	if isolated {
 		args = append(args, "-c", `cli_auth_credentials_store="file"`)

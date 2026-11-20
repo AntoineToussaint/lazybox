@@ -28,7 +28,7 @@ export const ToolLineContext = createContext<ToolLineScope>({ root: '' });
 
 /** Asks the Activity dialog showing this call to open on it. */
 export const TOOL_DETAILS_EVENT = 'lazybox:tool-details';
-export function openToolDetails(id: string) { window.dispatchEvent(new CustomEvent(TOOL_DETAILS_EVENT, { detail: { id } })); }
+export function openToolDetails(id: string, sessionId?: string) { window.dispatchEvent(new CustomEvent(TOOL_DETAILS_EVENT, { detail: { id, sessionId } })); }
 
 const ICONS: Record<ToolKind, string> = { read: 'file', search: 'search', list: 'folder', edit: 'pencil', command: 'terminal', web: 'external', browser: 'globe', agent: 'branch', plan: 'checklist', thinking: 'sparkle', mcp: 'activity', other: 'activity' };
 const CATEGORY_ICONS: Record<ActivityCategory, string> = { explore: 'search', test: 'play', check: 'shield', build: 'processes', install: 'download', git: 'branch', web: 'external', browser: 'globe', command: 'terminal', tool: 'activity', plan: 'checklist', edit: 'pencil', thinking: 'sparkle' };

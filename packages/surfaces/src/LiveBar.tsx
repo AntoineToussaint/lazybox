@@ -18,6 +18,7 @@ import { openInBrowser, openInViewer, openPreview } from './web-links';
 import type { FileLink } from './file-reference';
 import type { OpenModifiers } from './file-links';
 import { readPreference, writePreference } from './view-state';
+import { openToolDetails } from './ToolLine';
 import { humanError } from './human-error';
 
 /** Whether the bar shows a command's latest lines: a choice that holds for every conversation until changed. */
@@ -148,6 +149,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
   const detail = managed && (!step || isManagedCommandTool(step.name) || !stepDetail(step).code)
     ? { ...commandParts(managed.argv.length ? managed.argv.join(' ') : managed.title), full: managed.argv.join(' ') || managed.title }
     : step ? stepDetail(step) : {};
+  const openOutput = managed && onOpenCommand ? () => openInConsole(managed.id) : step ? () => openToolDetails(step.id, sessionID) : undefined;
   const startedAt = step?.startedAt ?? (managed ? seen.current.get(managed.id) : undefined);
   const lines = managed ? outputLines(tail, expanded ? 40 : 3) : [];
   const stop = async () => {
@@ -175,6 +177,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
     { label: managed ? 'Stop command' : 'Interrupt', icon: 'stop', danger: true, disabled: !!managed && stopping === managed.id && 'Stopping…', run: () => stop() },
     managed && managed.ports.length > 0 && { label: `Preview :${managed.ports[0]}`, icon: 'globe', run: () => openPreview(managed.ports[0]) },
     managed && onOpenCommand && { label: 'Open in console', icon: 'output', run: () => openInConsole(managed.id) },
+    !managed && !!detail.code && openOutput && { label: 'View command output', icon: 'output', run: openOutput },
     managed && !tailHidden && { label: expanded ? 'Less output' : 'More output', icon: expanded ? 'collapse' : 'expand', run: () => expand(!expanded) },
     managed && { label: tailHidden ? 'Show output' : 'Hide output', icon: tailHidden ? 'eye' : 'close', run: () => showOutput(tailHidden) },
     'separator',
@@ -191,7 +194,9 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
       <LiveIndicator tone="busy"/>
       {/* The step and its time, as the status line says them. */}
       <span className="live-activity" data-tone="busy" aria-hidden="true">{detail.code ? live.label : detail.words || live.label}{startedAt !== undefined && now >= startedAt ? ` · ${elapsedLabel(now - startedAt)}` : live.text.slice(live.label.length) || '…'}</span>
-      {detail.code && <code className="live-bar-code" title={detail.full}>{detail.code}</code>}
+      {detail.code && (openOutput
+        ? <button type="button" className="live-bar-code live-bar-command" aria-label={`View command output: ${detail.code}`} title={detail.full} onClick={openOutput}>{detail.code}</button>
+        : <code className="live-bar-code" title={detail.full}>{detail.code}</code>)}
       {detail.where && <span className="live-bar-where" title={detail.where}>in <code>{detail.where}</code></span>}
       <span className="live-bar-actions">
         {managed && tailHidden && <button type="button" className="live-bar-button" aria-expanded={false} onClick={() => showOutput(true)} title={inConsole === managed.id && !hidden ? 'The output is open in the console. Show its latest lines here too' : 'Show the command’s latest output here'}><Icon name="eye" size={12}/><span>Show output</span></button>}

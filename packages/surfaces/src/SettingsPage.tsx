@@ -31,6 +31,7 @@ import { ClaudeAuthSettings } from './ClaudeAuthSettings';
 import { AgentSettings, PricingSettings, useRunnerSettings } from './RunnerSettings';
 import { RunnerSection } from './RunnerControl';
 import { OrchestrationProcessSettings } from './OrchestrationProcessSettings';
+import { ProviderUpdates } from './ProviderUpdates';
 import { AboutSettings } from './AboutSettings';
 import { Resizer } from './Resizer';
 import { runAction } from './actions';
@@ -86,7 +87,7 @@ const settingsTopics: { id: SettingsTab; label: string; keywords: string; anchor
   { id: 'chat', label: 'Conversation tabs', anchor: 'chat-conversation-tabs', keywords: 'open close preview conversations chat tabs' },
   { id: 'appearance', label: 'Display and zoom', keywords: 'theme dark light font text size zoom scale colour color' },
   { id: 'extensions', label: 'Extensions', keywords: 'plugin plugins installed panels' },
-  { id: 'agents', label: 'Agent configuration', keywords: 'claude codex model effort permissions acp terminal' },
+  { id: 'agents', label: 'Agent configuration', keywords: 'claude codex model effort permissions acp terminal updates update version upgrade' },
   { id: 'subscriptions', label: 'Subscription accounts', keywords: 'sign in login account claude codex usage limit rotation switch' },
   { id: 'repositories', label: 'Repository home checkouts', keywords: 'git checkout clone home folder github' },
 ];
@@ -417,7 +418,7 @@ export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openS
     {panel('runner', <RunnerSection onShowProcesses={onShowProcesses}/>)}
     {panel('process', <OrchestrationProcessSettings/>)}
     {panel('about', <AboutSettings app={app}/>)}
-    {panel('agents', <><AgentSettings/><ClaudeAuthSettings onRunInShell={onRunInShell}/><AcpAgentsSettings/><TerminalSettings/></>)}
+    {panel('agents', <><ProviderUpdates onOpenAbout={() => select('about', true)}/><AgentSettings/><ClaudeAuthSettings onRunInShell={onRunInShell}/><AcpAgentsSettings/><TerminalSettings/></>)}
     {panel('workspaces', <RuntimeSettings/>)}
     {panel('devices', <DevicesSettings/>)}
     {panel('pricing', <PricingSettings/>)}

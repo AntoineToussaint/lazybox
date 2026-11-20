@@ -204,6 +204,7 @@ func eventID(s *State, seq uint64) string {
 
 // Where evidence came from, to find the attempts it belongs to.
 type Origin struct {
+	Attempt string
 	// Conversation: an agent's own run belongs to that conversation's attempts.
 	Conversation string
 	// Workspace: a terminal run, a commit or a pull request belongs to every
@@ -212,6 +213,9 @@ type Origin struct {
 }
 
 func (o Origin) matches(a Attempt) bool {
+	if o.Attempt != "" && o.Attempt != a.ID {
+		return false
+	}
 	if o.Conversation != "" {
 		return a.Conversation == o.Conversation
 	}

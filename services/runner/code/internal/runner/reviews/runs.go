@@ -48,6 +48,11 @@ type ReviewInput struct {
 
 // Run is one agent review.
 type Run struct {
+	ContractDigest  string            `json:"contractDigest,omitempty"`
+	ReviewAttempt   string            `json:"reviewAttempt,omitempty"`
+	ReviewWorkspace string            `json:"reviewWorkspace,omitempty"`
+	MemberHeads     map[string]string `json:"memberHeads,omitempty"`
+
 	ID             string        `json:"id"`
 	TemplateID     string        `json:"templateId,omitempty"`
 	Input          []ReviewInput `json:"input,omitempty"`

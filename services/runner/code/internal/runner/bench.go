@@ -228,7 +228,8 @@ type Bench struct {
 	ports portCache
 	// Availability is the last probe of the provider programs
 	// (provider_availability.go); a test may replace its Probe.
-	Availability *availability.Cache
+	Availability     *availability.Cache
+	ProviderReleases availability.ReleaseCache
 	// Adapters is an injection boundary for deterministic conformance tests.
 	Adapters map[string]agent.Adapter
 	// ACP lists the ACP agents the Runner runs (acp_agents.go).
@@ -627,12 +628,16 @@ func (b *Bench) OpenAssistant(profile, purpose, contextText string, options acco
 }
 
 func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gatewayID, workID, previous, collectionID, purpose, suppliedContext string, emptyWorkspace bool, fork ...conversationFork) (*Execution, error) {
-	if err := b.ReloadProfiles(); err != nil {
-		return nil, err
-	}
 	id := commands.ID()
 	if len(fork) > 0 {
 		id = fork[0].id
+	}
+	return b.openWithID(id, profile, cwd, resume, options, gatewayID, workID, previous, collectionID, purpose, suppliedContext, emptyWorkspace, fork...)
+}
+
+func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Options, gatewayID, workID, previous, collectionID, purpose, suppliedContext string, emptyWorkspace bool, fork ...conversationFork) (*Execution, error) {
+	if err := b.ReloadProfiles(); err != nil {
+		return nil, err
 	}
 	b.mu.Lock()
 	activeCount := 0
@@ -1087,6 +1092,18 @@ func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args
 	}
 	if agent.BrowserTool(name) {
 		return b.browserTool(ctx, e, name, args)
+	}
+	if name == agent.ReviewFindingTool {
+		var request FindingRequest
+		if err := json.Unmarshal(args, &request); err != nil {
+			return "", err
+		}
+		finding, updated, run, err := b.AddReviewFinding(ctx, e.ID, request)
+		if err != nil {
+			return "", err
+		}
+		data, err := json.Marshal(map[string]any{"findingId": finding.ID, "reviewId": run.ID, "updated": updated})
+		return string(data), err
 	}
 	if name != "lazybox_command" {
 		return "", agent.ErrUnsupported

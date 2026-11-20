@@ -29,7 +29,7 @@ A plan:
       brief: "Objective: … Done when: … Boundaries: … Output: …"
       role: worker
       permission: ask            # read-only | ask | yolo, within your grant
-      workspace: new             # same | new
+      workspace: new             # same | new | pinned (proposal-time commits)
       paths: [search/]
       estimate_usd: 4
     - key: rank
@@ -39,6 +39,11 @@ A plan:
 
 // planFile is a plan as an agent writes it.
 type planFile struct {
+	Contract *struct {
+		Artifact string `yaml:"artifact" json:"artifact"`
+		Version  uint32 `yaml:"version" json:"version"`
+	} `yaml:"contract" json:"contract"`
+
 	Summary string `yaml:"summary" json:"summary"`
 	Tasks   []struct {
 		Key         string   `yaml:"key" json:"key"`
@@ -104,6 +109,12 @@ func (c *cli) missionPlan(args []string) error {
 		return fail(exitUsage, "the plan has no tasks")
 	}
 	req := &pb.ProposePlanRequest{SessionId: me, OperationId: *key, Summary: plan.Summary}
+	if plan.Contract != nil {
+		if plan.Contract.Artifact == "" || plan.Contract.Version == 0 {
+			return fail(exitUsage, "contract requires an artifact ID and positive version")
+		}
+		req.Contract = &pb.PlanContract{ArtifactId: plan.Contract.Artifact, Version: plan.Contract.Version}
+	}
 	for i, t := range plan.Tasks {
 		if t.Key == "" {
 			t.Key = fmt.Sprintf("t%d", i+1)

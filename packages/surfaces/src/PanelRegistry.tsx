@@ -25,6 +25,7 @@ import { conversationReader } from './transcript-cache';
 import type { ViewTarget } from './workspace-model';
 import { WorkspaceHome } from './WorkspaceHome';
 import { NewTaskStart } from './NewTaskSheet';
+import { TrainingWheels } from './TrainingWheels';
 import { HelpAssistant } from './HelpAssistant';
 import { ExtensionModule } from './ExtensionPanel';
 import { useAskRequests } from './help-requests';
@@ -91,8 +92,13 @@ function AssistantModule({ viewState, workspaceId, collections }: ModuleProps) {
     if (next === purpose) return;
     setPurpose(next); viewState?.setItem(`${key}:purpose`, next); setSessionId(''); viewState?.setItem(key, '');
   };
-  useAskRequests(() => { changePurpose('help'); setFocusToken(token => token + 1); });
-  if (purpose === 'help') return <HelpAssistant key={purpose} workspaceId={workspaceId} workspaceName={collections.find(c => c.id === workspaceId)?.name} viewState={viewState} sessionKey={key} focusToken={focusToken} onPurpose={changePurpose}/>;
+  const [question, setQuestion] = useState<string>();
+  useAskRequests(suggestion => {
+    if (suggestion) setQuestion(draft => draft ?? suggestion);
+    changePurpose('help');
+    setFocusToken(token => token + 1);
+  });
+  if (purpose === 'help') return <HelpAssistant question={question} setQuestion={setQuestion} key={purpose} workspaceId={workspaceId} workspaceName={collections.find(c => c.id === workspaceId)?.name} viewState={viewState} sessionKey={key} focusToken={focusToken} onPurpose={changePurpose}/>;
   return <>
     <label className="assistant-purpose">Conversation<select aria-label="Assistant purpose" value={purpose} onChange={e => changePurpose(e.target.value as typeof purpose)}>
       <option value="help">Help</option>
@@ -112,6 +118,7 @@ export const builtinPanels: Readonly<Record<string, PanelModule>> = {
   console: { title: 'Command output', icon: 'output', Component: CommandPanel },
   terminal: { title: 'Terminal', icon: 'terminal', Component: ({ workspaceId, collections, viewState, onClosePanel, target, onShowSession }) => <TerminalPanel key={workspaceId} workspaceId={workspaceId} collections={collections} viewState={viewState} onClosePanel={onClosePanel} sessionId={target.collectionId === workspaceId ? target.sessionId : ''} onShowSession={onShowSession}/> },
   assistant: { title: 'Ask Lazybox', icon: 'ask', Component: AssistantModule },
+  training: { title: 'Training Wheels', icon: 'keyboard', Component: TrainingWheels },
   changes: { title: 'Changes', icon: 'branch', Component: ({ workspaceId, viewState, target, onShowSession }) => <ChangesPanel key={workspaceId} workspaceId={workspaceId} sessionId={target.collectionId === workspaceId ? target.sessionId : ''} onShowSession={onShowSession} viewState={viewState}/> },
   usage: { title: 'Usage & cost', icon: 'sliders', Component: ({ workspaceId }) => <TelemetryPanel workspaceId={workspaceId}/> },
   sessions: { title: 'Sessions', icon: 'history', Component: ({ workspaceId, target, onTarget }) => <ConversationList collectionId={workspaceId} target={target} onTarget={onTarget}/> },

@@ -329,3 +329,17 @@ A summary is a handoff, not an exact snapshot of private model state. Record pro
 The shared conformance suite simulates subscription exhaustion, temporary throttling, expired authentication, failed resume, interrupted switch, and competing profile selection. Verify one active writer, stable work identity, correct profile attribution, and accessible evidence after handoff.
 
 Real-provider verification requires two usable configured profiles for a provider. Exercise both native resume where supported and checkpoint fallback, while a sibling session keeps its original profile. Record exact provider/adapter versions and actual capabilities. Missing profiles mean that path remains unverified; simulated capacity events do not establish that provider account switching works.
+
+When Codex is installed as a symlink to a package that includes
+`codex-code-mode-host`, Lazybox launches the package executable directly so
+Codex can find the helper beside it. An already running Codex execution
+keeps the executable it started with.
+
+### Agent version updates
+
+Lazybox checks official stable Claude Code and Codex releases on the Runner
+when the workspace opens and about every six hours while it is open.
+**Settings → Agents & workspaces → Agent updates** shows installed and
+latest versions and links to update instructions. Bundled Claude Code is
+updated through Lazybox. Version checks send no account details and do not
+install updates or restart agents.

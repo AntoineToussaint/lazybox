@@ -54,3 +54,8 @@
 .help-need-actions small{color:var(--text-muted,var(--text-subtle))}
 .help-empty>footer{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:4px}
 .help-empty>footer>button:not(.onboarding-docs){display:inline-flex;align-items:center;gap:6px;padding:5px 10px;font-size:calc(12px * var(--text-scale));border-radius:6px}
+
+.training-wheels{padding:1rem;overflow:auto;color:var(--text)}
+.training-wheels article{margin-top:1rem}
+.training-wheels button{margin:0 .5rem .5rem 0}
+.training-wheels textarea{display:block;width:100%;margin:.5rem 0}

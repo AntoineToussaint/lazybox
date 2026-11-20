@@ -145,12 +145,14 @@ test('Codex sub-threads get a card from their status and keep their own messages
     record(10, { type: 'agent_status', agentId: thread, parentAgentId: 'root', nativeId: 'thread-b', agentKind: 'agent', status: 'running', name: 'Review the Go side', data: { toolUseId: 'item-7', prompt: 'Review the Go side' } }),
     record(20, { type: 'turn_started', agentId: thread, parentAgentId: 'root', turnId: 'tb1' }),
     record(30, { type: 'tool_activity', agentId: thread, data: call('cmd-1', 'Shell command', 'running', { input: ['go', 'vet', './...'] }) }),
-    record(40, { type: 'message_delta', agentId: thread, text: 'Looks fine.' }),
+    record(40, { type: 'message_delta', agentId: thread, text: 'Checking.', data: { itemId: 'progress' } }),
+    record(41, { type: 'message_delta', agentId: thread, text: 'Looks ', data: { itemId: 'answer' } }),
+    record(42, { type: 'message_delta', agentId: thread, text: 'fine.', data: { itemId: 'answer' } }),
   );
   const agent = t.subagents.byId[thread];
   assert.equal(t.messages.at(-1)?.agentId, thread);
   assert.equal(agent.type, '', 'a generic agent kind is no type');
-  assert.equal(agent.items.length, 2);
+  assert.deepEqual(agent.items.flatMap(item => item.kind === 'message' ? [item.text] : []), ['Checking.', 'Looks fine.']);
   t = fold(t, record(50, { type: 'turn_ended', agentId: thread, status: 'completed' }));
   assert.equal(t.subagents.byId[thread].status, 'done');
 });
@@ -548,4 +550,19 @@ test('past the limit with everything still running, a new sub-agent is dropped a
   assert.equal(t.subagents.order.length, SUBAGENT_LIMIT);
   assert.ok(!t.subagents.byId['codex:extra']);
   assert.equal(t.subagents.truncated, true);
+});
+
+test('retained managed command events remain one command instead of a sub-agent card', () => {
+  const id = 'managed-1', agentId = 'attempt-0:claude-tool:' + id;
+  const started = fold(emptyTranscript(), record(0, { type: 'tool_activity', data: call(id, 'mcp__lazybox__command', 'running', { input: { action: 'interactive', argv: ['gcloud', 'auth', 'login'] } }) }));
+  const t = fold(started,
+    record(1, { type: 'agent_status', agentId, status: 'running', agentKind: 'mcp__lazybox__command', name: 'mcp__lazybox__command', data: { toolUseId: id } }),
+    record(2, { type: 'message_delta', agentId, text: '{"exitCode":0}' }),
+    record(3, { type: 'agent_status', agentId, status: 'done', data: { toolUseId: id } }),
+    record(4, { type: 'tool_activity', data: call(id, 'mcp__lazybox__command', 'completed', { output: '{"exitCode":0}' }) }),
+  );
+  assert.deepEqual(t.subagents.order, []);
+  const command = t.messages.flatMap(message => message.tools || []).find(tool => tool.id === id);
+  assert.equal(command?.output, 'Completed successfully.');
+  assert.deepEqual(describeTool(command!).meta, []);
 });

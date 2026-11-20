@@ -23,7 +23,7 @@ export type SubagentStatus = 'starting' | 'running' | 'waiting' | 'done' | 'fail
 export const activeSubagent = (status: SubagentStatus) => status === 'starting' || status === 'running' || status === 'waiting';
 
 export type SubagentItem =
-  | { kind: 'message'; id: string; text: string }
+  | { kind: 'message'; id: string; text: string; itemId?: string }
   | { kind: 'tool'; id: string; call: ToolCall }
   /** A sub-agent this one spawned, at the point it spawned it. */
   | { kind: 'agent'; id: string; agentId: string };
@@ -106,6 +106,8 @@ export type Subagents = {
   commandCalls?: Readonly<Record<string, CommandCall>>;
   /** Skill calls by tool call id → the skill: names the run a forked one starts, which the provider may not name. */
   skillCalls?: Readonly<Record<string, string>>;
+  /** Managed calls that older workers incorrectly emitted as a forked run. */
+  managedCalls?: ReadonlySet<string>;
   truncated: boolean;
 };
 export type CommandCall = { command: string; description: string };
@@ -134,6 +136,7 @@ const GENERIC_TYPES = new Set(['', 'general-purpose', 'general', 'agent', 'local
 const GENERIC_NAMES = new Set(['', 'agent', 'sub-agent', 'subagent', 'sub agent', 'task']);
 export const genericType = (type: string) => GENERIC_TYPES.has(type.trim().toLowerCase());
 export const genericName = (name: string) => GENERIC_NAMES.has(name.trim().toLowerCase());
+const MANAGED_TOOLS = new Set(['mcp__lazybox__command', 'lazybox_command']);
 const SPAWN_TOOLS = new Set(['Task', 'Agent']);
 /** Tools the agent reads a background command's output with. */
 const READ_TOOLS = new Set(['BashOutput', 'TaskOutput']);
@@ -205,6 +208,7 @@ export class SubagentFold {
   private aliases?: Record<string, string>;
   private commandCalls?: Record<string, CommandCall>;
   private skillCalls?: Record<string, string>;
+  private managedCalls?: Set<string>;
   private truncated: boolean;
   private owned = new Set<object>();
   private cards: string[] = [];
@@ -399,6 +403,18 @@ export class SubagentFold {
   record(record: JournalEvent): void {
     const e = record.event;
     if (!e) return;
+    // Legacy journals may include synthetic children for an interactive MCP
+    // command. Keep the parent tool call and ignore its duplicate child.
+    if (e.type === 'tool_activity' && /"name"\s*:\s*"(?:mcp__lazybox__command|lazybox_command)"/.test(peek(e.providerDataJson))) {
+      const call = payload(e.providerDataJson);
+      if (call && MANAGED_TOOLS.has(call.name) && typeof call.id === 'string') {
+        const known = this.managedCalls ??= new Set(this.state.managedCalls);
+        known.add(call.id);
+        if (known.size > COMMAND_CALLS) known.delete(known.values().next().value!);
+      }
+    }
+    const childCall = /(?:^|:)claude-tool:(.+)$/.exec(e.agentId)?.[1];
+    if (MANAGED_TOOLS.has(e.agentKind) || (childCall && (this.managedCalls ?? this.state.managedCalls)?.has(childCall))) return;
     const at = time(record.capturedAt);
     if (!e.agentId || e.agentId === 'root') {
       switch (e.type) {
@@ -474,11 +490,12 @@ export class SubagentFold {
         if (agent.status === 'starting') agent.status = 'running';
         this.phase(agent, 'responding', '', at);
         const items = agent.items, last = items.at(-1);
-        if (last?.kind === 'message') {
+        const itemId = text(payload(e.providerDataJson)?.itemId) || undefined;
+        if (last?.kind === 'message' && last.itemId === itemId) {
           if (last.text.length >= MAX_MESSAGE) return;
           const owned = this.items(agent);
           owned[owned.length - 1] = { ...last, text: last.text + e.text };
-        } else this.push(agent, { kind: 'message', id: `message:${record.cursor}`, text: e.text });
+        } else this.push(agent, { kind: 'message', id: `message:${record.cursor}`, text: e.text, ...(itemId ? { itemId } : {}) });
         return;
       }
       case 'activity':
@@ -636,8 +653,8 @@ export class SubagentFold {
   }
 
   result(): Subagents {
-    if (!this.byId && !this.order && !this.spawns && !this.aliases && !this.commandCalls && !this.skillCalls && this.truncated === this.state.truncated) return this.state;
-    return { byId: this.byId ?? this.state.byId, order: this.order ?? this.state.order, spawns: this.spawns ?? this.state.spawns, aliases: this.aliases ?? this.state.aliases, commandCalls: this.commandCalls ?? this.state.commandCalls ?? {}, skillCalls: this.skillCalls ?? this.state.skillCalls ?? {}, truncated: this.truncated };
+    if (!this.byId && !this.order && !this.spawns && !this.aliases && !this.commandCalls && !this.skillCalls && !this.managedCalls && this.truncated === this.state.truncated) return this.state;
+    return { byId: this.byId ?? this.state.byId, order: this.order ?? this.state.order, spawns: this.spawns ?? this.state.spawns, aliases: this.aliases ?? this.state.aliases, commandCalls: this.commandCalls ?? this.state.commandCalls ?? {}, skillCalls: this.skillCalls ?? this.state.skillCalls ?? {}, managedCalls: this.managedCalls ?? this.state.managedCalls, truncated: this.truncated };
   }
 }
 

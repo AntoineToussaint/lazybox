@@ -26,6 +26,7 @@ import { useConversationTabs, useTabsSetting } from './useConversationTabs';
 import { openModeFor } from './conversation-tabs';
 import './workspace.css';
 import './workspace-shell.css';
+import { ProviderUpdateNotices } from './ProviderUpdates';
 import { SettingsPage, type SettingsTab } from './SettingsPage';
 import { RestartNotice } from './RunnerControl';
 import { AttentionScope } from './useAttention';
@@ -460,7 +461,10 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   useWebViewer(openWeb);
   useKeyboardAction('web.open', () => { openWeb({ url: '', newPanel: !shownPanels(livePage()).some(panel => panel.kind === 'web' && !panel.detached) }); });
   // Ask Lazybox (Help menu, ⌘K, ]] h): its panel on this page, with the message box focused.
-  useKeyboardAction('help.ask', () => { if (showModule('assistant')) requestAsk(); });
+  useKeyboardAction('help.training', () => showModule('training'));
+  useKeyboardAction('help.ask', question => {
+    if (showModule('assistant')) requestAsk(typeof question === 'string' ? question : undefined);
+  });
   /** Show this workspace's terminal: the open panel, or one docked beside the work. It starts a shell only when none is running. */
   const showTerminal = () => { if (workspaceID && showModule('terminal')) requestTerminal(workspaceID); };
   // A panel asked for in another workspace is shown once that workspace's page is.
@@ -887,7 +891,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   useKeyboardAction('layout.split', () => splitActive('right'), hasActive);
   useKeyboardAction('layout.split-down', () => splitActive('below'), hasActive);
   useKeyboardAction('layout.close', closeActive, () => hasActive() && !activePanel()!.detached);
-  useKeyboardAction('layout.maximize', () => dock.current?.toggleMaximize(), hasActive);
+  useKeyboardAction('layout.maximize', (_, source) => dock.current?.toggleMaximize(undefined, source === 'keys' ? 'keys' : undefined), hasActive);
   // ⌃⇥ walks every tab: the active group's, then the next group's (one tab a group is one group a step, as before).
   useKeyboardAction('layout.next-group', () => dock.current?.cycleTabs(1), docked);
   useKeyboardAction('layout.previous-group', () => dock.current?.cycleTabs(-1), docked);
@@ -1109,6 +1113,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       </>}
     <PeekHost navigation={{ showSession, showModule: kind => void showModule(kind), showTerminal, openArtifact: (collectionId, artifactId) => { if (!openArtifact({ collectionId, artifactId })) showModule('artifacts'); },
       openFile: (collectionId, path, line) => { if (!workbench || collectionId !== workspaceID) return false; workbench.open(path, { line, focus: true }); return true; } }}/>
+    {!fixedWorkspaceId && <ProviderUpdateNotices store={viewState} onOpen={() => { setSettingsTab('agents'); setSettings(true); }}/> }
     <Onboarding viewState={viewState} collections={collections} collectionsLoaded={catalogLoaded} settingsOpen={settings} onWorkspace={id => select({ collectionId: id, sessionId: '', commandId: '' })} automatic={!fixedWorkspaceId} host={host} sessionId={page.selection.sessionId} onOpenSettings={tab => { if (fixedWorkspaceId && tab !== 'about') return; setSettingsTab(tab); setSettings(true); }}/>
     {quickOpen && workbench && <QuickOpen key={workbench.workspaceId} workbench={workbench} onClose={() => setQuickOpen(false)}/>}
     {quickLook && workspaceID && <FilePreview key={`${workspaceID}:${quickLook.path}`} workspaceId={workspaceID} reference={quickLook} viewState={viewState} onClose={() => setQuickLook(undefined)}/>}

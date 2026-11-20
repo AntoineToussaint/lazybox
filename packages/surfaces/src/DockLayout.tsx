@@ -1,3 +1,4 @@
+import { recordMaximize } from './training-wheels';
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { createDockview, type DockviewApi, type DockviewGroupPanel, type DockviewTheme, type IDockviewPanel } from 'dockview';
@@ -29,7 +30,7 @@ export type GroupView = {
 };
 export type MenuItem = { label: string; icon?: string; action(): void; disabled?: boolean; danger?: boolean; separator?: boolean };
 export type DockHandle = {
-  toggleMaximize(panelID?: string): void;
+  toggleMaximize(panelID?: string, source?: 'pointer' | 'keys'): void;
   activePanelID(): string | undefined;
   activeGroup(): GroupView | undefined;
   /** Moves the front tab of the active group into a new group beside it; false when it is alone. */
@@ -506,7 +507,7 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
             const titled = parameters.api.onDidTitleChange(event => { title.textContent = event.title; close.setAttribute('aria-label', latest.current.closeLabel?.(panel, event.title) ?? `Close ${event.title} panel`); decorateTab(id, current(), event.title); });
             disposers.push(() => titled.dispose(), () => { if (tabs.current.get(id)?.tab === tab) tabs.current.delete(id); });
             // A preview tab double-clicked is kept open; any other tab maximizes.
-            tab.ondblclick = event => { event.preventDefault(); if (latest.current.onTabDoubleClick?.(current())) return; handle.toggleMaximize(id); };
+            tab.ondblclick = event => { event.preventDefault(); if (latest.current.onTabDoubleClick?.(current())) return; handle.toggleMaximize(id, 'pointer'); };
             // A middle-click closes a tab, as in a browser.
             tab.onmousedown = event => { if (event.button === 1) event.preventDefault(); };
             tab.onauxclick = event => {
@@ -720,10 +721,16 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     if (order.length > 1) announce(`${titleIn(next)}, group ${order.indexOf(next) + 1} of ${order.length}${byTab && next.panels.length > 1 ? `, tab ${next.panels.indexOf(front!) + 1} of ${next.panels.length}` : ''}${dock.hasMaximizedGroup() ? ', maximized' : ''}`);
   };
   const handle: DockHandle = {
-    toggleMaximize: panelID => {
+    toggleMaximize: (panelID, source) => {
       const dock = api.current, panel = panelOf(panelID);
       if (!dock || !panel) return;
-      if (dock.hasMaximizedGroup()) dock.exitMaximizedGroup(); else if (panel.group.api.location.type === 'grid' && dock.groups.length > 1) dock.maximizeGroup(panel);
+      if (dock.hasMaximizedGroup()) {
+        dock.exitMaximizedGroup();
+      } else {
+        if (panel.group.api.location.type !== 'grid' || dock.groups.length <= 1) return;
+        dock.maximizeGroup(panel);
+      }
+      if (source) recordMaximize(source);
     },
     activePanelID: () => api.current?.activePanel?.id,
     activeGroup: () => { const group = api.current?.activeGroup; return group ? view(group) : undefined; },

@@ -48,6 +48,26 @@ try {
   await expect(menu.getByRole('button', {name: /Codex · Saved Codex/})).toBeVisible();
   await page.keyboard.press('Escape');
 
+  // A repeated panel operation suggests its shortcut and preserves an existing help draft.
+  await box.fill('My existing question');
+  await helpMenu('Training Wheels');
+  const coach = page.locator('section.training-wheels');
+  await coach.getByRole('checkbox', {name: 'Enable coaching'}).check();
+  for (let i = 0; i < 4; i++) {
+    await page.locator('.dv-groupview:visible .dock-maximize:visible').first().click();
+  }
+  await expect(coach.getByRole('heading', {name: 'Maximize a panel from the keyboard'})).toBeVisible();
+  await coach.getByRole('button', {name: 'Ask Lazybox'}).click();
+  const followup = panel.getByRole('textbox', {name: 'Question from Training Wheels'});
+  await expect(followup).toHaveValue(/maximize/);
+  await followup.fill('How do I change this shortcut?');
+  await helpMenu('Training Wheels');
+  await coach.getByRole('button', {name: 'Ask Lazybox'}).click();
+  await expect(followup).toHaveValue('How do I change this shortcut?');
+  await panel.getByRole('button', {name: 'Dismiss', exact: true}).click();
+  await expect(box).toHaveValue('My existing question');
+  assert.equal(fixture.mutations.filter(m => m.method === 'OpenAssistant').length, 0);
+
   // The first question starts the assistant: no form, Enter sends it.
   await box.focus();
   await box.fill('How do I add a second subscription?');

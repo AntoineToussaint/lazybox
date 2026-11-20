@@ -1,5 +1,5 @@
 import type { AgentActivity, Session } from '@lazybox/protocol';
-import { attentionTitle, type Attention, type AttentionState, type Inbox } from './attention';
+import { activityAt, attentionTitle, type Attention, type AttentionState, type Inbox } from './attention';
 import { conversationName } from './conversation-model';
 import { toolLabel } from './live-status';
 
@@ -19,7 +19,7 @@ export const isPinned = (session: Session) => pinnedAt(session) > 0;
 export const isArchivedAway = (session: Session) => archivedAt(session) > 0 && !session.pending.length && session.status !== 'waiting_input' && session.status !== 'waiting_approval';
 
 /** By Runner only when the window shows several (MULTI_RUNNER.md). */
-export type Grouping = 'priority' | 'workspace' | 'runner';
+export type Grouping = 'priority' | 'workspace' | 'runner' | 'recent';
 export type AgentSection = { id: string; title: string; state?: AttentionState; rows: Attention[] };
 
 /** What the filter matches: the title, the workspace, what the row says, the model. */
@@ -42,6 +42,10 @@ export function agentSections(inbox: Pick<Inbox, 'rows'>, grouping: Grouping, wo
   const pins = rows.filter(row => isPinned(row.session)).sort((a, b) => pinnedAt(a.session) - pinnedAt(b.session) || (a.key < b.key ? -1 : 1));
   const rest = rows.filter(row => !isPinned(row.session));
   const sections: AgentSection[] = pins.length ? [{ id: 'pinned', title: 'Pinned', rows: pins }] : [];
+  if (grouping === 'recent') {
+    const recent = rows.map(row => ({ ...row, at: Math.max(activityAt(row.session), row.at) })).sort((a, b) => b.at - a.at);
+    return recent.length ? [{ id: 'recent', title: 'Recent activity', rows: recent }] : [];
+  }
   if (grouping === 'priority') {
     const states = [...new Set(rest.map(row => row.state))];
     return [...sections, ...states.map(state => ({ id: state, title: attentionTitle[state], state, rows: rest.filter(row => row.state === state) }))];
@@ -80,7 +84,7 @@ export function lineageLabel(session: Session): string {
 
 /** The rows in reading order, skipping folded sections: what j/k walk. */
 export function visibleRows(sections: readonly AgentSection[], folded: readonly string[]): Attention[] {
-  return sections.filter(section => !folded.includes(section.id)).flatMap(section => nestByLineage(section.rows).map(item => item.row));
+  return sections.filter(section => !folded.includes(section.id)).flatMap(section => section.id === 'recent' ? section.rows : nestByLineage(section.rows).map(item => item.row));
 }
 
 export type SubagentRow = { id: string; name: string; status: string; tone: 'busy' | 'waiting'; detail: string; since: number };

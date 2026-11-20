@@ -43,6 +43,8 @@ export function PlanSheet({ mission, plan, onClose }: { mission: Mission; plan: 
     <DialogHeader><h2><Icon name="checklist" size={15}/> {grant?.title || 'The orchestrator'} proposes {plan.tasks.length} {plan.tasks.length === 1 ? 'agent' : 'agents'}</h2><button type="button" aria-label="Close" disabled={busy} onClick={onClose}>×</button></DialogHeader>
     <form onSubmit={submit} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void decide(!rejecting); } }}>
       <p className="plan-for">For <b>{mission.title}</b>{plan.summary ? <> · {plan.summary}</> : null}</p>
+      {plan.contract && <section><h3>Acceptance criteria</h3><p>Spec {plan.contract.artifactId} · version {plan.contract.version}</p><ul>{plan.contract.acceptanceCriteria.map((text, index) => <li key={index}>{text}</li>)}</ul></section>}
+      {!!plan.baseline?.length && <section><h3>Starting revisions</h3><ul>{plan.baseline.map(member => <li key={member.name}>{member.name} <code title={member.commit}>{member.commit.slice(0, 12)}</code></li>)}</ul></section>}
       {decided && <p className="missions-notice">This plan was {plan.state}.</p>}
       <ol className="plan-tasks">{order.map(({ task, step }) => <li key={task.key} data-key={task.key}>
         <span className="plan-step" title={task.after.length ? `Starts after ${task.after.join(', ')}` : 'Starts right away'}>{step}</span>
@@ -51,7 +53,7 @@ export function PlanSheet({ mission, plan, onClose }: { mission: Mission; plan: 
           <div className="plan-task-meta">
             <span>{task.role || 'worker'}</span>
             <span>{permissionLabel[task.permission] || (task.permission ? task.permission : `${permissionLabel[grant?.ceiling?.permission || 'ask'] || 'Ask'} (its default)`)}</span>
-            <span>{task.workspace === 'new' ? 'its own workspace' : 'this workspace'}</span>
+            <span>{task.workspace === 'pinned' ? 'workspace at starting revisions' : task.workspace === 'new' ? 'its own workspace' : 'this workspace'}</span>
             {task.after.length > 0 && <span>after {task.after.join(', ')}</span>}
           </div>
           {task.paths.length > 0 && <ul className="plan-paths" aria-label="Paths">{task.paths.map(path => {

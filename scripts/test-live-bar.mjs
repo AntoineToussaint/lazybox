@@ -42,7 +42,7 @@ try{
  // A managed command streams: its last lines, without colour codes.
  const out=bar.locator('.live-bar-output');
  await expect(out).toContainText('No output yet.');
- const commandRow = bar.locator('.live-bar-code');
+ const commandRow = bar.locator('.live-bar-row > .live-activity');
  const compactHeight = await out.evaluate(node => node.getBoundingClientRect().height);
  await commandRow.dblclick();
  await expect(out).toHaveAttribute('data-expanded','true');
@@ -55,9 +55,9 @@ try{
  await expect(out).not.toContainText('[32m');
  assert.equal(await out.evaluate(node => node.getBoundingClientRect().height), compactHeight, 'compact output does not grow as lines arrive');
  assert.equal((await out.textContent()).split('\n').length,3,'three lines until more is asked for');
- await bar.locator('.live-bar-code').dblclick();
+ await commandRow.dblclick();
  await expect(bar.getByRole('button',{name:'Less output'})).toHaveAttribute('aria-expanded','true');
- await bar.locator('.live-bar-code').dblclick();
+ await commandRow.dblclick();
  await expect(bar.getByRole('button',{name:'More output'})).toHaveAttribute('aria-expanded','false');
  await bar.getByRole('button',{name:'More output'}).click();
  await expect(out).toContainText('check step 1');
@@ -89,7 +89,7 @@ try{
  await page.screenshot({path:'.cache/subagents-live-bar.png'});
 
  // Open in console: the workspace's command output shows it.
- await bar.getByRole('button',{name:'Open in console'}).click();
+ await bar.getByRole('button',{name:/View command output:/}).click();
  await expect(page.locator('.command-panel')).toContainText('CHECK_TAIL_LINE');
  // The console says the command is running and can stop it itself.
  await expect(page.locator('.command-panel .console-state [role=status]')).toHaveText('Running');
@@ -137,6 +137,13 @@ try{
  live({type:'tool_activity',data:{type:'tool_call',id:'toolu_dev',status:'completed',output:'[lazybox] npm run dev → running in the background as command cmd-dev'}});
  live({type:'tool_activity',data:{type:'tool_call',id:'toolu_tail',name:'Bash',status:'running',input:{command:'tail -f log/development.log'}}});
  await expect(bar.getByRole('note')).toHaveText('This command may never end. Interrupt the turn and ask Claude to start it with lazybox run — it moves servers to the background.');
+ await bar.getByRole('button',{name:/View command output:/}).click();
+ const activity=page.getByRole('dialog',{name:'Tools and activity'});
+ await expect(activity.getByText('Waiting for the result…',{exact:true})).toBeVisible();
+ live({type:'tool_activity',data:{type:'tool_call',id:'toolu_tail',status:'completed',output:'Tail command output'}});
+ await expect(activity.getByText('Tail command output',{exact:true})).toBeVisible();
+ await activity.getByRole('button',{name:'Close tools'}).click();
+
  await expect(bar.getByRole('button',{name:'Interrupt'})).toBeVisible();
 
  // Reduced motion stills the indicator; a phone keeps the bar on screen without sideways scroll.

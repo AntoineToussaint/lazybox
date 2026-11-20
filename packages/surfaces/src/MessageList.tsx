@@ -74,7 +74,8 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
     onContextMenu={menu && contextMenu<MessageMenuDetail>('message', menu, { message: m, role: messageRole(m), sessionId }, 'Message actions')}>
     {/* A message steered into a running turn says so, where it reached the agent. */}
     {own
-      ? m.steered && <span className="message-tag" title={`Given to ${agentName} inside its running turn`}>steered</span>
+      ? <>{m.steered && <span className="message-tag" title={`Given to ${agentName} inside its running turn`}>steered</span>}
+          {at !== undefined && <div className="message-byline"><ActivityTime at={at} className="prompt-sent-time"/></div>}</>
       : (!reply || at !== undefined) && <div className="message-byline">
         {!reply && <span className="eyebrow">{m.type === 'failure' ? 'Stopped' : agentName}</span>}
         {reply && at !== undefined && <ActivityTime at={at} className="message-time"/>}

@@ -82,10 +82,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 			return nil, agent.ErrUnsupported
 		}
 	}
-	binary := a.Binary
-	if binary == "" {
-		binary = "codex"
-	}
+	binary := codexProgram(a.Binary)
 	if o.Host != nil && o.Host.Attach != nil {
 		return attach(ctx, o, binary)
 	}
@@ -909,13 +906,17 @@ func (s *session) read() {
 				ev.Data = nil // Activity only; never expose private reasoning text.
 			case "item/agentMessage/delta":
 				var delta struct {
-					Delta string `json:"delta"`
+					Delta  string `json:"delta"`
+					ItemID string `json:"itemId"`
 				}
 				if !fields(&delta) {
 					return
 				}
 				ev.Type = "message_delta"
 				ev.Text = delta.Delta
+				if ev.AgentID != "root" && delta.ItemID != "" {
+					ev.Data, _ = json.Marshal(map[string]string{"itemId": delta.ItemID})
+				}
 			case "serverRequest/resolved":
 				var resolved struct {
 					RequestID json.RawMessage `json:"requestId"`

@@ -165,3 +165,28 @@ func TestExpiredWorkspaceDeletionPurgesEntireRootAndGitRegistration(t *testing.T
 		t.Fatal("workspace branch was changed")
 	}
 }
+
+func TestFailedDeletionCanBeDismissedAfterDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pending-deletions.json")
+	store, err := openPendingDeletions(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := PendingDeletion{ID: "failed", Expires: time.Now().Add(-time.Minute), Failure: "cleanup failed"}
+	expired := PendingDeletion{ID: "expired", Expires: failed.Expires}
+	store.entries[failed.ID], store.entries[expired.ID] = failed, expired
+	b := &Bench{pendingDeletions: store}
+	if err := b.UndoDeletion(expired.ID); err == nil {
+		t.Fatal("undo accepted after deadline while cleanup could still run")
+	}
+	if err := b.UndoDeletion(failed.ID); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openPendingDeletions(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := reopened.entries[failed.ID]; found || len(reopened.entries) != 1 {
+		t.Fatalf("unexpected pending deletions after reopening: %+v", reopened.entries)
+	}
+}

@@ -57,7 +57,7 @@ const idPattern = /^[\w.:-]{1,64}$/;
 
 /** The size of a structured-clone value as JSON, or Infinity when it is not JSON. */
 function jsonSize(value: unknown): number {
-  try { return JSON.stringify(value)?.length ?? 0; } catch { return Infinity; }
+  try { return new TextEncoder().encode(JSON.stringify(value)).byteLength ?? 0; } catch { return Infinity; }
 }
 
 /** Parses a message from the extension: a request, or undefined for anything else (ignored). */

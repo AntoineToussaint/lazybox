@@ -73,6 +73,10 @@ try{
  // The Inbox is the docked Agents panel now (audit R1): its working row says the same.
  await page.getByRole('button',{name:/^Inbox/}).click();const agentsPanel=page.locator('.agents-panel');
  await expect(agentsPanel.locator('li[data-state=working]').first()).toContainText(/Running a command/);
+ await agentsPanel.getByRole('button',{name:'Recent',exact:true}).click();
+ await expect(agentsPanel.getByRole('region',{name:'Recent activity'}).locator('.agent-row').first()).toBeVisible();
+ await agentsPanel.getByRole('button',{name:'Priority',exact:true}).click();
+
 
  // Rename in place: Enter saves.
  await header.getByRole('button',{name:'Rename conversation',exact:true}).click();
@@ -108,6 +112,23 @@ try{
  await message.evaluate(n=>n.select());
  await releaseFrames();
  await message.press('Backspace');await expect(message,'a selection made after a recall is kept').toHaveValue('');
+ await message.fill('First line\nSecond line');
+ await message.press('Enter');await expect(message).toHaveValue('');
+ await message.press('ArrowUp');await expect(message).toHaveValue('First line\nSecond line');
+ await message.press('ArrowUp');await expect(message).toHaveValue('second prompt');
+ await message.press('ArrowDown');await expect(message).toHaveValue('First line\nSecond line');
+ await message.press('ArrowDown');await expect(message).toHaveValue('');
+ await page.route('**/ListPromptHistory',route=>route.fulfill({json:{prompts:[{text:'Prompt from another device',atUnixMillis:String(Date.now()-120_000)},{text:'Automated review brief from another device',source:{kind:'review'},atUnixMillis:String(Date.now()-90_000)}]}}));
+ await chat.getByRole('button',{name:'Prompt history',exact:true}).click();
+ const history=page.getByRole('dialog',{name:'Prompt history',exact:true});
+ await history.getByRole('searchbox',{name:'Search prompts'}).fill('another device');
+ const historyItem=history.getByRole('listitem').filter({hasText:'Prompt from another device'});
+ await expect(historyItem.locator('time')).toHaveAttribute('datetime',/T/);
+ await expect(history.getByText('Automated review brief from another device')).toHaveCount(0);
+ await historyItem.getByRole('button',{name:'Prompt from another device',exact:true}).click();
+ await expect(message).toHaveValue('Prompt from another device');
+ await expect(message).toBeFocused();
+
 
  // Sending keeps the keyboard in the message box: WebKit blurred it while it was disabled for the send.
  await message.fill('Look at the retry loop too.');await message.press('Enter');

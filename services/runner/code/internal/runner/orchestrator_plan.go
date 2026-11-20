@@ -2,11 +2,14 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/artifacts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/telemetry"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 )
@@ -21,7 +24,7 @@ var ErrPlanRequired = errors.New("the person asked to approve a plan before any 
 
 // planBriefing is the plan line of the orchestrator's briefing.
 func planBriefing(required bool) string {
-	how := "Propose your split as a plan: `lazybox mission plan -` reads YAML (summary; tasks: key, title, brief, role, permission, workspace same|new, paths, estimate_usd, after: [keys]). The person sees it on one sheet, with the paths two tasks share and the total, and approves it with a $ cap; then `lazybox agents ls` lists its tasks' ids and `lazybox agents spawn --task ID` starts each, in order."
+	how := "Propose your split as a plan: `lazybox mission plan -` reads YAML (summary; tasks: key, title, brief, role, permission, workspace same|new|pinned, paths, estimate_usd, after: [keys]). The person sees it on one sheet, with the paths two tasks share and the total, and approves it with a $ cap; then `lazybox agents ls` lists its tasks' ids and `lazybox agents spawn --task ID` starts each, in order."
 	if required {
 		return "The person asked to approve a plan before any agent starts. " + how
 	}
@@ -29,7 +32,7 @@ func planBriefing(required bool) string {
 }
 
 // ProposePlan records the calling orchestrator's plan for the person.
-func (b *Bench) ProposePlan(ctx context.Context, session, operation, summary string, tasks []work.PlanTask) (*work.State, *work.Plan, error) {
+func (b *Bench) ProposePlan(ctx context.Context, session, operation, summary string, tasks []work.PlanTask, artifactID string, version uint32) (*work.State, *work.Plan, error) {
 	c, err := b.orchestrationCaller(session)
 	if err != nil {
 		return nil, nil, err
@@ -38,7 +41,42 @@ func (b *Bench) ProposePlan(ctx context.Context, session, operation, summary str
 		return nil, nil, ErrNoGrant
 	}
 	actor := work.Actor{Kind: work.ActorAgent, Role: "orchestrator", Conversation: c.conversation, Execution: c.e.ID}
-	state, id, err := b.Work.ProposePlan(c.held.Mission.ID, actor, operation, work.PlanPayload{Grant: c.held.Grant.Grant, Summary: summary, Tasks: tasks})
+	payload := work.PlanPayload{Grant: c.held.Grant.Grant, Summary: summary, Tasks: tasks}
+	if event, ok := c.held.Mission.Event(operation); operation != "" && ok && event.Type == work.PlanProposed {
+		if plan := c.held.Mission.PlanOf(strings.TrimPrefix(event.Subject, "plan:")); plan != nil && plan.Grant == payload.Grant {
+			return c.held.Mission, plan, nil
+		}
+	}
+	if artifactID != "" || version != 0 {
+		if artifactID == "" || version == 0 || b.Artifacts == nil {
+			return nil, nil, fmt.Errorf("%w: give a spec artifact ID and a positive version", work.ErrRefused)
+		}
+		doc, err := b.Artifacts.Get(c.e.CollectionID, artifactID, version)
+		if err != nil {
+			return nil, nil, err
+		}
+		var spec struct {
+			Schema             string
+			AcceptanceCriteria []string
+		}
+		if doc.Kind != "spec" || doc.Format != "json" || json.Unmarshal([]byte(doc.Content), &spec) != nil || spec.Schema != "spec.v1" || len(spec.AcceptanceCriteria) == 0 {
+			return nil, nil, fmt.Errorf("%w: the contract needs a structured spec with acceptance criteria", work.ErrRefused)
+		}
+		if len(strings.Join(spec.AcceptanceCriteria, "\n")) > 4096 {
+			return nil, nil, fmt.Errorf("%w: mission acceptance criteria exceed 4 KiB", work.ErrRefused)
+		}
+		payload.Contract = &work.PlanContract{Artifact: artifactID, Version: version, Workspace: c.e.CollectionID, Digest: artifacts.Digest(doc.Content), Criteria: spec.AcceptanceCriteria}
+	}
+	for _, t := range tasks {
+		if t.Workspace == "pinned" {
+			payload.Baseline, err = b.planBaseline(ctx, c.e.CollectionID)
+			if err != nil {
+				return nil, nil, err
+			}
+			break
+		}
+	}
+	state, id, err := b.Work.ProposePlan(c.held.Mission.ID, actor, operation, payload)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -199,8 +237,8 @@ func (b *Bench) planned(state *work.State, g *work.Grant, r *SpawnRequest) (floa
 		}
 		return 0, nil
 	}
-	entry, ok := state.ApprovedTask(g.Grant, r.Task)
-	if !ok {
+	entry, plan := state.ApprovedTaskPlan(g.Grant, r.Task)
+	if plan == nil {
 		if g.Ceiling.PlanRequired {
 			return 0, fmt.Errorf("%w: task %q is not in a plan the person approved; %v", work.ErrRefused, r.Task, ErrPlanRequired)
 		}
@@ -212,6 +250,13 @@ func (b *Bench) planned(state *work.State, g *work.Grant, r *SpawnRequest) (floa
 				return 0, fmt.Errorf("%w: “%s” starts after “%s”, which the person has not accepted yet", work.ErrRefused, t.Title, pre.Title)
 			}
 		}
+	}
+	r.contract = plan.Contract
+	if entry.Workspace == "pinned" {
+		if r.StartFrom != "" || (r.Workspace != "" && r.Workspace != "pinned") {
+			return 0, fmt.Errorf("%w: the approved task requires its pinned baseline", work.ErrRefused)
+		}
+		r.baseline = plan.Baseline
 	}
 	// The plan's choices are the defaults; what is asked still has to fit the ceiling.
 	r.Role, r.Permission, r.Profile, r.Workspace = firstOf(r.Role, entry.Role), firstOf(r.Permission, entry.Permission), firstOf(r.Profile, entry.Profile), firstOf(r.Workspace, entry.Workspace)
@@ -233,3 +278,29 @@ func capLabel(v float64) string {
 }
 
 func round2(v float64) float64 { return float64(int64(v*100+0.5)) / 100 }
+
+func (b *Bench) planBaseline(ctx context.Context, workspace string) ([]work.BaselineMember, error) {
+	if workspace == "" || b.Collections == nil {
+		return nil, fmt.Errorf("%w: a pinned plan requires a workspace", work.ErrRefused)
+	}
+	c, err := b.Collections.Get(workspace)
+	if err != nil {
+		return nil, err
+	}
+	evidence, err := b.Collections.Evidence(ctx, workspace)
+	if err != nil {
+		return nil, err
+	}
+	if len(c.Members) == 0 || len(evidence) != len(c.Members) {
+		return nil, fmt.Errorf("%w: workspace membership is empty or changed while capturing the baseline", work.ErrRefused)
+	}
+	var baseline []work.BaselineMember
+	for i, m := range c.Members {
+		e := evidence[i]
+		if !m.Ready || e.Path != m.Path || e.Name != m.Name || e.Head == "" || e.Error != "" || e.Status != "" {
+			return nil, fmt.Errorf("%w: member %q must be ready, clean and readable before proposing a pinned plan", work.ErrRefused, m.Name)
+		}
+		baseline = append(baseline, work.BaselineMember{Name: m.Name, Repository: m.RepositoryID, Commit: e.Head})
+	}
+	return baseline, nil
+}

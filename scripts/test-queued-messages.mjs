@@ -153,6 +153,7 @@ try{
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),'no horizontal page scroll');
  await page.screenshot({path:'.cache/queued-phone.png'});
  await page.setViewportSize({width:1400,height:900});
+ await expect.poll(async () => (await chat.boundingBox()).width).toBeGreaterThan(600);
 
  // ── ↵ queued them; ⌘↵ with an empty message box sends the oldest now, the others keep their order.
  // (Back at desktop width the chat is laid out again: it shows the queue before the key is pressed.)

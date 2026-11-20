@@ -160,10 +160,13 @@ async function tabsOn(){
  await row('Main alpha conversation').click();
  const source=page.locator('article.message').filter({hasText:'A cache entry expires after ten minutes.'});
  const words=source.getByText('A cache entry expires after ten minutes.',{exact:true});
+ await words.scrollIntoViewIfNeeded();
  const selectedPoint=await words.evaluate(node=>{
   const range=document.createRange();
   range.setStart(node.firstChild,2);range.setEnd(node.firstChild,13);
   const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+  // Some browsers replace the selection after pointerdown and before contextmenu.
+  node.addEventListener('mousedown',()=>selection.removeAllRanges(),{once:true});
   const rect=range.getBoundingClientRect();
   return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};
  });

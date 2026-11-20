@@ -324,8 +324,12 @@ The initial exact-model standard rate card is versioned `2026-11-02`, sourced fr
 [GPT-5.4](https://developers.openai.com/api/docs/models/gpt-5.4) and
 [GPT-5.3-Codex](https://developers.openai.com/api/docs/models/gpt-5.3-codex).
 Unknown models, service tiers, incomplete usage, additional detected tool fees
-and unsupported long-context pricing remain unpriced. Direct Codex lifetime
-deltas are not priced from a guessed model. Newer cache-write protocols and
+and unsupported long-context pricing remain unpriced. Direct Codex usage is priced when the cumulative counter change matches the
+latest request and its model is known. Unattributed or aggregated changes
+retain their token counts. Codex context shows reported token types where
+they add up to the context total. Claude's SDK reports semantic categories
+such as system instructions and tools. Published long-context rates apply to
+GPT‑6.2 Sol, GPT‑6.2 Astra, and GPT‑6 Sol. Newer cache-write protocols and
 cloud/region discounts require provider parser/rate additions; they are not
 assumed equivalent to the supported standard rates.
 

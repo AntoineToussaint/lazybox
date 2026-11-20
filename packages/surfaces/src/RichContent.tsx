@@ -30,13 +30,13 @@ function Copy({text}:{text:string}) {
  return <button type="button" aria-label="Copy code" onClick={()=>void navigator.clipboard.writeText(text).then(()=>setState('Copied'),()=>setState('Copy failed'))}>{state}</button>;
 }
 /** `runnable`: a block of a message's Markdown, which can offer Run when it is a shell block in an agent's message (code-runs.tsx). */
-export const CodeBlock=memo(function CodeBlock({text,language='',label,runnable=false}:{text:string;language?:string;label?:string;runnable?:boolean}) {
+export const CodeBlock=memo(function CodeBlock({text,language='',label,runnable=false,action}:{text:string;language?:string;label?:string;runnable?:boolean;action?:ReactNode}) {
  const highlighted=useMemo(()=>text.length<=100000&&hljs.getLanguage(language)?hljs.highlight(text,{language,ignoreIllegals:true}).value:undefined,[text,language]);
  const run=useRunnableBlock(text,language,runnable);
  const name=label||language||'Text';
  return <div className={'code-block'+(run?' is-runnable':'')} tabIndex={run?0:undefined} role={run?'group':undefined} aria-label={run?`${name} commands`:undefined} aria-keyshortcuts={run?'Enter Alt+Enter':undefined} onKeyDown={run?.onKeyDown}
   onContextMenu={contextMenu('code-block',()=>run?[...run.menu(),'separator',...codeBlockItems(text,language)]:codeBlockItems(text,language),{text,language})}>
-  <header><span>{name}</span>{run?<span className="code-block-actions">{run.header}<Copy text={text}/></span>:<Copy text={text}/>}</header>
+  <header><span>{name}</span>{run||action?<span className="code-block-actions">{run?.header}{action}<Copy text={text}/></span>:<Copy text={text}/>}</header>
   <pre aria-label={label||`${language||'Plain text'} code`}><code>{highlighted===undefined?text:<span dangerouslySetInnerHTML={{__html:highlighted}}/>}</code></pre>
   {run?.footer}</div>;
 });

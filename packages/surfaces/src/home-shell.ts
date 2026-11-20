@@ -67,6 +67,8 @@ export type ShellTyped = 'run' | 'typed';
 export type ShellCommand = {
   /** Run sends Return after a one-line command; Paste never does. */
   mode?: 'run' | 'paste';
+  /** Show a specific shell in the caller’s own terminal panel. */
+  showTerminal?(terminalId: string): void;
   /** The command is in the shell: running, or waiting at the prompt. */
   onTyped?(how: ShellTyped): void;
   /** The command line the person or Run started there ended, with its status, when the shell says. */
@@ -116,9 +118,9 @@ export async function openHomeShell(api: RunnerClient, workspaceId: string, plac
     const idle = command ? reusableTerminal(open, place, taken) : undefined;
     const terminal = idle || await api.openTerminal({ collectionId: workspaceId, ...('repositoryId' in place ? { repositoryHome: place.repositoryId } : 'userHome' in place ? { userHome: true } : { directory: place.directory }), cols: 100, rows: 30, requestKey: crypto.randomUUID() });
     // The specific shell first, so showing the panel does not start another.
-    requestTerminal(workspaceId, terminal.id);
-    runAction('terminal.open');
-    if (!command) { showMenuNotice(`Shell in ${place.label}`); return { terminalId: terminal.id, error: '' }; }
+    if (how.showTerminal) how.showTerminal(terminal.id);
+    else { requestTerminal(workspaceId, terminal.id); runAction('terminal.open'); }
+    if (!command) { if (!how.showTerminal) showMenuNotice(`Shell in ${place.label}`); return { terminalId: terminal.id, error: '' }; }
     if (!idle) showMenuNotice(`Starting a shell in ${place.label}…`);
     taken.add(terminal.id);
     void typeAndWatch(api, workspaceId, terminal.id, command, place.label, !!idle, how).catch(() => {});

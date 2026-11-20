@@ -38,10 +38,22 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 	names := map[string]bool{}
 	for _, member := range c.Members {
 		names[member.Name] = true
-		if _, err = os.Lstat(member.Path); errors.Is(err, os.ErrNotExist) && c.State == "deleting" {
+		if _, err = os.Lstat(member.Path); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err = m.validate(ctx, member); err != nil {
+			m.mu.Lock()
+			repo, ok := m.repos[member.RepositoryID]
+			verified := ok && m.common[repo.ID] == member.CommonDir
+			m.mu.Unlock()
+			if verified && member.Path == filepath.Join(c.Root, member.Name) && missingWorktreeLink(member.Path) {
+				registered, checkErr := m.registeredWorktree(ctx, repo, member.Path)
+				if checkErr == nil && registered {
+					// With no Git status, assume there are files to discard.
+					p.Dirty = append(p.Dirty, member.Name)
+					continue
+				}
+			}
 			return p, fmt.Errorf("%s: %w", member.Name, err)
 		}
 		// Include ignored build artifacts: they are user bytes too.
@@ -179,6 +191,18 @@ func (m *Manager) FinishDeletion(ctx context.Context, id string, discard bool, a
 		if !verified {
 			return fail(errors.New("source repository changed; cleanup refused"))
 		}
+		if discard && member.Path == filepath.Join(c.Root, member.Name) && missingWorktreeLink(member.Path) {
+			registered, err := m.registeredWorktree(ctx, repo, member.Path)
+			if err != nil || !registered || !missingWorktreeLink(member.Path) {
+				return fail(errors.New("damaged worktree changed during deletion; retry to check it again"))
+			}
+			// Git can recreate a missing link from its registration. It can
+			// emit a diagnostic for the broken link even after repairing it.
+			_, repairErr := m.git(ctx, repo.Path, "worktree", "repair", "--", member.Path)
+			if err := m.validate(ctx, member); err != nil {
+				return fail(errors.Join(errors.New("could not repair the member's missing Git link"), repairErr, err))
+			}
+		}
 		if err = m.removeRegisteredWorktree(ctx, repo, member, discard); err != nil {
 			return fail(err)
 		}
@@ -212,16 +236,38 @@ func (m *Manager) removeWorktree(ctx context.Context, member Member, discard boo
 	return m.removeRegisteredWorktree(ctx, repo, member, discard)
 }
 
+// A missing link can be recreated. Existing Git metadata, symlinks and
+// non-directories are left alone even if the path was once registered.
+func missingWorktreeLink(path string) bool {
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil || canonical != path {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	_, err = os.Lstat(filepath.Join(path, ".git"))
+	return errors.Is(err, os.ErrNotExist)
+}
+
+func (m *Manager) registeredWorktree(ctx context.Context, repo Repository, path string) (bool, error) {
+	listing, err := m.git(ctx, repo.Path, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return false, err
+	}
+	for _, field := range strings.Split(listing, "\x00") {
+		if field == "worktree "+path {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *Manager) removeRegisteredWorktree(ctx context.Context, repo Repository, member Member, discard bool) error {
-	listing, err := m.git(ctx, repo.Path, "worktree", "list", "--porcelain")
+	registered, err := m.registeredWorktree(ctx, repo, member.Path)
 	if err != nil {
 		return err
-	}
-	registered := false
-	for _, line := range strings.Split(listing, "\n") {
-		if line == "worktree "+member.Path {
-			registered = true
-		}
 	}
 	if !registered {
 		if _, err = os.Lstat(member.Path); !errors.Is(err, os.ErrNotExist) {

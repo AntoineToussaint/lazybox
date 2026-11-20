@@ -24,6 +24,7 @@ type pending struct {
 	answered bool
 }
 type session struct {
+	cwd             string
 	mu              sync.Mutex
 	p               *jsonl.Process
 	ref, turn       string
@@ -148,6 +149,9 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 			return fail(err)
 		}
 		config := map[string]any{"features.shell_tool": false, "features.goals": false, "features.view_image": false, "tools.experimental_request_user_input.enabled": false, "features.multi_agent": false, "features.multi_agent_v2": false, "features.apps": false, "web_search": "disabled"}
+		if o.Effort != "" {
+			config["model_reasoning_effort"] = o.Effort
+		}
 		for name := range resolved.Config.MCP {
 			config["mcp_servers."+strconv.Quote(name)+".enabled"] = false
 		}
@@ -197,13 +201,16 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 			return fail(errors.Join(err, archiveErr))
 		}
 	}
-	s := &session{p: p, ref: response.Thread.ID, model: response.Model, workflow: o.Workflow, permission: o.Permission, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose}
+	s := &session{p: p, cwd: o.Cwd, ref: response.Thread.ID, model: response.Model, workflow: o.Workflow, permission: o.Permission, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose}
 	s.titler = newTitler(binary, o, s.currentModel)
 	settings := map[string]json.RawMessage{}
 	for key, value := range map[string]json.RawMessage{"approvalPolicy": response.Approval, "approvalsReviewer": response.Reviewer, "sandboxPolicy": response.Sandbox} {
 		if len(value) > 0 && string(value) != "null" {
 			settings[key] = value
 		}
+	}
+	if o.Effort != "" {
+		settings["effort"], _ = json.Marshal(o.Effort)
 	}
 	if response.Model != "" {
 		settings["model"], _ = json.Marshal(response.Model)
@@ -308,7 +315,7 @@ func attach(ctx context.Context, o agent.Open, binary string) (agent.Session, er
 			return nil, err
 		}
 	}
-	s := &session{p: p, ref: o.Host.Attach.Reference, turn: state.Turn, model: state.Model, workflow: o.Workflow, permission: o.Permission, settings: state.Settings, overrides: state.Overrides, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose, responded: o.Host.Attach.Responded}
+	s := &session{p: p, cwd: o.Cwd, ref: o.Host.Attach.Reference, turn: state.Turn, model: state.Model, workflow: o.Workflow, permission: o.Permission, settings: state.Settings, overrides: state.Overrides, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose, responded: o.Host.Attach.Responded}
 	s.titler = newTitler(binary, o, s.currentModel)
 	go s.read()
 	return s, nil
@@ -391,6 +398,9 @@ func threadParams(o agent.Open) map[string]any {
 	if o.Model != "" {
 		params["model"] = o.Model
 	}
+	if o.Effort != "" {
+		params["config"] = map[string]any{"model_reasoning_effort": o.Effort}
+	}
 	return params
 }
 
@@ -448,12 +458,20 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		method := "turn/start"
 		params := map[string]any{"threadId": ref}
 		if op.Kind == agent.Message {
+			s.mu.Lock()
 			for key, value := range s.overrides {
 				params[key] = value
 			}
-		}
-		if op.Kind == agent.Message && s.workflow == "plan" {
-			params["collaborationMode"] = map[string]any{"mode": "plan", "settings": map[string]any{"model": s.model}}
+			if s.workflow == "plan" {
+				plan := map[string]any{"model": s.model}
+				var settings map[string]json.RawMessage
+				_ = json.Unmarshal(s.settings, &settings)
+				if effort := settings["effort"]; len(effort) > 0 {
+					plan["reasoning_effort"] = effort
+				}
+				params["collaborationMode"] = map[string]any{"mode": "plan", "settings": plan}
+			}
+			s.mu.Unlock()
 		}
 		if op.Kind != agent.Interrupt {
 			params["input"] = inputs(op)
@@ -501,6 +519,27 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		s.mu.Unlock()
 		r.Delivery = "accepted"
 		return r, nil
+	case agent.ListProviderCatalog:
+		ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		result, err := listProviderCatalog(ctx, s.p, ref, s.cwd, op.Section)
+		if err != nil {
+			return r, err
+		}
+		s.emit(agent.Event{Type: "provider_catalog", Text: result, OperationID: op.ID})
+		return r, nil
+	case agent.CompactContext:
+		_, err := s.p.Call(ctx, "thread/compact/start", map[string]string{"threadId": ref})
+		return r, err
+	case agent.ListMcpServers:
+		ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		text, err := listMcpServers(ctx, s.p, ref)
+		if err != nil {
+			return r, err
+		}
+		s.emit(agent.Event{Type: "mcp_servers", Text: text, OperationID: op.ID})
+		return r, nil
 	case agent.Model:
 		model, err := json.Marshal(op.Model)
 		if err != nil || op.Model == "" {
@@ -513,11 +552,17 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 			s.overrides = map[string]json.RawMessage{}
 		}
 		s.overrides["model"] = model
+		if op.Effort != "" {
+			s.overrides["effort"], _ = json.Marshal(op.Effort)
+		}
 		s.model = op.Model
 		// A same-provider handoff carries the model now in force.
 		var settings map[string]json.RawMessage
 		if json.Unmarshal(s.settings, &settings) == nil && settings != nil {
 			settings["model"] = model
+			if op.Effort != "" {
+				settings["effort"] = s.overrides["effort"]
+			}
 			s.settings, _ = json.Marshal(settings)
 		}
 		s.mu.Unlock()

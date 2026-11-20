@@ -60,6 +60,10 @@ type Member struct {
 	CommonDir  string `json:"commonDir"`
 	Ready      bool   `json:"ready"`
 }
+
+// ErrBranchExists indicates a branch is already present in a selected repository.
+var ErrBranchExists = errors.New("branch already exists; choose a new collection branch")
+
 type Collection struct {
 	Slug                    string            `json:"slug,omitempty"`
 	LegacyRoot              bool              `json:"legacyRoot,omitempty"`
@@ -563,7 +567,7 @@ func (m *Manager) planMembers(ctx context.Context, c Collection, specs []MemberS
 			}
 		}
 		if exists {
-			return Collection{}, errors.New("branch already exists; choose a new collection branch")
+			return Collection{}, ErrBranchExists
 		}
 		branches[branchKey] = true
 		// No explicit base: origin's default branch as last fetched (base.go),

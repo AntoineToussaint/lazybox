@@ -15,7 +15,8 @@ What people do with it is in [INSTALL.md](INSTALL.md).
 | Local equivalent | `make release VERSION=x.y.z` → `dist/<x.y.z>/` beside the Makefile |
 | Notes | [`CHANGELOG.md`](CHANGELOG.md), also the app's What's new |
 | Update feed | `latest.json` on the rolling `v2-updates` GitHub release |
-| Cask | `lazybox-v2` in `AntoineToussaint/homebrew-lazybox` |
+| Apple Silicon cask | `lazybox-v2` in `AntoineToussaint/homebrew-lazybox` |
+| Linux formula | `lazybox-runner` in the same tap (x64 and ARM64) |
 
 ## Cut a release
 
@@ -60,6 +61,7 @@ artifacts on the run, nothing published.
 | `Lazybox_<v>_aarch64.app.tar.gz` and `.sig` | The updater's archive and its minisign signature |
 | `latest.json` | The feed entry: version, notes, date, archive URL and signature, plus the changelog's sections (below) |
 | `lazybox-v2.rb` | The cask for this version (the workflow pushes it to the tap) |
+| `lazybox-runner.rb` | The Linux formula with checksums for both Runner bundles |
 | `RELEASE_NOTES.md` | The GitHub release body, from the changelog |
 | `THIRD_PARTY_NOTICES.txt` | Every bundled component's licence (below); also in the app and on the disk image |
 | `lazybox-runner-<v>-linux-{x64,arm64}.tar.gz` and `.sha256` | The Runner for a Linux machine: the app's `runtime/` tree without the app (static Runner and CLI, the pinned Node's official Linux build, the Claude worker without Claude Code, the phone app, the docs, the notices), with a `SHA256SUMS` of every file inside, all at the top level: the bundle `lazybox remote add --bundle` uploads. `node scripts/release/build.mjs --linux-only --version <v>` builds just these, on any OS |
@@ -447,3 +449,17 @@ local readiness, protocol availability and owner-link identity persistence
 after replacing the container. Kubernetes delivery and a desktop transport
 for Kubernetes exec are separate integration work. Replacing the container
 restarts its processes.
+
+## Homebrew qualification
+
+Each release candidate is installed and removed on clean Apple Silicon macOS,
+Linux x64 and Linux ARM64 runners before publication. The tests populate the
+Homebrew download cache with the candidate release files. Homebrew evaluates
+the actual tap definitions. The Linux formula installs the complete runtime
+under libexec and links the CLI into bin.
+
+A stable release publishes the Mac cask and Linux formula in one tap commit.
+The Linux package name is `AntoineToussaint/lazybox/lazybox-runner`. After
+installation or upgrade, run `lazybox service install` and `lazybox doctor`
+to register and verify the user service. Prereleases carry the rendered packages
+as release assets and leave the stable tap alone.

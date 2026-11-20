@@ -302,3 +302,6 @@
 .workspace-branch-preview .link-button:hover{text-decoration:underline}
 .workspace-branch-field{display:flex!important;flex-direction:row!important;align-items:center;gap:6px;color:var(--text-muted)}
 .workspace-branch-field input{flex:1;font-family:var(--font-mono);font-size:calc(12px * var(--code-scale))!important}
+
+.workspace-branch-field input[aria-invalid="true"] { border-color: var(--danger); }
+.workspace-branch-error { margin: 6px 0 0; color: var(--danger); font-size: 0.875rem; }

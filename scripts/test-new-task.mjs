@@ -296,6 +296,7 @@ try {
   await conversation.getByRole('option', { name: /^Codex/ }).click();
   await conversation.getByText('Model & context', { exact: true }).click();
   await conversation.getByRole('textbox', { name: 'Model', exact: true }).fill('gpt-6.2-sol');
+  await conversation.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('high');
   await conversation.getByRole('combobox', { name: 'Permissions', exact: true }).selectOption('read-only');
   await conversation.getByRole('combobox', { name: 'Workflow', exact: true }).selectOption('plan');
   await conversation.getByRole('button', { name: 'Start Codex ↗' }).click();
@@ -304,6 +305,7 @@ try {
   await expect(tabs).toHaveCount(1);
   const original = f.sessions.at(-1);
   assert.equal(original.collectionId, cloned.id);
+  assert.equal(original.effort, 'high');
 
   // Choices carry across workspace boundaries and between both start forms.
   const sourceRow = page.locator('.workspace-row').filter({ hasText: source.name });
@@ -315,6 +317,7 @@ try {
   await page.keyboard.press('Meta+n');
   const newTask = page.getByRole('dialog', { name: 'New task' });
   await expect(newTask.getByRole('textbox', { name: 'Model', exact: true })).toHaveValue('gpt-6.2-sol');
+  await expect(newTask.getByRole('combobox', { name: 'Reasoning effort', exact: true })).toHaveValue('high');
   await expect(newTask.locator('.new-task-chip-name')).toHaveText(['fixture-team/api', 'fixture-team/web']);
   await page.keyboard.press('Escape');
 
@@ -334,6 +337,7 @@ try {
   const started = since('OpenSession').at(-1).body;
   assert.equal(started.collectionId, cloned.id);
   assert.equal(started.options.model, 'gpt-6.2-sol');
+  assert.equal(started.options.effort, 'high');
   assert.equal(started.options.workflow, 'execute');
   assert.equal(started.options.permission || '', '');
   assert.ok(!started.resumeReference);

@@ -9,7 +9,7 @@ import { projectAttention, projectCommands, projectConversations, projectMission
 import { describeGrant, extensionStateLabel } from './extension-grants';
 import { ExtensionApprovalSheet } from './ExtensionApprovalSheet';
 import { Icon } from './Icons';
-import type { ModuleProps } from './PanelRegistry';
+import type { ExtensionPanelChoice, ModuleProps } from './PanelRegistry';
 import { useRunner } from './RunnerContext';
 import { useRunnerIdentity } from './RunnerDirectory';
 import { useSeen } from './useAttention';
@@ -32,7 +32,7 @@ import './extensions.css';
  * panel's own credential again; a crash, a refusal or a page it tries to leave
  * for is a quiet notice here, never an error elsewhere.
  */
-type Choice = { id: string; panel: string };
+type Choice = ExtensionPanelChoice;
 type Notice = { key: string; tone: 'info' | 'warn' | 'bad'; text: string; review?: boolean; reload?: boolean };
 
 const readChoice = (store: ViewStateStore | undefined, key: string): Choice | undefined => {
@@ -62,10 +62,15 @@ class ExtensionBoundary extends Component<{ children: ReactNode }, { error?: str
   }
 }
 
-function ExtensionPanel({ viewState, collections, workspaceId, onShowPanel, onPanelTitle }: ModuleProps) {
+function ExtensionPanel({ viewState, collections, workspaceId, onShowPanel, onPanelTitle, extensionRequest }: ModuleProps) {
   const key = viewState ? `${viewState.key}:extension` : '';
-  const [choice, setChoiceState] = useState<Choice | undefined>(() => readChoice(viewState, key));
+  const [choice, setChoiceState] = useState<Choice | undefined>(() => extensionRequest ? extensionRequest.choice : readChoice(viewState, key));
   const setChoice = (next?: Choice) => { setChoiceState(next); try { viewState?.setItem(key, next ? JSON.stringify(next) : ''); } catch { /* a convenience */ } };
+  useEffect(() => {
+    if (!extensionRequest) return;
+    setChoice(extensionRequest.choice);
+    extensionRequest.onOpened();
+  }, [extensionRequest]);
   const { value, error } = useExtensions();
   const extension = choice ? value?.extensions.find(e => e.id === choice.id) : undefined;
   const panel = extension?.panels.find(p => p.id === choice?.panel) || extension?.panels[0];
@@ -74,12 +79,12 @@ function ExtensionPanel({ viewState, collections, workspaceId, onShowPanel, onPa
     return () => onPanelTitle?.(undefined);
   }, [extension?.id, panel?.id, panel?.title]);
   if (!value) return <div className="extension-state" role="status">{error ? <><Icon name="alert" size={18}/><p>Extensions are not available: {error}</p></> : <p>Loading extensions…</p>}</div>;
-  if (!choice || !extension || !panel) return <ExtensionHome extensions={value.extensions} examples={value.examples} directory={value.directory} missing={choice && !extension ? choice.id : ''} onChoose={setChoice}/>;
+  if (!choice || !extension || !panel) return <ExtensionHome extensions={value.extensions} examples={value.examples} missing={choice && !extension ? choice.id : ''} onChoose={setChoice}/>;
   return <RunningExtension key={`${extension.id}/${panel.id}`} extension={extension} panelId={panel.id} collections={collections} workspaceId={workspaceId} onShowPanel={onShowPanel} onClose={() => setChoice(undefined)} onSwitch={setChoice}/>;
 }
 
 /** What can be shown, what waits for the person, and the examples. */
-function ExtensionHome({ extensions, examples, directory, missing, onChoose }: { extensions: Extension[]; examples: { id: string; name: string; description: string; installed: boolean }[]; directory: string; missing: string; onChoose(choice: Choice): void }) {
+function ExtensionHome({ extensions, examples, missing, onChoose }: { extensions: Extension[]; examples: { id: string; name: string; description: string; installed: boolean }[]; missing: string; onChoose(choice: Choice): void }) {
   const { change } = useExtensions();
   const [reviewing, setReviewing] = useState<Extension>();
   const [busy, setBusy] = useState('');
@@ -95,6 +100,7 @@ function ExtensionHome({ extensions, examples, directory, missing, onChoose }: {
     if (failed) setError(failed); else if (added) setReviewing(added);
   };
   return <div className="extension-home">
+    <button type="button" className="extension-manage" onClick={() => runAction('settings.open', 'extensions')}><Icon name="sliders" size={13}/> Manage extensions</button>
     {missing && <p className="extension-notice tone-warn" role="status"><Icon name="alert" size={14}/> The extension this panel showed ({missing}) is no longer in your extensions folder.</p>}
     {running.length > 0 && <section aria-labelledby="extensions-running"><h3 id="extensions-running">Show</h3>
       <ul className="extension-tiles">{running.flatMap(ext => ext.panels.map(p => <li key={`${ext.id}/${p.id}`}>
@@ -129,7 +135,6 @@ function ExtensionHome({ extensions, examples, directory, missing, onChoose }: {
     {error && <p className="settings-error" role="alert">{error}</p>}
     <footer className="extension-home-footer">
       <span>Make your own: <code>lazybox extension new my-panel</code></span>
-      <button type="button" className="quiet" title={directory} onClick={() => runAction('settings.open', 'extensions')}><Icon name="sliders" size={13}/> Manage…</button>
     </footer>
     {reviewing && <ExtensionApprovalSheet extension={reviewing} onClose={() => setReviewing(undefined)} onApproved={ext => onChoose({ id: ext.id, panel: ext.panels[0]?.id || '' })}/>}
   </div>;

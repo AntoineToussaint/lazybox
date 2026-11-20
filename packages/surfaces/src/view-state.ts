@@ -59,13 +59,13 @@ export function writePreference(store: ViewStateStore | undefined, name: string,
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(PREFERENCE_EVENT, { detail: { name } }));
 }
 
-export type LaunchChoices = { provider: string; profile: string; model: string; gateway: string; behaviorProfile?: string };
+export type LaunchChoices = { provider: string; profile: string; model: string; effort?: string; gateway: string; behaviorProfile?: string };
 export function readLaunchChoices(store?: ViewStateStore): Partial<LaunchChoices> {
   try {
     const raw = readPreference(store, 'launch-choices') ?? store?.getItem(`${store.scope || store.key}:launch-choices`);
     const data = raw && raw.length < 4096 ? JSON.parse(raw) : {};
     if (!data || typeof data.provider !== 'string' || !(['claude', 'codex'].includes(data.provider) || isAcp(data.provider))) return {};
-    return Object.fromEntries(['provider', 'profile', 'model', 'gateway', 'behaviorProfile'].filter(k => typeof data[k] === 'string' && data[k].length < 512).map(k => [k, data[k]]));
+    return Object.fromEntries(['provider', 'profile', 'model', 'effort', 'gateway', 'behaviorProfile'].filter(k => typeof data[k] === 'string' && data[k].length < 512).map(k => [k, data[k]]));
   } catch { return {}; }
 }
 /** Seed older installations from their latest coding conversation on this Runner. */
@@ -78,7 +78,7 @@ export function conversationDefaults(store?: ViewStateStore, info?: InfoResponse
     return !best || candidate.createdAtUnixMillis > best.createdAtUnixMillis ? candidate : best;
   }, undefined);
   if (!latest) return {};
-  return { provider: info?.profiles.find(profile => profile.id === latest.profileId)?.provider, profile: latest.profileId, model: latest.model };
+  return { provider: info?.profiles.find(profile => profile.id === latest.profileId)?.provider, profile: latest.profileId, model: latest.model, effort: latest.effort };
 }
 
 export function writeLaunchChoices(store: ViewStateStore | undefined, choices: LaunchChoices): void {

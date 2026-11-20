@@ -155,7 +155,7 @@ export function CommandPalette({ keymap, navigator, viewState, initialQuery = ''
       }
     }
     const settings: Item[] = navigator.openSettings ? settingsTabs.map(tab => ({
-      key: `setting:${tab.id}`, kind: 'setting', title: `${tab.label} settings`, detail: `Settings · ${tab.group}`, extra: 'settings preferences', icon: <Icon name={tab.icon} size={15}/>,
+      key: `setting:${tab.id}`, kind: 'setting', title: `${tab.label} settings`, detail: `Settings · ${tab.group}`, extra: tab.id === 'extensions' ? 'plugins add-ons install manage settings' : 'settings preferences', icon: <Icon name={tab.icon} size={15}/>,
       run: () => navigator.openSettings!(tab.id),
     })) : [];
     const panels: Item[] = (navigator.panels || []).map(panel => ({

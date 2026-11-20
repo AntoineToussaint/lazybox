@@ -38,7 +38,7 @@ type Capabilities struct {
 type Open struct {
 	ForkThread, ForkAfterTurn                             string
 	ID, Cwd, Model, Resume, Profile, Permission, Workflow string
-	Context                                               string
+	Effort, Context                                       string
 	Purpose                                               string
 	Isolated                                              bool
 	ProviderSettings                                      json.RawMessage
@@ -177,7 +177,10 @@ const (
 	// StopAgent stops one running sub-agent; the main agent's turn continues.
 	StopAgent Kind = "stop_agent"
 	// Model switches the running session's model for its following turns.
-	Model Kind = "model"
+	Model               Kind = "model"
+	ListMcpServers      Kind = "list_mcp_servers"
+	CompactContext      Kind = "compact_context"
+	ListProviderCatalog Kind = "list_provider_catalog"
 	// RevokeGrant takes back one "always allow" of the conversation (Grant).
 	RevokeGrant Kind = "revoke_grant"
 )
@@ -190,9 +193,10 @@ var PermissionModes = map[string]bool{"ask": true, "read-only": true, "yolo": tr
 // the id the provider takes (an alias or a full id), its name as people say
 // it and a short description. The JSON is a command_catalog event's `models`.
 type ModelChoice struct {
-	Value       string `json:"value"`
-	DisplayName string `json:"displayName"`
-	Description string `json:"description,omitempty"`
+	Value        string   `json:"value"`
+	DisplayName  string   `json:"displayName"`
+	Description  string   `json:"description,omitempty"`
+	EffortLevels []string `json:"effortLevels,omitempty"`
 }
 
 // ValidModel checks a model identifier a person chose for a running session:
@@ -214,6 +218,26 @@ func ValidModel(model string) error {
 
 // ErrInvalidModel marks a model name ValidModel refuses.
 var ErrInvalidModel = errors.New("invalid model")
+
+// ValidEffort validates an optional override for providers with reasoning effort.
+func ValidEffort(provider, effort string) error {
+	if effort == "" {
+		return nil
+	}
+	switch provider {
+	case "claude":
+		switch effort {
+		case "low", "medium", "high", "xhigh", "max":
+			return nil
+		}
+	case "codex":
+		switch effort {
+		case "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: unsupported reasoning effort %q for %s", ErrInvalidModel, effort, provider)
+}
 
 type Operation struct {
 	ID        string  `json:"id"`
@@ -240,7 +264,10 @@ type Operation struct {
 	AgentID  string `json:"agentId,omitempty"`
 	NativeID string `json:"nativeId,omitempty"`
 	// Model is the new model of a Model operation.
-	Model string `json:"model,omitempty"`
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+	// Section is the inventory requested by ListProviderCatalog.
+	Section string `json:"section,omitempty"`
 	// Origin, on a Message, marks one Lazybox wrote rather than the person.
 	Origin *Origin `json:"origin,omitempty"`
 	// GrantID is the grant a RevokeGrant operation takes back.

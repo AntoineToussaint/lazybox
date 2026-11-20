@@ -26,7 +26,7 @@ func TestModelSwitchIsTheOwnersAlone(t *testing.T) {
 	}
 	agentCredential := agentToken(t, fake.Session.Open.Env)
 	switchTo := func(id, model string) *pb.ApplyRequest {
-		return &pb.ApplyRequest{SessionId: e.ID, OperationId: id, Operation: &pb.ApplyRequest_Model{Model: &pb.ModelChange{Model: model}}}
+		return &pb.ApplyRequest{SessionId: e.ID, OperationId: id, Operation: &pb.ApplyRequest_Model{Model: &pb.ModelChange{Model: model, Effort: "high"}}}
 	}
 	_, err = f.client.Apply(bearer(ctx, agentCredential), switchTo("agent", "agent-model"))
 	expectCode(t, "agent switched its own model", err, codes.PermissionDenied)
@@ -44,7 +44,7 @@ func TestModelSwitchIsTheOwnersAlone(t *testing.T) {
 	}
 	select {
 	case op := <-fake.Session.Applied:
-		if op.Kind != agent.Model || op.Model != "second-model" {
+		if op.Kind != agent.Model || op.Model != "second-model" || op.Effort != "high" {
 			t.Fatalf("delivered as %+v", op)
 		}
 	case <-ctx.Done():
@@ -54,8 +54,8 @@ func TestModelSwitchIsTheOwnersAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.Session.Model != "second-model" || !session.Session.Capabilities.LiveModel {
-		t.Fatalf("session does not report the switch: model %q live %v", session.Session.Model, session.Session.Capabilities.LiveModel)
+	if session.Session.Model != "second-model" || session.Session.Effort != "high" || !session.Session.Capabilities.LiveModel {
+		t.Fatalf("session does not report the switch: model %q effort %q live %v", session.Session.Model, session.Session.Effort, session.Session.Capabilities.LiveModel)
 	}
 }
 

@@ -103,4 +103,11 @@ cask_in_tap "$bare4" | grep -q 'version "0.3.0"' || fail "case 4: cask missing a
 git -C "$bare4" show "main:OTHER.md" >/dev/null 2>&1 || fail "case 4: rebase dropped the concurrent commit"
 echo "PASS case 4: rejected first push is rebased and retried, keeping both changes"
 
+# Publish the Linux formula alongside the Mac cask in the same tap commit.
+formula="$WORK/lazybox-runner.rb"
+echo 'class LazyboxRunner < Formula; end' > "$formula"
+before="$(commits_in_tap "$bare1")"
+bash "$SCRIPT" "$TMPL" "0.3.1" "ffeeaa" "$bare1" Casks/lazybox-v2.rb "$formula" >/dev/null
+git -C "$bare1" show main:Formula/lazybox-runner.rb | cmp - "$formula"
+[ "$(commits_in_tap "$bare1")" -eq "$((before + 1))" ] || fail "packages need one commit"
 echo "OK: publish-cask.sh regression tests passed"

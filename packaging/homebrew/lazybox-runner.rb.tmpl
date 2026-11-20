@@ -1,0 +1,39 @@
+class LazyboxRunner < Formula
+  desc "Run and supervise Lazybox coding workspaces on Linux"
+  homepage "https://lazybox.ai"
+  version "__VERSION__"
+
+  on_linux do
+    if Hardware::CPU.arm?
+      url "https://github.com/AntoineToussaint/lazybox/releases/download/v2-v#{version}/lazybox-runner-#{version}-linux-arm64.tar.gz"
+      sha256 "__ARM64__"
+    else
+      url "https://github.com/AntoineToussaint/lazybox/releases/download/v2-v#{version}/lazybox-runner-#{version}-linux-x64.tar.gz"
+      sha256 "__X64__"
+    end
+  end
+
+  depends_on :linux
+  depends_on "git"
+  conflicts_with "lazybox", because: "both install a lazybox command"
+
+  def install
+    libexec.install Dir["*"]
+    bin.install_symlink libexec/"bin/lazybox"
+  end
+
+  def caveats
+    <<~EOS
+      To install or refresh your user service after an upgrade, run:
+        lazybox service install
+        lazybox doctor
+    EOS
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/lazybox --version")
+    assert_predicate libexec/"bin/lazybox-runner", :executable?
+    assert_predicate libexec/"worker/dist/main.js", :file?
+    system libexec/"node/bin/node", "--version"
+  end
+end

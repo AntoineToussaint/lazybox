@@ -56,3 +56,33 @@ export function saveSnippetUse(store: ViewStateStore | undefined, key: string, a
   try { writePreference(store, usageKey, JSON.stringify(next)); } catch { /* usage is a convenience */ }
   return next;
 }
+
+type SearchableSnippet = { key: string; category: string; description: string; body: string };
+
+const words = (text: string) => text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+
+/** Rank a filtered view by relevance, keeping its browse order for tied matches. */
+export function searchSnippets<T extends SearchableSnippet>(rows: readonly T[], query: string): T[] {
+  const text = query.trim().toLowerCase();
+  if (!text) return [...rows];
+  if (text.startsWith('body:')) {
+    const phrase = text.slice(5).trim().replace(/\s+/g, ' ');
+    return rows.filter(row => row.body.toLowerCase().replace(/\s+/g, ' ').includes(phrase));
+  }
+  const terms = words(text);
+  const joined = terms.join('');
+  const matches = (term: string, field: string[]) => field.some(word => word.startsWith(term));
+  return rows.flatMap(row => {
+    const key = row.key.toLowerCase();
+    if (key === text) return [{ row, rank: 0 }];
+    const keyWords = words(key), compactKey = keyWords.join('');
+    const description = words(row.description), category = words(row.category);
+    if (joined && compactKey === joined) return [{ row, rank: 1 }];
+    if (key.startsWith(text) || (joined && compactKey.startsWith(joined))) return [{ row, rank: 2 }];
+    if (terms.length && (terms.every(term => matches(term, keyWords)) ||
+        (joined.length >= 3 && compactKey.includes(joined)))) return [{ row, rank: 3 }];
+    if (terms.length && terms.every(term => matches(term, [...keyWords, ...description]))) return [{ row, rank: 4 }];
+    if (terms.length && terms.every(term => matches(term, [...keyWords, ...description, ...category]))) return [{ row, rank: 5 }];
+    return [];
+  }).sort((a, b) => a.rank - b.rank).map(match => match.row);
+}

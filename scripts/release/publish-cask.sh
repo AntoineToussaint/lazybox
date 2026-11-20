@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 #
-# Render a Homebrew cask from its template and publish it to the tap.
-# V1's scripts/publish-desktop-cask.sh, copied with its regression test
-# (publish-cask_test.sh) so the standalone V2 repository carries both; the
-# only change is that the commit names the cask it publishes.
+# Publish the rendered Mac cask and optional Linux formula in one tap commit.
 #
 # The bug this guards: on the FIRST release the cask does not yet exist in the
 # tap, so it is untracked. `git diff --quiet <path>` ignores untracked files
@@ -13,14 +10,14 @@
 # A push that loses a race with a concurrent release is rebased and retried
 # rather than left as a failed job.
 #
-# Usage: publish-cask.sh TEMPLATE VERSION SHA256 TAP_URL [CASK_SUBPATH]
+# Usage: publish-cask.sh TEMPLATE VERSION SHA256 TAP_URL [CASK_SUBPATH] [FORMULA_FILE]
 
 set -euo pipefail
 
-template="${1:?usage: $0 TEMPLATE VERSION SHA256 TAP_URL [CASK_SUBPATH]}"
-version="${2:?usage: $0 TEMPLATE VERSION SHA256 TAP_URL [CASK_SUBPATH]}"
-sha256="${3:?usage: $0 TEMPLATE VERSION SHA256 TAP_URL [CASK_SUBPATH]}"
-tap_url="${4:?usage: $0 TEMPLATE VERSION SHA256 TAP_URL [CASK_SUBPATH]}"
+template="${1:?usage: $0 TEMPLATE VERSION SHA256 TAP_URL [CASK_SUBPATH] [FORMULA_FILE]}"
+version="${2:?usage: $0 TEMPLATE VERSION SHA256 TAP_URL [CASK_SUBPATH] [FORMULA_FILE]}"
+sha256="${3:?usage: $0 TEMPLATE VERSION SHA256 TAP_URL [CASK_SUBPATH] [FORMULA_FILE]}"
+tap_url="${4:?usage: $0 TEMPLATE VERSION SHA256 TAP_URL [CASK_SUBPATH] [FORMULA_FILE]}"
 cask_subpath="${5:-Casks/lazybox-v2.rb}"
 
 [ -f "$template" ] || { echo "::error::template not found: $template" >&2; exit 1; }
@@ -44,6 +41,11 @@ cp "$rendered" "$tapdir/$cask_subpath"
 
 # Stage BEFORE diffing so a brand-new (untracked) cask counts as a change.
 git -C "$tapdir" add "$cask_subpath"
+if [ -n "${6:-}" ]; then
+	mkdir -p "$tapdir/Formula"
+	cp "$6" "$tapdir/Formula/lazybox-runner.rb"
+	git -C "$tapdir" add Formula/lazybox-runner.rb
+fi
 if git -C "$tapdir" diff --cached --quiet; then
 	echo "Cask already at ${version}; nothing to publish."
 	exit 0

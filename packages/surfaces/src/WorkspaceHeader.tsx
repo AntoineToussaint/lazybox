@@ -22,7 +22,7 @@ import type { ViewTarget, WorkspacePage } from './workspace-model';
  * page's own actions.
  */
 const PHONE = '(max-width: 479px)';
-export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, fixedWorkspace, navigatorOpen, collections, selection, viewState, workspaceID, info, terminalReady, canShowNewSession, editing, layoutMenu, canOpenWorkspaceWindow, onOpenNavigator, onSelectPage, onOpenSettings, onOpenAttention, onShowChanges, onBrowseFiles, onShowTerminal, onNewConversation, onOpenRunner, onOpenWorkspaceWindow, onToggleEditing, onToggleConfiguring, onShowModule }: {
+export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, fixedWorkspace, navigatorOpen, collections, selection, viewState, workspaceID, info, terminalReady, canShowNewSession, editing, layoutMenu, canOpenWorkspaceWindow, onOpenNavigator, onSelectPage, extensionsOpen, onManageExtensions, onOpenSettings, onOpenAttention, onShowChanges, onBrowseFiles, onShowTerminal, onNewConversation, onOpenRunner, onOpenWorkspaceWindow, onToggleEditing, onToggleConfiguring, onShowModule }: {
   /** The desktop app, for its update notice (absent in a browser and in workspace windows). */
   app?: AppHost;
   pages: WorkspacePage[];
@@ -46,6 +46,8 @@ export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, f
   canOpenWorkspaceWindow: boolean;
   onOpenNavigator(): void;
   onSelectPage(id: string): void;
+  extensionsOpen: boolean;
+  onManageExtensions(): void;
   onOpenSettings(): void;
   onOpenAttention(target: ViewTarget): void;
   onShowChanges(): void;
@@ -84,7 +86,8 @@ export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, f
     </div>
     <nav aria-label="Pages">
       {pages.map(value => <button key={value.id} disabled={pending} className={!settings && value.id === selectedPage ? 'selected' : ''} aria-current={!settings && value.id === selectedPage ? 'page' : undefined} onClick={() => onSelectPage(value.id)}>{value.name}</button>)}
-      {!fixedWorkspace && <button className={settings ? 'selected' : ''} aria-current={settings ? 'page' : undefined} onClick={onOpenSettings}>Settings</button>}
+      {!fixedWorkspace && <button className={extensionsOpen ? 'selected' : ''} aria-current={extensionsOpen ? 'page' : undefined} onClick={onManageExtensions}>Extensions</button>}
+      {!fixedWorkspace && <button className={settings && !extensionsOpen ? 'selected' : ''} aria-current={settings && !extensionsOpen ? 'page' : undefined} onClick={onOpenSettings}>Settings</button>}
     </nav>
     <div className="workspace-header-actions">
       <AttentionCenter collections={collections} selection={selection} viewState={viewState} onOpen={onOpenAttention}/>
@@ -109,6 +112,7 @@ export function WorkspaceHeader({ app, pages, selectedPage, settings, pending, f
       <UpdateNotice app={app}/>
       <RunnerIndicator onOpen={fixedWorkspace ? undefined : onOpenRunner}/>
       <ActionMenu label="Page actions">
+        {!fixedWorkspace && phone && <button onClick={onManageExtensions}>Extensions</button>}
         {canOpenWorkspaceWindow && <button onClick={onOpenWorkspaceWindow}>Open workspace window</button>}
         <button disabled={settings} onClick={onToggleEditing}>{editing ? 'Finish customizing' : 'Customize pages'}</button>
         <button disabled={settings} onClick={onToggleConfiguring}>Layout configuration</button>

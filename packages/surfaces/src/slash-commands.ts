@@ -14,7 +14,7 @@ export type SlashGroup = 'lazybox' | 'provider' | 'snippet';
 export const SLASH_GROUPS: readonly SlashGroup[] = ['lazybox', 'provider', 'snippet'];
 
 /** One value an argument can take (a model, a permission mode), as it is listed. */
-export type SlashChoice = { value: string; label: string; detail?: string; current?: boolean; disabled?: string; keywords?: string };
+export type SlashChoice = { value: string; label: string; detail?: string; current?: boolean; disabled?: string; keywords?: string; effort?: string };
 export type SlashCommand = {
   /** Unique across groups: `lazybox:model`, `provider:review-pr`, `snippet:review`. */
   key: string;
@@ -144,7 +144,7 @@ const modelOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'base' 
 /** Keep the current model visible and sort the other names independently of catalog order. */
 function orderedModelChoices(choices: readonly SlashChoice[]): SlashChoice[] {
   return [...choices].sort((a, b) =>
-    Number(!!b.current) - Number(!!a.current) || modelOrder.compare(a.label, b.label) ||
+    Number(!!b.current) - Number(!!a.current) || Number(!!a.effort) - Number(!!b.effort) || modelOrder.compare(a.label, b.label) ||
     modelOrder.compare(a.value, b.value) || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0),
   );
 }
@@ -184,21 +184,13 @@ export type SlashDecision =
   /** The agent's own command: send the text as the prompt, the provider runs it. */
   | { kind: 'provider'; command: SlashCommand; args: string }
   /** A snippet's name: put its body in the box. */
-  | { kind: 'snippet'; command: SlashCommand }
-  /** Reads as a command but is none: ask before sending it as text. */
-  | { kind: 'unknown'; name: string };
-/**
- * The send rule, when no menu entry is chosen: Lazybox's command runs, the
- * agent's goes through as the prompt, and `/something` that is neither is
- * not sent without a second Enter ("Not a command — send as text?"). Text
- * that does not read as a command (`/usr/local/bin is missing`, `/ 2`) is a
- * message like any other.
- */
+  | { kind: 'snippet'; command: SlashCommand };
+/** Run known commands locally or through the provider. Other input follows the normal message path. */
 export function decideSend(text: string, commands: readonly SlashCommand[]): SlashDecision {
   const input = parseSlash(text.trimEnd());
   if (!input || !COMMAND_NAME.test(input.name)) return { kind: 'text' };
   const command = findCommand(commands, input.name);
-  if (!command || command.unsupported) return { kind: 'unknown', name: input.name };
+  if (!command || command.unsupported) return { kind: 'text' };
   if (command.group === 'snippet') return { kind: 'snippet', command };
   return { kind: command.group, command, args: input.args.trim() };
 }
@@ -207,7 +199,7 @@ export function decideSend(text: string, commands: readonly SlashCommand[]): Sla
 
 /** The agent's catalog, as the worker reports it (`command_catalog`). */
 export type ProviderCommand = { name: string; description: string; argumentHint: string; aliases?: string[]; builtin?: boolean };
-export type ProviderModel = { value: string; displayName: string; description: string };
+export type ProviderModel = { value: string; displayName: string; description: string; effortLevels?: readonly string[] };
 export type CommandCatalog = { commands: ProviderCommand[]; models: ProviderModel[]; terminal: string[] };
 export const emptyCatalog = (): CommandCatalog => ({ commands: [], models: [], terminal: [] });
 const text = (value: unknown, limit: number) => typeof value === 'string' ? value.slice(0, limit) : '';
@@ -224,7 +216,8 @@ export function mergeCatalog(previous: CommandCatalog, payload: Record<string, u
   if (Array.isArray(payload.models)) next.models = payload.models.flatMap((raw): ProviderModel[] => {
     const m = raw as Record<string, unknown>;
     const value = text(m?.value, 200);
-    return value ? [{ value, displayName: text(m.displayName, 120) || value, description: text(m.description, 300) }] : [];
+    const effortLevels = Array.isArray(m?.effortLevels) ? m.effortLevels.filter((level): level is string => typeof level === 'string' && /^(none|minimal|low|medium|high|xhigh|max|ultra)$/.test(level)) : [];
+    return value ? [{ ...(effortLevels.length ? { effortLevels } : {}), value, displayName: text(m.displayName, 120) || value, description: text(m.description, 300) }] : [];
   }).slice(0, 100);
   if (Array.isArray(payload.terminal)) next.terminal = payload.terminal.map(name => text(name, 80).replace(/^\//, '')).filter(Boolean);
   return next;
@@ -271,6 +264,7 @@ export type SlashContext = {
   planWorkflow: boolean;
   livePermission: boolean;
   model: string;
+  effort?: string;
   liveModel: boolean;
   /** The provider can resume: a restart (model, permissions) keeps the conversation. */
   resumable: boolean;
@@ -299,18 +293,28 @@ export function lazyboxCommands(ctx: SlashContext): SlashCommand[] {
   const notLive = !ctx.live && 'The conversation is not running';
   const agentName = ctx.agentName || agentTitle(ctx.provider);
   const restart = (live: boolean) => live ? '' : ctx.resumable ? ' (restarts the agent; the conversation continues)' : '';
-  const models = modelChoices(mergeModels(ctx.providerModels || [], ctx.models), ctx.model);
+  const models = modelChoices(mergeModels(ctx.providerModels || [], ctx.models), ctx.model, ctx.effort);
   const permissions: SlashChoice[] = (['ask', 'read-only', 'yolo'] as PermissionMode[]).map(mode => ({ value: mode, label: PERMISSION_LABELS[mode], detail: PERMISSION_DETAILS[mode] + restart(ctx.livePermission), current: ctx.permission === mode, disabled: permissionBlocked(ctx.planWorkflow ? 'plan' : '', mode) || undefined, keywords: mode === 'yolo' ? 'bypass dangerous skip' : mode === 'ask' ? 'approve default' : 'plan readonly' }));
   return [
-    { key: 'lazybox:model', name: 'model', group: 'lazybox', icon: 'sparkle', argumentHint: '<name>', description: ctx.liveModel ? `Switch ${agentName}'s model` : `Switch ${agentName}'s model${restart(false)}`, choices: models, freeArgument: true, disabled: unless(notLive), keywords: 'opus sonnet haiku gpt' },
+    { key: 'lazybox:model', name: 'model', group: 'lazybox', icon: 'sparkle', argumentHint: '<name> [effort]', description: ctx.liveModel ? `Switch ${agentName}'s model` : `Switch ${agentName}'s model${restart(false)}`, choices: models, freeArgument: true, disabled: unless(notLive), keywords: 'opus sonnet haiku gpt' },
     { key: 'lazybox:permissions', name: 'permissions', group: 'lazybox', icon: 'shield', argumentHint: 'ask|read-only|yolo', aliases: ['permission', 'yolo'], description: 'Ask, Read only or YOLO', choices: permissions, disabled: unless(notLive, !ctx.coding && 'Assistants are read-only') },
     { key: 'lazybox:subscription', name: 'subscription', group: 'lazybox', icon: 'card', description: 'Switch subscription…', aliases: ['account'], disabled: unless(notLive), keywords: 'account login profile limit' },
     { key: 'lazybox:browser', name: 'browser', group: 'lazybox', icon: 'globe', description: `Give ${agentName} the browser${ctx.browser === 'can_give' ? ' (restarts the agent; the conversation continues)' : ''}`,
       disabled: unless(notLive, ctx.browser === 'has' && `${agentName} has the browser`, ctx.browser === 'off' && 'The agent browser is off in Settings → Browser', !ctx.browser && 'The agent browser is not available in this conversation'),
       unsupported: !ctx.browser, keywords: 'chromium web page preview playwright' },
-    { key: 'lazybox:compact', name: 'compact', group: 'lazybox', icon: 'collapse', description: 'Compact the context: summarize the conversation so far', disabled: unless(notLive, ctx.busy && 'Wait for the turn to finish', !ctx.compact && (ctx.provider === 'codex' ? 'Codex compacts its context on its own' : isAcp(ctx.provider) ? `${agentName} has no /compact; see its own commands` : 'Not available until the agent reports its commands')), unsupported: !ctx.compact, keywords: 'summarize context shrink tokens' },
+    { key: 'lazybox:compact', name: 'compact', group: 'lazybox', icon: 'collapse', description: 'Compact the context: summarize the conversation so far', disabled: unless(notLive, ctx.busy && 'Wait for the turn to finish', !ctx.compact && (isAcp(ctx.provider) ? `${agentName} has no /compact; see its own commands` : 'Not available until the agent reports its commands')), unsupported: !ctx.compact, keywords: 'summarize context shrink tokens' },
     { key: 'lazybox:clear', name: 'clear', group: 'lazybox', icon: 'plus', description: 'New conversation in this workspace (this one is kept)', aliases: ['new'], disabled: unless(!ctx.workspace && 'Only in a workspace'), keywords: 'reset fresh start' },
     { key: 'lazybox:cost', name: 'cost', group: 'lazybox', icon: 'activity', description: 'Token cost of this conversation', aliases: ['usage'], keywords: 'tokens price money spend' },
+    ...((ctx.provider === 'codex' || ctx.provider === 'claude') && ctx.live ? [{ key: 'lazybox:mcp', name: 'mcp', group: 'lazybox' as const, icon: 'puzzle', description: 'List MCP servers in this conversation', disabled: unless(notLive), keywords: 'tools integrations servers' }] : []),
+    ...(ctx.provider === 'codex' && ctx.live ? (['skills', 'apps', 'plugins'] as const).map(name => ({
+      key: `lazybox:${name}`, name, group: 'lazybox' as const, icon: 'puzzle', description: `List Codex ${name}`,
+    })) : []),
+    { key: 'lazybox:diff', name: 'diff', group: 'lazybox', icon: 'branch', description: 'Open this workspace’s changes', disabled: unless(!ctx.workspace && 'Only in a workspace') },
+    { key: 'lazybox:status', name: 'status', group: 'lazybox', icon: 'activity', description: 'Show conversation status and context usage' },
+    { key: 'lazybox:copy', name: 'copy', group: 'lazybox', icon: 'copy', description: 'Copy the latest agent reply', freeArgument: true, disabled: unless(!ctx.agentMessage && 'No reply to copy yet') },
+    ...(ctx.provider === 'claude' || ctx.provider === 'codex' ? [
+      { key: 'lazybox:effort', name: 'effort', group: 'lazybox' as const, icon: 'sliders', description: 'Show or change the current model’s reasoning effort', freeArgument: true, disabled: unless(notLive) },
+    ] : []),
     { key: 'lazybox:context', name: 'context', group: 'lazybox', icon: 'activity', description: 'How full the context window is', keywords: 'tokens window memory' },
     // `/review` has the default reviewer review this conversation's changes; `/review claude` names one; `/review <focus>`
     // (or `/review codex <focus>`) adds what to look at to the brief; `/review tray` opens the tray.
@@ -371,12 +375,19 @@ const ALIAS = /^[a-z]+$/;
  * listed once, the first time.
  */
 export function mergeModels(provider: readonly ProviderModel[], listed: readonly ProviderModel[]): ProviderModel[] {
-  const out: ProviderModel[] = [], seen = new Set<string>();
+  const out: ProviderModel[] = [];
+  const seen = new Map<string, ProviderModel>();
   for (const model of [...provider, ...listed]) {
+    if (!model.value) continue;
     const keys = [model.value.toLowerCase(), `name:${(model.displayName || model.value).toLowerCase()}`];
-    if (!model.value || keys.some(key => seen.has(key))) continue;
-    keys.forEach(key => seen.add(key));
-    out.push({ value: model.value, displayName: model.displayName || model.value, description: model.description || '' });
+    const existing = keys.map(key => seen.get(key)).find(Boolean);
+    if (existing) {
+      if (model.effortLevels?.length) existing.effortLevels = model.effortLevels;
+      continue;
+    }
+    const entry = { ...model, displayName: model.displayName || model.value, description: model.description || '' };
+    keys.forEach(key => seen.set(key, entry));
+    out.push(entry);
   }
   return out;
 }
@@ -391,7 +402,19 @@ const DEFAULT_MODEL_CHOICE: SlashChoice = { value: DEFAULT_MODEL, label: 'Defaul
  * id) is listed first, so the list always says what runs now — but choosing
  * the current model changes nothing (useSlashCommands' switchModel).
  */
-export function modelChoices(models: readonly ProviderModel[], current: string): SlashChoice[] {
+export function modelChoices(models: readonly ProviderModel[], current: string, effort = ''): SlashChoice[] {
+  const withEffort = (choices: SlashChoice[]) => {
+    const plain: SlashChoice[] = [], variants: SlashChoice[] = [];
+    for (const choice of choices) {
+      const levels = models.find(model => model.value === choice.value)?.effortLevels || [];
+      plain.push({ ...choice, current: choice.current && !levels.includes(effort) });
+      variants.push(...levels.map(level => ({
+        ...choice, effort: level, value: `${choice.value} ${level}`, label: `${choice.label} · ${level}`,
+        current: choice.current && effort === level, keywords: `${choice.value} ${level} effort`,
+      })));
+    }
+    return [...plain, ...variants];
+  };
   // No model named yet: the conversation runs on the provider's own default
   // (no id was asked for, and the agent has not said which). That is the
   // current choice, so the list never reads as "none of these": the agent's
@@ -399,7 +422,7 @@ export function modelChoices(models: readonly ProviderModel[], current: string):
   if (!current.trim()) {
     const listed = models.findIndex(model => model.value.toLowerCase() === DEFAULT_MODEL);
     const choices = models.map((model, i): SlashChoice => ({ value: model.value, label: model.displayName, detail: [model.value !== model.displayName ? model.value : '', model.description].filter(Boolean).join(' · '), current: i === listed, keywords: model.value }));
-    return listed < 0 ? [DEFAULT_MODEL_CHOICE, ...choices] : choices;
+    return withEffort(listed < 0 ? [DEFAULT_MODEL_CHOICE, ...choices] : choices);
   }
   // Every entry that is the current model is marked (an id and its alias), so
   // none of them is offered first as a switch (rankChoices skips the current).
@@ -417,7 +440,7 @@ export function modelChoices(models: readonly ProviderModel[], current: string):
     const label = modelName(current);
     choices.unshift({ value: current, label, detail: label === current ? 'Current model' : `${current} · Current model`, current: true, keywords: current });
   }
-  return choices;
+  return withEffort(choices);
 }
 /**
  * What the card asks before a model switch that restarts the agent, in one
@@ -515,6 +538,7 @@ export function shortTokens(n: number): string {
  * "Compacted context: 156k → 61k tokens". Empty for anything else.
  */
 export function commandLine(type: string, text: string, status: string, data: Record<string, unknown>): string {
+  if (type === 'mcp_servers' || type === 'provider_catalog') return text;
   if (type === 'model_changed' && text) return `Switched model to ${text}${status === 'restart' ? ' · the agent restarted' : status === 'next_turn' ? ' · from the next turn' : ''}`;
   if (type === 'permission_changed' && text) return `Permissions: ${PERMISSION_LABELS[text as PermissionMode] || text}${status === 'restart' ? ' · the agent restarted' : ''}`;
   if (type === 'compacted') {

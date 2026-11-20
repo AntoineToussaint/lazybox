@@ -192,9 +192,31 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  publish:
-    name: publish (release · update feed · cask)
+  brew-install:
+    name: Homebrew install (${{ matrix.os }})
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Homebrew/actions/setup-homebrew@61b401267256bb9c047d6d1481b176d5772a0ba7
+      - uses: actions/download-artifact@v8
+        with:
+          name: lazybox-v2-${{ needs.build.outputs.version }}
+          path: dist
+      - run: bash scripts/release/test-brew-install.sh dist
+
+  publish:
+    name: publish (release · update feed · Homebrew)
+    needs: [build, brew-install]
     # A manual run is a dry run: it never publishes.
     if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-24.04
@@ -232,7 +254,7 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "$title" --notes-file dist/RELEASE_NOTES.md "${flags[@]}" \
             dist/Lazybox_*.dmg dist/Lazybox_*.app.tar.gz dist/Lazybox_*.app.tar.gz.sig \
-            dist/latest.json dist/lazybox-v2.rb dist/SHA256SUMS dist/release.json \
+            dist/latest.json dist/lazybox-v2.rb dist/lazybox-runner.rb dist/SHA256SUMS dist/release.json \
             dist/lazybox-runner-*-linux-*.tar.gz dist/lazybox-runner-*-linux-*.tar.gz.sha256 \
             dist/lazybox-cli-*-linux-*.tar.gz dist/lazybox-cli-*-linux-*.tar.gz.sha256
 
@@ -251,18 +273,18 @@ jobs:
           fi
           gh release upload v2-updates dist/latest.json --repo "$GITHUB_REPOSITORY" --clobber
 
-      - name: Publish the cask to the Homebrew tap
+      - name: Publish the Mac cask and Linux formula to the Homebrew tap
         if: ${{ needs.build.outputs.prerelease != 'true' }}
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "${TAP_TOKEN:-}" ]; then
-            echo "::warning::HOMEBREW_TAP_TOKEN is not set: Casks/lazybox-v2.rb was not published (it is attached to the release)."
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set: Homebrew packages were attached to the release but not published to the tap."
             exit 0
           fi
           sha="$(awk '/\.dmg$/ { print $1 }' dist/SHA256SUMS)"
           # V1's tested publisher, copied (scripts/release/publish-cask_test.sh): first
           # publish, no-op and push-race handling, for another cask path.
           scripts/release/publish-cask.sh packaging/homebrew/lazybox-v2.rb.tmpl \
-            "$VERSION" "$sha" "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" Casks/lazybox-v2.rb
+            "$VERSION" "$sha" "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" Casks/lazybox-v2.rb dist/lazybox-runner.rb

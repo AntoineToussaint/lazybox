@@ -104,8 +104,10 @@ Runner acts on them itself.
 
 ## Bundled workflow plugins
 
-Install these from **Settings → Extensions**, then open them in an
-**Extensions** panel. Each plugin shows the name of the workspace or Runner
+Choose **Extensions** in the main navigation or search for “plugins” in the
+command palette to manage installed extensions and add examples. Use **Open
+panel** on an enabled extension to launch it, or **Browse panels** to see all
+available panels. Each plugin shows the name of the workspace or Runner
 it acts on.
 
 | Plugin | What you can do |

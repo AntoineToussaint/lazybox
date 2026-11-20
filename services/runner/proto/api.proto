@@ -808,6 +808,7 @@ message ProviderModel {
   // Its name as people say it: "Opus 5.5", "GPT-6.1-Sol".
   string display_name = 2;
   string description = 3;
+  repeated string effort_levels = 4;
 }
 // An ACP agent (Agent Client Protocol) as Settings → Agents shows it.
 message AcpAgentInfo {
@@ -880,6 +881,7 @@ message RunnerOptions {
   bool no_rotation = 7;
   // A versioned behavior profile for a new coding conversation.
   string behavior_profile = 8;
+  string effort = 9;
 }
 message OpenSessionRequest {
   string profile_id = 1;
@@ -1271,6 +1273,7 @@ message GiveBrowserRequest {
   string session_id = 1;
 }
 message RestartWithModelRequest {
+  string effort = 3;
   string session_id = 1;
   // The provider's model identifier (an alias such as "opus" or a full id).
   string model = 2;
@@ -1400,6 +1403,7 @@ message Session {
   string behavior_profile = 42;
   string forked_from_session_id = 43;
   uint64 forked_from_cursor = 44;
+  string effort = 45;
 }
 // PermissionGrant is one "always allow" of a conversation.
 message PermissionGrant {
@@ -1719,8 +1723,17 @@ message ApplyRequest {
     ModelChange model = 10;
     DeliverQueued deliver_queued = 11;
     RevokeGrant revoke_grant = 12;
+    ListMcpServers list_mcp_servers = 13;
+    CompactContext compact_context = 14;
+    ListProviderCatalog list_provider_catalog = 15;
   }
 }
+// Lists the running agent’s MCP servers without starting a turn.
+message ListMcpServers {}
+// Requests native context compaction once the conversation is idle.
+message CompactContext {}
+// Lists provider inventory for the current conversation.
+message ListProviderCatalog { string section = 1; }
 // Takes back one "always allow" of the conversation (Session.permission_grants):
 // the agent asks again for what it covered, now and after any restart.
 message RevokeGrant {
@@ -1738,6 +1751,7 @@ message DeliverQueued {
 // Capabilities.live_model. A setting, not a response: the owner's alone.
 message ModelChange {
   string model = 1;
+  string effort = 2;
 }
 // Stops one running sub-agent, when Capabilities.stop_agent; the main agent's
 // turn continues. agent_id is an AgentActivity id other than root.

@@ -132,7 +132,7 @@ try{
  // Snippets: the last used comes first; Frequent counts uses.
  await chat.getByRole('button',{name:'Snippets',exact:true}).click();let picker=page.getByRole('dialog',{name:'Snippets',exact:true});
  // Enter sends the selected snippet; the list loads from the Runner, so wait for it.
- await picker.getByRole('searchbox').fill('Run the relevant');await expect(picker.getByRole('option',{selected:true})).toContainText('test');
+ await picker.getByRole('searchbox').fill('body: Run the relevant');await expect(picker.getByRole('option',{selected:true})).toContainText('test');
  await picker.getByRole('searchbox').press('Enter');await expect(picker).toHaveCount(0);
  await chat.getByRole('button',{name:'Snippets',exact:true}).click();picker=page.getByRole('dialog',{name:'Snippets',exact:true});
  await expect(picker.getByRole('option').first()).toContainText('test');await expect(picker.getByRole('option').first()).toContainText('Last used');
@@ -190,7 +190,18 @@ try{
  await expect(field).toBeFocused();
  await create.getByRole('checkbox',{name:'codefly-dev/authority',exact:true}).check();
  await expect(field).toHaveValue('authority');await expect(create.getByTestId('branch-preview')).toHaveText('feature/authority');
- await field.fill('Login fix');await expect(create.getByTestId('branch-preview')).toHaveText('feature/login-fix');
+ await create.getByRole('button',{name:'Create workspace',exact:true}).click();
+ const branchField=create.getByRole('textbox',{name:'Branch',exact:true});
+ await expect(branchField).toBeFocused();
+ await expect(branchField).toHaveAttribute('aria-invalid','true');
+ await expect(create.getByRole('alert')).toHaveText('This branch already exists. Enter a different branch name.');
+ await expect(create.getByRole('button',{name:'Create workspace',exact:true})).toBeDisabled();
+ await branchField.fill('fix/login');
+ await expect(create.getByRole('alert')).toHaveCount(0);
+ await branchField.press('Escape');
+ await expect(branchField).toBeFocused();
+ await field.fill('Login fix');
+ await branchField.press('Enter');await expect(create.getByTestId('branch-preview')).toHaveText('feature/login-fix');
  await page.screenshot({path:'.cache/chat-polish-new-workspace.png'});
  await create.getByRole('button',{name:'Edit branch'}).click();await create.getByRole('textbox',{name:'Branch'}).fill('fix/login');await create.getByRole('textbox',{name:'Branch'}).press('Enter');
  await expect(create.getByTestId('branch-preview')).toHaveText('fix/login');

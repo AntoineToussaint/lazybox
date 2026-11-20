@@ -7,11 +7,11 @@ import { openArtifact } from './artifact-events';
 import { TrackArtifactDialog, UpdateArtifactDialog } from './ArtifactDialogs';
 import { requestReviewTray } from './ChangesPanel';
 import type { ReviewLauncher } from './review-client';
-import { showMenuNotice } from './ContextMenu';
+import { copyText, showMenuNotice } from './ContextMenu';
 import type { VimMode } from './composer-vim';
 import { conversationArtifacts, trackable } from './MessageArtifactActions';
 import { saveSnippetUse } from './snippet-usage';
-import { SlashMenu, SlashWarning, SLASH_MENU_ID, slashOptionId } from './SlashMenu';
+import { SlashMenu, SLASH_MENU_ID, slashOptionId } from './SlashMenu';
 import { useDismiss } from './dismiss';
 import { useConfirmCard } from './confirm-card';
 import {
@@ -116,13 +116,13 @@ export function useSlashCommands(o: Options) {
   // An agent started by an older Lazybox lists none of its own; these stand in.
   const availability = useProviderAvailability(o.enabled);
   const providerModels: ProviderModel[] = useMemo(() => (availability.report?.providers.find(p => p.provider === provider)?.models || [])
-    .map(m => ({ value: m.value, displayName: m.displayName, description: m.description })), [availability.report, provider]);
+    .map(m => ({ value: m.value, displayName: m.displayName, description: m.description, ...(m.effortLevels?.length ? { effortLevels: m.effortLevels } : {}) })), [availability.report, provider]);
   const models = useMemo(() => mergeModels(providerModels, catalog.models), [providerModels, catalog.models]);
   const context: SlashContext = {
     provider, agentName: o.agentName, live, busy: !!session?.busy, coding: !!session && (!session.purpose || session.purpose === 'coding'), workspace: !!workspaceId,
     permission: session?.permission || '', planWorkflow: session?.workflow === 'plan', livePermission: !!session?.capabilities?.livePermission,
-    model: o.model, liveModel: !!session?.capabilities?.liveModel, resumable: !!session?.capabilities?.resume, models: catalog.models, providerModels,
-    agentMessage: !!lastAgentMessage, shellBlock: o.shellBlock, compact: provider === 'claude', detail: o.detail, subscriptions: o.subscriptions,
+    model: o.model, effort: session?.effort, liveModel: !!session?.capabilities?.liveModel, resumable: !!session?.capabilities?.resume, models: catalog.models, providerModels,
+    agentMessage: !!lastAgentMessage, shellBlock: o.shellBlock, compact: provider === 'claude' || provider === 'codex', detail: o.detail, subscriptions: o.subscriptions,
     reviewers: workspaceId && !reviewLauncher.unavailable ? reviewLauncher.choices : [],
     browser: session?.browserAccess || '',
   };
@@ -167,39 +167,37 @@ export function useSlashCommands(o: Options) {
     setDismissed(false); setText(text);
   };
 
-  // ---- Unknown commands ------------------------------------------------
-  const [warning, setWarning] = useState<string | null>(null);
-  useEffect(() => { if (warning !== null && warning !== o.message) setWarning(null); }, [o.message, warning]);
-
   // ---- Running ---------------------------------------------------------
   // A model switch that restarts the agent: asked once, and, during a turn, done when it ends.
-  const [restart, setRestart] = useState<{ model: string; label: string; queued: boolean }>();
+  const [restart, setRestart] = useState<{ model: string; effort: string; label: string; queued: boolean }>();
   const [tracking, setTracking] = useState<Tracking>();
   const notice = (text: string) => showMenuNotice(text);
-  const switchModel = async (model: string) => {
+  const switchModel = async (value: string) => {
+    const [, name, effort = ''] = /^(.*?)(?:\s+(none|minimal|low|medium|high|xhigh|max|ultra))?$/.exec(value.trim()) ?? [];
+    const model = resolveModel(name || '', modelsRef.current);
     const { session: current, sessionID: id, onError } = latest.current;
     if (!model || !current) return;
-    const choice = byNameLatest('model')?.choices?.find(c => c.value.toLowerCase() === model.toLowerCase());
-    const label = choice?.label || modelName(model);
+    const choice = byNameLatest('model')?.choices?.find(c => c.value.toLowerCase() === [model, effort].filter(Boolean).join(' ').toLowerCase());
+    const label = choice?.label || [modelName(model), effort].filter(Boolean).join(' · ');
     // The model it runs on already: nothing to switch, nothing to confirm.
-    if (choice?.current || sameModel({ value: model, displayName: label, description: '' }, latest.current.model)) { setRestart(undefined); notice(`Already on ${label}`); return; }
+    if (choice?.current || ((!effort || current.effort === effort) && sameModel({ value: model, displayName: modelName(model), description: '' }, latest.current.model))) { setRestart(undefined); notice(`Already on ${label}`); return; }
     if (current.capabilities?.liveModel) {
       try {
-        await api.apply({ sessionId: id, operationId: crypto.randomUUID(), operation: { case: 'model', value: { model } } });
+        await api.apply({ sessionId: id, operationId: crypto.randomUUID(), operation: { case: 'model', value: { model, effort } } });
         setRestart(undefined);
         if (current.busy) notice(`${label} from the next turn; this one finishes on the model it started with`);
       } catch (e) { onError(humanError(e)); }
       return;
     }
     if (!current.capabilities?.resume) { onError(`${latest.current.agentName} cannot change models during a conversation. Start a new conversation with ${label}.`); return; }
-    setRestart({ model, label, queued: false });
+    setRestart({ model, effort, label, queued: false });
   };
   // A restart asked for during a turn runs once the turn ends.
-  useEffect(() => { if (restart?.queued && session && !session.busy && !session.closed) void restartWithModel(restart.model); }, [restart, session?.busy, session?.closed]);
-  const restartWithModel = async (model: string) => {
+  useEffect(() => { if (restart?.queued && session && !session.busy && !session.closed) void restartWithModel(restart.model, restart.effort); }, [restart, session?.busy, session?.closed]);
+  const restartWithModel = async (model: string, effort: string) => {
     setRestart(undefined);
     try {
-      const result = await api.restartWithModel({ sessionId: latest.current.sessionID, model });
+      const result = await api.restartWithModel({ sessionId: latest.current.sessionID, model, effort });
       if (!result.session) throw new Error('Runner did not return the restarted conversation');
       latest.current.actions.adopt(result.session);
     } catch (e) { latest.current.onError(humanError(e)); }
@@ -228,7 +226,29 @@ export function useSlashCommands(o: Options) {
     const back = boxAfterCommand(from, stash.current);
     if (back !== undefined) { stash.current = null; setText(back); }
     switch (command.name) {
-      case 'model': void switchModel(resolveModel(args, modelsRef.current)); break;
+      case 'model': void switchModel(args); break;
+      case 'effort': {
+        const { model, session: current } = latest.current;
+        if (!args || args === 'status') { notice(`Reasoning effort: ${current?.effort || 'Provider default'}`); break; }
+        if (!model) { notice('Choose a model and effort with /model'); break; }
+        if (!/^(none|minimal|low|medium|high|xhigh|max|ultra)$/.test(args)) { notice('Choose a supported effort with /model'); break; }
+        void switchModel(`${model} ${args}`);
+        break;
+      }
+      case 'diff': if (!runAction('changes.show')) notice('Open Changes in the workspace window'); break;
+      case 'status': {
+        const { model, session: current } = latest.current;
+        notice([current?.status || 'Connecting', model && modelName(model), current?.effort].filter(Boolean).join(' · '));
+        openUsage(latest.current.sessionID, 'context');
+        break;
+      }
+      case 'copy': {
+        const index = args ? Number(args) : 1;
+        const reply = [...latest.current.conversation].reverse().filter(trackable)[index - 1];
+        if (!reply) { notice('No reply at that position'); break; }
+        void copyText(reply.text, 'Copied agent reply');
+        break;
+      }
       case 'permissions': {
         const mode = PERMISSION_WORDS[args.toLowerCase()];
         if (!mode) { onError(`“${args}” is not a permission mode: choose ask, read-only or yolo.`); break; }
@@ -239,8 +259,27 @@ export function useSlashCommands(o: Options) {
       }
       case 'subscription': actions.switchSubscription(); break;
       case 'browser': actions.giveBrowser(); break;
-      case 'compact': void actions.sendText(args ? `/compact ${args}` : '/compact'); break;
+      case 'compact':
+        if (provider !== 'codex') { void actions.sendText(args ? `/compact ${args}` : '/compact'); break; }
+        if (args) { notice('Codex compaction does not take instructions'); break; }
+        void api.apply({ sessionId: latest.current.sessionID, operationId: crypto.randomUUID(), operation: { case: 'compactContext', value: {} } })
+          .then(receipt => {
+            if (receipt.delivery === 'failed') onError(receipt.error || 'Could not compact context.');
+            else notice('Compacting context…');
+          })
+          .catch(e => onError(humanError(e)));
+        break;
       case 'clear': void actions.clear().catch(e => onError(humanError(e))); break;
+      case 'skills': case 'apps': case 'plugins':
+        void api.apply({ sessionId: latest.current.sessionID, operationId: crypto.randomUUID(), operation: { case: 'listProviderCatalog', value: { section: command.name } } })
+          .then(receipt => { if (receipt.delivery === 'failed') onError(receipt.error || `Could not list Codex ${command.name}.`); })
+          .catch(e => onError(humanError(e)));
+        break;
+      case 'mcp':
+        void api.apply({ sessionId: latest.current.sessionID, operationId: crypto.randomUUID(), operation: { case: 'listMcpServers', value: {} } })
+          .then(receipt => { if (receipt.delivery === 'failed') onError(receipt.error || 'Could not list MCP servers.'); })
+          .catch(e => onError(humanError(e)));
+        break;
       case 'cost': case 'context':
         if (!openUsage(latest.current.sessionID, command.name)) notice('The usage of this conversation shows in its header');
         break;
@@ -300,7 +339,6 @@ export function useSlashCommands(o: Options) {
     if (mode !== vimMode) setVimMode(mode);
     const native = event.nativeEvent;
     if (native.isComposing || native.keyCode === 229) return false;
-    if (warning !== null && event.key === 'Escape') { event.preventDefault(); setWarning(null); return true; }
     if (!menu || (mode && mode !== 'insert')) return false;
     const count = menu.kind === 'hint' ? 0 : menu.items.length;
     const move = (by: number) => { event.preventDefault(); if (count) select((selected + by + count) % count); return true; };
@@ -322,6 +360,13 @@ export function useSlashCommands(o: Options) {
     }
     if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
       if (unavailable) { setDismissed(true); return false; }
+      if (menu.kind === 'commands' && menu.query && picked.key !== menuKey) {
+        const command = menu.items[selected]?.command;
+        const typed = menu.query.toLowerCase();
+        const exact = findCommand(commands, typed);
+        // Fuzzy matches stay available for an explicit selection.
+        if (exact ? command !== exact : !command || ![command.name, ...(command.aliases || [])].some(name => name.toLowerCase().startsWith(typed))) return false;
+      }
       event.preventDefault(); choose(selected); return true;
     }
     return false;
@@ -329,7 +374,7 @@ export function useSlashCommands(o: Options) {
 
   /**
    * Before a send: a Lazybox command runs instead, a snippet's name becomes
-   * its body, an unknown `/word` asks first. True when the send is handled here.
+   * its body. Unrecognized commands use the normal send path.
    */
   const intercept = (text: string): boolean => {
     if (!latest.current.enabled) return false;
@@ -339,9 +384,6 @@ export function useSlashCommands(o: Options) {
       case 'lazybox': run(decision.command, decision.args); return true;
       case 'provider': if (decision.command.disabled) { notice(decision.command.disabled); return true; } return false;
       case 'snippet': setText(decision.command.body || ''); return true;
-      case 'unknown':
-        if (warning === text) { setWarning(null); return false; }
-        setWarning(text); return true;
     }
   };
 
@@ -372,13 +414,9 @@ export function useSlashCommands(o: Options) {
   }, [menuBox, o.textarea], { escape: false, restoreFocus: false });
   const menuElement = menu && <div ref={menuBox} style={{ display: 'contents' }}><SlashMenu menu={menu} selected={selected} sessionId={sessionID} agentName={o.agentName}
     onSelect={select} onChoose={index => choose(index)} onClose={() => { setDismissed(true); if (stash.current !== null) finish(); latest.current.textarea.current?.focus(); }}/></div>;
-  const unknown = warning !== null ? decideSend(warning, commands) : undefined;
-  const above: ReactNode = <>
-    {menuElement}
-    {unknown?.kind === 'unknown' && <SlashWarning name={unknown.name} onSend={() => { latest.current.textarea.current?.form?.requestSubmit(); }} onCancel={() => { setWarning(null); latest.current.textarea.current?.focus(); }}/>}
-  </>;
+  const above = menuElement;
   const prompt: ReactNode = restart ? <ModelRestartPrompt provider={provider} agentName={o.agentName} label={restart.label} busy={!!session?.busy} queued={restart.queued} returnTo={o.textarea}
-    onRestart={() => { if (session?.busy) setRestart({ ...restart, queued: true }); else void restartWithModel(restart.model); }} onCancel={() => setRestart(undefined)}/> : null;
+    onRestart={() => { if (session?.busy) setRestart({ ...restart, queued: true }); else void restartWithModel(restart.model, restart.effort); }} onCancel={() => setRestart(undefined)}/> : null;
   const dialogs: ReactNode = tracking && workspaceId && <>
     {tracking.kind === 'track' && <TrackArtifactDialog collectionId={workspaceId} content={tracking.message.text}
       source={{ kind: 'message', sessionId: sessionID, conversationId: session?.conversationId, messageId: tracking.message.id, turnId: tracking.message.turnId }} existing={tracking.existing}
@@ -395,10 +433,16 @@ export function useSlashCommands(o: Options) {
     'aria-activedescendant': menu && menu.kind !== 'hint' && selected >= 0 ? slashOptionId(sessionID, selected) : undefined,
   };
   const modelCommand = byName('model');
+  const choices = modelCommand.choices || [];
+  const currentModel = choices.find(choice => choice.current)?.value.split(' ')[0];
+  const modelMenuChoices = choices.filter(choice => !choice.effort).map(choice =>
+    choice.value === currentModel && !choice.current ? { ...choice, current: true } : choice);
+  const effortChoices = choices.filter(choice => choice.effort && choice.value.split(' ')[0] === currentModel);
+
   return {
     menu: menu as SlashMenuState | null, onKeyDown, intercept, above, prompt, dialogs, textareaProps,
     /** The model picker of the ⋯ menu and the header: the same choices and switch as `/model`. */
-    models: { choices: modelCommand.choices || [], live: context.liveModel, disabled: modelCommand.disabled, choose: (value: string) => { const choice = modelCommand.choices?.find(c => c.value === value); if (choice?.current) return; void switchModel(value); }, pick: () => fromPalette('model') },
+    models: { choices: modelMenuChoices, efforts: effortChoices, live: context.liveModel, disabled: modelCommand.disabled, choose: (value: string) => { void switchModel(value); }, pick: () => fromPalette('model') },
     find: (name: string) => findCommand(commands, name),
   };
 }

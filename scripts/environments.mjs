@@ -235,7 +235,7 @@ async function stageCandidate(environmentRoot, revision) {
   const before = await digestTree(source);
   await run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], source);
   const receiptPath = join(destination, 'gates.json');
-  await run(process.execPath, ['scripts/release-gates.mjs', 'run', 'release', '--report', receiptPath], source, { ...buildEnv, CARGO_TARGET_DIR: join(environmentRoot, 'build', 'working') });
+  await run(process.execPath, ['scripts/release-gates.mjs', 'run', 'release', '--fail-fast', '--report', receiptPath], source, { ...buildEnv, CARGO_TARGET_DIR: join(environmentRoot, 'build', 'working') });
   const gateReceipt = JSON.parse(await readFile(receiptPath, 'utf8'));
   validateReleaseReceipt(gateReceipt, await loadGateCatalog(source), before);
   const app = await buildDesktop(source, environmentPaths(environmentRoot, 'working'), join(environmentRoot, 'build', 'working'));

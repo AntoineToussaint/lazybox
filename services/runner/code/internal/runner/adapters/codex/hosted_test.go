@@ -139,13 +139,26 @@ func fixtureAppServer() {
 			}
 		case "config/read":
 			send(map[string]any{"id": m.ID, "result": map[string]any{"config": map[string]any{}}})
+		case "thread/compact/start":
+			if m.Params.ThreadID != "thread-1" {
+				send(map[string]any{"id": m.ID, "error": map[string]any{"code": -32602, "message": "missing thread id"}})
+				continue
+			}
+			send(map[string]any{"id": m.ID, "result": map[string]any{}})
+			send(map[string]any{"method": "thread/compacted", "params": map[string]string{"threadId": "thread-1", "turnId": "compact-1"}})
+		case "mcpServerStatus/list":
+			if m.Params.ThreadID != "thread-1" {
+				send(map[string]any{"id": m.ID, "error": map[string]any{"code": -32602, "message": "missing thread id"}})
+				continue
+			}
+			send(map[string]any{"id": m.ID, "result": json.RawMessage(`{"data":[{"name":"fixture","runtimeStatus":"connected","tools":{"one":{},"two":{}}},{"name":"private","runtimeStatus":"authenticationRequired","httpOrigin":"https://fixture.invalid"}],"nextCursor":null}`)})
 		case "model/list":
 			// Two pages, a hidden preset and a repeat: the picker gets three models.
 			if os.Getenv("FIXTURE_NO_MODEL_LIST") != "" {
 				send(map[string]any{"id": m.ID, "error": map[string]any{"code": -32601, "message": "unknown method"}})
 			} else if m.Params.Cursor == "" {
 				send(map[string]any{"id": m.ID, "result": map[string]any{"data": []map[string]any{
-					{"id": "gpt-6.1-sol", "model": "gpt-6.1-sol", "displayName": "GPT-6.1-Sol", "description": "Workhorse", "hidden": false, "isDefault": true},
+					{"id": "gpt-6.1-sol", "model": "gpt-6.1-sol", "displayName": "GPT-6.1-Sol", "description": "Workhorse", "supportedReasoningEfforts": []map[string]string{{"reasoningEffort": "high"}}, "hidden": false, "isDefault": true},
 					{"id": "internal", "model": "gpt-internal", "displayName": "Internal", "description": "", "hidden": true},
 					{"id": "gpt-6-luna", "model": "gpt-6-luna", "displayName": "GPT-6-Luna", "description": "Fast", "hidden": false},
 				}, "nextCursor": "page-2"}})

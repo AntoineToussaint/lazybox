@@ -37,11 +37,14 @@ func listModels(ctx context.Context, p caller) ([]agent.ModelChoice, error) {
 		}
 		var response struct {
 			Data []struct {
-				ID          string `json:"id"`
-				Model       string `json:"model"`
-				DisplayName string `json:"displayName"`
-				Description string `json:"description"`
-				Hidden      bool   `json:"hidden"`
+				ID                        string `json:"id"`
+				Model                     string `json:"model"`
+				DisplayName               string `json:"displayName"`
+				Description               string `json:"description"`
+				Hidden                    bool   `json:"hidden"`
+				SupportedReasoningEfforts []struct {
+					Effort string `json:"reasoningEffort"`
+				} `json:"supportedReasoningEfforts"`
 			} `json:"data"`
 			NextCursor *string `json:"nextCursor"`
 		}
@@ -62,7 +65,13 @@ func listModels(ctx context.Context, p caller) ([]agent.ModelChoice, error) {
 			if name == "" {
 				name = value
 			}
-			out = append(out, agent.ModelChoice{Value: value, DisplayName: name, Description: strings.TrimSpace(m.Description)})
+			var efforts []string
+			for _, level := range m.SupportedReasoningEfforts {
+				if level.Effort != "" && agent.ValidEffort("codex", level.Effort) == nil {
+					efforts = append(efforts, level.Effort)
+				}
+			}
+			out = append(out, agent.ModelChoice{EffortLevels: efforts, Value: value, DisplayName: name, Description: strings.TrimSpace(m.Description)})
 			if len(out) >= maxModels {
 				break
 			}

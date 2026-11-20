@@ -52,7 +52,7 @@ button.extension-chip{cursor:pointer}
 .extension-row-text strong{font-weight:500;color:var(--text-strong)}
 .extension-home-footer{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-top:auto;padding-top:12px;border-top:1px solid var(--line-subtle);color:var(--text-muted);font-size:calc(12px * var(--text-scale))}
 .extension-home-footer code{font-family:var(--font-mono);font-size:calc(11px * var(--text-scale));color:var(--text-secondary)}
-.extension-home-footer button.quiet{display:inline-flex;align-items:center;gap:4px;border:0;background:transparent;color:var(--text-secondary)}
+.extension-manage{align-self:flex-end;display:inline-flex;align-items:center;gap:6px}
 
 /* The approval sheet. */
 .extension-approval{width:min(560px,calc(100vw - 32px));font-family:var(--font-ui);font-size:calc(13px * var(--text-scale))}
@@ -105,7 +105,7 @@ button.extension-chip{cursor:pointer}
 .extension-problems{margin:0;padding-left:16px;color:var(--danger-strong);font-size:calc(12px * var(--text-scale));line-height:1.5}
 .extension-problems .where{color:var(--text-muted);font-family:var(--font-mono);font-size:calc(11px * var(--text-scale))}
 .extension-card .extension-path{display:block;max-width:100%}
-.extension-card-actions{display:flex;align-items:center;gap:8px}
+.extension-card-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
 .extension-card-actions button.quiet{display:inline-grid;place-items:center;width:26px;height:26px;padding:0;border:0;border-radius:5px;background:transparent;color:var(--text-muted)}
 .extension-card-actions button.quiet:hover{background:var(--surface-hover);color:var(--danger)}
 .extension-switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:calc(12px * var(--text-scale));color:var(--text-secondary)}

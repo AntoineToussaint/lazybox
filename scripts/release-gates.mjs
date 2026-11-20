@@ -116,7 +116,7 @@ export async function executeGate(gate, { root, signal, env = process.env }) {
 // `passed`. The run passes, so one flake does not fail the build, but the
 // receipt, the log and the job summary name it, and a release receipt never
 // admits it (validateReleaseReceipt requires every gate `passed`).
-export async function runGateCatalog(root, profile, { snapshot, execute = executeGate, signal, onProgress = () => {}, only, retryFlaky = false } = {}) {
+export async function runGateCatalog(root, profile, { snapshot, execute = executeGate, signal, onProgress = () => {}, only, retryFlaky = false, failFast = false } = {}) {
   if (retryFlaky && profile !== 'ui') throw new Error('Only UI gates are retried; staging and release runs need a clean first pass');
   const catalog = await loadGateCatalog(root), gates = selectGates(catalog, profile, only);
   const sourceDigest = await snapshot();
@@ -128,9 +128,14 @@ export async function runGateCatalog(root, profile, { snapshot, execute = execut
     catch (error) { result = { status: 'failed', exitCode: null, error: error.message }; }
     return { ...result, durationMs: Math.round(performance.now() - started) };
   };
-  // Run the remaining gates after a failure to give one complete diagnostic.
+  // Diagnostic runs continue after failures; staging opts into fail-fast.
   // Cancellation leaves explicit not-run records and never a passing receipt.
+  let failed = false;
   for (const gate of gates) {
+    if (failFast && failed) {
+      report.results.push({ id: gate.id, command: gate.command, args: gate.args, status: 'not-run', exitCode: null, durationMs: 0 });
+      continue;
+    }
     onProgress({ gate, phase: 'start' });
     let result = await attempt(gate);
     // Only a plain failure is retried: a deadline or a cancellation is not a flake.
@@ -142,6 +147,7 @@ export async function runGateCatalog(root, profile, { snapshot, execute = execut
     }
     const { durationMs, ...outcome } = result;
     report.results.push({ id: gate.id, command: gate.command, args: gate.args, ...outcome, durationMs });
+    failed ||= !['passed', 'flaky'].includes(outcome.status) || outcome.exitCode !== 0;
     onProgress({ gate, phase: 'finish', result: outcome });
   }
   report.finalSourceDigest = await snapshot();
@@ -180,7 +186,7 @@ export function validateReleaseReceipt(report, catalog, sourceDigest) {
 
 async function main() {
   const [action, profile = 'release', ...rest] = process.argv.slice(2);
-  const usage = 'Use release-gates.mjs list [profile] | shards <profile> <count> [--only <id,...>] | run [profile] [--only <id,...>] [--report <path>] [--retry-flaky]';
+  const usage = 'Use release-gates.mjs list [profile] | shards <profile> <count> [--only <id,...>] | run [profile] [--only <id,...>] [--report <path>] [--retry-flaky] [--fail-fast]';
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const catalog = await loadGateCatalog(root);
   if (action === 'list' && !rest.length) { for (const gate of selectGates(catalog, profile)) console.log(`${gate.id}: ${gate.command} ${gate.args.join(' ')}`); return; }
@@ -196,7 +202,7 @@ async function main() {
   const options = {};
   for (let index = 0; index < rest.length; index += 2) {
     const [flag, value] = [rest[index], rest[index + 1]];
-    if (flag === '--retry-flaky' && !('retry-flaky' in options)) { options['retry-flaky'] = true; index--; continue; }
+    if (['--retry-flaky', '--fail-fast'].includes(flag) && !(flag.slice(2) in options)) { options[flag.slice(2)] = true; index--; continue; }
     if (!['--only', '--report'].includes(flag) || !value || value.startsWith('--') || flag.slice(2) in options) throw new Error(usage);
     options[flag.slice(2)] = value;
   }
@@ -209,7 +215,7 @@ async function main() {
   let report;
   try {
     const progress = ({ gate, phase, result }) => console.log(`[${gate.id}] ${phase === 'start' ? 'running' : phase === 'retry' ? `${result.status}; running it once more (--retry-flaky)` : result.status === 'flaky' ? 'flaky (passed on retry)' : result.status}`);
-    report = await runGateCatalog(root, profile, { only, retryFlaky: !!options['retry-flaky'], snapshot, signal: controller.signal, onProgress: progress });
+    report = await runGateCatalog(root, profile, { only, retryFlaky: !!options['retry-flaky'], failFast: !!options['fail-fast'], snapshot, signal: controller.signal, onProgress: progress });
     if (report.sourceDigest !== report.finalSourceDigest) report.sourceChanged = changedFiles(snapshots[0], snapshots.at(-1));
     const path = resolve(options.report || join(root, '.cache', `gates-${profile}.json`));
     await mkdir(dirname(path), { recursive: true });

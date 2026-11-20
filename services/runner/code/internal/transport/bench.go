@@ -21,6 +21,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/attachments"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/checkpoints"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/engine"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/journal"
@@ -74,6 +75,9 @@ func rpcError(err error) error {
 		return nil
 	}
 	code := codes.FailedPrecondition
+	if errors.Is(err, collections.ErrBranchExists) {
+		code = codes.AlreadyExists
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		code = codes.NotFound
 	}
@@ -116,6 +120,7 @@ func wireSession(e *runner.Execution) *pb.Session {
 	w.ForkedFromSessionId, w.ForkedFromCursor = e.Saved.ForkedFrom, e.Saved.ForkCursor
 	w.Permission, w.Workflow = e.Options.Permission, e.Options.Workflow
 	w.BehaviorProfile = e.Options.BehaviorProfile
+	w.Effort = e.Options.Effort
 	w.Title = s.Title
 	if w.Title == "" {
 		w.Title = e.Saved.Title
@@ -250,7 +255,7 @@ func (s *Service) OpenSession(ctx context.Context, r *pb.OpenSessionRequest) (*p
 	options := accounts.Options{}
 	gateway := ""
 	if p.Options != nil {
-		options.Model = p.Options.Model
+		options.Model, options.Effort = p.Options.Model, p.Options.Effort
 		options.Instructions = p.Options.Instructions
 		options.BehaviorProfile = p.Options.BehaviorProfile
 		options.Workflow = p.Options.Workflow
@@ -283,7 +288,7 @@ func (s *Service) OpenAssistant(ctx context.Context, p *pb.OpenAssistantRequest)
 	options := accounts.Options{}
 	gateway := ""
 	if p.Options != nil {
-		options.Model = p.Options.Model
+		options.Model, options.Effort = p.Options.Model, p.Options.Effort
 		options.Instructions = p.Options.Instructions
 		options.RotationProfiles = p.Options.RotationProfileIds
 		options.NoRotation = p.Options.NoRotation
@@ -404,7 +409,7 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 		}
 		return &pb.Receipt{OperationId: receipt.ID, Delivery: receipt.Delivery, ProviderId: receipt.ProviderID, Error: receipt.Error}, nil
 	case *pb.ApplyRequest_Model:
-		receipt, err := s.Bench.SetModel(ctx, e, p.OperationId, o.Model.GetModel())
+		receipt, err := s.Bench.SetModelAndEffort(ctx, e, p.OperationId, o.Model.GetModel(), o.Model.GetEffort())
 		if err != nil {
 			return nil, rpcError(err)
 		}
@@ -451,6 +456,12 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 			command.CancelForegroundPipe()
 		}
 		return &pb.Receipt{OperationId: receipt.ID, Delivery: receipt.Delivery, ProviderId: receipt.ProviderID, Error: receipt.Error}, nil
+	case *pb.ApplyRequest_ListProviderCatalog:
+		op.Kind, op.Section = agent.ListProviderCatalog, o.ListProviderCatalog.GetSection()
+	case *pb.ApplyRequest_CompactContext:
+		op.Kind = agent.CompactContext
+	case *pb.ApplyRequest_ListMcpServers:
+		op.Kind = agent.ListMcpServers
 	case *pb.ApplyRequest_StopAgent:
 		op.Kind = agent.StopAgent
 		op.AgentID = o.StopAgent.GetAgentId()
@@ -1025,7 +1036,7 @@ func (s *Service) RestartWithModel(ctx context.Context, r *pb.RestartWithModelRe
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	next, err := s.Bench.RestartWithModel(ctx, e, r.Model)
+	next, err := s.Bench.RestartWithModelAndEffort(ctx, e, r.Model, r.Effort)
 	if err != nil {
 		return nil, rpcError(err)
 	}

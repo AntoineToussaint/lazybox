@@ -1,0 +1,10 @@
+schema: codefly/module-package/v2
+kind: module-package
+id: codefly/lazybox
+version: 0.1.0
+minimum-codefly-version: ">=0.1.258 <1.0.0"
+artifact-roots:
+  - services
+contracts:
+  composition: ">=2.0.0 <3.0.0"
+  permissions: ">=1.0.0 <2.0.0"

@@ -97,7 +97,8 @@ of your own · [missions](docs/guides/missions.md) and
 [the testers' guide](docs/testers.md), concepts, guides,
 [keyboard shortcuts](docs/reference/keyboard-shortcuts.md),
 [the CLI](docs/reference/cli.md), [troubleshooting](docs/troubleshooting.md)
-and the [FAQ](docs/faq.md).
+and the [FAQ](docs/faq.md). See the [Codefly Runner module](deploy/module-lazybox/)
+for Kubernetes deployment.
 
 ## Feedback
 

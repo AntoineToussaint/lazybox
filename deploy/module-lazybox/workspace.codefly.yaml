@@ -1,0 +1,4 @@
+name: module-lazybox
+layout: modules
+modules:
+    - name: lazybox

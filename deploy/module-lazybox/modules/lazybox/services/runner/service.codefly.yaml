@@ -1,0 +1,23 @@
+name: runner
+version: 0.1.0
+agent:
+    kind: codefly:service
+    name: go-grpc
+    version: 0.2.0
+    publisher: codefly.dev
+spec:
+    persistent-loopback:
+        # Set to the digest-qualified multi-platform Lazybox Runner image.
+        image: ""
+        uid: 10001
+        gid: 10001
+        mount-path: /var/lib/lazybox
+        storage: 20Gi
+        readiness:
+            - /bin/sh
+            - -ec
+            - 'exec lazybox --endpoint "$XDG_DATA_HOME/lazybox/state/endpoint.json" info'
+        liveness:
+            - /bin/sh
+            - -ec
+            - 'exec lazybox --endpoint "$XDG_DATA_HOME/lazybox/state/endpoint.json" info'

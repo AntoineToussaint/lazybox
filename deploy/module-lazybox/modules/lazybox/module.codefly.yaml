@@ -1,0 +1,4 @@
+kind: module
+name: lazybox
+services:
+    - name: runner

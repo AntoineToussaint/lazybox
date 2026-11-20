@@ -279,7 +279,13 @@ func validate(op agent.Operation, c agent.Capabilities) error {
 		if err := agent.ValidModel(op.Model); err != nil {
 			return err
 		}
-	case agent.Interrupt:
+	case agent.ListProviderCatalog:
+		switch op.Section {
+		case "skills", "apps", "plugins":
+		default:
+			return errors.New("unknown provider catalog")
+		}
+	case agent.Interrupt, agent.ListMcpServers, agent.CompactContext:
 	case agent.RevokeGrant:
 		if op.GrantID == "" || len(op.GrantID) > 128 {
 			return errors.New("grant id required")
@@ -374,6 +380,10 @@ func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, 
 	if (op.Kind == agent.Interrupt || op.Kind == agent.Steer) && !e.state.Busy {
 		e.mu.Unlock()
 		return agent.Receipt{}, errors.New("no active turn")
+	}
+	if op.Kind == agent.CompactContext && (e.state.Busy || len(e.queue) > 0) {
+		e.mu.Unlock()
+		return agent.Receipt{}, errors.New("wait for the current and queued turns to finish before compacting")
 	}
 	if op.Kind == agent.StopAgent {
 		// A sub-agent can outlive its parent's turn (a background task), so

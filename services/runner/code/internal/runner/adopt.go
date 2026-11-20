@@ -71,7 +71,7 @@ func (b *Bench) sessionAdapter(e *Execution, selected accounts.Profile, options 
 // sessionOpen resolves the native open request. Every execution runs under a
 // session host so a Runner restart never stops its agent.
 func (b *Bench) sessionOpen(e *Execution, contextText, resume string) agent.Open {
-	open := agent.Open{ID: e.ID, Cwd: e.Cwd, Purpose: e.Purpose, Isolated: e.Profile.Isolation == "environment", Context: contextText, Model: e.Options.Model, Permission: e.Options.Permission, Workflow: e.Options.Workflow, ClaudeAIConnectors: b.Preferences.Snapshot().ClaudeAIConnectors, Gateway: e.Options.Gateway, Profile: e.Profile.ID, Env: e.Env, Resume: resume, Host: &agent.Hosting{Root: b.Config.HostRoot, Backend: b.hosting}}
+	open := agent.Open{ID: e.ID, Cwd: e.Cwd, Purpose: e.Purpose, Isolated: e.Profile.Isolation == "environment", Context: contextText, Model: e.Options.Model, Effort: e.Options.Effort, Permission: e.Options.Permission, Workflow: e.Options.Workflow, ClaudeAIConnectors: b.Preferences.Snapshot().ClaudeAIConnectors, Gateway: e.Options.Gateway, Profile: e.Profile.ID, Env: e.Env, Resume: resume, Host: &agent.Hosting{Root: b.Config.HostRoot, Backend: b.hosting}}
 	open.Tools = b.executionTools(e, e.Env)
 	open.Browser = e.browserTools
 	return open

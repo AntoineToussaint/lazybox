@@ -50,6 +50,7 @@ type Options struct {
 	// NoRotation keeps the conversation on its selected subscription.
 	NoRotation bool           `json:"noRotation,omitempty"`
 	Workflow   string         `json:"workflow,omitempty"`
+	Effort     string         `json:"effort,omitempty"`
 	Model      string         `json:"model,omitempty"`
 	Permission string         `json:"permission,omitempty"`
 	Gateway    *agent.Gateway `json:"gateway,omitempty"`

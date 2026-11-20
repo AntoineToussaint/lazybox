@@ -356,7 +356,9 @@ multi-repository selection. The name field opens focused, its suggestion selecte
 typing replaces it. The suggested display name follows selected repository
 names (`api`, `api + web`, or `authority +4` for more, never a run-on list) until
 the user types a custom name. The branch follows the name (`Login fix` →
-`feature/login-fix`) and is shown under it; **Edit branch** overrides it. Deselecting
+`feature/login-fix`) and is shown under it. **Edit branch** overrides it. If
+a selected repository already has that branch, the dialog focuses the branch
+field so the user can enter another name and retry. Deselecting
 and reselecting updates an automatic suggestion. **Settings → Agents & workspaces**
 sets whether suggestions use repository names or a memorable generated name.
 Renaming later never renames the fixed disk slug or branches. A workspace still
@@ -446,13 +448,26 @@ gently-bright-otter/
 ## Sessions, windows and modules
 
 **New session** exposes account and permission choices directly, with model,
-gateway and additional context under an expandable section. **Quick start** starts
-once from an explicit click using the last successful provider/account/model/gateway
-selection for this workspace. Choices are shared by its panels/windows. A refresh
+reasoning effort, gateway, and additional context under **Model & context**.
+**New task** puts reasoning effort next to the model for Claude and Codex.
+**Quick start** uses the last successful provider, account, model, effort, and
+gateway selection. Choices are shared by its panels/windows. A refresh
 never starts an execution. One-off permissions, context, and rotation pools are not
 remembered; Runner defaults apply unless chosen explicitly in New session. Quick start pauses for account selection if its saved profile is unavailable.
 With no saved choice, setup suggests a configured managed account, then the first
 profile of that provider. In-flight or resumed sessions are not changed.
+
+In a running conversation, pick **Reasoning effort** from the conversation
+menu or choose a model and effort from **/model**. The choices come from the
+provider's model catalog. Changes take effect from the next turn. The Runner
+remembers the choice when the conversation resumes or switches subscriptions.
+In a running Claude or Codex chat, `/mcp` lists MCP servers in the conversation.
+`/compact` requests manual compaction, and for Claude it can take focus
+instructions. Use `/effort` for the current setting or pass an effort level,
+`/status` for conversation and context information, `/diff` to open Changes,
+and `/copy` to copy an agent reply. In Codex, `/skills`, `/apps`, and `/plugins`
+list the enabled provider inventory. Slash input Lazybox does
+not handle goes to the agent through the normal message flow.
 
 All sessions in one workspace use the same working folder, branches and files.
 They retain independent transcripts, provider identities, commands and continuation
@@ -1251,7 +1266,9 @@ searchable picker. Preview the exact delivered body, then **Insert** (Shift+Ente
 or **Send snippet** (Enter). Existing draft text disables immediate snippet sending;
 insertion preserves it. Every confirmed send or insert counts as a use: the
 last-used snippet comes first, then favorites, and **Frequent** sorts by use
-count (shown as `3×`).
+count (shown as `3×`). While searching, exact and prefix matches on the
+snippet name come first, followed by words in the name, description, and
+category. Use `body:` followed by a phrase to search inside snippet text.
 
 In the message box, ↑ in an empty box (or with the caret at its very start)
 recalls sent messages like a shell: this conversation's first, then every
@@ -1307,7 +1324,7 @@ require file-shaped text, so `origin/main` and `feature/example` stay plain code
 with the working tree; staged diffs compare HEAD with the index. Untracked files
 show their content. This view does not compare committed branch work with main.
 
-Snippet search now includes the body. Favorites are saved in native view state
+Favorites are saved in native view state
 and can be filtered; built-ins/global/project content remains owned by V1's
 catalog adapter. This is still a picker, not a create/edit/delete snippet manager.
 

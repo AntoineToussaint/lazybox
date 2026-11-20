@@ -7,7 +7,7 @@
  * `command_catalog` event the Runner journals.
  */
 export type CatalogCommand = { name: string; description: string; argumentHint: string; aliases?: string[]; builtin?: boolean };
-export type CatalogModel = { value: string; displayName: string; description: string };
+export type CatalogModel = { value: string; displayName: string; description: string; effortLevels?: string[] };
 export type CatalogEvent = { type: 'command_catalog'; data: { commands: CatalogCommand[]; models: CatalogModel[]; terminal?: string[] } };
 
 const MAX_COMMANDS = 400, MAX_MODELS = 64, NAME = 80, DESCRIPTION = 300, HINT = 120;
@@ -40,7 +40,9 @@ function models(list: unknown): CatalogModel[] {
     if (!row || typeof row !== 'object') continue;
     const value = text((row as Record<string, unknown>).value, NAME);
     if (!value || /\s/.test(value) || out.some(m => m.value === value)) continue;
-    out.push({ value, displayName: text((row as Record<string, unknown>).displayName, NAME) || value, description: text((row as Record<string, unknown>).description, DESCRIPTION) });
+    const levels = (row as Record<string, unknown>).supportedEffortLevels;
+    const effortLevels = Array.isArray(levels) ? levels.filter((level): level is string => typeof level === 'string' && /^(low|medium|high|xhigh|max)$/.test(level)) : [];
+    out.push({ ...(effortLevels.length ? { effortLevels } : {}), value, displayName: text((row as Record<string, unknown>).displayName, NAME) || value, description: text((row as Record<string, unknown>).description, DESCRIPTION) });
     if (out.length >= MAX_MODELS) break;
   }
   return out;

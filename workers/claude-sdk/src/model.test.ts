@@ -38,3 +38,13 @@ test('a model is one word', async () => {
   await assert.rejects(models.change(''));
   await assert.rejects(models.change('two words'));
 });
+
+test('the queued model change carries reasoning effort to the next turn', async () => {
+  const applied: unknown[] = [];
+  const models = new ModelSwitch(async (model, effort) => { applied.push({ model, effort }); });
+  models.turnStarted();
+  assert.equal(await models.change('sonnet', 'high'), 'accepted');
+  assert.deepEqual(applied, []);
+  await models.turnEnded();
+  assert.deepEqual(applied, [{ model: 'sonnet', effort: 'high' }]);
+});

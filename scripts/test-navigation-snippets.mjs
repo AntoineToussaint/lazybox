@@ -37,6 +37,20 @@ try {
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
+  await page.route("**/ListSnippets", async route => {
+    const response = await route.fetch();
+    const { snippets } = await response.json();
+    const sample = [
+      ["clarify", "Explain this PR briefly", "Use deepclarify for more."],
+      ["look-closer", "Run a deep review", "Inspect the changes."],
+      ["deepclarify", "Explain this PR in depth", "Explain the problem and the proof."],
+      ["deepreview", "Review design and risk", "Inspect the design and risk."],
+      ["fixall", "Apply review findings", "Apply findings from deepreview."],
+      ...Array.from({ length: 16 }, (_, i) => [`example-${i}`, "Example snippet", "An example."]),
+    ];
+    await route.fulfill({ response, json: { snippets: [...snippets, ...sample.map(([key, description, body]) =>
+      ({ key, description, body, category: "Review", origin: "built-in" }))] } });
+  });
   await page.goto(
     `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`,
   );
@@ -86,7 +100,21 @@ try {
   await search.fill("zzqxyunmatched");
   await expect(dialog.getByText("No matching snippets.")).toBeVisible();
   assert.deepEqual(await dialog.boundingBox(), snippetBounds, "empty snippet results stay inside the browser");
+  const list = dialog.getByRole("listbox", { name: "Available snippets" });
+  await search.fill("");
+  await list.evaluate(node => { node.scrollTop = node.scrollHeight; });
+  assert.ok(await list.evaluate(node => node.scrollTop) > 0);
+  await search.fill("Deep");
+  await expect(list.getByRole("option").locator("strong")).toHaveText(["deepclarify", "deepreview", "look-closer"]);
+  await expect(list.getByRole("option", { selected: true }).locator("strong")).toHaveText("deepclarify");
+  assert.equal(await list.evaluate(node => node.scrollTop), 0);
+  await search.press("ArrowDown");
+  await expect(dialog.locator(".snippet-preview")).toContainText("Inspect the design and risk.");
+  await search.fill("Deep Review");
+  await expect(list.getByRole("option", { selected: true }).locator("strong")).toHaveText("deepreview");
   await search.fill("carefully");
+  await expect(dialog.getByText("No matching snippets.")).toBeVisible();
+  await search.fill("body: carefully");
   await dialog.getByRole("button",{name:"☆ Add to favorites",exact:true}).click();
   await expect(dialog.getByRole("button",{name:"★ Favorite",exact:true})).toHaveAttribute("aria-pressed","true");
   await search.fill("review");

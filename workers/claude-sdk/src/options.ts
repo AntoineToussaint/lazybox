@@ -3,7 +3,7 @@ import { helpPermissions } from './settings.js';
 import { browserRule } from './browser.js';
 
 type ExecutionOptions = {
-  cwd: string; model?: string; resume?: string; context?: string;
+  cwd: string; model?: string; effort?: Options['effort']; resume?: string; context?: string;
   purpose?: string; binary?: string; permission?: string; workflow?: string;
   /** The Runner offers the agent browser: its tools need no per-call prompt (the Runner asks per site). */
   browser?: boolean;
@@ -47,7 +47,7 @@ function baseOptions(o: ExecutionOptions, env: NodeJS.ProcessEnv): Options {
       : {};
   const flagSettings = permission.settings ?? (connectors ? undefined : off);
   return {
-    cwd: o.cwd, model: o.model || undefined, resume: o.resume || undefined,
+    cwd: o.cwd, model: o.model || undefined, effort: o.effort || undefined, resume: o.resume || undefined,
     ...(o.context ? { systemPrompt: { type: 'preset', preset: 'claude_code', append: o.context } } : {}),
     pathToClaudeCodeExecutable: o.binary || undefined,
     // Omit settingSources and permissionMode to retain the native CLI settings

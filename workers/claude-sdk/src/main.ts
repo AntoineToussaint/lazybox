@@ -36,7 +36,7 @@ const settingsApprovals = new SettingsApprovals();
 // The agent's own slash commands and models, said once per change.
 const catalog = new CommandCatalog();
 // The model of the following turns: a change during a turn waits for it to end.
-const models = new ModelSwitch(model => session!.setModel(model), (model, error) => process.stderr.write(`model ${model} not applied: ${String(error)}\n`));
+const models = new ModelSwitch((model, effort) => effort ? session!.applyFlagSettings({ model, effortLevel: effort }) : session!.setModel(model), (model, error) => process.stderr.write(`model ${model} not applied: ${String(error)}\n`));
 const sayCatalog = (value: ReturnType<CommandCatalog['fromChanged']>) => { if (value) event({ ...value, sessionId: reference }); };
 const send = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
 const event = (value: unknown) => send({ method: 'event', params: value });
@@ -113,7 +113,7 @@ async function open(options: any) {
   void session.initializationResult().then(init => sayCatalog(catalog.fromInitialize(init))).catch(() => { /* Each turn's init message still names the commands. */ });
   // Operations added after the original protocol. A running worker outlives
   // Runner upgrades, so the Runner asks this worker rather than assuming.
-  return { reference: options.resume || '', features: ['permission', 'context', 'stop_agent', 'model', 'title', 'parts', 'steer', 'grants'] };
+  return { reference: options.resume || '', features: ['permission', 'context', 'stop_agent', 'model', 'model_effort', 'title', 'parts', 'steer', 'grants'] };
 }
 
 async function receive(q: Query) {
@@ -180,9 +180,17 @@ async function handle(request: Request) {
         permission = mode;
         reply(request.id, { delivery: 'acknowledged' }); break;
       }
+      case 'list_mcp_servers': {
+        const servers = await session.mcpServerStatus();
+        const labels = servers.map(server => `${server.name} (${server.status === 'needs-auth' ? 'sign-in required' : server.status})`);
+        event({ type: 'mcp_servers', sessionId: reference, operationId: p.id,
+          text: labels.length ? `MCP servers: ${labels.join(' · ')}` : 'No MCP servers are configured for this conversation.' });
+        reply(request.id, { delivery: 'acknowledged' });
+        break;
+      }
       case 'model': {
         // The model of the following turns; the provider resolves an alias.
-        reply(request.id, { delivery: await models.change(p?.model) }); break;
+        reply(request.id, { delivery: await models.change(p?.model, p?.effort) }); break;
       }
       case 'stop_agent': {
         // Stops one sub-agent; the main agent's turn continues.

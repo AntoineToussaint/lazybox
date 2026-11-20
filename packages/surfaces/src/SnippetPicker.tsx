@@ -1,6 +1,6 @@
 import { readPreference, writePreference } from "./view-state";
-import { readSnippetUsage, saveSnippetUse, sortSnippets, type SnippetUsage } from "./snippet-usage";
-import { useEffect, useRef, useState } from "react";
+import { readSnippetUsage, saveSnippetUse, searchSnippets, sortSnippets, type SnippetUsage } from "./snippet-usage";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Snippet } from "@lazybox/protocol";
 import type { ViewStateStore } from "@lazybox/platform";
 import { useRunner } from "./RunnerContext";
@@ -23,6 +23,8 @@ export function SnippetPicker({
 }) {
   const { api } = useRunner(),
     dialog = useRef<HTMLDialogElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const preview = useRef<HTMLElement>(null);
   const [rows, setRows] = useState<Snippet[]>([]),
     [query, setQuery] = useState(""),
     [index, setIndex] = useState(0),
@@ -56,18 +58,28 @@ export function SnippetPicker({
       });
     return () => controller.abort();
   }, [api]);
-  const matching = rows
-    .filter(s=>view!=='favorites'||favorites.includes(s.key))
-    .filter(s=>view!=='frequent'||(usage[s.key]?.count||0)>0)
-    .filter((s) =>
-      `${s.key} ${s.category} ${s.description} ${s.body}`
-        .toLowerCase()
-        .includes(query.toLowerCase()),
-    );
-  // A search keeps the frequent order in that view; otherwise it reads by name.
-  const filtered = !query || view==='frequent' ? sortSnippets(matching, usage, favorites, view==='frequent'?'frequent':'suggested') : sortSnippets(matching, {}, [], 'suggested');
-  const lastUsed = !query && view==='all' ? filtered.find(s=>usage[s.key])?.key : undefined;
+  const matching = rows.filter(row =>
+    view === 'all' || (view === 'favorites' ? favorites.includes(row.key) : (usage[row.key]?.count || 0) > 0),
+  );
+  const ordered = sortSnippets(matching, usage, favorites, view === 'frequent' ? 'frequent' : 'suggested');
+  const filtered = searchSnippets(ordered, query);
+  const lastUsed = !query.trim() && view === 'all' ? filtered.find(row => usage[row.key])?.key : undefined;
   const selected = filtered[Math.min(index, filtered.length - 1)];
+  useLayoutEffect(() => {
+    const node = list.current;
+    if (!node) return;
+    const row = node.querySelector<HTMLElement>('[aria-selected="true"]');
+    if (!row || index === 0) { node.scrollTop = 0; return; }
+    const top = node.getBoundingClientRect().top;
+    const option = row.getBoundingClientRect();
+    if (option.top < top) node.scrollTop += option.top - top;
+    else if (option.bottom > top + node.clientHeight) node.scrollTop += option.bottom - top - node.clientHeight;
+  }, [index, query, view, selected?.key]);
+
+  useLayoutEffect(() => {
+    if (preview.current) preview.current.scrollTop = 0;
+  }, [selected?.key]);
+
   const insert = () => {
     if (selected && !busy) {
       used(selected.key);
@@ -133,7 +145,8 @@ export function SnippetPicker({
         autoFocus
         type="search"
         aria-label="Find snippets"
-        placeholder="Search key, category or description…"
+        placeholder="Search name, description or category…"
+        title="Use body: followed by text to search inside snippets."
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);
@@ -142,10 +155,11 @@ export function SnippetPicker({
       />
       <div className="snippet-filters" role="group" aria-label="Show snippets">{([['all','All'],['favorites',`Favorites${favorites.length?` · ${favorites.length}`:''}`],['frequent','Frequent']] as const).map(([value,label])=><button key={value} aria-pressed={view===value} onClick={()=>{setView(value);setIndex(0);}}>{label}</button>)}<small>{filtered.length} {filtered.length===1?'snippet':'snippets'}</small></div>
       <div className="snippet-browser">
-        <div role="listbox" aria-label="Available snippets">
+        <div ref={list} role="listbox" aria-label="Available snippets">
           {error && <p role="alert">{error}</p>}
           {loading && <p role="status">Loading snippets…</p>}
-          {!loading && !filtered.length && <p className="snippet-empty">{query ? 'No matching snippets.' : view==='frequent' ? 'Snippets you send or insert show up here, most used first.' : view==='favorites' ? 'Star a snippet to keep it here.' : 'No snippets yet.'}</p>}
+          {!loading && !filtered.length && <p className="snippet-empty">{query.trim() ? 'No matching snippets.' : view==='frequent' ? 'Snippets you send or insert show up here, most used first.' : view==='favorites' ? 'Star a snippet to keep it here.' : 'No snippets yet.'}</p>}
+          {!loading && !filtered.length && !!query.trim() && !/^body:/i.test(query.trim()) && <p className="snippet-empty">Search snippet text with <code>body:</code> followed by a phrase.</p>}
           {filtered.map((s, i) => (
             <button
               type="button"
@@ -165,7 +179,7 @@ export function SnippetPicker({
           ))}
         </div>
         <Resizer split={SPLITS.snippetList} label="snippet list" store={store}/>
-        <article className="snippet-preview">
+        <article ref={preview} className="snippet-preview">
           {selected && (
             <>
               <small>

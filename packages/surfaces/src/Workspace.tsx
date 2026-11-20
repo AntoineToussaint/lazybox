@@ -35,7 +35,7 @@ import type { FileLink } from './file-reference';
 import { Workbench, WorkbenchContext } from './workbench';
 import { CommandCenter } from './CommandCenter';
 import { useWorkspaceCommands } from './useWorkspaceCommands';
-import { builtinPanels, sentence, type PanelModule, type PanelTitle } from './PanelRegistry';
+import { builtinPanels, sentence, type ExtensionPanelChoice, type ModuleProps, type PanelModule, type PanelTitle } from './PanelRegistry';
 import { WorkspaceHeader } from './WorkspaceHeader';
 import { OtherWindows, type OtherWindow } from './OtherWindows';
 import type { ConversationCopy } from './NewSessionForm';
@@ -209,6 +209,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const [mobilePanelId, setMobilePanelId] = useState('');
   const display = useDisplayDetail(viewState);
   const [settings, setSettings] = useState(false);
+  const [extensionRequest, setExtensionRequest] = useState<{ panelId: string; request: NonNullable<ModuleProps['extensionRequest']> }>();
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('subscriptions');
   const [newSession, setNewSession] = useState(false);
   const [conversationCopy, setConversationCopy] = useState<ConversationCopy>();
@@ -408,6 +409,14 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     setSettings(false); setMobilePanelId(shown.id);
     return shown.id;
   };
+  const openExtensionPanel = (choice?: ExtensionPanelChoice) => {
+    const panelId = showModule('extension');
+    if (panelId) {
+      const request = { choice, onOpened: () => setExtensionRequest(current => current?.request === request ? undefined : current) };
+      setExtensionRequest({ panelId, request });
+    }
+  };
+  const manageExtensions = () => { setSettingsTab('extensions'); setSettings(true); };
   /** Agents asked for by the person (Panels, the palette): back under Workspaces, unfolded, on every page of every workspace. */
   const bringBackAgents = () => {
     if (locked) return '';
@@ -807,7 +816,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       if (!session || !provider || session.collectionId !== workspaceID) return;
       return () => {
         conversationGroup.current = groupOf(livePage(), panel.id)?.id || '';
-        beginConversation(session.collectionId, { provider, model: session.model, title: `${(conversationTitle(session) || 'Conversation').slice(0, 100)} copy` });
+        beginConversation(session.collectionId, { provider, model: session.model, effort: session.effort, title: `${(conversationTitle(session) || 'Conversation').slice(0, 100)} copy` });
       };
     },
   };
@@ -996,7 +1005,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   // The tabs on screen: each group's front tab, unless the group is minimized to its tab bar.
   const frontPanels = new Set(pageGroups(page).filter(group => !group.minimized).map(group => group.active));
   const renderPanel = (panel: Panel) => <WorkspacePanel panel={panel} definition={Object.hasOwn(registry, panel.kind) ? registry[panel.kind] : undefined} target={resolveTarget(panel, page.selection)} store={storeFor(panel)}
-    module={moduleProps} actions={panelActions} pending={!!pending} mobileActive={panel.id === mobilePanel?.id} canDetach={!!chatHost}
+    module={extensionRequest?.panelId === panel.id ? { ...moduleProps, extensionRequest: extensionRequest.request } : moduleProps} actions={panelActions} pending={!!pending} mobileActive={panel.id === mobilePanel?.id} canDetach={!!chatHost}
     shown={narrow ? panel.id === mobilePanel?.id : frontPanels.has(panel.id)}/>;
   const kindsShown = new Map<string, 'shown' | 'window'>([...detachedPanels.map(panel => [panel.kind, 'window'] as const), ...page.popouts.flatMap(group => group.panels.map(panel => [panel.kind, 'window'] as const)), ...shown.filter(panel => !page.popouts.some(group => group.panels.includes(panel)) && !panel.detached).map(panel => [panel.kind, 'shown'] as const)]);
 
@@ -1017,7 +1026,8 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       </>}
       onOpenNavigator={() => setNavigatorOpen(true)}
       onSelectPage={id => { setSettings(false); commit({ ...layout, selectedPage: id }); }}
-      onOpenSettings={() => setSettings(true)}
+      onOpenSettings={() => { if (settingsTab === 'extensions') setSettingsTab('subscriptions'); setSettings(true); }}
+      extensionsOpen={settings && settingsTab === 'extensions'} onManageExtensions={manageExtensions}
       onOpenAttention={target => { setSettings(false); showSession(target); }}
       onShowChanges={showChanges}
       onBrowseFiles={focusFiles}
@@ -1047,7 +1057,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       </div>)}
     {!fixedWorkspaceId && <AccountNotices onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }}/>}
     {settings
-      ? <SettingsPage app={host?.app} zoom={host?.zoom} tab={settingsTab} onTab={setSettingsTab} onShowProcesses={() => showModule('processes')} onRunInShell={runInShell} chooseRepositoryFolder={host?.chooseRepositoryFolder} viewState={viewState} openSignIn={host?.openSignIn} copySignInCode={host?.copySignInCode}/>
+      ? <SettingsPage onOpenExtensionPanel={openExtensionPanel} app={host?.app} zoom={host?.zoom} tab={settingsTab} onTab={setSettingsTab} onShowProcesses={() => showModule('processes')} onRunInShell={runInShell} chooseRepositoryFolder={host?.chooseRepositoryFolder} viewState={viewState} openSignIn={host?.openSignIn} copySignInCode={host?.copySignInCode}/>
       : <>
         {locked && <div className="layout-locked" role="status">
           <Icon name="lock" size={14}/>

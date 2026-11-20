@@ -16,7 +16,7 @@ import { Icon } from './Icons';
 import { agentTitle } from './providers';
 
 /** The model picker: the same choices and switch as `/model` (useSlashCommands.tsx). */
-export type ModelChoices = { choices: SlashChoice[]; live: boolean; disabled?: string; choose(value: string): void; /** Any model id: `/model ` in the message box. */ pick(): void };
+export type ModelChoices = { choices: SlashChoice[]; efforts?: SlashChoice[]; live: boolean; disabled?: string; choose(value: string): void; /** Any model id: `/model ` in the message box. */ pick(): void };
 const copySessionId = (id: string) => { void navigator.clipboard?.writeText(id).then(() => showMenuNotice('Session ID copied'), () => showMenuNotice('Could not copy the session ID')); };
 
 export const PERMISSION_CHOICES: [string, string][] = [['ask', 'Ask for approval'], ['read-only', 'Read only'], ['yolo', 'YOLO']];
@@ -70,6 +70,9 @@ export function sessionMenuItems({ session, allowStart, onChangePermission, onRe
       ...models.choices.map(choice => ({ label: choice.label + (models.live || choice.current ? '' : ' (restarts the agent)'), checked: !!choice.current, run: () => models.choose(choice.value) })),
       'separator', { label: 'Other model…', run: models.pick },
     ] },
+    models && session && !session.closed && !!models.efforts?.length && { label: 'Reasoning effort', disabled: models.disabled, submenu:
+      models.efforts.map(choice => ({ label: choice.effort || choice.label, checked: !!choice.current, run: () => models.choose(choice.value) })),
+    },
     session && !session.closed && { label: 'Switch subscription…', run: onSwitchSubscription },
     session && !session.closed && onGiveBrowser && session.browserAccess === 'can_give' && { label: `Give ${agentTitle(session.provider, [], 'the agent')} the browser`, icon: 'globe', run: onGiveBrowser },
     session?.closed ? allowStart && { label: 'New session', run: onNewSession } : { label: 'End session', disabled: !session, run: onClose },
@@ -133,7 +136,13 @@ export function SessionMenu({ session, sessionID, accountName, stream, allowStar
           onClick={() => choosePermission(session, mode, onChangePermission, onRestartWithPermission)}>{label}</button>;
       })}
     </div>}
-    {models && session && !session.closed && <ModelChoiceGroup models={models}/>}
+    {models && session && !session.closed && <>
+      <ModelChoiceGroup models={models}/>
+      {!!models.efforts?.length && <div className="session-permission" role="group" aria-label="Reasoning effort">
+        <strong>Reasoning effort</strong>
+        {models.efforts.map(choice => <button key={choice.value} type="button" aria-pressed={!!choice.current} disabled={!!models.disabled} onClick={() => models.choose(choice.value)}>{choice.effort}</button>)}
+      </div>}
+    </>}
     {activity && <ActivityDetailChoice activity={activity}/>}
     {session && !session.closed && session.permissionGrants.length > 0 && <AlwaysAllowed session={session}/>}
     {session?.closed && !allowStart && <span>Saved conversation</span>}

@@ -4,13 +4,14 @@ import { SubscriptionOptions } from './SubscriptionGroups';
 import type { RunnerClient } from '@lazybox/client-core';
 import type { InfoResponse } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
+import { ReasoningEffort } from './ReasoningEffort';
 import { AgentPicker } from './AgentPicker';
 import { useRunnerSettings } from './RunnerSettings';
 import { conversationDefaults, writeLaunchChoices } from './view-state';
 
 import { showToast } from './toasts';
 
-export type ConversationCopy = { provider: string; model: string; title: string };
+export type ConversationCopy = { provider: string; model: string; effort?: string; title: string };
 
 type Purpose = 'coding' | 'help' | 'planning' | 'summary';
 
@@ -38,7 +39,7 @@ export function useSessionLauncher({ api, info, viewState, agent, copy, workingD
   onError(message: string): void;
   onStarted(sessionId: string, collectionId?: string): void;
 }) {
-  const [remembered] = useState(() => { const choices = conversationDefaults(viewState, info); return copy ? { provider: copy.provider, model: copy.model } : agent && agent !== choices.provider ? {} : choices; });
+  const [remembered] = useState(() => { const choices = conversationDefaults(viewState, info); return copy ? { provider: copy.provider, model: copy.model, effort: copy.effort } : agent && agent !== choices.provider ? {} : choices; });
   const { settings: runnerSettings, loading: settingsLoading } = useRunnerSettings();
   const [provider, setProvider] = useState<string>(agent || remembered.provider || 'claude');
   const [title, setTitle] = useState(copy?.title || '');
@@ -48,6 +49,7 @@ export function useSessionLauncher({ api, info, viewState, agent, copy, workingD
   const assistant = purpose !== 'coding';
   const [cwd, setCwd] = useState(workingDirectory);
   const [model, setModel] = useState(remembered.model || '');
+  const [effort, setEffort] = useState(remembered.effort || '');
   const [gateway, setGateway] = useState(remembered.gateway || '');
   const [instructions, setInstructions] = useState('');
   const [behaviorProfile, setBehaviorProfile] = useState(() => behaviorForProvider(readDefaultBehavior(viewState), provider));
@@ -68,13 +70,13 @@ export function useSessionLauncher({ api, info, viewState, agent, copy, workingD
     openingRef.current = true; setOpening(true); onError('');
     const signal = lifetime.current!.signal;
     try {
-      const options = { model, permission: checkInFirst ? 'read-only' : permission, workflow, gatewayId: gateway, rotationProfileIds: [], noRotation: !rotate, instructions, behaviorProfile: assistant ? '' : behaviorProfile };
+      const options = { model, effort, permission: checkInFirst ? 'read-only' : permission, workflow, gatewayId: gateway, rotationProfileIds: [], noRotation: !rotate, instructions, behaviorProfile: assistant ? '' : behaviorProfile };
       const result = assistant ? await api.openAssistant({ profileId: selectedProfile, purpose, context: assistantContext, collectionId, options }, { signal }) : await api.openSession({ profileId: selectedProfile, cwd: collectionId || emptyWorkspace ? '' : cwd, collectionId, emptyWorkspace, options }, { signal });
       if (!result.session) throw new Error('Runner did not return a session');
       if (signal.aborted) return;
       if (!assistant) {
         try {
-          writeLaunchChoices(viewState, { provider, profile: selectedProfile, model, gateway, behaviorProfile });
+          writeLaunchChoices(viewState, { provider, profile: selectedProfile, model, effort, gateway, behaviorProfile });
           saveDefaultBehavior(viewState, behaviorProfile);
         } catch { /* The conversation can still open. */ }
       }
@@ -99,7 +101,7 @@ export function useSessionLauncher({ api, info, viewState, agent, copy, workingD
   }, [autoStart, sessionID, info, settingsLoading, selectedProfile, allowStart]);
 
   return {
-    runnerSettings, copy, title, setTitle, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway,
+    runnerSettings, copy, title, setTitle, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, effort, setEffort, gateway, setGateway,
     instructions, setInstructions, behaviorProfile, setBehaviorProfile, checkInFirst, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open,
   };
 }
@@ -117,14 +119,14 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
   collectionId: string;
   agentName: string;
 }) {
-  const { runnerSettings, copy, title, setTitle, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, gateway, setGateway, instructions, setInstructions, behaviorProfile, setBehaviorProfile, checkInFirst, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open } = launcher;
+  const { runnerSettings, copy, title, setTitle, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, effort, setEffort, gateway, setGateway, instructions, setInstructions, behaviorProfile, setBehaviorProfile, checkInFirst, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open } = launcher;
   const assistant = purpose !== 'coding';
   return <section className="session-setup">
     {assistant && <p>{purposeLabel(purpose)}. This conversation runs on the Runner.</p>}
     <form onSubmit={open} className="open-form">
       {copy && <label>Conversation name<input autoFocus required maxLength={128} value={title} disabled={opening} onFocus={event => event.target.select()} onChange={event => setTitle(event.target.value)}/></label>}
       <div className="setup-row">
-        <AgentPicker value={provider} disabled={!info || opening} onChange={next => { setProvider(next); setProfile(''); setModel(''); setGateway(''); setBehaviorProfile(behaviorForProvider(behaviorProfile, next)); }}/>
+        <AgentPicker value={provider} disabled={!info || opening} onChange={next => { setProvider(next); setProfile(''); setModel(''); setEffort(''); setGateway(''); setBehaviorProfile(behaviorForProvider(behaviorProfile, next)); }}/>
         <label>Account profile<select value={selectedProfile} disabled={!profiles.length || opening} onChange={e => setProfile(e.target.value)}>
           <SubscriptionOptions profiles={profiles}/>
         </select></label>
@@ -152,7 +154,8 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
       <details className="session-options" open={copy ? true : undefined}>
         <summary>Model & context</summary>
         <div className="options-grid">
-          <label>Model<input disabled={opening} placeholder="Provider default" value={model} onChange={e => setModel(e.target.value)}/></label>
+          <label>Model<input disabled={opening} placeholder="Provider default" value={model} onChange={e => { setModel(e.target.value); setEffort(''); }}/></label>
+          <ReasoningEffort provider={provider} model={model} value={effort} disabled={opening} onChange={setEffort}/>
           {/* A gateway is a choice only where the Runner has one besides the direct connection. */}
           {(gateways.length > 0 || !!gateway) && <label>Gateway<select disabled={opening} value={gateway} onChange={e => setGateway(e.target.value)}>
             <option value="">Runner default</option>

@@ -62,7 +62,7 @@ func TestModelSwitchesWhileRunningAndIsRemembered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = b.SetModel(context.Background(), e, "model-1", "second-model"); err != nil {
+	if _, err = b.SetModelAndEffort(context.Background(), e, "model-1", "second-model", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := applied(t, fake.Session); got.Kind != agent.Model || got.Model != "second-model" || got.Text != "" {
@@ -76,7 +76,7 @@ func TestModelSwitchesWhileRunningAndIsRemembered(t *testing.T) {
 	// During a turn the change waits for it to end, and the conversation says so.
 	fake.Session.Events <- agent.Event{Type: "turn_started", TurnID: "t"}
 	waitHistory(t, func() bool { return e.Engine.Snapshot().Busy })
-	if _, err = b.SetModel(context.Background(), e, "model-2", "third-model"); err != nil {
+	if _, err = b.SetModelAndEffort(context.Background(), e, "model-2", "third-model", ""); err != nil {
 		t.Fatalf("a change during a turn must be taken for the next one: %v", err)
 	}
 	if got := applied(t, fake.Session); got.Kind != agent.Model || got.Model != "third-model" {
@@ -84,7 +84,7 @@ func TestModelSwitchesWhileRunningAndIsRemembered(t *testing.T) {
 	}
 	journaled(t, e, `"model_changed"`, `"third-model"`, `"next_turn"`)
 	for _, bad := range []string{"", "two words", "tab\tmodel", strings.Repeat("m", 257)} {
-		if _, err = b.SetModel(context.Background(), e, "model-bad", bad); !errors.Is(err, agent.ErrInvalidModel) {
+		if _, err = b.SetModelAndEffort(context.Background(), e, "model-bad", bad, ""); !errors.Is(err, agent.ErrInvalidModel) {
 			t.Fatalf("%q must be refused as an invalid model: %v", bad, err)
 		}
 	}
@@ -102,23 +102,23 @@ func TestAgentWithoutLiveModelRestartsWithTheNewModelAndContinues(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = b.SetModel(context.Background(), e, "live", "second-model"); !errors.Is(err, agent.ErrUnsupported) {
+	if _, err = b.SetModelAndEffort(context.Background(), e, "live", "second-model", ""); !errors.Is(err, agent.ErrUnsupported) {
 		t.Fatalf("a worker without live model switches must refuse a live switch: %v", err)
 	}
 	fake.Session.Events <- agent.Event{Type: "turn_started", TurnID: "t"}
 	waitHistory(t, func() bool { return e.Engine.Snapshot().Busy })
-	if _, err = b.RestartWithModel(context.Background(), e, "second-model"); err == nil || !strings.Contains(err.Error(), "finish its turn") {
+	if _, err = b.RestartWithModelAndEffort(context.Background(), e, "second-model", ""); err == nil || !strings.Contains(err.Error(), "finish its turn") {
 		t.Fatalf("a busy agent must not be restarted: %v", err)
 	}
 	fake.Session.Events <- agent.Event{Type: "turn_ended", TurnID: "t", Status: "completed", SessionID: "native-reference"}
 	waitHistory(t, func() bool { return !e.Engine.Snapshot().Busy })
-	if _, err = b.RestartWithModel(context.Background(), e, "two words"); !errors.Is(err, agent.ErrInvalidModel) {
+	if _, err = b.RestartWithModelAndEffort(context.Background(), e, "two words", ""); !errors.Is(err, agent.ErrInvalidModel) {
 		t.Fatalf("an invalid model must be refused before the agent stops: %v", err)
 	}
 	if e.Engine.Snapshot().Closed {
 		t.Fatal("a refused restart stopped the agent")
 	}
-	next, err := b.RestartWithModel(context.Background(), e, "second-model")
+	next, err := b.RestartWithModelAndEffort(context.Background(), e, "second-model", "")
 	if err != nil {
 		t.Fatal(err)
 	}

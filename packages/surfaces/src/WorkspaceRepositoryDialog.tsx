@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Code, ConnectError } from "@lazybox/client-core";
 import type { ViewStateStore } from "@lazybox/platform";
 import type { Collection } from "@lazybox/protocol";
 import { DraggableDialog, DialogHeader } from "./DraggableDialog";
@@ -58,7 +59,8 @@ export function WorkspaceRepositoryDialog({
     [empty, setEmpty] = useState(copy ? !copy.members.length : !workspace && !preselected.length && !!remembered.empty),
     [busy, setBusy] = useState(false),
     [progress, setProgress] = useState(""),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [branchConflict, setBranchConflict] = useState("");
   useEffect(() => {
     dialog.current?.showModal();
     // Creating starts on the name, its suggestion selected: typing replaces it.
@@ -79,6 +81,14 @@ export function WorkspaceRepositoryDialog({
   const [customBranch, setCustomBranch] = useState<string>(),
     [editingBranch, setEditingBranch] = useState(false);
   const branch = workspace ? "" : (customBranch ?? branchForName(name)).trim();
+  const conflict = !empty && !!branchConflict && branch === branchConflict;
+  const branchInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (conflict && editingBranch && !busy) {
+      branchInput.current?.focus();
+      branchInput.current?.select();
+    }
+  }, [conflict, editingBranch, busy]);
   const included = new Set(
     workspace?.members.map((m) => m.spec?.repositoryId || ""),
   );
@@ -112,7 +122,7 @@ export function WorkspaceRepositoryDialog({
     setStartPicker(undefined);
     requestAnimationFrame(() => dialog.current?.querySelector<HTMLElement>(`[data-start-from="${CSS.escape(identity)}"]`)?.focus());
   };
-  const canSave = copyLoaded && !!(selected.size || empty) && !!(workspace || name.trim());
+  const canSave = !conflict && copyLoaded && !!(selected.size || empty) && !!(workspace || name.trim());
   // A double-clicked repository is added, then the dialog finishes on the next
   // render, once the name suggestion reflects the new selection.
   const [finishSoon, setFinishSoon] = useState(false);
@@ -126,6 +136,7 @@ export function WorkspaceRepositoryDialog({
     pending.current = true;
     setBusy(true);
     setError("");
+    setBranchConflict("");
     setProgress("Preparing workspace…");
     const request = {
       collectionId: workspace?.id || "",
@@ -161,7 +172,15 @@ export function WorkspaceRepositoryDialog({
       await reload();
       onSaved(result);
     } catch (error) {
-      setError(String(error));
+      const failure = ConnectError.from(error);
+      if (!workspace && !empty && (failure.code === Code.AlreadyExists ||
+          (failure.code === Code.FailedPrecondition &&
+            failure.rawMessage === "branch already exists; choose a new collection branch"))) {
+        setBranchConflict(branch);
+        setEditingBranch(true);
+      } else {
+        setError(failure.rawMessage);
+      }
     } finally {
       pending.current = false;
       setBusy(false);
@@ -215,10 +234,12 @@ export function WorkspaceRepositoryDialog({
         disabled={busy || !copyLoaded}
         initialQuery={initialQuery}
         onSelected={(value) => {
+          setBranchConflict("");
           setSelected(value);
           setEmpty(false);
         }}
         onActivate={(identity) => {
+          setBranchConflict("");
           setSelected((current) => new Set([...current, identity]));
           setEmpty(false);
           setFinishSoon(true);
@@ -245,11 +266,15 @@ export function WorkspaceRepositoryDialog({
             />
           </label>
           {!empty && (editingBranch ? (
+            <div className="workspace-branch-editor">
             <label className="workspace-branch-field">
               <span className="sr-only">Branch</span>
               <Icon name="branch" size={13} />
               <input
                 aria-label="Branch"
+                ref={branchInput}
+                aria-invalid={conflict || undefined}
+                aria-describedby={conflict ? "workspace-branch-conflict" : undefined}
                 value={branch}
                 maxLength={200}
                 disabled={busy}
@@ -257,11 +282,18 @@ export function WorkspaceRepositoryDialog({
                 autoFocus
                 onChange={(e) => setCustomBranch(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setCustomBranch(undefined); setEditingBranch(false); }
-                  if (e.key === "Enter") { e.preventDefault(); setEditingBranch(false); }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setCustomBranch(undefined);
+                    setEditingBranch(branchForName(name).trim() === branchConflict);
+                  }
+                  if (e.key === "Enter") { e.preventDefault(); if (!conflict) setEditingBranch(false); }
                 }}
               />
             </label>
+            {conflict && <p className="workspace-branch-error" id="workspace-branch-conflict" role="alert">This branch already exists. Enter a different branch name.</p>}
+            </div>
           ) : (
             <p className="workspace-branch-preview" aria-live="polite">
               <Icon name="branch" size={13} />

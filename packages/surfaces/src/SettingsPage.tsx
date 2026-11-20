@@ -88,7 +88,7 @@ const settingsTopics: { id: SettingsTab; label: string; keywords: string; anchor
   { id: 'appearance', label: 'Display and zoom', keywords: 'theme dark light font text size zoom scale colour color' },
   { id: 'extensions', label: 'Extensions', keywords: 'plugin plugins installed panels' },
   { id: 'agents', label: 'Agent configuration', keywords: 'claude codex model effort permissions acp terminal updates update version upgrade' },
-  { id: 'subscriptions', label: 'Subscription accounts', keywords: 'sign in login account claude codex usage limit rotation switch' },
+  { id: 'subscriptions', label: 'Subscription accounts', keywords: 'sign in login account claude codex usage limit rotation switch rename name label' },
   { id: 'repositories', label: 'Repository home checkouts', keywords: 'git checkout clone home folder github' },
 ];
 
@@ -106,7 +106,7 @@ function comebackLine(back: Comeback, now: number, refreshing: boolean): { text:
   }
 }
 
-function SubscriptionCard({ profile, now, refreshing, error, onRefresh, footer }: { profile: Profile; now: number; refreshing: boolean; error?: string; onRefresh(): void; footer: ReactNode }) {
+function SubscriptionCard({ profile, now, refreshing, error, onRefresh, onRename, footer }: { profile: Profile; now: number; refreshing: boolean; error?: string; onRefresh(): void; onRename(): void; footer: ReactNode }) {
   const usage = profile.availability, windows = usage?.windows || [], codex = profile.provider === 'codex';
   const name = profile.label || (codex ? 'Current Codex account' : 'Current Claude account');
   const back = comeback(profile, now), line = comebackLine(back, now, refreshing);
@@ -119,7 +119,7 @@ function SubscriptionCard({ profile, now, refreshing, error, onRefresh, footer }
   return <article className={`subscription-card tone-${tone}`} aria-label={`${name} subscription`}>
     <header>
       <span className={`provider-mark ${profile.provider}`} aria-hidden="true">{codex ? '›' : '✳'}</span>
-      <div className="subscription-identity"><h3 title={name}>{name}</h3>{usage?.email && <small className="subscription-email">{usage.email}</small>}<span>{codex ? 'Codex' : 'Claude'}{usage?.plan ? ` · ${usage.plan[0].toUpperCase()}${usage.plan.slice(1)}` : ''}</span></div>
+      <div className="subscription-identity"><div className="subscription-name"><h3 title={name}>{name}</h3><button type="button" className="icon-button" onClick={onRename} aria-label="Rename subscription" title="Rename subscription"><Icon name="pencil" size={13}/></button></div>{usage?.email && <small className="subscription-email">{usage.email}</small>}<span>{codex ? 'Codex' : 'Claude'}{usage?.plan ? ` · ${usage.plan[0].toUpperCase()}${usage.plan.slice(1)}` : ''}</span></div>
       <span className={`account-state tone-${tone}`}>{state}</span>
     </header>
     {line && <p className={`subscription-back tone-${line.tone}`} role="status" title={back.kind === 'back' || back.kind === 'due' ? new Date(back.resetAt * 1000).toLocaleString() : undefined}>{line.text}</p>}
@@ -137,6 +137,50 @@ function SubscriptionCard({ profile, now, refreshing, error, onRefresh, footer }
     <footer>{footer}<button type="button" className="quiet" disabled={refreshing} aria-label={refreshing ? "Refreshing…" : "Refresh usage"} title={observed} onClick={onRefresh}><Icon name="refresh" size={13}/>{refreshing ? "Refreshing…" : "Refresh"}</button></footer>
   </article>;
 }
+function RenameSubscriptionDialog({ profile, onClose }: { profile: Profile; onClose(): void }) {
+  const { api, refresh } = useRunner();
+  const dialog = useRef<HTMLDialogElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const pending = useRef(false);
+  const [name, setName] = useState(profile.label);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const trimmed = name.trim();
+  const tooLong = new TextEncoder().encode(trimmed).length > 64;
+  const canSave = !!trimmed && trimmed !== profile.label && !tooLong;
+  useEffect(() => {
+    dialog.current?.showModal();
+    input.current?.focus();
+    input.current?.select();
+  }, []);
+  return <DraggableDialog ref={dialog} className="subscription-dialog" aria-label="Rename subscription"
+    onCancel={event => { event.preventDefault(); if (!pending.current) onClose(); }}>
+    <DialogHeader><h2>Rename subscription</h2><button type="button" disabled={saving} onClick={onClose} aria-label="Close rename dialog">×</button></DialogHeader>
+    <form onSubmit={async event => {
+      event.preventDefault();
+      if (!canSave || pending.current) return;
+      pending.current = true;
+      setSaving(true);
+      setError('');
+      try {
+        await api.renameSubscription({ profileId: profile.id, label: trimmed }, { timeoutMs: 10000 });
+        refresh();
+        onClose();
+      } catch (err) {
+        setError(settingsError(err, 'rename subscription'));
+      } finally {
+        pending.current = false;
+        setSaving(false);
+      }
+    }}>
+      <label>Account name<input ref={input} autoComplete="off" maxLength={64} value={name} disabled={saving} required onChange={event => setName(event.target.value)}/></label>
+      {tooLong && <p className="settings-error" role="alert">This name exceeds 64 bytes.</p>}
+      {error && <p className="settings-error" role="alert">{error}</p>}
+      <div className="dialog-actions"><button type="button" disabled={saving} onClick={onClose}>Cancel</button><button className="primary" disabled={!canSave || saving}>{saving ? 'Saving…' : 'Save name'}</button></div>
+    </form>
+  </DraggableDialog>;
+}
+
 export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openSignIn, copySignInCode, chooseRepositoryFolder, tab: shownTab, onTab, onShowProcesses, onRunInShell }: { /** The desktop app: version and updates (Settings → About & updates). */ app?: AppHost; onOpenExtensionPanel?(choice?: import('./PanelRegistry').ExtensionPanelChoice): void; zoom?: ZoomHost; onShowProcesses?(): void; /** Types a command into a workspace's shell panel and shows it (Install Claude Code). */ onRunInShell?(command: string): Promise<void>; chooseRepositoryFolder?(): Promise<string | null>; viewState?: ViewStateStore; openSignIn?(url: string): Promise<void>; copySignInCode?(code: string): Promise<void>; tab?: SettingsTab; onTab?(tab: SettingsTab): void }) {
   const { api, info, refresh } = useRunner();
   const [query, setQuery] = useState('');
@@ -302,6 +346,7 @@ export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openS
   const { settings: runnerSettings, setSettings: setRunnerSettings } = useRunnerSettings();
   // An account imported from a token earlier: Settings → Subscriptions → Remove.
   const [removing, setRemoving] = useState<Profile>();
+  const [renaming, setRenaming] = useState<Profile>();
   // Claude sign-in in Lazybox is off unless the person turned it on (CLAUDE_COMPLIANCE.md).
   const claudeGated = !!runnerSettings && !runnerSettings.claudeSubscriptionSignIn;
   const [rotationSaving, setRotationSaving] = useState('');
@@ -318,7 +363,7 @@ export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openS
     } catch { setRefreshErrors(value => ({ ...value, [profile.id]: 'Could not save automatic switching. Settings may have changed in another window; try again.' })); window.dispatchEvent(new Event('lazybox-settings-saved')); }
     finally { setRotationSaving(''); }
   };
-  const profiles = info?.profiles.filter(profile => profile.managed).map(profile => (updated[profile.id]?.availability?.observedAtUnixMillis || 0n) > (profile.availability?.observedAtUnixMillis || 0n) ? updated[profile.id] : profile) || [];
+  const profiles = info?.profiles.filter(profile => profile.managed).map(profile => (updated[profile.id]?.availability?.observedAtUnixMillis || 0n) > (profile.availability?.observedAtUnixMillis || 0n) ? { ...profile, availability: updated[profile.id].availability } : profile) || [];
   const pending = !!flowID && !terminal(flow?.state);
   const now = useNow(30_000);
   // A limit whose reported reset has passed is checked once, by itself: the
@@ -430,13 +475,14 @@ export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openS
       {pending && !adding && <div className="sign-in-banner"><span>{flow?.label || 'Subscription'} · sign-in pending</span><button onClick={() => setAdding(true)}>Continue sign-in</button></div>}
       {!info && <p className="settings-empty" role="status">Loading subscriptions…</p>}
       {info && !profiles.length && <div className="settings-empty"><h3>No subscriptions yet</h3><p>Add a Claude or Codex account so agents can run on it. Your CLI sign-ins keep working either way.</p></div>}
-      <ProviderGroups groups={subscriptionGroups(profiles, { now })} className="subscription-grid">{items => items.map(profile => <SubscriptionCard key={profile.id} profile={profile} now={now} refreshing={refreshing.has(profile.id)} error={refreshErrors[profile.id]} onRefresh={() => void updateUsage(profile)}
+      <ProviderGroups groups={subscriptionGroups(profiles, { now })} className="subscription-grid">{items => items.map(profile => <SubscriptionCard key={profile.id} profile={profile} now={now} refreshing={refreshing.has(profile.id)} error={refreshErrors[profile.id]} onRefresh={() => void updateUsage(profile)} onRename={() => setRenaming(profile)}
         footer={profile.tokenImported ? <span className="subscription-imported"><small className="subscription-gated" title="Lazybox no longer imports subscription tokens: Anthropic does not allow apps to store Claude.ai credentials. Sign in again, or use an API key.">Imported token; not recommended</small><button type="button" className="quiet" onClick={() => setRemoving(profile)}>Remove</button></span>
           : profile.provider === 'claude' && profile.isolation === 'environment' && runnerSettings && !runnerSettings.claudeSubscriptionSignIn
           ? <small className="subscription-gated" title="Claude sign-in in Lazybox is off (Settings → Agents & workspaces → Claude)">Not used: Claude sign-in in Lazybox is off</small>
           // Only an account policy switches by itself (Settings → Extensions); this leaves one account out of it.
           : profile.isolation === 'environment' && runnerSettings?.automaticSwitchingProviders.includes(profile.provider) ? <label className="rotation-toggle" title={`When another ${profile.provider === 'codex' ? 'Codex' : 'Claude'} subscription hits a limit, its conversations can continue on this one. Applies to conversations started afterwards.`}><input type="checkbox" role="switch" checked={!excluded.includes(profile.id)} disabled={!runnerSettings || !!rotationSaving} onChange={event => void setRotation(profile, event.target.checked)}/><span>Automatic switching</span></label> : <small>{profile.isolation === 'inherited' ? 'Uses current CLI sign-in' : info?.sharedSubscriptions ? 'Shared subscription' : 'Saved on this Runner'}</small>}/>)}</ProviderGroups>
       {profiles.length > 0 && <p className="usage-note">Usage is what each provider reports for the subscription. Lazybox never guesses a number it was not given.</p>}
+      {renaming && <RenameSubscriptionDialog profile={renaming} onClose={() => setRenaming(undefined)}/>}
       {removing && <ConfirmDialog title={`Remove ${subscriptionName(removing, removing.id)}?`} closeLabel="Keep it" cancelLabel="Keep it" confirm="Remove" working="Removing…" onClose={() => setRemoving(undefined)}
         onConfirm={async () => { try { await api.removeSubscription({ profileId: removing.id }, { timeoutMs: 10000 }); refresh(); setRemoving(undefined); } catch (e) { setError(settingsError(e)); setRemoving(undefined); } }}>
         Lazybox forgets this account and deletes its saved credential. Your own Claude Code sign-in is not touched. A conversation on it must be switched or closed first.

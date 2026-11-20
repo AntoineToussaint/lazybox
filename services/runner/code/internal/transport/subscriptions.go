@@ -7,6 +7,8 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"os"
+
+	"google.golang.org/grpc/codes"
 )
 
 func (s *Service) wireProfile(p accounts.Profile) *pb.Profile {
@@ -57,6 +59,20 @@ func (s *Service) CancelSubscriptionEnrollment(ctx context.Context, p *pb.Subscr
 }
 func (s *Service) RefreshSubscription(ctx context.Context, p *pb.RefreshSubscriptionRequest) (*pb.Profile, error) {
 	profile, err := s.Bench.RefreshSubscription(ctx, p.ProfileId)
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	return s.wireProfile(profile), nil
+}
+
+func (s *Service) RenameSubscription(_ context.Context, r *pb.RenameSubscriptionRequest) (*pb.Profile, error) {
+	profile, err := s.Bench.RenameSubscription(r.ProfileId, r.Label)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, grpcError(codes.NotFound, errors.New("saved subscription not found"))
+	}
+	if errors.Is(err, accounts.ErrSubscriptionLabel) {
+		return nil, grpcError(codes.InvalidArgument, err)
+	}
 	if err != nil {
 		return nil, rpcError(err)
 	}

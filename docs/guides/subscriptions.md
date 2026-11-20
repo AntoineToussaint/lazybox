@@ -48,6 +48,7 @@ of your workspace, where you watch it run.
 
 - **Local CLI sign-in**: the account your `claude` or `codex` command already
   uses. It works with no setup.
+- To change the name shown in Lazybox, select **Rename** on the account card in **Settings → Subscriptions**. Existing conversations continue on the same account.
 - **Named subscriptions**: Settings → Subscriptions → **Add subscription**:
   choose Codex (or Claude, when Claude sign-in in Lazybox is on), name it
   ("Work Codex"), and choose **Continue in your browser**. The provider's

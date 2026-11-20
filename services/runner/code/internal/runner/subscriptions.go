@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
@@ -107,8 +106,8 @@ func (b *Bench) AddSubscription(key, provider, label, token, method string) (Enr
 	if err := b.ReloadProfiles(); err != nil {
 		return Enrollment{}, err
 	}
-	label = strings.TrimSpace(label)
-	if key == "" || len(key) > 128 || len(label) == 0 || len(label) > 64 || strings.IndexFunc(label, unicode.IsControl) >= 0 || (provider != "claude" && provider != "codex") {
+	label, labelErr := accounts.NormalizeSubscriptionLabel(label)
+	if key == "" || len(key) > 128 || labelErr != nil || (provider != "claude" && provider != "codex") {
 		return Enrollment{}, errors.New("request key, Claude/Codex provider and a label (max 64 bytes) required")
 	}
 	if provider == "claude" && token != "" {
@@ -149,10 +148,14 @@ func (b *Bench) AddSubscription(key, provider, label, token, method string) (Enr
 	for _, p := range b.Profiles() {
 		if p.ID == id {
 			b.mu.Unlock()
-			if p.Provider != provider || p.Label != label {
+			original := p.Label
+			if p.EnrollmentLabel != nil {
+				original = *p.EnrollmentLabel
+			}
+			if p.Provider != provider || original != label {
 				return Enrollment{}, errors.New("enrollment identity already exists")
 			}
-			return Enrollment{ID: id, State: "added", ProfileID: id, Provider: provider, Label: label}, nil
+			return Enrollment{ID: id, State: "added", ProfileID: id, Provider: provider, Label: p.Label}, nil
 		}
 	}
 	ctx, cancel := context.WithTimeout(b.ctx, 10*time.Minute)
@@ -322,6 +325,23 @@ func (b *Bench) CancelEnrollment(id string) (Enrollment, error) {
 		flow.UserCode = ""
 	}
 	return *flow, nil
+}
+
+// RenameSubscription changes the name of an enrolled account by its stable ID.
+func (b *Bench) RenameSubscription(id, label string) (accounts.Profile, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	profile, err := accounts.RenameProfile(b.Config.SubscriptionState, id, label)
+	if err != nil {
+		return accounts.Profile{}, err
+	}
+	if err := b.ReloadProfiles(); err != nil {
+		return accounts.Profile{}, err
+	}
+	if flow := b.enrollments[id]; flow != nil && flow.State == "added" {
+		flow.Label = profile.Label
+	}
+	return profile, nil
 }
 
 // RefreshSubscription reads native quota without creating an agent conversation.

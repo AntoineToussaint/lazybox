@@ -15,6 +15,8 @@ import (
 type Profile struct {
 	ID    string `json:"id"`
 	Label string `json:"label,omitempty"`
+	// EnrollmentLabel retains the original request label after a rename.
+	EnrollmentLabel *string `json:"enrollmentLabel,omitempty"`
 	// Derived from the Runner-owned enrollment registry, never configuration.
 	Managed  bool   `json:"-"`
 	Provider string `json:"provider"`

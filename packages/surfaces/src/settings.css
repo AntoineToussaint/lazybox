@@ -138,6 +138,8 @@ p.settings-empty[role=status]{border-style:solid;border-color:transparent;text-a
 .usage-unavailable small{font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--s-muted)}
 .subscription-card .settings-error{margin:0 14px 12px}
 .subscription-card footer{border-top:1px solid var(--s-line,var(--line));display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px 6px 14px;min-height:40px;flex-wrap:wrap;margin-top:auto}
+.subscription-name{display:flex;align-items:center;gap:4px;min-width:0}
+.subscription-name .icon-button{flex:none;width:24px;height:22px;padding:0}
 .subscription-card footer small{font-size:calc(11px * var(--text-scale));color:var(--s-muted)}
 .sign-in-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--accent-line);background:var(--s-accent-bg);padding:10px 14px;border-radius:var(--s-radius);margin-bottom:16px;font-size:calc(13px * var(--text-scale))}
 
@@ -150,11 +152,12 @@ p.settings-empty[role=status]{border-style:solid;border-color:transparent;text-a
 .rotation-toggle input:disabled,.settings-switch input:disabled{opacity:.6;cursor:default}
 @media (prefers-reduced-motion: reduce){.rotation-toggle input,.rotation-toggle input::after,.settings-switch input,.settings-switch input::after{transition:none}}
 
-/* Add-subscription dialog. */
+/* Subscription dialogs. */
 .subscription-dialog{width:min(440px,calc(100vw - 32px));border:1px solid var(--line-bold);border-radius:12px;padding:24px;background:var(--surface-raised);color:var(--text);box-shadow:0 24px 80px color-mix(in srgb,var(--shadow) calc(60% * var(--shadow-strength)),transparent)}
 .subscription-dialog>header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
 .subscription-dialog h2{font-size:calc(15px * var(--text-scale));font-weight:600;letter-spacing:-.2px;margin:0}
 .subscription-dialog>header button{font-size:calc(20px * var(--text-scale));padding:0 6px;border:0;background:transparent;color:var(--text-muted)}
+.subscription-dialog .dialog-actions{display:flex;justify-content:flex-end;gap:8px}
 .subscription-dialog form{display:flex;flex-direction:column;gap:18px}
 .subscription-dialog label{display:flex;flex-direction:column;gap:8px!important;font-size:calc(12px * var(--text-scale))!important}
 .subscription-dialog label input,.subscription-dialog label select{width:100%;box-sizing:border-box;font-size:calc(13px * var(--text-scale));padding:9px 11px}

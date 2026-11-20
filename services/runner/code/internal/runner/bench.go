@@ -1354,25 +1354,29 @@ func (b *Bench) Profiles() []accounts.Profile {
 	return profiles
 }
 func (b *Bench) ReloadProfiles() error {
+	b.profileMu.Lock()
+	defer b.profileMu.Unlock()
 	enrolled, err := accounts.LoadProfiles(b.Config.SubscriptionState)
 	if err != nil {
 		return err
 	}
-	b.profileMu.Lock()
-	defer b.profileMu.Unlock()
 	next := append([]accounts.Profile(nil), b.profiles...)
-	byID := map[string]accounts.Profile{}
-	for _, p := range b.profiles {
-		byID[p.ID] = p
+	byID := map[string]int{}
+	for i, p := range next {
+		byID[p.ID] = i
 	}
 	for _, p := range enrolled {
-		if old, exists := byID[p.ID]; exists {
+		if i, exists := byID[p.ID]; exists {
+			old := next[i]
 			if old.Provider != p.Provider || old.Home != p.Home || old.TokenFile != p.TokenFile {
 				return errors.New("enrolled profile conflicts with configured identity")
 			}
+			if old.Managed {
+				next[i] = p
+			}
 			continue
 		}
-		byID[p.ID] = p
+		byID[p.ID] = len(next)
 		next = append(next, p)
 	}
 	b.profiles = b.withACP(next)

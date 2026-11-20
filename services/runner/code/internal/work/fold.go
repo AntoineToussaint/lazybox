@@ -508,7 +508,7 @@ func (s *State) foldTask(e Event) error {
 			for i := range t.Evidence {
 				previous := &t.Evidence[i]
 				if previous.Seq == p.Corrects && previous.Kind == EvidenceReview && previous.Ref == p.Ref && previous.Attempt == p.Attempt {
-					previous.Outcome, previous.Detail = p.Outcome, p.Detail
+					previous.Outcome, previous.Detail, previous.State = p.Outcome, p.Detail, p.State
 					found = true
 					break
 				}

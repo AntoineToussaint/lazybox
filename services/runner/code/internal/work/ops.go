@@ -290,6 +290,7 @@ func (s *Store) InvalidateReview(ref, detail string) error {
 				}
 				evidence := recorded.Evidence
 				evidence.Corrects, evidence.Outcome, evidence.Detail = recorded.Seq, OutcomeUnknown, detail
+				evidence.State = "verification"
 				drafts = append(drafts, Draft{Subject: TaskSubject(task.ID), Type: EvidenceRecorded, Actor: Actor{Kind: ActorLazybox}, Payload: evidence})
 			}
 		}

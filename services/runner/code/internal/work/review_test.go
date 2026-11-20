@@ -99,3 +99,14 @@ func TestInvalidateReviewPreservesAttemptOrderingAndReplay(t *testing.T) {
 	}
 	check(newStore(t, dir))
 }
+
+func TestIncompleteVerificationCannotInheritGreenCITrust(t *testing.T) {
+	pr := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidencePR, Ref: "pr:repo#1", Repository: "repo", Head: "current", Outcome: OutcomePass}}
+	for _, outcome := range []string{OutcomeUnknown, OutcomePending, OutcomePass} {
+		review := Recorded{Seq: 2, Evidence: Evidence{Kind: EvidenceReview, Ref: "review:1", State: "verification", Outcome: outcome}}
+		trust, _, reason := judge(&Task{Evidence: []Recorded{pr, review}})
+		if (trust == TrustVerified) != (outcome == OutcomePass) {
+			t.Fatalf("%s produced %s: %s", outcome, trust, reason)
+		}
+	}
+}

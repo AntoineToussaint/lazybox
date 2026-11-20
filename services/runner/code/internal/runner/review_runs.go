@@ -739,6 +739,9 @@ func (b *Bench) recordReviewEvidence(run reviews.Run, counts reviews.Counts, fin
 	}
 	ev := work.Evidence{Kind: work.EvidenceReview, Ref: "review:" + run.ID, Title: run.ReviewerLabel + " review of " + lowerFirst(run.ScopeLabel), Outcome: work.OutcomePending, Detail: "running",
 		Execution: run.ReviewerSession, Blockers: counts.Blockers, Findings: counts.Total()}
+	if run.TemplateID == reviews.VerificationTemplate {
+		ev.State = "verification"
+	}
 	if finished {
 		ev.Detail = counts.Summary()
 		ev.Outcome = work.OutcomePass

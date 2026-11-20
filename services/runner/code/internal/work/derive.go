@@ -265,22 +265,23 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 	// Open blockers from the latest agent review keep the work from verified:
 	// checks passing on code a reviewer found wrong do not vouch for it.
 	blocked := review != nil && review.Outcome == OutcomeFail
+	incomplete := review != nil && review.State == "verification" && review.Outcome != OutcomePass
 	if blocked {
 		flags = append(flags, FlagBlockers)
 	}
 	switch {
-	case verified != nil && ciFailing == nil && !blocked:
+	case verified != nil && ciFailing == nil && !blocked && !incomplete:
 		return TrustVerified, flags, "checks passed on " + prName(verified)
 	case run != nil && run.Outcome == OutcomePass:
 		reason = "last run passed: " + runName(run)
 		if stale != nil {
 			reason += "; checks passed on an older head of " + prName(stale)
 		}
-		if blocked {
+		if blocked || incomplete {
 			reason += "; " + reviewName(review)
 		}
 		return TrustObserved, flags, reason
-	case verified != nil && blocked:
+	case verified != nil && (blocked || incomplete):
 		return TrustObserved, flags, "checks passed on " + prName(verified) + "; " + reviewName(review)
 	case ciFailing != nil:
 		return TrustClaimed, flags, "checks failed on " + prName(ciFailing)
@@ -293,6 +294,9 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 }
 
 func reviewName(r *Recorded) string {
+	if r.State == "verification" && r.Outcome != OutcomePass && r.Outcome != OutcomeFail {
+		return "acceptance verification is incomplete"
+	}
 	return firstNonEmpty(r.Title, "an agent review") + " has open blockers" + suffix(r.Detail)
 }
 

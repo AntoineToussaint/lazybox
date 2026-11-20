@@ -9,6 +9,7 @@ import { AgentPicker } from './AgentPicker';
 import { useRunnerSettings } from './RunnerSettings';
 import { conversationDefaults, writeLaunchChoices } from './view-state';
 
+import { humanError } from './human-error';
 import { showToast } from './toasts';
 
 export type ConversationCopy = { provider: string; model: string; effort?: string; title: string };
@@ -85,7 +86,7 @@ export function useSessionLauncher({ api, info, viewState, agent, copy, workingD
         catch { if (!signal.aborted) showToast({ tone: 'info', title: 'Conversation started', body: 'Could not save its name. Rename it from the chat header.' }); }
       }
       if (!signal.aborted) onStarted(result.session.id, result.session.collectionId);
-    } catch (e) { if (!signal.aborted) onError(String(e)); }
+    } catch (e) { if (!signal.aborted) onError(humanError(e)); }
     finally { if (!signal.aborted) { openingRef.current = false; setOpening(false); } }
   };
 

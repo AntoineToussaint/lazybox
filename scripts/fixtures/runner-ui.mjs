@@ -848,9 +848,11 @@ actions:
         const session = sessions.find(value => value.id === body.conversation?.sessionId);
         const workspace = collections.find(value => value.id === body.workspace?.collectionId);
         if (!session && !workspace) return error('not_found', 'Deletion target required');
+        const owner = workspace || collections.find(value => value.id === session.collectionId);
         const id = session ? `conversation:${session.id}` : `workspace:${workspace.id}`;
         const entry = pendingDeletions.get(id) || {
           id, workspaceId: workspace?.id || session.collectionId, sessionId: session?.id,
+          workspaceName: owner?.name, repositoryNames: owner?.members.map(member => member.spec.name),
           title: workspace?.name || session.title, expiresAtUnixMillis: String(Date.now() + 300_000),
         };
         pendingDeletions.set(id, entry);

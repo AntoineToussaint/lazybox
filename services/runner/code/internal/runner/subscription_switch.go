@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/engine"
@@ -48,6 +49,9 @@ func (b *Bench) SwitchSubscription(ctx context.Context, e *Execution, profileID 
 	}
 	if err = b.claudeSignInAllowed(target); err != nil {
 		return err
+	}
+	if target.ID != live.Snapshot().Profile && !b.Accounts.Eligible(target.ID, time.Now()) {
+		return errors.New("this subscription is unavailable right now; refresh usage or choose another subscription")
 	}
 	if enableRotation {
 		if _, ok := b.AccountPolicy(target.Provider); !ok {

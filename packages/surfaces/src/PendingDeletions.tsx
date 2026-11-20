@@ -1,6 +1,7 @@
 import { Code, ConnectError } from '@lazybox/client-core';
 import type { PendingDeletion } from '@lazybox/protocol';
 import { useEffect, useState } from 'react';
+import { Icon } from './Icons';
 import { useRunner } from './RunnerContext';
 import { dismissToast, showToast } from './toasts';
 
@@ -62,19 +63,24 @@ export function PendingDeletions() {
       setUndoing('');
     }
   };
-  return <details className="recently-deleted">
-    <summary>Recently deleted ({entries.length})</summary>
-    <ul>{entries.map(entry => {
-      const available = Number(entry.expiresAtUnixMillis) > now;
-      return <li key={entry.id}>
-        <span>{entry.title || (entry.sessionId ? 'Conversation' : 'Workspace')}</span>
-        {entry.failure ? <>
-          <small role="status">Deletion failed. {entry.failure}</small>
-          <button type="button" disabled={!!undoing} onClick={() => void undo(entry)} aria-label={`Dismiss deletion failure for ${entry.title || 'item'}`}>Dismiss</button>
-        </> : available
-          ? <button type="button" disabled={!!undoing} onClick={() => void undo(entry)} aria-label={`Undo deletion of ${entry.title || 'item'}`}>Undo</button>
-          : <small>Finishing deletion…</small>}
-      </li>;
-    })}</ul>
-  </details>;
+  return <section className="recently-deleted" aria-label="Recently deleted">
+    <details>
+      <summary><Icon name="archive" size={14}/><span>Recently deleted ({entries.length})</span></summary>
+      <ul>{entries.map(entry => {
+        const available = Number(entry.expiresAtUnixMillis) > now;
+        const kind = entry.sessionId ? 'Conversation' : 'Workspace';
+        const title = entry.sessionId ? entry.title : entry.workspaceName || entry.title || entry.workspaceId;
+        const context = [kind, entry.sessionId && entry.workspaceName, ...entry.repositoryNames].filter(Boolean).join(' · ');
+        return <li key={entry.id}>
+          <div className="deleted-item"><strong>{title || kind}</strong><small>{context}</small></div>
+          {entry.failure ? <>
+            <small role="status">Deletion failed. {entry.failure}</small>
+            <button type="button" disabled={!!undoing} onClick={() => void undo(entry)} aria-label={`Dismiss deletion failure for ${title || kind}`}>Dismiss</button>
+          </> : available
+            ? <button type="button" disabled={!!undoing} onClick={() => void undo(entry)} aria-label={`Undo deletion of ${title || kind}`}>Undo</button>
+            : <small>Finishing deletion…</small>}
+        </li>;
+      })}</ul>
+    </details>
+  </section>;
 }

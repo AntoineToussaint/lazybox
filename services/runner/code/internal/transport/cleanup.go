@@ -71,13 +71,13 @@ func (s *Service) ScheduleDeletion(ctx context.Context, r *pb.ScheduleDeletionRe
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return wirePendingDeletion(entry), nil
+	return s.wirePendingDeletion(entry), nil
 }
 
 func (s *Service) ListPendingDeletions(context.Context, *pb.ListPendingDeletionsRequest) (*pb.ListPendingDeletionsResponse, error) {
 	out := &pb.ListPendingDeletionsResponse{}
 	for _, entry := range s.Bench.PendingDeletions() {
-		out.Deletions = append(out.Deletions, wirePendingDeletion(entry))
+		out.Deletions = append(out.Deletions, s.wirePendingDeletion(entry))
 	}
 	return out, nil
 }
@@ -89,8 +89,17 @@ func (s *Service) UndoDeletion(ctx context.Context, r *pb.UndoDeletionRequest) (
 	return s.ListPendingDeletions(ctx, &pb.ListPendingDeletionsRequest{})
 }
 
-func wirePendingDeletion(entry runner.PendingDeletion) *pb.PendingDeletion {
-	return &pb.PendingDeletion{Id: entry.ID, WorkspaceId: entry.WorkspaceID, SessionId: entry.SessionID, Title: entry.Title, ExpiresAtUnixMillis: entry.Expires.UnixMilli(), Failure: entry.Failure}
+func (s *Service) wirePendingDeletion(entry runner.PendingDeletion) *pb.PendingDeletion {
+	result := &pb.PendingDeletion{Id: entry.ID, WorkspaceId: entry.WorkspaceID, SessionId: entry.SessionID, Title: entry.Title, ExpiresAtUnixMillis: entry.Expires.UnixMilli(), Failure: entry.Failure}
+	if entry.WorkspaceID != "" && s.Bench.Collections != nil {
+		if workspace, err := s.Bench.Collections.Get(entry.WorkspaceID); err == nil {
+			result.WorkspaceName = workspace.Name
+			for _, member := range workspace.Members {
+				result.RepositoryNames = append(result.RepositoryNames, member.Name)
+			}
+		}
+	}
+	return result
 }
 
 func (s *Service) hiddenWorkspaces() map[string]bool {

@@ -58,7 +58,7 @@ func TestInspectionHandlesStagedUnstagedRenamesOddNamesAndRejectsEscapes(t *test
 		if f.Path == "renamed.txt" {
 			rename = f.OriginalPath == "rename.txt"
 		}
-		if f.Path == "file.txt" && (f.IndexStatus != "M" || f.WorktreeStatus != "M") {
+		if f.Path == "file.txt" && (f.IndexStatus != "M" || f.WorktreeStatus != "M" || f.Lines == nil || *f.Lines != (LineCounts{Added: 1, Removed: 1})) {
 			t.Fatal(f)
 		}
 	}
@@ -141,6 +141,11 @@ func TestCommittedChangesSinceBaseIncludeRenamesCommitsAndDiffs(t *testing.T) {
 	}
 	if files["edit.txt"].IndexStatus != "M" || files["new.txt"].IndexStatus != "A" || files["moved.txt"].IndexStatus != "R" || files["moved.txt"].OriginalPath != "move.txt" || len(files) != 3 {
 		t.Fatalf("committed files: %+v", got.Files)
+	}
+	for path, want := range map[string]LineCounts{"edit.txt": {Added: 1, Removed: 1}, "new.txt": {Added: 1}, "moved.txt": {}} {
+		if got := files[path].Lines; got == nil || *got != want {
+			t.Errorf("%s counts = %+v, want %+v", path, got, want)
+		}
 	}
 	if len(got.Commits) != 2 || got.Commits[0].Subject != "agent renames" || got.Commits[1].Subject != "agent edits" || got.Commits[0].Time == 0 {
 		t.Fatalf("commits: %+v", got.Commits)

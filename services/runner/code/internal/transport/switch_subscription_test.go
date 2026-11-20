@@ -113,6 +113,15 @@ func TestSwitchSubscriptionContinuesTheSameConversationAndSendsOnce(t *testing.T
 	if _, err = service.SwitchSubscription(ctx, &pb.SwitchSubscriptionRequest{SessionId: id, ProfileId: "b", EnableRotation: true}); status.Code(err) != codes.FailedPrecondition || len(adapter.opened) != 0 {
 		t.Fatalf("automatic switching turned on without an account policy: %v", err)
 	}
+	if err := b.Accounts.Observe("b", agent.AccountObservation{State: "available", Windows: []agent.UsageWindow{{Name: "seven_day", UsedPercent: 100, ResetAt: time.Now().Add(time.Hour).Unix()}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.SwitchSubscription(ctx, &pb.SwitchSubscriptionRequest{SessionId: id, ProfileId: "b"}); status.Code(err) != codes.FailedPrecondition || len(adapter.opened) != 0 {
+		t.Fatalf("manual switch accepted an exhausted window: %v", err)
+	}
+	if err := b.Accounts.Observe("b", agent.AccountObservation{State: "available", Windows: []agent.UsageWindow{{Name: "seven_day", UsedPercent: 99}}}); err != nil {
+		t.Fatal(err)
+	}
 	enableAccountPolicy(t, b)
 	switched, err := service.SwitchSubscription(ctx, &pb.SwitchSubscriptionRequest{SessionId: id, ProfileId: "b", EnableRotation: true})
 	if err != nil {

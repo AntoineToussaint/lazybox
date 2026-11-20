@@ -75,7 +75,8 @@ The page follows new versions by itself. Rename by double-clicking the title.
   in that window**. Drag its edge to resize it; × or Esc closes it, and **Open
   in main window** shows it in the workspace.
 - **Export:** Copy as Markdown, Download .md, Download .html for a standalone
-  copy of the selected version, Print or save as PDF, **Save to
+  copy of the selected version with offline styling and an outline for longer documents,
+  Print or save as PDF, **Save to
   repository…** (written but never committed — review it in Changes), or
   **Create GitHub issue…** in a workspace repository. The desktop app opens
   the system Save dialog for Markdown, HTML, and JSON exports.

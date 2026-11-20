@@ -454,19 +454,6 @@ function WorkspaceList({
         target={target}
         onTarget={onTarget}
       />
-      <button
-        aria-label="Conversation history"
-        className="history-shortcut"
-        onClick={() => setHistoryOpen(true)}
-      >
-        <Icon name="history" size={14} />
-        History
-      </button>
-      {index.error && !connectionError && !runnerSlow && <div className="history-refresh-error" role="status">
-        <span title={index.error}>Could not refresh conversation history.</span>
-        <button type="button" onClick={index.refresh}>Retry history refresh</button>
-      </div>}
-      <PendingDeletions />
       {deletingConversation && (
         <DeleteConversationDialog
           session={deletingConversation}
@@ -535,6 +522,21 @@ function WorkspaceList({
           chooseRepositoryFolder={chooseRepositoryFolder}
         />
       )}
+      <footer className="collection-footer">
+        <button
+          aria-label="Conversation history"
+          className="history-shortcut"
+          onClick={() => setHistoryOpen(true)}
+        >
+          <Icon name="history" size={14} />
+          History
+        </button>
+        {index.error && !connectionError && !runnerSlow && <div className="history-refresh-error" role="status">
+          <span title={index.error}>Could not refresh conversation history.</span>
+          <button type="button" onClick={index.refresh}>Retry history refresh</button>
+        </div>}
+        <PendingDeletions />
+      </footer>
     </section>
   );
 }

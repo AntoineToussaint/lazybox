@@ -298,6 +298,17 @@ try {
   await expect(exported.locator('.print-meta')).toContainText('Version 1 of 2');
   await expect(exported.getByRole('table')).not.toHaveCount(0);
   await expect(exported.locator('pre')).not.toHaveCount(0);
+  const outline = exported.getByRole('navigation', { name: 'On this page' });
+  const firstSection = outline.getByRole('link').first();
+  const sectionHash = await firstSection.getAttribute('href');
+  await firstSection.click();
+  await expect.poll(() => new URL(exported.url()).hash).toBe(sectionHash);
+  const colors = await exported.locator('.doc-callout').evaluateAll(nodes =>
+    nodes.map(node => getComputedStyle(node).backgroundColor));
+  assert.ok(new Set(colors).size > 1, 'Callout types have distinct fills');
+  await expect(exported.locator('pre').first()).toHaveCSS('background-color', 'rgb(21, 34, 57)');
+  await exported.setViewportSize({ width: 390, height: 800 });
+  assert.ok(await exported.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await expect(exported.locator('.task-list-item input:checked:disabled')).toHaveCount(2);
   await expect(exported.locator('script, iframe, button, [role=toolbar]')).toHaveCount(0);
   await expect(exported.locator('.mermaid-block img')).toHaveAttribute('src', /^data:image\/svg\+xml/);

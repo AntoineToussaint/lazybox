@@ -221,7 +221,6 @@ export function WorkspaceRow({
         </button>
       )}
       {!editing && fold && (
-        // In the folder icon's place: the workspace's conversations, shown or folded.
         <button
           className="workspace-fold"
           aria-expanded={!fold.folded}

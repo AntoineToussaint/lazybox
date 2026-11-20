@@ -45,8 +45,10 @@ try{
  await page.reload();
  const trash = page.locator('.recently-deleted');
  await expect(trash).toBeVisible();
- assert.ok(await trash.evaluate(node => !!(node.parentElement.querySelector('.history-shortcut').compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)), 'Recently deleted follows History');
+ assert.ok(await trash.evaluate(node => node === node.parentElement.lastElementChild && node.parentElement === node.closest('.collection-panel').lastElementChild && !node.closest('nav')), 'Recently deleted is a separate section at the end of the sidebar');
  await trash.getByText('Recently deleted (1)').click();
+ await expect(trash.getByRole('listitem')).toContainText('Beta release');
+ await expect(trash.getByRole('listitem')).toContainText('Workspace · api · web');
  await trash.getByRole('button',{name:'Undo deletion of Beta release'}).click();
  await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).toContainText('Beta release');
  await expect(trash).toHaveCount(0);

@@ -54,7 +54,9 @@
 .detached-message>svg{color:var(--accent);margin-bottom:16px}
 .detached-message h3{font-size:calc(16px * var(--text-scale));color:var(--text-soft);font-weight:500}
 .detached-message p{margin-top:8px}
-.collection-panel{padding:12px 8px;overflow:auto;font-size:calc(13px * var(--text-scale));flex:1;min-height:0}
+.collection-panel{display:flex;flex-direction:column;padding:12px 8px;overflow:auto;font-size:calc(13px * var(--text-scale));flex:1;min-height:0}
+.collection-panel > *{flex-shrink:0}
+.collection-footer{margin-top:auto}
 .explorer-heading{display:flex;align-items:center;justify-content:space-between;padding:0 8px;margin-bottom:10px;color:var(--text-faint);font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.65px;text-transform:uppercase}
 .explorer-heading>div{display:flex;gap:1px}.explorer-heading small{font-size:calc(9px * var(--text-scale));font-weight:400;letter-spacing:0;text-transform:none;color:var(--text-disabled)}
 .explorer-heading .icon-button{width:23px;height:23px;color:var(--text-faint)}

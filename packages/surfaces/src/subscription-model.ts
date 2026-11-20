@@ -115,39 +115,48 @@ export function limitHeadline(name: string, state: LimitState, resetAt: bigint |
 
 export type SubscriptionChoice = { id: string; provider: string; name: string; ready: boolean; detail: string; resetAt: number; current: boolean };
 
+/** A zero reset means a known limit with no recovery time. */
+function limitResets(profile: SubscriptionLike): number[] {
+  const usage = profile.availability;
+  const resets = (usage?.windows || []).filter(usageWindow => usageWindow.usedPercent >= 100).map(usageWindow => seconds(usageWindow.resetAt));
+  if (usage?.state === 'exhausted' || usage?.state === 'throttled') resets.push(seconds(usage.resetAt));
+  return resets;
+}
+
+function readiness(profile: SubscriptionLike, now: number): 0 | 1 | 2 {
+  const state = profile.availability?.state;
+  if (state === 'auth_required' || state === 'billing_error') return 2;
+  const resets = limitResets(profile);
+  if (resets.some(reset => !reset || reset * 1000 > now)) return 2;
+  return state === 'available' && !resets.length ? 0 : 1;
+}
+
 /** Can this subscription take work now, as far as anyone has observed? */
 export function subscriptionReady(profile: SubscriptionLike, now: number): boolean {
-  const state = profile.availability?.state || 'unknown';
-  if (state === 'available' || state === 'unknown') return true;
-  const reset = seconds(profile.availability?.resetAt) * 1000;
-  return (state === 'exhausted' || state === 'throttled') && reset > 0 && reset <= now;
+  return readiness(profile, now) !== 2;
 }
 
-/** How a subscription stands, in one line: "Available · 37% used", "Limit reached · back at 6:00 PM". */
+/** How a subscription stands, in one line. */
 export function subscriptionDetail(profile: SubscriptionLike, now: number): string {
-  const usage = profile.availability, state = usage?.state || 'unknown';
-  if (subscriptionReady(profile, now)) {
-    const used = Math.max(-1, ...(usage?.windows || []).map(w => Number.isFinite(w.usedPercent) ? w.usedPercent : -1));
-    const prefix = state === 'available' ? 'Available' : 'Ready';
-    return used >= 0 ? `${prefix} · ${Math.round(used)}% used` : prefix;
+  const usage = profile.availability;
+  if (usage?.state === 'auth_required') return 'Sign-in required';
+  if (usage?.state === 'billing_error') return 'Billing issue';
+  const resets = limitResets(profile);
+  const rank = readiness(profile, now);
+  if (rank === 2) {
+    const back = resets.includes(0) ? '' : backAt(Math.max(...resets), now);
+    const label = usage?.state === 'throttled' ? 'Rate limited' : 'Limit reached';
+    return back ? `${label} · ${back}` : label;
   }
-  const back = backAt(usage?.resetAt, now);
-  switch (state) {
-    case 'exhausted': return back ? `Limit reached · ${back}` : 'Limit reached';
-    case 'throttled': return back ? `Rate limited · ${back}` : 'Rate limited';
-    case 'auth_required': return 'Sign-in required';
-    case 'billing_error': return 'Billing issue';
-    default: return 'Unavailable';
-  }
+  if (resets.length) return 'Reset elapsed · usage unconfirmed';
+  const used = Math.max(-1, ...(usage?.windows || []).map(w => Number.isFinite(w.usedPercent) ? w.usedPercent : -1));
+  const prefix = rank === 0 ? 'Available' : 'Ready';
+  return used >= 0 ? `${prefix} · ${Math.min(99, Math.round(used))}% used` : prefix;
 }
 
-/**
- * How ready a subscription is, for ordering: 0 known to be available, 1 not
- * known to be limited, 2 limited (or needing sign-in, or billing).
- */
+/** Sort by reported capacity, possible capacity, then unavailable. */
 export function standing(profile: SubscriptionLike, now = Date.now()): 0 | 1 | 2 {
-  if (!subscriptionReady(profile, now)) return 2;
-  return profile.availability?.state === 'available' ? 0 : 1;
+  return readiness(profile, now);
 }
 
 /**

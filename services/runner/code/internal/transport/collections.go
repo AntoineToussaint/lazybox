@@ -16,7 +16,7 @@ func (s *Service) collectionStore() (*collections.Manager, error) {
 	return s.Bench.Collections, nil
 }
 func wireCollection(c collections.Collection) *pb.Collection {
-	w := &pb.Collection{Id: c.ID, Name: c.Name, WorkId: c.WorkID, Root: c.Root, State: c.State, Error: c.Error, OwnerExecutionId: c.OwnerExecutionID, OwnershipUncertain: c.OwnershipUncertain, OwnerExecutionIds: c.OwnerExecutionIDs, CreatedAtUnixMillis: c.CreatedAt}
+	w := &pb.Collection{Id: c.ID, HourlyWorkflowReview: c.HourlyWorkflowReview, Name: c.Name, WorkId: c.WorkID, Root: c.Root, State: c.State, Error: c.Error, OwnerExecutionId: c.OwnerExecutionID, OwnershipUncertain: c.OwnershipUncertain, OwnerExecutionIds: c.OwnerExecutionIDs, CreatedAtUnixMillis: c.CreatedAt}
 	if c.Origin != nil {
 		w.Origin = &pb.ItemRef{Provider: c.Origin.Provider, Key: c.Origin.Key}
 	}

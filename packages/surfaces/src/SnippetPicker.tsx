@@ -8,13 +8,16 @@ import { DraggableDialog, DialogHeader } from "./DraggableDialog";
 import { RichContent } from "./RichContent";
 import { Resizer } from "./Resizer";
 import { SPLITS } from "./resizable-model";
+import { WorkflowReview } from "./WorkflowReview";
 export function SnippetPicker({
+  workspace,
   store,
   canSend,
   onClose,
   onInsert,
   onSend,
 }: {
+  workspace?: string;
   store?: ViewStateStore;
   canSend: boolean;
   onClose(): void;
@@ -114,7 +117,7 @@ export function SnippetPicker({
         else onClose();
       }}
       onKeyDown={(e) => {
-        if ((e.target as HTMLElement).tagName === "BUTTON") return;
+        if ((e.target as HTMLElement).closest("button, .workflow-review")) return;
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
           e.preventDefault();
           setIndex((i) =>
@@ -187,6 +190,7 @@ export function SnippetPicker({
               </small>
               <button className="snippet-favorite" aria-pressed={favorites.includes(selected.key)} onClick={()=>{const next=favorites.includes(selected.key)?favorites.filter(k=>k!==selected.key):[...favorites,selected.key];try{writePreference(store,favoritesKey,JSON.stringify(next));setFavorites(next);}catch(e){setError(`Could not save favorites: ${String(e)}`);}}}>{favorites.includes(selected.key)?'★ Favorite':'☆ Add to favorites'}</button>
               <RichContent text={selected.body} />
+              {workspace && <WorkflowReview key={selected.key} workspace={workspace} snippet={selected.key}/>}
             </>
           )}
         </article>

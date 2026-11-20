@@ -5,8 +5,12 @@ package snippets
 import (
 	"context"
 	"errors"
+	"fmt"
 	"gopkg.in/yaml.v3"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
@@ -21,7 +25,10 @@ type Entry struct {
 type Catalog interface {
 	List(context.Context) ([]Entry, error)
 }
-type Command struct{ Binary, Directory string }
+type Command struct {
+	Binary, Directory string
+	Packs             []string
+}
 type boundedOutput struct{ data []byte }
 
 func (b *boundedOutput) Write(p []byte) (int, error) {
@@ -49,6 +56,15 @@ func (c Command) List(ctx context.Context) ([]Entry, error) {
 	if err := yaml.Unmarshal(output.data, &entries); err != nil {
 		return nil, errors.New("invalid snippet catalog response")
 	}
+	remaining := (4 << 20) - len(output.data)
+	for _, path := range c.Packs {
+		pack, size, err := readPack(path, remaining)
+		if err != nil {
+			return nil, fmt.Errorf("snippet pack %s: %w", path, err)
+		}
+		remaining -= size
+		entries = append(entries, pack...)
+	}
 	seen := map[string]bool{}
 	for _, entry := range entries {
 		if entry.Key == "" || entry.Body == "" || seen[entry.Key] {
@@ -57,4 +73,37 @@ func (c Command) List(ctx context.Context) ([]Entry, error) {
 		seen[entry.Key] = true
 	}
 	return entries, nil
+}
+
+func readPack(path string, budget int) ([]Entry, int, error) {
+	if !filepath.IsAbs(path) {
+		return nil, 0, errors.New("expected an absolute path")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, 0, errors.New("expected a regular file")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, int64(budget+1)))
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(data) > budget {
+		return nil, 0, errors.New("combined catalog exceeds 4 MiB")
+	}
+	var entries []Entry
+	if err := yaml.Unmarshal(data, &entries); err != nil {
+		return nil, 0, err
+	}
+	for i := range entries {
+		entries[i].Origin = "pack: " + filepath.Base(path)
+	}
+	return entries, len(data), nil
 }

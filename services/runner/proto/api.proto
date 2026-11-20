@@ -364,6 +364,9 @@ service RunnerService {
   rpc UpdateMission(UpdateMissionRequest) returns (Mission);
   // Owner only. Sent prompts, newest first, from the Runner's prompt log, with
   // the snippet chain a conversation offers next.
+  // Review human inputs within one workspace and publish editable proposals.
+  rpc SetWorkflowReviewSchedule(SetWorkflowReviewScheduleRequest) returns (CollectionResponse);
+  rpc ReviewWorkflow(ReviewWorkflowRequest) returns (ReviewWorkflowResult);
   rpc ListPromptHistory(ListPromptHistoryRequest) returns (PromptHistory);
   // The Orchestrator verbs (`lazybox agents …`; audits/2026-11-16/sota-agents.md
   // §6.3). An agent credential calls them only for its own execution. Starting
@@ -1581,6 +1584,7 @@ message Collection {
   ItemRef origin = 11;
   // When it was created; 0 for a workspace older than the field.
   int64 created_at_unix_millis = 12;
+  bool hourly_workflow_review = 13;
 }
 message CreateCollectionRequest {
   string request_key = 1;
@@ -3496,6 +3500,19 @@ message MissionEvent {
   string id = 13;
   string caused_by = 14;
 }
+message SetWorkflowReviewScheduleRequest {
+  string collection_id = 1;
+  bool hourly = 2;
+}
+message ReviewWorkflowRequest {
+  string collection_id = 1;
+  string snippet_key = 2;
+  string feedback = 3;
+}
+message ReviewWorkflowResult {
+  repeated string proposal_titles = 1;
+}
+
 message ListPromptHistoryRequest {
   // Scope: one conversation, one workspace, or (both empty) every conversation.
   string conversation_id = 1;

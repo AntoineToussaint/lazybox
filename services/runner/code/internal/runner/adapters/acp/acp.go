@@ -603,6 +603,9 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		if err := s.applyPermission(ctx, op.Permission); err != nil {
 			return r, err
 		}
+		if mode := s.reportedMode(); mode != "" {
+			s.emit(agent.Event{Type: "agent_permission", Text: mode})
+		}
 		r.Delivery = "accepted"
 		return r, nil
 	case agent.Model:

@@ -48,6 +48,15 @@ try {
     const what = dialog.getByRole('textbox', { name: 'What happened?' });
     await expect(what).toBeFocused();
     const preview = dialog.getByLabel('Report preview');
+    await page.route('**/ReviewWorkflow', async route => {
+      assert.equal(route.request().postDataJSON().collectionId, session.collectionId);
+      await route.fulfill({ json: { proposalTitles: ['New snippet · Verify release'] } });
+    });
+    await dialog.getByText('Review recent work', { exact: true }).click();
+    await dialog.getByRole('button', { name: 'Run workflow review' }).click();
+    await expect(dialog.getByRole('status')).toContainText('Verify release');
+    await expect(preview).not.toContainText('Verify release');
+    await dialog.getByText('Review recent work', { exact: true }).click();
 
     // What is attached by default: a screenshot (taken before the dialog opened) and diagnostics; never the conversation.
     await expect(dialog.getByRole('img', { name: 'The screenshot to attach' })).toBeVisible();

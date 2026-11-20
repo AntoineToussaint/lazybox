@@ -244,6 +244,9 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	if ev, ok := readyEvent(s.model); ok {
 		s.events <- ev
 	}
+	if mode := reportedPermission(response.Approval, response.Sandbox); mode != "" {
+		s.events <- agent.Event{Type: "agent_permission", Text: mode}
+	}
 	go s.read()
 	// The models this subscription can switch to, for /model and the picker.
 	go s.reportModels()
@@ -342,6 +345,20 @@ func (s *session) Detach() error {
 		s.cancel()
 	}
 	return err
+}
+
+func reportedPermission(approval, sandbox json.RawMessage) string {
+	var policy string
+	var box struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(approval, &policy) != nil || json.Unmarshal(sandbox, &box) != nil || box.Type == "" || policy == "" {
+		return ""
+	}
+	if box.Type == "dangerFullAccess" && policy == "never" {
+		return "YOLO"
+	}
+	return box.Type + " · " + policy
 }
 
 // turnPolicies are the turn/start overrides for each permission mode, matching
@@ -503,6 +520,11 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 			s.turn = response.Turn.ID
 			s.mu.Unlock()
 			r.ProviderID = response.Turn.ID
+			approval, _ := params["approvalPolicy"].(json.RawMessage)
+			sandbox, _ := params["sandboxPolicy"].(json.RawMessage)
+			if mode := reportedPermission(approval, sandbox); mode != "" {
+				s.emit(agent.Event{Type: "agent_permission", Text: mode})
+			}
 		}
 		return r, nil
 	case agent.Permission:

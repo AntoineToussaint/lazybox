@@ -42,3 +42,8 @@
   .feedback-actions{flex-wrap:wrap}
   .feedback-actions small{flex:1 1 100%}
 }
+
+.workflow-review{margin-block:10px;padding:8px 10px;border:1px solid var(--line-subtle);border-radius:8px}
+.workflow-review summary{cursor:pointer;font-weight:600}
+.workflow-review label{display:block;margin-block:8px}
+.workflow-review textarea{display:block;width:100%;box-sizing:border-box;min-height:4em;font:inherit}

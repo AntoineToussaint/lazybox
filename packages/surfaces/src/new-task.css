@@ -50,6 +50,9 @@
 
 .new-task-controls{display:flex;align-items:center;gap:8px;min-width:0}
 .new-task-controls>*{flex:1;min-width:0}
+.new-task-controls .reasoning-effort{display:flex;flex-direction:column;gap:4px}
+.new-task-agent .new-task-controls{flex-wrap:wrap}
+.new-task-agent .new-task-controls>*{flex-basis:130px}
 .new-task-controls :is(select, input){padding:7px 10px;border-radius:8px;font-size:calc(13px * var(--text-scale))}
 /* The agent picker in the sheet's grid: its own label stays for screen readers, the row's label shows. */
 .new-task-agent .agent-picker{gap:0}

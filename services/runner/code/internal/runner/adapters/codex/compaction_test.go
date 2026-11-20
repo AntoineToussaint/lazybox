@@ -57,3 +57,17 @@ func TestCompactionStateWithoutUsage(t *testing.T) {
 		t.Fatal("one line per turn; an unnamed turn is never held back")
 	}
 }
+
+func TestManualCompactionUsesNativeThread(t *testing.T) {
+	self, _ := os.Executable()
+	s, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	receipt, err := s.Apply(context.Background(), agent.Operation{ID: "compact", Kind: agent.CompactContext})
+	if err != nil || receipt.Delivery != "acknowledged" {
+		t.Fatalf("manual compaction refused: %+v %v", receipt, err)
+	}
+	receive(t, s, "compacted")
+}

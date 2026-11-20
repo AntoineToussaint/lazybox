@@ -418,7 +418,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const firstPrompt = transcript.partial ? '' : conversation.find(m => m.type === 'operation_accepted' && !m.origin)?.text || '';
   // An assistant conversation is about Lazybox, not the workspace's branches: its header names none.
   const branch = assistant ? undefined : branchSummary(workspace);
-  const modelLabel = sessionModelLabel(session, transcript.reportedModel);
+  const modelLabel = [sessionModelLabel(session, transcript.reportedModel), session?.effort].filter(Boolean).join(' · ');
   const accountName = sessionAccountLabel(session, activeProfile);
   const profileList = info?.profiles;
   const nameFor = useCallback((id: string) => subscriptionName(profileList?.find(p => p.id === id), id), [profileList]);
@@ -523,7 +523,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const openFreshConversation = async (source: Session, profileId: string, firstMessage = '') => {
     const sameAccount = source.profileId === profileId;
     const opened = await api.openSession({ profileId, collectionId: source.collectionId, cwd: source.collectionId ? '' : source.workingDirectory,
-      options: { model: sameAccount ? source.model : '', permission: source.permission, workflow: source.workflow, gatewayId: sameAccount && source.gatewayId !== 'direct' ? source.gatewayId : '', rotationProfileIds: [], instructions: '', noRotation: false } });
+      options: { model: sameAccount ? source.model : '', effort: sameAccount ? source.effort : '', permission: source.permission, workflow: source.workflow, gatewayId: sameAccount && source.gatewayId !== 'direct' ? source.gatewayId : '', rotationProfileIds: [], instructions: '', noRotation: false } });
     if (!opened.session) throw new Error('Runner did not return the new conversation');
     let transferError = '';
     if (firstMessage) {

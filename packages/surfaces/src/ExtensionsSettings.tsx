@@ -3,6 +3,7 @@ import type { Extension } from '@lazybox/protocol';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ExtensionApprovalSheet } from './ExtensionApprovalSheet';
 import { CLAUDE_SWITCHING_WARNING, CLAUDE_TERMS_URL, describeGrant, describeHost, extensionStateLabel, switchedProviders, widening } from './extension-grants';
+import type { ExtensionPanelChoice } from './PanelRegistry';
 import { Icon } from './Icons';
 import { SettingsGroup, SettingsHeader } from './settings-parts';
 import { useExtensions } from './useExtensions';
@@ -13,7 +14,7 @@ import './extensions.css';
  * do, and the switch, review and removal; the bundled examples; where the
  * folder is and how to make one. Approving always goes through the sheet.
  */
-export function ExtensionsSettings() {
+export function ExtensionsSettings({ onOpenPanel }: { onOpenPanel?(choice?: ExtensionPanelChoice): void }) {
   const { value, error, change } = useExtensions();
   const [reviewing, setReviewing] = useState<Extension>();
   const [removing, setRemoving] = useState<Extension>();
@@ -42,7 +43,7 @@ export function ExtensionsSettings() {
   const copy = (text: string) => void navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => undefined);
   const list = value?.extensions || [];
   return <div className="extensions-settings">
-    <SettingsHeader title="Extensions" description={<>Panels you add as a folder of HTML, JavaScript and CSS, and account policies such as switching subscriptions at a limit. Each runs in a sandbox, apart from Lazybox, and can read and do only what you allow here. Show a panel from <strong>Panels → New Extensions panel</strong>.</>}/>
+    <SettingsHeader title="Extensions" description="Install extensions, open their panels, and manage what they can access." actions={onOpenPanel && <button type="button" onClick={() => onOpenPanel()}><Icon name="puzzle" size={14}/> Browse panels</button>}/>
     {(error && !value) && <p className="settings-error" role="alert">{error}</p>}
     {problem && <p className="settings-error" role="alert">{problem}</p>}
     {!value && !error && <p className="settings-empty" role="status">Loading extensions…</p>}
@@ -67,6 +68,10 @@ export function ExtensionsSettings() {
               <small className="extension-path mono" title={ext.path}>{ext.path}</small>
             </div>
             <div className="extension-card-actions">
+              {onOpenPanel && on && ext.panels.map(panel => <button type="button" key={panel.id}
+                aria-label={`Open ${panel.title}`} onClick={() => onOpenPanel({ id: ext.id, panel: panel.id })}>
+                {ext.panels.length === 1 ? 'Open panel' : panel.title}
+              </button>)}
               {ext.state !== 'broken' && <span className="settings-switch" title={on ? 'Turn off' : 'Turn on'}><input type="checkbox" role="switch" aria-label={`${ext.name || ext.id} on`} checked={on} disabled={busy === ext.id} onChange={event => toggle(ext, event.target.checked)}/></span>}
               {(ext.state === 'new' || ext.state === 'review') && <button type="button" className="primary" onClick={() => setReviewing(ext)}>{ext.state === 'new' ? 'Review' : 'Review what’s new'}</button>}
               {ext.state === 'enabled' && <button type="button" onClick={() => setReviewing(ext)}>Access</button>}

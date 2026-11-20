@@ -2,7 +2,7 @@
 // (Lazybox · Claude · Snippets), it filters as you type, Enter runs Lazybox's
 // own commands for real (permissions, a live model switch and one that needs a
 // restart), the agent's own commands go as the prompt, a snippet is inserted,
-// an unknown /word asks before it is sent, a path is just a message, Vim
+// an unknown /word goes to the agent unchanged, a path is just a message, Vim
 // insert mode works, and ⌘K, the ⋯ menu and the header reach the same pickers.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
@@ -16,7 +16,7 @@ Object.assign(f.sessions[1],{title:'Release notes',provider:'claude',model:'clau
 const alpha=f.openEvents('alpha-session');alpha.push({type:'command_catalog',providerDataJson:data(catalog)});alpha.push({type:'operation_accepted',text:'Why is the login test flaky?'});alpha.push({type:'message_delta',text:'The test races the session cookie.'});alpha.push({type:'turn_ended',status:'completed'});
 f.openEvents('beta-session');
 f.sessions.push({...structuredClone(f.sessions[1]),id:'codex-session',conversationId:'codex-conversation',title:'Codex refactor',provider:'codex',profileId:'codex-default',model:'gpt-6.1-sol',modelReported:true,busy:false,status:'ready',capabilities:{...f.sessions[1].capabilities,liveModel:true,resume:true,steer:true}});
-f.openEvents('codex-session').push({type:'command_catalog',providerDataJson:data({models:[{value:'gpt-6.1-sol',displayName:'GPT-6.1-Sol',description:'Workhorse'},{value:'gpt-6-astra',displayName:'GPT-6-Astra',description:'Frontier'},{value:'gpt-6-luna',displayName:'GPT-6-Luna',description:'Fast'},{value:'gpt-5.5',displayName:'GPT-5.5',description:'Legacy'}]})});
+f.openEvents('codex-session').push({type:'command_catalog',providerDataJson:data({models:[{value:'gpt-6.1-sol',displayName:'GPT-6.1-Sol',description:'Workhorse'},{value:'gpt-6-astra',displayName:'GPT-6-Astra',description:'Frontier'},{value:'gpt-6-luna',displayName:'GPT-6-Luna',description:'Fast',effortLevels:['low','high']},{value:'gpt-5.5',displayName:'GPT-5.5',description:'Legacy'}]})});
 // A Codex conversation of the "Work" subscription in YOLO, on Codex's own default model (none asked for, none reported
 // yet), whose app-server lists a dozen models: the ⋯ menu marks YOLO and Default as current, and switches for real.
 const manyModels=['gpt-6.1-sol','gpt-6-astra','gpt-6-luna','gpt-5.5','gpt-5.5-mini','gpt-5.4','gpt-5.4-mini','gpt-5.3','gpt-5.2','gpt-5.1','gpt-5','gpt-5-mini'].map(value=>({value,displayName:value.toUpperCase(),description:''}));
@@ -107,6 +107,11 @@ try{
  await page.keyboard.type('/compact');await page.keyboard.press('Enter');
  await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe('/compact');
  await expect(message).toHaveValue('');
+ await message.fill('/mcp');
+ await message.press('Enter');
+ await expect.poll(() => applies().at(-1)?.body.listMcpServers).toEqual({});
+ await expect(chat.locator('.command-line').filter({hasText:'MCP servers: fixture (2 tools)'})).toBeVisible();
+ await expect(message).toHaveValue('');
 
  // A snippet is inserted, not sent.
  const before=applies().length;
@@ -115,15 +120,18 @@ try{
  assert.equal(applies().length,before,'inserting a snippet sends nothing');
  await message.fill('');
 
- // An unknown /word asks first; Enter again sends it as text.
+ // An unknown /word goes to the agent on the first Enter.
  await page.keyboard.type('/deploy now');await expect(menu).toBeHidden();
  // Under load the box can lag the keys: Enter only once it holds the whole line.
  await expect(message).toHaveValue('/deploy now');
  await page.keyboard.press('Enter');
- await expect(chat.getByRole('alert').filter({hasText:'is not a command'})).toBeVisible({timeout:10000});
- assert.equal(applies().length,before,'not sent yet');
- await page.keyboard.press('Enter');
  await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe('/deploy now');
+ await expect(message).toHaveValue('');
+ // An unselected fuzzy match must not turn the typed input into a different command.
+ await message.fill('/mdl');
+ await expect(menu.getByRole('option').filter({ hasText: '/model' })).toBeVisible();
+ await message.press('Enter');
+ await expect.poll(() => applies().at(-1)?.body.message?.text).toBe('/mdl');
  await expect(message).toHaveValue('');
  // A path is a message like any other.
  await page.keyboard.type('/usr/local/bin is missing');await expect(menu).toBeHidden();
@@ -263,31 +271,55 @@ try{
  await expect(codexMessage).toBeEnabled();
  await codexMessage.click();await page.keyboard.type('/model ');
  const codexModels=codexChat.getByRole('listbox',{name:'/model choices'});
- await expect(codexModels.getByRole('option')).toHaveText([/GPT-6\.1-Sol.*Current/,/GPT-5\.5/,/GPT-6-Astra/,/GPT-6-Luna/]);
+ await expect(codexModels.getByRole('option')).toHaveText([/GPT-6\.1-Sol.*Current/,/GPT-5\.5/,/GPT-6-Astra/,/GPT-6-Luna/,/GPT-6-Luna · high/,/GPT-6-Luna · low/]);
  await page.keyboard.press('ArrowUp');await page.keyboard.press('Enter');
  await expect(codexModels).toBeHidden();await expect(codexChat.locator('.restart-model')).toHaveCount(0);
  assert.equal(applies().filter(m=>m.body.sessionId==='codex-session').length,0,'the current Codex model applies nothing');
- await page.keyboard.type('/model luna');await page.keyboard.press('Enter');
+ await page.keyboard.type('/model luna high');await page.keyboard.press('Enter');
  await expect.poll(()=>applies().findLast(m=>m.body.sessionId==='codex-session')?.body.model?.model).toBe('gpt-6-luna');
+ assert.equal(applies().findLast(m=>m.body.sessionId==='codex-session').body.model.effort,'high');
  await expect(codexChat.locator('.command-line').filter({hasText:'Switched model to gpt-6-luna'})).toBeVisible();
+ await codexChat.locator('summary[aria-label="Session actions"]').click();
+ const efforts=codexChat.locator('.session-menu').getByRole('group',{name:'Reasoning effort'});
+ await expect(efforts.getByRole('button',{name:'high',exact:true})).toHaveAttribute('aria-pressed','true');
+ await efforts.getByRole('button',{name:'low',exact:true}).click();
+ await expect.poll(()=>applies().findLast(m=>m.body.sessionId==='codex-session')?.body.model?.effort).toBe('low');
  await expect(codexChat.locator('.restart-model')).toHaveCount(0);
 
+ // /mcp is a provider inventory request, even while composing another turn.
+ await codexMessage.fill('/mcp');
+ await codexMessage.press('Enter');
+ await expect.poll(() => applies().at(-1)?.body.listMcpServers).toEqual({});
+ await expect(codexChat.locator('.command-line').filter({hasText:'MCP servers: fixture (2 tools)'})).toBeVisible();
+ await expect(codexMessage).toHaveValue('');
+ assert.equal(applies().some(m => m.body.message?.text === '/mcp'), false);
+
+ for (const section of ['skills', 'apps', 'plugins']) {
+   await codexMessage.fill('/' + section);
+   await codexMessage.press('Enter');
+   await expect.poll(() => applies().at(-1)?.body.listProviderCatalog?.section).toBe(section);
+   await expect(codexChat.locator('.command-line').filter({ hasText: `Codex ${section}: fixture` })).toBeVisible();
+ }
+ // Manual Codex compaction uses a native control request.
+ await codexMessage.fill('/compact');
+ await codexMessage.press('Enter');
+ await expect.poll(() => applies().at(-1)?.body.compactContext).toEqual({});
+ await expect(codexMessage).toHaveValue('');
+ assert.equal(applies().some(m => m.body.sessionId === 'codex-session' && m.body.message?.text === '/compact'), false);
+
  // An unavailable suggestion must not swallow Tab or the normal send flow.
- await codexMessage.fill('/comp');
+ const partialInterrupt = '/interrupt'.slice(0, -1);
+ await codexMessage.fill(partialInterrupt);
  const codexCommands = codexChat.getByRole('listbox', {name:'Commands', exact:true});
  await expect(codexCommands.getByRole('option', {selected:true})).toHaveAttribute('aria-disabled','true');
  await codexMessage.press('Tab');
  await expect(codexMessage).not.toBeFocused();
- await expect(codexMessage).toHaveValue('/comp');
+ await expect(codexMessage).toHaveValue(partialInterrupt);
  await codexMessage.fill('');
- await codexMessage.fill('/comp');
+ await codexMessage.fill(partialInterrupt);
  await expect(codexCommands).toBeVisible();
- const beforeUnavailable = applies().length;
  await codexMessage.press('Enter');
- await expect(codexChat.getByRole('button',{name:/Send as text/})).toBeVisible();
- assert.equal(applies().length, beforeUnavailable);
- await codexMessage.press('Enter');
- await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe('/comp');
+ await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe(partialInterrupt);
  await expect(codexMessage).toHaveValue('');
 
  // The ⋯ menu says what is current: YOLO is selected (pressed, not greyed out), and the provider's
@@ -343,5 +375,5 @@ try{
  await expect.poll(()=>applies().at(-1)?.body.permission?.mode).toBe('read-only');
 
  assert.deepEqual(errors,[]);
- console.log('PASS: / opens the grouped command menu (Lazybox · Claude · Snippets) with icons, names, hints and descriptions; it filters and ranks as you type, Esc closes it; /permissions and /model run for real (for Claude and Codex: the provider\'s models, the Runner\'s list where the agent lists none, the current one marked and a no-op, a live switch, one clear restart card where needed) and leave one line in the conversation; a restart card (model or permissions) takes the keyboard, Enter restarts, Esc cancels, and the message box has the keyboard back, with no click; the agent\'s commands complete for arguments and go as the prompt; a snippet is inserted; an unknown /word asks first; a path is a message; /detail and /help act; ⌘K lists the commands and gives a borrowed draft back, a command run from it keeps the draft (and its saved copy), and its Open the review tray opens the tray without starting a review; the ⋯ menu offers the models; the header\'s model name and the message box\'s model label open the /model choices, by click or Tab and Enter; Vim insert mode works. Fixture only.');
+ console.log('PASS: / opens the grouped command menu (Lazybox · Claude · Snippets) with icons, names, hints and descriptions; it filters and ranks as you type, Esc closes it; /permissions and /model run for real (for Claude and Codex: the provider\'s models, the Runner\'s list where the agent lists none, the current one marked and a no-op, a live switch, one clear restart card where needed) and leave one line in the conversation; a restart card (model or permissions) takes the keyboard, Enter restarts, Esc cancels, and the message box has the keyboard back, with no click; the agent\'s commands complete for arguments and go as the prompt; a snippet is inserted; an unknown /word passes through; a path is a message; /detail and /help act; ⌘K lists the commands and gives a borrowed draft back, a command run from it keeps the draft (and its saved copy), and its Open the review tray opens the tray without starting a review; the ⋯ menu offers the models; the header\'s model name and the message box\'s model label open the /model choices, by click or Tab and Enter; Vim insert mode works. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close?.();}

@@ -91,12 +91,3 @@ function ChoiceRow({ choice, id, selected, onHover, onChoose }: { choice: SlashC
 function Footer({ hint, onClose }: { hint: string; onClose?(): void }) {
   return <div className="slash-footer"><span>{hint}</span>{onClose && <button type="button" className="slash-close" aria-label="Close commands" onClick={onClose}><Icon name="close" size={12}/></button>}</div>;
 }
-
-/** A `/word` that is no command, before it goes as text: Enter again sends it. */
-export function SlashWarning({ name, onSend, onCancel }: { name: string; onSend(): void; onCancel(): void }) {
-  return <div className="slash-warning" role="alert">
-    <span><code>/{name}</code> is not a command. Send it as text?</span>
-    <button type="button" className="primary" onClick={onSend}>Send as text <kbd>↵</kbd></button>
-    <button type="button" onClick={onCancel}>Edit <kbd>Esc</kbd></button>
-  </div>;
-}

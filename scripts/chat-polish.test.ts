@@ -8,7 +8,7 @@ import { elapsedLabel, liveStatus, phaseFromEvents } from '../packages/surfaces/
 import { awaitingFirstMessage, sessionStatus } from '../packages/surfaces/src/agent-status.ts';
 import { deriveAttention } from '../packages/surfaces/src/attention.ts';
 import { caretOnFirstLine, caretOnLastLine, parsePromptHistory, recallOrder, recordPrompt } from '../packages/surfaces/src/prompt-history.ts';
-import { parseSnippetUsage, recordSnippetUse, sortSnippets } from '../packages/surfaces/src/snippet-usage.ts';
+import { parseSnippetUsage, recordSnippetUse, searchSnippets, sortSnippets } from '../packages/surfaces/src/snippet-usage.ts';
 import { branchForName, generatedName, repositoryGroups, suggestWorkspaceName } from '../packages/surfaces/src/repository-model.ts';
 import { branchSummary, conversationDetails, conversationTitle, titleFromMessage } from '../packages/surfaces/src/conversation-model.ts';
 
@@ -152,4 +152,21 @@ test('errors read as sentences: the Runner\'s words without the Connect wrapping
   assert.doesNotMatch(humanError(new ConnectError('boom', Code.Internal)), /ConnectError|\[internal\]/);
   assert.equal(streamLabel('Disconnected: ConnectError: [unavailable] Runner unreachable'), 'Reconnecting…');
   assert.equal(streamLabel('ConnectError: [not_found] execution is no longer available'), 'Not connected');
+});
+
+test('snippet search ranks names above metadata, and only searches bodies on request', () => {
+  const rows = [
+    { key: 'clarify', category: 'Review', description: 'Explain briefly', body: 'Use deepclarify for more.' },
+    { key: 'inspect', category: 'Review', description: 'Run a deep review', body: '' },
+    { key: 'deep-review', category: 'Code', description: 'Inspect a diff', body: '' },
+    { key: 'deep', category: 'Code', description: 'Explore a problem', body: '' },
+  ];
+  const find = (query: string) => searchSnippets(rows, query).map(row => row.key);
+  assert.deepEqual(find(' Deep '), ['deep', 'deep-review', 'inspect']);
+  assert.deepEqual(find('review deep'), ['deep-review', 'inspect']);
+  assert.deepEqual(find('deep review'), ['deep-review', 'inspect']);
+  assert.deepEqual(find('clar'), ['clarify']);
+  assert.deepEqual(find('arif'), ['clarify']);
+  assert.deepEqual(find('rify inspect'), []);
+  assert.deepEqual(find('body: deepclarify'), ['clarify']);
 });

@@ -207,9 +207,21 @@ async function scenario(browser, scheme, full) {
     await expect(access.getByRole('button', { name: 'Done' })).toBeFocused();
     await shot('access');
     await access.getByRole('button', { name: 'Done' }).click();
-    await page.keyboard.press('Meta+,');
-    await page.getByRole('tab', { name: 'Extensions' }).click();
+    const extensions = page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Extensions', exact: true });
+    await extensions.click();
+    await expect(extensions).toHaveAttribute('aria-current', 'page');
     await expect(page.getByRole('listitem', { name: 'Mischief' })).toContainText('Off');
+    await expect(page.getByRole('listitem', { name: 'Mischief' }).getByRole('button', { name: /^Open / })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Browse panels' }).click();
+    await page.getByRole('button', { name: 'Manage extensions', exact: true }).click();
+    await expect(extensions).toHaveAttribute('aria-current', 'page');
+    await page.getByRole('listitem', { name: 'Agent board' }).getByRole('button', { name: 'Open Agent board' }).click();
+    await expect(page.locator('iframe[title="Agent board (extension)"]')).toBeVisible();
+    await page.keyboard.press('Meta+k');
+    const palette = page.getByRole('dialog', { name: 'Command palette' });
+    await palette.getByRole('combobox', { name: 'Search commands' }).fill('plugins');
+    await palette.getByRole('option', { name: /Extensions settings/ }).click();
+    await expect(extensions).toHaveAttribute('aria-current', 'page');
     await shot('settings');
   }
   // WebKit reports the malicious frame's refused top navigation on the page; nothing else may fail.

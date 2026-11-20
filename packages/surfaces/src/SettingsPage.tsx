@@ -125,7 +125,7 @@ function SubscriptionCard({ profile, now, refreshing, error, onRefresh, footer }
     <footer>{footer}<button type="button" className="quiet" disabled={refreshing} aria-label={refreshing ? "Refreshing…" : "Refresh usage"} title={observed} onClick={onRefresh}><Icon name="refresh" size={13}/>{refreshing ? "Refreshing…" : "Refresh"}</button></footer>
   </article>;
 }
-export function SettingsPage({ app, zoom, viewState, openSignIn, copySignInCode, chooseRepositoryFolder, tab: shownTab, onTab, onShowProcesses, onRunInShell }: { /** The desktop app: version and updates (Settings → About & updates). */ app?: AppHost; zoom?: ZoomHost; onShowProcesses?(): void; /** Types a command into a workspace's shell panel and shows it (Install Claude Code). */ onRunInShell?(command: string): Promise<void>; chooseRepositoryFolder?(): Promise<string | null>; viewState?: ViewStateStore; openSignIn?(url: string): Promise<void>; copySignInCode?(code: string): Promise<void>; tab?: SettingsTab; onTab?(tab: SettingsTab): void }) {
+export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openSignIn, copySignInCode, chooseRepositoryFolder, tab: shownTab, onTab, onShowProcesses, onRunInShell }: { /** The desktop app: version and updates (Settings → About & updates). */ app?: AppHost; onOpenExtensionPanel?(choice?: import('./PanelRegistry').ExtensionPanelChoice): void; zoom?: ZoomHost; onShowProcesses?(): void; /** Types a command into a workspace's shell panel and shows it (Install Claude Code). */ onRunInShell?(command: string): Promise<void>; chooseRepositoryFolder?(): Promise<string | null>; viewState?: ViewStateStore; openSignIn?(url: string): Promise<void>; copySignInCode?(code: string): Promise<void>; tab?: SettingsTab; onTab?(tab: SettingsTab): void }) {
   const { api, info, refresh } = useRunner();
   const [ownTab, setOwnTab] = useState<SettingsTab>('subscriptions');
   const tab = shownTab || ownTab, setTab = (next: SettingsTab) => { setOwnTab(next); onTab?.(next); };
@@ -376,7 +376,7 @@ export function SettingsPage({ app, zoom, viewState, openSignIn, copySignInCode,
     {panel('keyboard', <KeyboardSettings store={viewState}/>)}
     {panel('power', <PowerSettings viewState={viewState}/>)}
     {panel('runners', <RunnersSettings/>)}
-    {panel('extensions', <ExtensionsSettings/>)}
+    {panel('extensions', <ExtensionsSettings onOpenPanel={onOpenExtensionPanel}/>)}
     {panel('runner', <RunnerSection onShowProcesses={onShowProcesses}/>)}
     {panel('process', <OrchestrationProcessSettings/>)}
     {panel('about', <AboutSettings app={app}/>)}

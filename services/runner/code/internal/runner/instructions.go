@@ -103,11 +103,14 @@ func (b *Bench) restart(ctx context.Context, e *Execution) (*Execution, error) {
 	return b.Resume(ctx, e.ID, false)
 }
 
-// SetModel switches a running session's model for its following turns and
+// SetModelAndEffort switches a running session's model for its following turns and
 // remembers it, so a resume or a subscription rotation keeps the new model.
 // Asked for during a turn, the change waits for that turn to end (the
 // adapters apply it to the next one), and the conversation says so.
-func (b *Bench) SetModel(ctx context.Context, e *Execution, operationID, model string) (agent.Receipt, error) {
+func (b *Bench) SetModelAndEffort(ctx context.Context, e *Execution, operationID, model, effort string) (agent.Receipt, error) {
+	if err := agent.ValidEffort(e.Profile.Provider, effort); err != nil {
+		return agent.Receipt{}, err
+	}
 	model, err := availability.ResolveModel(e.Profile.Provider, model)
 	if err != nil {
 		return agent.Receipt{}, err
@@ -119,21 +122,24 @@ func (b *Bench) SetModel(ctx context.Context, e *Execution, operationID, model s
 	if e.Engine.Snapshot().Busy {
 		when = "next_turn"
 	}
-	r, err := e.Engine.Apply(ctx, agent.Operation{ID: operationID, Kind: agent.Model, Model: model})
+	r, err := e.Engine.Apply(ctx, agent.Operation{ID: operationID, Kind: agent.Model, Model: model, Effort: effort})
 	if err != nil || r.Delivery == "failed" {
 		return r, err
 	}
-	if err = b.rememberModel(ctx, e, model); err != nil {
+	if err = b.rememberModel(ctx, e, model, effort); err != nil {
 		return r, err
 	}
 	_ = b.Record(e, agent.Event{Type: "model_changed", Text: model, Status: when})
 	return r, nil
 }
 
-// RestartWithModel switches the model of an agent whose running worker cannot
+// RestartWithModelAndEffort switches the model of an agent whose running worker cannot
 // switch live: the agent is ended between turns and the same provider
 // conversation resumes in a new agent started with that model.
-func (b *Bench) RestartWithModel(ctx context.Context, e *Execution, model string) (*Execution, error) {
+func (b *Bench) RestartWithModelAndEffort(ctx context.Context, e *Execution, model, effort string) (*Execution, error) {
+	if err := agent.ValidEffort(e.Profile.Provider, effort); err != nil {
+		return nil, err
+	}
 	model, err := availability.ResolveModel(e.Profile.Provider, model)
 	if err != nil {
 		return nil, err
@@ -148,7 +154,7 @@ func (b *Bench) RestartWithModel(ctx context.Context, e *Execution, model string
 	if state.Reference == "" || !state.Capabilities.Resume {
 		return nil, errors.New("this conversation cannot be resumed by its provider; start a new conversation with that model")
 	}
-	if err := b.rememberModel(ctx, e, model); err != nil {
+	if err := b.rememberModel(ctx, e, model, effort); err != nil {
 		return nil, err
 	}
 	next, err := b.restart(ctx, e)
@@ -159,13 +165,16 @@ func (b *Bench) RestartWithModel(ctx context.Context, e *Execution, model string
 	return next, nil
 }
 
-func (b *Bench) rememberModel(ctx context.Context, e *Execution, model string) error {
-	if err := b.History.Amend(ctx, e.ID, func(r *sessionstore.Record) { r.Options.Model = model }); err != nil {
+func (b *Bench) rememberModel(ctx context.Context, e *Execution, model, effort string) error {
+	if effort == "" {
+		effort = e.Options.Effort
+	}
+	if err := b.History.Amend(ctx, e.ID, func(r *sessionstore.Record) { r.Options.Model, r.Options.Effort = model, effort }); err != nil {
 		return err
 	}
 	e.activity.Lock()
-	e.Options.Model = model
-	e.Saved.Options.Model = model
+	e.Options.Model, e.Options.Effort = model, effort
+	e.Saved.Options.Model, e.Saved.Options.Effort = model, effort
 	e.activity.Unlock()
 	return nil
 }

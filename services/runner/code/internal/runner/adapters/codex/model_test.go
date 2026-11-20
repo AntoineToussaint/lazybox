@@ -17,14 +17,14 @@ func TestLiveModelSwitchAppliesToFollowingTurns(t *testing.T) {
 	if !s.Capabilities().LiveModel {
 		t.Fatal("Codex turns accept a model")
 	}
-	r, err := s.Apply(context.Background(), agent.Operation{ID: "m", Kind: agent.Model, Model: "gpt-new"})
+	r, err := s.Apply(context.Background(), agent.Operation{ID: "m", Kind: agent.Model, Model: "gpt-new", Effort: "high"})
 	if err != nil || r.Delivery != "accepted" {
 		t.Fatalf("switch refused: %+v %v", r, err)
 	}
-	if string(s.overrides["model"]) != `"gpt-new"` || s.model != "gpt-new" {
+	if string(s.overrides["model"]) != `"gpt-new"` || string(s.overrides["effort"]) != `"high"` || s.model != "gpt-new" {
 		t.Fatalf("model not kept for turn/start: %s %q", s.overrides, s.model)
 	}
-	if got := string(s.SessionSettings()); got != `{"approvalPolicy":"never","model":"gpt-new"}` {
+	if got := string(s.SessionSettings()); got != `{"approvalPolicy":"never","effort":"high","model":"gpt-new"}` {
 		t.Fatalf("a handoff would carry the old model: %s", got)
 	}
 	if _, err = s.Apply(context.Background(), agent.Operation{ID: "e", Kind: agent.Model}); err == nil {
@@ -87,7 +87,7 @@ func TestSessionReportsItsModelsForThePicker(t *testing.T) {
 	if err = json.Unmarshal(ev.Data, &catalog); err != nil || ev.AgentID != "root" {
 		t.Fatalf("catalog: %s %v", ev.Data, err)
 	}
-	want := []agent.ModelChoice{{Value: "gpt-6.1-sol", DisplayName: "GPT-6.1-Sol", Description: "Workhorse"}, {Value: "gpt-6-luna", DisplayName: "GPT-6-Luna", Description: "Fast"}, {Value: "gpt-6-astra", DisplayName: "gpt-6-astra", Description: "Frontier"}}
+	want := []agent.ModelChoice{{Value: "gpt-6.1-sol", DisplayName: "GPT-6.1-Sol", Description: "Workhorse", EffortLevels: []string{"high"}}, {Value: "gpt-6-luna", DisplayName: "GPT-6-Luna", Description: "Fast"}, {Value: "gpt-6-astra", DisplayName: "gpt-6-astra", Description: "Frontier"}}
 	if !reflect.DeepEqual(catalog.Models, want) {
 		t.Fatalf("models %+v, want %+v", catalog.Models, want)
 	}
@@ -120,5 +120,22 @@ func TestListModelsStartsAnAppServerOnlyToList(t *testing.T) {
 	t.Setenv("FIXTURE_NO_MODEL_LIST", "1")
 	if _, err = ListModels(context.Background(), self, os.Environ(), t.TempDir()); err == nil {
 		t.Fatal("a failed listing reported models")
+	}
+}
+
+func TestListMcpServersUsesTheCurrentThread(t *testing.T) {
+	self, _ := os.Executable()
+	s, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	receipt, err := s.Apply(context.Background(), agent.Operation{ID: "inventory", Kind: agent.ListMcpServers})
+	if err != nil || receipt.Delivery != "acknowledged" {
+		t.Fatalf("inventory request failed: %+v %v", receipt, err)
+	}
+	event := receive(t, s, "mcp_servers")
+	if event.OperationID != "inventory" || event.Text != "MCP servers: fixture (2 tools) · private (sign-in required)" {
+		t.Fatalf("unexpected inventory: %+v", event)
 	}
 }

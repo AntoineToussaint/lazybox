@@ -111,7 +111,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	defer cancel()
 	// The conversation's "always allow" choices so far: the new worker holds
 	// them (a worker started before grants ignores the field).
-	result, err := p.Call(setup, "open", map[string]any{"cwd": o.Cwd, "purpose": o.Purpose, "model": o.Model, "resume": o.Resume, "permission": o.Permission, "workflow": o.Workflow, "binary": a.Binary, "context": o.Context, "browser": o.Browser, "claudeAiConnectors": o.ClaudeAIConnectors, "grants": agent.GrantSpecs(o.Grants)})
+	result, err := p.Call(setup, "open", map[string]any{"cwd": o.Cwd, "purpose": o.Purpose, "model": o.Model, "effort": o.Effort, "resume": o.Resume, "permission": o.Permission, "workflow": o.Workflow, "binary": a.Binary, "context": o.Context, "browser": o.Browser, "claudeAiConnectors": o.ClaudeAIConnectors, "grants": agent.GrantSpecs(o.Grants)})
 	if err != nil {
 		p.Close()
 		return nil, err
@@ -186,6 +186,9 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 	// Steer hands the message to the running turn: Claude Code folds it in
 	// between two steps (the worker's steer.ts). A worker started before
 	// steering existed cannot; the message then waits for the turn to end.
+	if op.Kind == agent.Model && op.Effort != "" && !s.has("model_effort") {
+		return agent.Receipt{}, errors.New("this Claude worker cannot change reasoning effort while running; resume the conversation with the current worker")
+	}
 	if op.Kind == agent.Steer && !s.has("steer") {
 		return r, agent.ErrUnsupported
 	}

@@ -93,7 +93,7 @@ test('choices: YOLO is refused in plan mode; detail marks the current one',()=>{
 
 test('argument hints, and what cannot run now says why',()=>{
  const byName=Object.fromEntries(lazyboxCommands(ctx({busy:true,shellBlock:false,workspace:false,compact:false,provider:'codex',liveModel:false,models:[]})).map(c=>[c.name,c]));
- assert.equal(byName.model.argumentHint,'<name>');assert.equal(byName.detail.argumentHint,'quiet|smart|verbose');assert.equal(byName.rename.argumentHint,'<title>');
+ assert.equal(byName.model.argumentHint,'<name> [effort]');assert.equal(byName.detail.argumentHint,'quiet|smart|verbose');assert.equal(byName.rename.argumentHint,'<title>');
  assert.match(byName.model.description,/restarts the agent/,'a model change that is not live says so');
  assert.deepEqual(byName.model.choices!.map(c=>[c.value,c.current]),[['claude-opus-5-5',true]],'the current model is listed even when the provider lists none');
  assert.equal(byName.compact.disabled,'Wait for the turn to finish');
@@ -101,7 +101,7 @@ test('argument hints, and what cannot run now says why',()=>{
  assert.equal(byName.review.disabled,'Only in a workspace');
  assert.equal(byName.stop.disabled,undefined,'busy: stop is offered');
  assert.equal(lazyboxCommands(ctx()).find(c=>c.name==='stop')!.disabled,'Claude is not working');
- assert.equal(lazyboxCommands(ctx({busy:false,provider:'codex',compact:false})).find(c=>c.name==='compact')!.disabled,'Codex compacts its context on its own');});
+ assert.equal(lazyboxCommands(ctx({busy:false,provider:'codex',compact:false})).find(c=>c.name==='compact')!.disabled,'Not available until the agent reports its commands');});
 
 test('/browser gives the agent the browser when it has none, and says why it cannot otherwise',()=>{
  const browser=(over:Partial<SlashContext>)=>lazyboxCommands(ctx(over)).find(c=>c.name==='browser')!;
@@ -112,7 +112,7 @@ test('/browser gives the agent the browser when it has none, and says why it can
  assert.equal(browser({browser:''}).disabled,'The agent browser is not available in this conversation');
  assert.equal(browser({browser:'can_give',live:false}).disabled,'The conversation is not running');});
 
-test('send as text: commands run, the agent\'s go through, an unknown /word asks first, anything else is a message',()=>{
+test('send as text: commands run, the agent\'s go through, an unknown /word passes through, anything else is a message',()=>{
  assert.deepEqual(decideSend('hello',all()),{kind:'text'});
  assert.deepEqual(decideSend('/usr/local/bin is missing',all()),{kind:'text'},'a path is a message');
  assert.deepEqual(decideSend('/ 2',all()),{kind:'text'});
@@ -120,8 +120,8 @@ test('send as text: commands run, the agent\'s go through, an unknown /word asks
  const pr=decideSend('/review-pr 12',all());assert.equal(pr.kind,'provider');assert.equal(pr.kind==='provider'&&pr.args,'12');
  assert.equal(decideSend('/INIT',all()).kind,'provider','names are case-insensitive');
  assert.equal(decideSend('/test',all()).kind,'snippet');
- assert.deepEqual(decideSend('/deploy now',all()),{kind:'unknown',name:'deploy'});
- assert.deepEqual(decideSend('/compact',lazyboxCommands(ctx({provider:'codex',compact:false}))),{kind:'unknown',name:'compact'});
+ assert.deepEqual(decideSend('/deploy now',all()),{kind:'text'});
+ assert.deepEqual(decideSend('/compact',lazyboxCommands(ctx({provider:'codex',compact:false}))),{kind:'text'});
  assert.equal(decideSend('/compact  ',all()).kind,'lazybox','Lazybox\'s /compact stands in for the agent\'s');});
 
 test('models resolve by id, name or prefix; an id the list lacks is kept as typed',()=>{

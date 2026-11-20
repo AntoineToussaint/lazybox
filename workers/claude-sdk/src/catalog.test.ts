@@ -12,14 +12,14 @@ test('the initialize response lists commands with their words, and the models', 
       { name: 'has space', description: 'invalid', argumentHint: '' },
       { description: 'no name' },
     ],
-    models: [{ value: 'opus', displayName: 'Opus', description: 'Most capable' }, { value: 'opus', displayName: 'dup', description: '' }, { value: 'two words', displayName: 'x', description: '' }],
+    models: [{ value: 'opus', displayName: 'Opus', description: 'Most capable', supportedEffortLevels: ['low', 'high', 'invalid'] }, { value: 'opus', displayName: 'dup', description: '' }, { value: 'two words', displayName: 'x', description: '' }],
   });
   assert.deepEqual(event, { type: 'command_catalog', data: {
     commands: [
       { name: 'compact', description: 'Clear history but keep a summary', argumentHint: '<instructions>', builtin: true },
       { name: 'review-pr', description: 'Review a pull request', argumentHint: '<number>', aliases: ['rpr'] },
     ],
-    models: [{ value: 'opus', displayName: 'Opus', description: 'Most capable' }],
+    models: [{ value: 'opus', displayName: 'Opus', description: 'Most capable', effortLevels: ['low', 'high'] }],
   } });
   assert.equal(catalog.fromInitialize({ commands: [
     { name: 'compact', description: 'Clear history but keep a summary', argumentHint: '<instructions>', builtin: true },

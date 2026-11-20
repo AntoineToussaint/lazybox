@@ -290,7 +290,10 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		// A later subscription attempt runs the model now in force, including
 		// when the provider's carried settings name the model they started on.
 		s.open.Model = op.Model
-		s.open.ProviderSettings = withModel(s.open.ProviderSettings, op.Model)
+		if op.Effort != "" {
+			s.open.Effort = op.Effort
+		}
+		s.open.ProviderSettings = withModel(s.open.ProviderSettings, op.Model, op.Effort)
 	}
 	if err == nil && (op.Kind == agent.Message || op.Kind == agent.Steer) {
 		s.remember("\nUSER: " + agent.Prompt(op) + "\n")
@@ -670,12 +673,15 @@ func (s *session) SessionSettings() json.RawMessage {
 
 // withModel replaces the model a provider's carried settings name, if they
 // name one; other settings, and settings that name none, are kept as they are.
-func withModel(settings json.RawMessage, model string) json.RawMessage {
+func withModel(settings json.RawMessage, model, effort string) json.RawMessage {
 	var fields map[string]json.RawMessage
 	if len(settings) == 0 || json.Unmarshal(settings, &fields) != nil || fields["model"] == nil {
 		return settings
 	}
 	fields["model"], _ = json.Marshal(model)
+	if effort != "" {
+		fields["effort"], _ = json.Marshal(effort)
+	}
 	data, err := json.Marshal(fields)
 	if err != nil {
 		return settings

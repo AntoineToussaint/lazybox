@@ -31,7 +31,9 @@ import { useAskRequests } from './help-requests';
 
 /** What a panel's header shows while its module has something better than its kind's title: a web page's title and icon. */
 export type PanelTitle = { text: string; /** An image URL (a page's icon). */ icon?: string; tooltip?: string; agent?: { sessionId: string; provider: string } };
+export type ExtensionPanelChoice = { id: string; panel: string };
 export type ModuleProps = {
+  extensionRequest?: { choice?: ExtensionPanelChoice; onOpened(): void };
   workspaceId: string;
   /** This panel's identity on its page, stable while it is open. */
   panelId?: string;

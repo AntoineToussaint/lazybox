@@ -220,7 +220,7 @@ function TaskCard({ task, goal, now, collections, titles, orchestrators, overlap
         <Icon name="subagent" size={11}/>{orchestrators.find(g => g.conversationId === attempt.parentConversationId)?.title || 'Orchestrator'}<small>{attempt.role || 'worker'}</small></span>}
     </div>
     <p className="mission-reason">{task.reason}</p>
-    {attempt && <button type="button" className="mission-conversation" disabled={!attempt.sessionId || attempt.live === 'missing'} onClick={onOpen} title={attempt.sessionId ? 'Open the conversation working on this task' : 'This conversation was deleted'}>
+    {attempt && <button type="button" className="mission-conversation" disabled={!attempt.sessionId || attempt.live === 'missing' || attempt.live === 'reserved'} onClick={onOpen} title={attempt.live === 'reserved' ? 'The worker conversation is being prepared' : attempt.sessionId ? 'Open the conversation working on this task' : 'This conversation was deleted'}>
       <Icon name="chat" size={13}/><span className="mission-conversation-title">{attempt.title || 'Conversation'}</span>
       {workspace && <span className="mission-conversation-where">{workspace}</span>}
       <span className={`mission-live live-${attempt.live}`}>{liveLabel(attempt.live, attempt.liveDetail)}</span>

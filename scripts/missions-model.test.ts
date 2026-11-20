@@ -72,3 +72,12 @@ test('recall takes this window first, then what the Runner kept from other windo
   const merged = mergeHistory([{ text: 'mine', conversation: 'c1' }], [{ text: 'mine', conversation: 'c1' }, { text: 'from the phone', conversation: 'c2' }]);
   assert.deepEqual(merged.map(e => e.text), ['mine', 'from the phone']);
 });
+
+test('a stale Mission review names its bound inputs', () => {
+  const chip = evidenceChip(evidence({kind: 'review', state: 'stale', outcome: 'unknown', contractDigest: 'spec-sha', revisions: {api: 'candidate-sha'}}));
+  assert.equal(chip.label, 'Review needs repeating');
+  assert.equal(chip.tone, 'neutral');
+  assert.match(chip.title, /spec-sha/);
+  assert.match(chip.title, /api candidate-sha/);
+  assert.equal(liveLabel('reserved'), 'Reserved');
+});

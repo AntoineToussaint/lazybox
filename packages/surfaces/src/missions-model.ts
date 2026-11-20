@@ -88,6 +88,11 @@ export function evidenceChip(e: MissionEvidence): { mark: string; label: string;
     return { mark, label: `PR #${e.number}${e.head ? ' · ' + short(e.head) : ''}`, tone, title: [`${e.repository}#${e.number} (${e.state})`, e.detail].filter(Boolean).join('\n') };
   }
   // An agent review: failing while it has open blockers.
+  if (e.kind === 'review' && e.contractDigest) {
+    const revisions = Object.entries(e.revisions).map(([member, head]) => member + ' ' + head);
+    const label = e.state === 'stale' ? 'Review needs repeating' : e.title || 'Mission review';
+    return { mark, tone, label, title: [e.detail, 'Contract ' + e.contractDigest, ...revisions].filter(Boolean).join('\n') };
+  }
   if (e.kind === 'review') return { mark, label: [e.title || 'Agent review', e.detail].filter(Boolean).join(' · '), tone, title: [e.title, e.outcome === 'fail' ? 'Open blockers keep this task from verified.' : e.outcome === 'pending' ? 'The reviewer is still working.' : 'No open blockers.', e.ref].filter(Boolean).join('\n') };
   if (e.kind === 'commit') return { mark: '•', label: `${e.member ? e.member + ' ' : ''}${short(e.head)}`, tone: 'neutral', title: e.title };
   return { mark, label: e.title || e.ref, tone, title: e.ref };
@@ -104,6 +109,7 @@ export function headlineEvidence(evidence: readonly MissionEvidence[]): MissionE
 export type TaskAction = 'assign' | 'report' | 'accept' | 'reject' | 'open';
 export function taskActions(task: MissionTask): TaskAction[] {
   const live = !!task.attempt && !task.attempt.endedAtUnixMillis;
+  if (task.attempt?.live === 'reserved' && !task.attempt.endedAtUnixMillis) return [];
   switch (task.status) {
     case 'ready': return live ? ['open', 'report', 'assign'] : ['assign'];
     case 'blocked': return ['assign'];
@@ -118,7 +124,7 @@ export function taskActions(task: MissionTask): TaskAction[] {
 
 /** A conversation's liveness, said briefly. */
 export function liveLabel(live: string, detail = ''): string {
-  const base = { running: 'Running', waiting: 'Waiting for you', idle: 'Idle', closed: 'Stopped', missing: 'Deleted' }[live] || '';
+  const base = { reserved: 'Reserved', running: 'Running', waiting: 'Waiting for you', idle: 'Idle', closed: 'Stopped', missing: 'Deleted' }[live] || '';
   return base && detail && live !== 'closed' ? `${base} · ${detail}` : base;
 }
 

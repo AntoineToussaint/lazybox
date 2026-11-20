@@ -11,7 +11,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/reviews"
 )
 
-func (b *Bench) captureReviewInput(ctx context.Context, conversation string, workspace collections.Collection, compare string) (reviewScope, error) {
+func (b *Bench) captureReviewInput(ctx context.Context, conversation string, workspace collections.Collection, compare string, heads map[string]string) (reviewScope, error) {
 	out := reviewScope{label: "Changes"}
 	var repos []codecheckpoints.Repository
 	bases := map[string]string{}
@@ -30,6 +30,13 @@ func (b *Bench) captureReviewInput(ctx context.Context, conversation string, wor
 	}
 	var commands []string
 	for _, repo := range point.Repos {
+		if heads != nil {
+			_, changed, err := codecheckpoints.ReviewDiff(ctx, repo, repo.Head, false)
+			if err != nil || len(changed) > 0 || repo.Head != heads[repo.Member] || repo.SkippedCount > 0 {
+				_ = b.Checkpoints.Delete(ctx, conversation)
+				return out, fmt.Errorf("candidate %s changed during review capture", repo.Member)
+			}
+		}
 		base := firstOf(compare, bases[repo.Member])
 		if compare == ":uncommitted" {
 			base = repo.Head

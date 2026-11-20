@@ -2,10 +2,10 @@ package runner
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 	"slices"
 	"strings"
 	"sync"
@@ -340,27 +340,37 @@ func (b *Bench) Spawn(ctx context.Context, r SpawnRequest) (LineageView, error) 
 	g := c.held.Grant
 	unlock := b.orch().lock(g.Grant)
 	defer unlock()
-	if r.Operation != "" {
-		if state, err := b.Work.Mission(c.held.Mission.ID); err == nil {
-			if e, ok := state.Event(r.Operation); ok {
-				// A retried spawn: the same child.
-				var p work.AttemptPayload
-				_ = json.Unmarshal(e.Payload, &p)
-				view, err := b.agentTree(ctx, c.e, 0)
-				for i := range view.Children {
-					if view.Children[i].Conversation == p.Conversation {
-						view.Spawned = &view.Children[i]
-					}
-				}
-				return view, err
-			}
-		}
-	}
 	// Re-read the grant under its lock: a concurrent spawn may have filled it.
-	if c.held, c.holds = b.Work.HeldBy(c.conversation); !c.holds {
+	if c.held, c.holds = b.Work.HeldBy(c.conversation); !c.holds || c.held.Grant.Grant != g.Grant {
 		return LineageView{}, ErrNoGrant
 	}
 	g, state := c.held.Grant, c.held.Mission
+	if r.Operation != "" {
+		if event, ok := c.held.Mission.Event(r.Operation); ok {
+			var a work.AttemptPayload
+			if event.Type != work.TaskAssigned || json.Unmarshal(event.Payload, &a) != nil || a.Grant != g.Grant || a.Parent != c.conversation || (r.Task != "" && a.Task != r.Task) {
+				return LineageView{}, fmt.Errorf("%w: operation key already used for another assignment", work.ErrRefused)
+			}
+			if task := c.held.Mission.Task(a.Task); task != nil {
+				if at := task.Current(); at != nil && at.ID == a.Attempt && at.Dispatch != nil && at.Started.IsZero() && !at.Ended {
+					if err := b.finishPinnedDispatch(ctx, c.e, c.held.Mission, task, at); err != nil {
+						return LineageView{}, err
+					}
+				}
+			}
+			return b.spawnedView(ctx, c.e, a.Conversation)
+		}
+	}
+	// A CLI retry may carry a fresh operation key. The approved task already
+	// owns its pending reservation; resume it before counting occupied slots.
+	if task := state.Task(r.Task); task != nil {
+		if a := task.Current(); a != nil && a.Dispatch != nil && a.Grant == g.Grant && !a.Ended && a.Started.IsZero() {
+			if err := b.finishPinnedDispatch(ctx, c.e, state, task, a); err != nil {
+				return LineageView{}, err
+			}
+			return b.spawnedView(ctx, c.e, a.Conversation)
+		}
+	}
 	if live := state.LiveChildren(g.Grant); live >= g.Ceiling.MaxChildren {
 		return LineageView{}, fmt.Errorf("%w: your grant allows %d agents at once and %d are running; wait for one (lazybox agents wait) or stop one", work.ErrRefused, g.Ceiling.MaxChildren, live)
 	}
@@ -434,18 +444,22 @@ func (b *Bench) Spawn(ctx context.Context, r SpawnRequest) (LineageView, error) 
 		if len(r.baseline) == 0 {
 			return LineageView{}, fmt.Errorf("%w: only an approved pinned task has a baseline", work.ErrRefused)
 		}
-		spec := collections.Spec{Name: truncateRunes(title, 120)}
-		for _, m := range r.baseline {
-			spec.Members = append(spec.Members, collections.MemberSpec{Name: m.Name, RepositoryID: m.Repository, BaseRef: m.Commit})
+		if r.Operation == "" {
+			r.Operation = commands.ID()
 		}
-		// Collection creation keys are Runner-wide. Hash the complete scoped
-		// operation so long keys and keys reused by other missions stay distinct.
-		operation := firstOf(r.Operation, fmt.Sprint(time.Now().UnixNano()))
-		digest := sha256.Sum256([]byte(state.ID + "\x00" + r.Task + "\x00" + operation))
-		workspace, err = b.createChildWorkspace(ctx, spec, fmt.Sprintf("pinned/%x", digest))
+		execution := commands.ID()
+		text, origin := b.spawnBrief(ctx, parent, state, c.conversation, title, r.Brief, role, r.contract)
+		dispatch := &work.Dispatch{Title: title, Brief: text, Model: options.Model, ParentTitle: origin.From, ParentSession: origin.Session}
+		actor := work.Actor{Kind: work.ActorAgent, Role: "orchestrator", Conversation: c.conversation, Execution: parent.ID}
+		reserved, taskID, _, err := b.Work.Spawn(state.ID, actor, r.Operation, r.Task, title, r.Brief, work.AttemptPayload{Dispatch: dispatch, Conversation: execution, Execution: execution, Workspace: commands.ID(), Parent: c.conversation, Grant: g.Grant, Role: role, Permission: permission, Profile: profile})
 		if err != nil {
 			return LineageView{}, err
 		}
+		task := reserved.Task(taskID)
+		if err = b.finishPinnedDispatch(ctx, parent, reserved, task, task.Current()); err != nil {
+			return LineageView{}, err
+		}
+		return b.spawnedView(ctx, parent, execution)
 	case "new":
 		if parent.CollectionID == "" || b.Collections == nil {
 			return LineageView{}, fmt.Errorf("%w: --workspace new needs a workspace to branch from; this conversation has none", work.ErrRefused)
@@ -476,14 +490,7 @@ func (b *Bench) Spawn(ctx context.Context, r SpawnRequest) (LineageView, error) 
 		_ = b.DeleteConversation(context.WithoutCancel(ctx), child.ID, true)
 		return LineageView{}, err
 	}
-	parentTitle := b.agentTitle(ctx, parent)
-	text := title + "\n\n" + firstOf(strings.TrimSpace(r.Brief), "(No brief beyond the title: ask your orchestrator with `lazybox agents send parent` if it is unclear.)") +
-		fmt.Sprintf("\n\n(Task of the Lazybox mission “%s”, from your orchestrator “%s”. Run tests and builds with `lazybox run -- …`. When done: `lazybox agents report \"…\"`.)", state.Title, parentTitle)
-	if contract := r.contract; contract != nil {
-		text += fmt.Sprintf("\n\nApproved acceptance criteria (spec %s, version %d):\n- %s", contract.Artifact, contract.Version, strings.Join(contract.Criteria, "\n- "))
-	}
-	// The child's transcript shows its brief as an event from its orchestrator, never as the person's.
-	origin := agent.Origin{Kind: agent.OriginAgentBrief, Summary: "Task from “" + parentTitle + "”: " + title, Detail: role, From: parentTitle, Conversation: c.conversation, Session: parent.ID}
+	text, origin := b.spawnBrief(ctx, parent, state, c.conversation, title, r.Brief, role, r.contract)
 	if _, err := b.deliverAgentMessage(ctx, child, "spawn-"+task+"-"+child.ID, text, origin, work.PromptSource{Kind: work.SourceAgent, Mission: state.ID, Task: task}); err != nil {
 		// The child stands (it is on the board); say the brief did not go.
 		b.recordLineageEvent(parent, "agent_spawned", fmt.Sprintf("Started “%s”, but its brief was not delivered: %v", title, err), map[string]any{"conversation": childConversation, "session": child.ID, "task": task, "mission": state.ID})
@@ -495,6 +502,22 @@ func (b *Bench) Spawn(ctx context.Context, r SpawnRequest) (LineageView, error) 
 		b.recordLineageEvent(parent, "agent_spawned", fmt.Sprintf("Started “%s” · %s · %s · %s", title, role, permission, where), map[string]any{"conversation": childConversation, "session": child.ID, "task": task, "mission": state.ID, "role": role})
 	}
 	b.orch().broadcast()
+	return b.spawnedView(ctx, parent, childConversation)
+}
+
+func (b *Bench) spawnBrief(ctx context.Context, parent *Execution, state *work.State, conversation, title, brief, role string, contract *work.PlanContract) (string, agent.Origin) {
+	parentTitle := b.agentTitle(ctx, parent)
+	text := title + "\n\n" + firstOf(strings.TrimSpace(brief), "(No brief beyond the title: ask your orchestrator with `lazybox agents send parent` if it is unclear.)") +
+		fmt.Sprintf("\n\n(Task of the Lazybox mission “%s”, from your orchestrator “%s”. Run tests and builds with `lazybox run -- …`. When done: `lazybox agents report \"…\"`.)", state.Title, parentTitle)
+	if contract != nil {
+		text += fmt.Sprintf("\n\nApproved acceptance criteria (spec %s, version %d):\n- %s", contract.Artifact, contract.Version, strings.Join(contract.Criteria, "\n- "))
+	}
+	// The child's transcript shows its brief as an event from its orchestrator, never as the person's.
+	origin := agent.Origin{Kind: agent.OriginAgentBrief, Summary: "Task from “" + parentTitle + "”: " + title, Detail: role, From: parentTitle, Conversation: conversation, Session: parent.ID}
+	return text, origin
+}
+
+func (b *Bench) spawnedView(ctx context.Context, parent *Execution, childConversation string) (LineageView, error) {
 	view, err := b.agentTree(ctx, parent, 0)
 	if err != nil {
 		return LineageView{}, err

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/artifacts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/telemetry"
@@ -253,11 +254,62 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 	if !strings.Contains(reviewerBrief.Text, "Approved Mission contract") || !strings.Contains(reviewerBrief.Text, plan.Contract.Digest) || !strings.Contains(reviewerBrief.Text, "One row after reconnect") || strings.Contains(reviewerBrief.Text, "Unapproved local criteria") {
 		t.Fatalf("wrong reviewer contract: %s", reviewerBrief.Text)
 	}
+	git(t, child.Members[0].Path, "commit", "--allow-empty", "-m", "new candidate head")
+	reviewer := o.fake.session(review.Session.Id)
+	reviewer.Events <- agent.Event{Type: "turn_started"}
+	reviewer.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	until(t, "stale revision-bound verdict", func() bool {
+		board, err := o.client.GetMission(owner, &pb.GetMissionRequest{MissionId: o.mission})
+		if err != nil {
+			return false
+		}
+		for _, row := range board.Tasks {
+			for _, ev := range row.Evidence {
+				if ev.Kind == "review" && ev.State == "stale" && ev.Outcome == "unknown" && ev.ContractDigest == plan.Contract.Digest && ev.Revisions["api"] == member.BaseCommit {
+					return true
+				}
+			}
+		}
+		return false
+	})
 	spawn.TaskId = m.Plans[0].Tasks[1].TaskId
 	spawn.OperationId = strings.Repeat("k", 125) + "b"
+	// Remove the fixture's source temporarily so allocation fails after reservation.
+	if err = os.Rename(source, source+"-offline"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = o.client.SpawnAgent(orch, spawn)
+	if restore := os.Rename(source+"-offline", source); restore != nil {
+		t.Fatal(restore)
+	}
+	if err == nil {
+		t.Fatal("allocation should fail with source offline")
+	}
+	reserved, err := o.bench.Work.Mission(o.mission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := reserved.Task(spawn.TaskId).Current()
+	if a == nil || a.Dispatch == nil || !a.Started.IsZero() || reserved.LiveChildren(a.Grant) != 2 {
+		t.Fatalf("lost pending reservation: %+v", a)
+	}
 	other, err := o.client.SpawnAgent(orch, spawn)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if other.Spawned.SessionId != a.Execution || other.Spawned.CollectionId != a.Workspace {
+		t.Fatal("retry replaced reserved identities")
+	}
+	again, err := o.client.SpawnAgent(orch, spawn)
+	if err != nil || again.Spawned.SessionId != a.Execution {
+		t.Fatalf("replayed assignment: %v %v", again, err)
+	}
+	applied := o.fake.session(a.Execution).Applied
+	_ = briefOf(t, applied)
+	select {
+	case <-applied:
+		t.Fatal("duplicate worker brief")
+	default:
 	}
 	if other.Spawned.CollectionId == child.ID {
 		t.Fatal("distinct pinned tasks share a writable workspace")

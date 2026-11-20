@@ -357,6 +357,18 @@ func (m *Manager) Get(id string) (Collection, error) {
 // request retains its record and any completed worktrees; the same key retries
 // that plan. It never force-checks out, resets, removes, or prunes work.
 func (m *Manager) Create(ctx context.Context, key string, spec Spec) (Collection, error) {
+	return m.create(ctx, key, spec, "")
+}
+
+// CreateReserved realizes the workspace ID already assigned to a Mission attempt.
+func (m *Manager) CreateReserved(ctx context.Context, id string, spec Spec) (Collection, error) {
+	if !component.MatchString(id) {
+		return Collection{}, errors.New("invalid reserved workspace id")
+	}
+	return m.create(ctx, "reserved/"+id, spec, id)
+}
+
+func (m *Manager) create(ctx context.Context, key string, spec Spec, id string) (Collection, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	spec.Members = append([]MemberSpec(nil), spec.Members...)
@@ -410,7 +422,12 @@ func (m *Manager) Create(ctx context.Context, key string, spec Spec) (Collection
 	if activeCount >= 128 || len(m.items) >= 16384 {
 		return Collection{}, errors.New("collection capacity exhausted")
 	}
-	c := Collection{Version: 4, ID: commands.ID(), Name: spec.Name, WorkID: spec.WorkID, State: "creating", RequestKey: key, Fingerprint: fingerprint, CreatedAt: time.Now().UnixMilli()}
+	if id == "" {
+		id = commands.ID()
+	} else if _, ok := m.items[id]; ok {
+		return Collection{}, errors.New("reserved workspace already exists")
+	}
+	c := Collection{Version: 4, ID: id, Name: spec.Name, WorkID: spec.WorkID, State: "creating", RequestKey: key, Fingerprint: fingerprint, CreatedAt: time.Now().UnixMilli()}
 	if spec.Origin != nil {
 		origin := *spec.Origin
 		if origin.StartedAt.IsZero() {

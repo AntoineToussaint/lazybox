@@ -46,3 +46,18 @@ func TestReviewEvidenceIsRecordedOnTheAttempt(t *testing.T) {
 		t.Fatal("a review whose blockers were settled must be recorded again")
 	}
 }
+
+func TestBoundReviewOnlyInvalidatedByLaterRevisionObservations(t *testing.T) {
+	old := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidenceCommit, Member: "api", Head: "old"}}
+	verdict := Recorded{Seq: 2, Evidence: Evidence{Kind: EvidenceReview, Outcome: OutcomePass, ContractDigest: "spec", Revisions: map[string]string{"api": "reviewed"}}}
+	checks := Recorded{Seq: 3, Evidence: Evidence{Kind: EvidenceRun, Revisions: map[string]string{"api": "reviewed"}}}
+	_, flags, _ := judge(&Task{Evidence: []Recorded{old, verdict, checks}})
+	if slices.Contains(flags, FlagStale) {
+		t.Fatal("old observation invalidated the newer review")
+	}
+	checks.Revisions["api"] = "next"
+	trust, flags, _ := judge(&Task{Evidence: []Recorded{old, verdict, checks}})
+	if trust == TrustVerified || !slices.Contains(flags, FlagStale) {
+		t.Fatal("review survived a subsequent revision change")
+	}
+}

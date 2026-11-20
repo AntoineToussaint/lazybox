@@ -561,8 +561,51 @@ func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution,
 	if req.TemplateID != "" && (req.Scope != reviews.ScopeChanges || b.Checkpoints == nil) {
 		return nil, reviews.Run{}, errors.New("review templates need workspace changes and code checkpoints")
 	}
+	var required []work.BaselineMember
+	var missionID, taskID, attemptID string
+	var contract *work.PlanContract
+	if b.Work != nil {
+		for _, at := range b.Work.Attempts() {
+			if at.Attempt.Conversation != conversationOf(source) {
+				continue
+			}
+			missionID, taskID, attemptID = at.Mission, at.Task, at.Attempt.ID
+			state, err := b.Work.Mission(at.Mission)
+			if err != nil {
+				return nil, reviews.Run{}, err
+			}
+			if entry, plan := state.ApprovedTaskPlan(at.Attempt.Grant, at.Task); plan != nil {
+				contract = plan.Contract
+				if entry.Workspace == "pinned" {
+					required = plan.Baseline
+				}
+			}
+			break
+		}
+	}
+	bound := contract != nil && req.Scope == reviews.ScopeChanges
+	var heads map[string]string
+	if bound {
+		members, err := b.planBaseline(ctx, workspace.ID)
+		if err != nil {
+			return nil, reviews.Run{}, fmt.Errorf("commit the candidate before requesting a Mission changes review: %w", err)
+		}
+		repos := map[string]string{}
+		for _, m := range members {
+			repos[m.Name] = m.Repository
+		}
+		for _, m := range required {
+			if repos[m.Name] != m.Repository {
+				return nil, reviews.Run{}, fmt.Errorf("required Mission member %q is missing or changed", m.Name)
+			}
+		}
+		heads = map[string]string{}
+		for _, m := range members {
+			heads[m.Name] = m.Commit
+		}
+	}
 	var scope reviewScope
-	if req.TemplateID == "" {
+	if req.TemplateID == "" && !bound {
 		scope, err = b.scopeOf(ctx, source, workspace, req)
 		if err != nil {
 			return nil, reviews.Run{}, err
@@ -572,11 +615,17 @@ func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution,
 	if err != nil {
 		return nil, reviews.Run{}, err
 	}
-	if req.TemplateID != "" {
-		scope, err = b.captureReviewInput(ctx, conversationOf(e), workspace, req.Compare)
+	if req.TemplateID != "" || bound {
+		scope, err = b.captureReviewInput(ctx, conversationOf(e), workspace, req.Compare, heads)
 		if err != nil {
 			_ = e.Engine.Close()
 			return nil, reviews.Run{}, err
+		}
+	}
+	if bound {
+		if len(scope.input) != len(heads) {
+			_ = e.Engine.Close()
+			return nil, reviews.Run{}, errors.New("workspace membership changed during review capture")
 		}
 	}
 	label, authorLabel := agentLabel(profile), agentLabel(source.Profile)
@@ -600,23 +649,12 @@ func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution,
 		run.Detail += " " + fallback
 	}
 	run.Fallback, run.Focus = fallback, focus
-	var contract *work.PlanContract
-	if b.Work != nil {
-		for _, at := range b.Work.Attempts() {
-			if at.Attempt.Conversation != run.SourceConversation {
-				continue
-			}
-			run.Mission, run.Task = at.Mission, at.Task
-			state, err := b.Work.Mission(at.Mission)
-			if err != nil {
-				_ = e.Engine.Close()
-				return nil, reviews.Run{}, err
-			}
-			if _, plan := state.ApprovedTaskPlan(at.Attempt.Grant, at.Task); plan != nil {
-				contract = plan.Contract
-			}
-			break
-		}
+	run.Mission, run.Task = missionID, taskID
+	if bound {
+		run.ContractDigest = contract.Digest
+		run.MemberHeads = heads
+		run.ReviewWorkspace = workspace.ID
+		run.ReviewAttempt = attemptID
 	}
 	workspacePlan := ""
 	if contract == nil {
@@ -767,8 +805,25 @@ func (b *Bench) recordReviewEvidence(run reviews.Run, counts reviews.Counts, fin
 			ev.Outcome = work.OutcomeFail
 		}
 	}
+	if run.ContractDigest != "" {
+		ev.ContractDigest, ev.Revisions, ev.Workspace = run.ContractDigest, run.MemberHeads, run.ReviewWorkspace
+		if finished {
+			members, err := b.planBaseline(b.ctx, run.ReviewWorkspace)
+			stale := err != nil || len(members) != len(run.MemberHeads)
+			for _, m := range members {
+				if run.MemberHeads[m.Name] != m.Commit {
+					stale = true
+				}
+			}
+			if stale {
+				ev.State = "stale"
+				ev.Outcome = work.OutcomeUnknown
+				ev.Detail = "Candidate changed or could not be read. Review the current workspace revisions."
+			}
+		}
+	}
 	actor := work.Actor{Kind: work.ActorAgent, Role: "reviewer", Conversation: run.ReviewerConversation, Execution: run.ReviewerSession}
-	_, _ = b.Work.Record(work.Origin{Conversation: run.SourceConversation}, actor, ev)
+	_, _ = b.Work.Record(work.Origin{Conversation: run.SourceConversation, Attempt: run.ReviewAttempt}, actor, ev)
 }
 
 // reviewTurnEnded follows reviews when a turn of e ended: a reviewer's turn

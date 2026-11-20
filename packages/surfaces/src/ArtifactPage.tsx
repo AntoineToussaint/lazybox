@@ -4,6 +4,7 @@ import type { Artifact, ArtifactVersion, Collection } from '@lazybox/protocol';
 import { ActionMenu } from './ActionMenu';
 import { CreateIssueDialog, DeleteArtifactDialog, DiffStats, DiffView, SaveToRepositoryDialog } from './ArtifactDialogs';
 import { artifactsChanged, errorText, restoreArtifacts, retireArtifact } from './artifact-client';
+import { TodoList, todoMarkdown } from './TodoList';
 import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, slug, versionOrigin } from './artifact-model';
 import { extractToc, readingMinutes, tocOutline, withoutRepeatedTitle } from './artifact-reader';
 import { DocumentBody, RenderedDiff, TableOfContents, useScrollSpy } from './ArtifactReader';
@@ -138,7 +139,20 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
 
   const content = contents.get(shown);
   const baseContent = baseNumber ? contents.get(baseNumber) : '';
-  const diff = useMemo(() => view === 'changes' && content !== undefined && baseContent !== undefined ? lineDiff(baseContent, content) : [], [view, content, baseContent]);
+  const structured = artifact?.format === 'json' || artifact?.kind === 'todo-list';
+  const project = (body: string) => {
+    if (!structured || !body) return body;
+    if (artifact?.kind === 'todo-list') return todoMarkdown(body);
+    const fields = JSON.parse(body) as Record<string, string | string[]>;
+    return Object.entries(fields).filter(([name]) => name !== 'schema').map(([name, value]) => {
+      const title = name[0].toUpperCase() + name.slice(1).replace(/[A-Z]/g, letter => ' ' + letter.toLowerCase());
+      const text = Array.isArray(value) ? value.map(entry => '- ' + entry).join('\n') : value;
+      return '## ' + title + '\n\n' + text;
+    }).join('\n\n');
+  };
+  const currentText = useMemo(() => content === undefined ? undefined : project(content), [content, structured, artifact?.kind]);
+  const previousText = useMemo(() => baseContent === undefined ? undefined : project(baseContent), [baseContent, structured, artifact?.kind]);
+  const diff = useMemo(() => view === 'changes' && currentText !== undefined && previousText !== undefined ? lineDiff(previousText, currentText) : [], [view, currentText, previousText]);
   const version = versions.find(v => v.number === shown);
   const latest = versions.at(-1);
   const documentRef = useRef<HTMLDivElement>(null);
@@ -157,7 +171,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   // One title on the page: a leading h1 that repeats the artifact's title, or nearly
   // ("(final)", a subtitle), is hidden and the artifact's title shows (repeatsTitle).
   const { Preview, extension, mime, label: formatLabel } = artifactFormat(artifact?.format ?? '');
-  const reading = useMemo(() => content === undefined || !artifact ? undefined : Preview ? content : withoutRepeatedTitle(content, artifact.title), [content, artifact?.title, Preview]);
+  const reading = useMemo(() => content === undefined || !artifact ? undefined : structured ? currentText : Preview ? content : withoutRepeatedTitle(content, artifact.title), [content, currentText, structured, artifact?.title, Preview]);
   const headings = useMemo(() => reading === undefined || Preview ? [] : extractToc(reading), [reading, Preview]);
   const outline = useMemo(() => tocOutline(headings), [headings]);
   const active = useScrollSpy(scroller, view === 'document' ? outline.map(entry => entry.id) : []);
@@ -213,17 +227,17 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
       requestAnimationFrame(() => moreMenu.current?.querySelector('summary')?.focus());
     } catch (e) { setError(errorText(e)); }
   };
-  const republishVersion = async () => {
-    if (content === undefined || republishing || shown === latestNumber) return;
+  const saveRevision = async (body: string, message: string) => {
+    if (republishing) return;
     setRepublishing(true);
     try {
-      const saved = await api.putArtifact({ collectionId, artifactId, content, expectedVersion: latestNumber }, { timeoutMs: 10000 });
+      const saved = await api.putArtifact({ collectionId, artifactId, content: body, expectedVersion: latestNumber }, { timeoutMs: 10000 });
       setContents(current => new Map(current).set(saved.contentVersion, saved.content));
       setArtifact(saved);
       setSelected(0);
       setBase(0);
       artifactsChanged(collectionId);
-      say(saved.contentVersion === latestNumber ? 'This version matches the latest.' : `Republished v${shown} as v${saved.contentVersion}.`);
+      say(message);
     } catch (e) { setError(errorText(e)); }
     finally { setRepublishing(false); }
   };
@@ -234,11 +248,12 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   };
   const retiredBy = artifact.retired?.by?.kind === 'agent' ? 'an agent' : 'you';
   const copy = async (text: string, said: string) => { try { await navigator.clipboard.writeText(text); say(said); } catch (e) { setError(`Copy failed: ${errorText(e)}`); } };
-  const exportContent = Preview ? content : latestContent;
-  const download = () => {
-    if (exportContent === undefined) return;
-    const filename = `${slug(artifact.title)}.${extension}`;
-    const url = URL.createObjectURL(new Blob([exportContent], { type: `${mime};charset=utf-8` }));
+  const exportContent = structured ? currentText : Preview ? content : latestContent;
+  const download = (source = false) => {
+    const payload = source ? content : exportContent;
+    if (payload === undefined) return;
+    const filename = `${slug(artifact.title)}.${source ? 'json' : extension}`;
+    const url = URL.createObjectURL(new Blob([payload], { type: `${source ? 'application/json' : mime};charset=utf-8` }));
     const link = document.createElement('a'); link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     say(`Downloaded ${filename}`);
@@ -269,7 +284,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   };
   const openFile = () => { if (filePath && workbench) workbench.open(filePath, { focus: true }); };
   const sendToAgent = () => {
-    const reference = agentReference(artifact, content ?? '', 1200, shown);
+    const reference = agentReference(artifact, currentText ?? '', 1200, shown);
     const text = excerpt ? `${reference}Selected excerpt:\n${excerpt.split('\n').map(line => `> ${line}`).join('\n')}\n\n` : reference;
     if (conversationId && onShowSession) {
       composeInConversation({ sessionId: conversationId, text });
@@ -290,13 +305,13 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
         <label className={`artifact-kind-picker kind-${kind}`} title={`${kindLabel[kind]}: choose another kind`}>
           <span className={`artifact-kind-dot kind-${kind}`} aria-hidden="true"><Icon name={kindIcon[kind]} size={13}/></span>
           <span className="artifact-kind-name" aria-hidden="true">{kindLabel[kind]}</span>
-          <select aria-label="Kind" value={kind} onChange={event => void update({ kind: event.target.value }, `Marked as ${kindLabel[asKind(event.target.value)].toLowerCase()}.`)}>{ARTIFACT_KINDS.map(value => <option key={value} value={value}>{kindLabel[value]}</option>)}</select>
+          <select disabled={structured} aria-label="Kind" value={kind} onChange={event => void update({ kind: event.target.value }, `Marked as ${kindLabel[asKind(event.target.value)].toLowerCase()}.`)}>{ARTIFACT_KINDS.filter(value => value !== 'todo-list' || kind === value).map(value => <option key={value} value={value}>{kindLabel[value]}</option>)}</select>
         </label>
         {(scrolled || collection?.name) && <span className="artifact-crumb-text" aria-hidden="true">{scrolled ? artifact.title : collection?.name}</span>}
       </div>
       <div className="artifact-segmented" role="tablist" aria-label="View">
         <button type="button" role="tab" aria-selected={view === 'document'} onClick={() => setView('document')}>{Preview ? 'Preview' : 'Document'}</button>
-        {Preview && <button type="button" role="tab" aria-selected={view === 'source'} onClick={() => setView('source')}>Source</button>}
+        {(Preview || structured) && <button type="button" role="tab" aria-selected={view === 'source'} onClick={() => setView('source')}>Source</button>}
         <button type="button" role="tab" aria-selected={view === 'changes'} disabled={versions.length < 2 && shown <= 1} onClick={() => setView('changes')}>Changes</button>
       </div>
       <div className="artifact-page-actions">
@@ -305,7 +320,8 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
         <button type="button" className="artifact-tool" aria-label={excerpt ? 'Send selection to agent' : 'Send to agent'} onMouseDown={event => { if (excerpt) event.preventDefault(); }} onClick={sendToAgent} title={conversationId ? `Put a reference in the message box of “${conversationTitle || 'the conversation'}” (not sent)` : 'Copy a reference an agent can read'}><Icon name="send" size={14}/><span className="artifact-tool-label">{excerpt ? 'Send selection' : 'Send to agent'}</span></button>
         <ActionMenu label="Export" className="artifact-export-menu" summary={<><Icon name="download" size={14}/><span className="artifact-tool-label">Export</span></>}>
           <button type="button" disabled={exportContent === undefined} onClick={() => void copy(exportContent ?? '', `Copied ${formatLabel}.`)}><Icon name="copy"/><span>{Preview ? 'Copy HTML source' : 'Copy as Markdown'}</span></button>
-          <button type="button" disabled={exportContent === undefined} onClick={download}><Icon name="download"/><span>Download .{extension}</span></button>
+          <button type="button" disabled={exportContent === undefined} onClick={() => download()}><Icon name="download"/><span>Download .{extension}</span></button>
+          {structured && <button type="button" disabled={content === undefined} onClick={() => download(true)}><Icon name="download"/><span>Download .json</span></button>}
           {!Preview && <><button type="button" onClick={print}><Icon name="print"/><span>Print or save as PDF…</span></button>
           <button type="button" disabled={!collection?.members.length} onClick={() => setDialog('save')}><Icon name="repository"/><span>Save to repository…</span></button>
           <button type="button" disabled={!collection?.members.length} onClick={() => setDialog('issue')}><Icon name="external"/><span>Create GitHub issue…</span></button></>}
@@ -364,8 +380,8 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
                   </ActionMenu>}
                 </div>
               </header>
-              {shown !== latestNumber && <div className="artifact-old-version" role="note"><Icon name="history" size={14}/><span>You are viewing v{shown} of {latestNumber}.</span><button type="button" className="link-button" onClick={() => { setSelected(0); setBase(shown); setView('changes'); }}>What changed since</button><button type="button" className="link-button" onClick={() => { setSelected(0); setBase(0); }}>Back to latest</button>{!artifact.trackedPath && !artifact.retired && <button type="button" className="link-button" disabled={content === undefined || republishing} onClick={() => void republishVersion()}>Republish v{shown}</button>}</div>}
-              <div ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <pre className="artifact-html-source">{reading}</pre> : Preview ? <Preview source={reading}/> : <DocumentBody markdown={reading} headings={headings} scroller={scroller}/>}</div>
+              {shown !== latestNumber && <div className="artifact-old-version" role="note"><Icon name="history" size={14}/><span>You are viewing v{shown} of {latestNumber}.</span><button type="button" className="link-button" onClick={() => { setSelected(0); setBase(shown); setView('changes'); }}>What changed since</button><button type="button" className="link-button" onClick={() => { setSelected(0); setBase(0); }}>Back to latest</button>{!artifact.trackedPath && !artifact.retired && <button type="button" className="link-button" disabled={content === undefined || republishing} onClick={() => content !== undefined && void saveRevision(content, `Republished v${shown}.`)}>Republish v{shown}</button>}</div>}
+              <div ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <pre className="artifact-html-source">{content}</pre> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : <DocumentBody markdown={reading} headings={headings} scroller={scroller}/>}</div>
             </div>
             {outline.length > 0 && <aside className="doc-toc-rail"><TableOfContents entries={outline} active={active} scroller={scroller}/></aside>}
           </div>
@@ -373,13 +389,13 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
               <div className="artifact-changes-bar">
                 <h2>Changes</h2>
                 {shown > 1 && <label className="artifact-compare">from <select aria-label="Compare with" value={baseNumber} onChange={event => setBase(Number(event.target.value))}>{versions.filter(v => v.number < shown).reverse().map(v => <option key={v.number} value={v.number}>v{v.number}{v.number === shown - 1 ? ' (previous)' : ''}</option>)}</select> to <strong>v{shown}</strong>{diff.length > 0 && <DiffStats lines={diff}/>}</label>}
-                {!Preview && <div className="artifact-segmented" role="radiogroup" aria-label="Show changes as">
+                {artifact.kind !== 'todo-list' && !Preview && <div className="artifact-segmented" role="radiogroup" aria-label="Show changes as">
                   <button type="button" role="radio" aria-checked={diffMode === 'rendered'} onClick={() => setDiffMode('rendered')}>Rendered</button>
                   <button type="button" role="radio" aria-checked={diffMode === 'text'} onClick={() => setDiffMode('text')}>Text</button>
                 </div>}
               </div>
               {content === undefined || baseContent === undefined ? <p role="status" className="module-empty">Loading versions…</p>
-                : !Preview && diffMode === 'rendered' ? <RenderedDiff key={`${baseNumber}:${shown}`} before={withoutRepeatedTitle(baseContent, artifact.title)} after={withoutRepeatedTitle(content, artifact.title)}
+                : artifact.kind !== 'todo-list' && !Preview && diffMode === 'rendered' ? <RenderedDiff key={`${baseNumber}:${shown}`} before={withoutRepeatedTitle(previousText ?? '', artifact.title)} after={withoutRepeatedTitle(currentText ?? '', artifact.title)}
                   beforeLabel={<VersionLabel number={baseNumber} version={versions.find(v => v.number === baseNumber)} tone="before"/>} afterLabel={<VersionLabel number={shown} version={version} tone="after"/>}/>
                 : <DiffView key={`${baseNumber}:${shown}`} lines={diff} label={`Changes from v${baseNumber} to v${shown}`}/>}
             </div>}

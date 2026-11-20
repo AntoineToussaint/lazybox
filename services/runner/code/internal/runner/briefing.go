@@ -68,6 +68,7 @@ var builtinBriefings = []builtinBriefing{
 		{version: 2, since: "## Documents you write for the person", note: "Keep those documents in Lazybox, in GitHub-flavoured Markdown: never in an external document tool or connector unless the person names it."},
 		{version: 3, since: "--supersedes", note: "Keep one artifact per topic: merge overlapping ones with `lazybox artifact put <file|-> --title \"…\" --supersedes ID,ID`, or retire one with `lazybox artifact retire ID`; do not leave pointer stubs."},
 		{version: 4, since: "Prefer Mermaid for workflows", note: "Prefer Mermaid for workflows, state transitions and service interactions. Show entry points, decisions and relevant failure paths. Use tables for comparisons and checklists for procedures; link to the source and document assumptions and unverified work."},
+		{version: 5, since: "lazybox artifact template KIND", note: "For structured artifacts start with lazybox artifact template KIND and publish with --kind KIND --format json. Each supported kind has a versioned schema."},
 	}},
 	{id: "conversations", text: conversationBriefing, changes: []briefingChange{
 		{version: 1, since: "lazybox conversation new", note: "To start another conversation when the person asks, run `lazybox conversation new --title \"…\" --brief \"…\"` (or `--brief-artifact ID`): the person approves it in one click."},

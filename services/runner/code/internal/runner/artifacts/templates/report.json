@@ -1,0 +1,11 @@
+{
+  "schema": "report.v1",
+  "scope": "What was examined",
+  "findings": [
+    "What was observed"
+  ],
+  "evidence": [
+    "Source or observation"
+  ],
+  "verificationGaps": []
+}

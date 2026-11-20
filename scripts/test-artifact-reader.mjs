@@ -25,6 +25,14 @@ import { designDocV2, seedDesignDoc } from './fixtures/artifact-sample.mjs';
 const fixture = await startRunnerFixture();
 const session = fixture.sessions[0];
 const doc = seedDesignDoc(fixture, { sessionId: session.id });
+const todo = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Tasks', kind: 'todo-list',
+  content: JSON.stringify({ schema: 'todo-list.v1', items: [{ id: 'verify', text: 'Verify phone', status: 'todo' }] }) });
+const structuredDocs = [];
+for (const kind of ['plan', 'spec', 'report', 'notes', 'other']) {
+  const content = await readFile(new URL('../services/runner/code/internal/runner/artifacts/templates/' + kind + '.json', import.meta.url), 'utf8');
+  const record = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Structured ' + kind, kind, format: 'json', content });
+  structuredDocs.push({ record, field: Object.keys(JSON.parse(content))[1] });
+}
 const htmlSource = '<!doctype html><html><head><style>h2 { color: rgb(12, 34, 56) }</style></head><body>' +
   '<h2>Deploy preview</h2><details><summary>Metrics</summary>Latency</details>' +
   '<script>document.body.textContent = "script ran"</script>' +
@@ -44,6 +52,18 @@ try {
   // The system print dialog is stubbed: the print sheet stays for the print media checks.
   await context.addInitScript(() => { window.__printed = 0; window.print = () => { window.__printed++; }; });
   const page = await context.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', e => errors.push(String(e)));
+  for (const { record, field } of structuredDocs) {
+    await page.goto(standalone.replace(doc.id, record.id));
+    await expect(page.getByRole('heading', { name: field[0].toUpperCase() + field.slice(1), exact: true })).toBeVisible();
+  }
+  await page.goto(standalone.replace(doc.id, todo.id));
+  const checkbox = page.getByRole('checkbox', { name: 'Verify phone' });
+  await checkbox.click();
+  await expect(page.getByLabel('Version', { exact: true })).toHaveValue('2');
+  await expect(checkbox).toBeChecked();
+  await page.getByLabel('Version', { exact: true }).selectOption('1');
+  await expect(checkbox).toBeDisabled();
+  await expect(checkbox).not.toBeChecked();
   await page.goto(standalone.replace(doc.id, html.id));
   const preview = page.frameLocator('iframe[title="HTML artifact preview"]');
   await expect(preview.getByRole('heading', { name: 'Deploy preview' })).toHaveCSS('color', 'rgb(12, 34, 56)');

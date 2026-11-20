@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"connectrpc.com/connect"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/artifacts"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen/genconnect"
 )
@@ -29,7 +30,8 @@ type artifactAPI interface {
 }
 
 const artifactUsage = `Usage:
-  lazybox artifact put <file|-> --title T [--id ID] [--kind plan|report|spec|notes|other] [--format markdown|html] [--supersedes ID[,ID…]]
+  lazybox artifact template KIND
+  lazybox artifact put <file|-> --title T [--id ID] [--kind plan|report|spec|notes|todo-list|other] [--format markdown|html|json] [--supersedes ID[,ID…]]
   lazybox artifact retire ID [--superseded-by ID] [--reason "…"]
   lazybox artifact get ID [--version N]
   lazybox artifact list [--all]`
@@ -98,8 +100,8 @@ func artifactCommand(ctx context.Context, client artifactAPI, workspace string, 
 	collection := flags.String("collection", workspace, "workspace whose artifacts to use (set for agents and workspace terminals)")
 	title := flags.String("title", "", "put: the artifact's title (required to create one)")
 	id := flags.String("id", "", "put: publish a new version of this artifact instead of creating one")
-	format := flags.String("format", "", "put: markdown or html (set at creation)")
-	kind := flags.String("kind", "", "put: plan, report, spec, notes or other")
+	format := flags.String("format", "", "put: markdown, html or json (set at creation)")
+	kind := flags.String("kind", "", "put: plan, report, spec, notes, todo-list or other")
 	version := flags.Uint("version", 0, "get: this version instead of the latest")
 	supersedes := flags.String("supersedes", "", "put: retire these artifacts (comma-separated IDs) as superseded by the one published")
 	supersededBy := flags.String("superseded-by", "", "retire: the artifact that replaces it")
@@ -107,6 +109,17 @@ func artifactCommand(ctx context.Context, client artifactAPI, workspace string, 
 	all := flags.Bool("all", false, "list: include retired artifacts")
 	positional, err := parseInterleaved(flags, args[1:])
 	if err != nil {
+		return err
+	}
+	if verb == "template" {
+		if len(positional) != 1 {
+			return errors.New("artifact template needs one kind")
+		}
+		body, err := artifacts.Template(positional[0])
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(stdout, body)
 		return err
 	}
 	if *collection == "" {

@@ -90,7 +90,7 @@ make promote RELEASE=<candidate-id-printed-by-stage>
 make working
 ```
 
-Staging copies source into a new release directory, excluding `.cache`, private
+Staging copies source into a new release directory, excluding `.git`, `.cache`, private
 `runner.config.json`, `.env` files, dependencies and build output. It installs
 locked npm dependencies, runs the [shared release catalog](RELEASE_GATES.md),
 builds the native app, and records each gate result plus source, app and compiled

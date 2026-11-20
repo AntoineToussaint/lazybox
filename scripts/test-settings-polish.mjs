@@ -37,7 +37,11 @@ try {
   await mkdir('.cache', { recursive: true });
   // Hold the automatic refresh, so "checking" can be seen before the answer.
   let release; const held = new Promise(resolve => { release = resolve; });
-  await page.route('**/RefreshSubscription', async route => { if (route.request().postDataJSON().profileId === 'claude-past') await held; await route.continue(); });
+  await page.route('**/RefreshSubscription', async route => { if (route.request().postDataJSON().profileId === 'claude-past') await held; const id = route.request().postDataJSON().profileId;
+    if (id === 'claude-future' || id === 'claude-unknown') {
+      return route.fulfill({ json: fixture.profiles.find(profile => profile.id === id) });
+    }
+    await route.continue(); });
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
 

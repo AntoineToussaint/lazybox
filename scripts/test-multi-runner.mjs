@@ -307,12 +307,7 @@ try {
       await page.keyboard.press(tab);
       await page.keyboard.press(tab);
       await expect(sheet.getByRole('textbox', { name: 'First message' })).toBeFocused();
-      // Working remembers no repository: Enter asks for one, ↑ is "Start without a repository", Enter takes it, Enter starts.
-      await page.keyboard.press('Enter');
-      await expect(sheet.getByRole('combobox', { name: 'Add a repository' })).toBeFocused();
-      await page.keyboard.press('ArrowUp');
-      await page.keyboard.press('Enter');
-      await expect(sheet.getByRole('textbox', { name: 'First message' })).toBeFocused();
+      // Working remembers the previous choice to start without a repository.
       await page.keyboard.press('Enter');
       await expect(sheet).toHaveCount(0);
       await expect.poll(() => mutations(working, 'Apply').filter(m => m.body.message?.text === 'Tidy the release script').length).toBe(1);

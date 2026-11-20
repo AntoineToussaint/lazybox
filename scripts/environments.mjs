@@ -27,7 +27,7 @@ export function validateEnvironmentRoot(source, directory) {
     throw new Error('Environment storage must be outside source or inside an excluded build/state directory such as .cache');
   }
 }
-const excluded = new Set(['.cache', '.codefly', 'node_modules', 'target', 'dist', 'build', 'bin', 'coverage', '.expo', 'playwright-report', 'test-results']);
+const excluded = new Set(['.git', '.cache', '.codefly', 'node_modules', 'target', 'dist', 'build', 'bin', 'coverage', '.expo', 'playwright-report', 'test-results']);
 export function includeSource(relativePath) {
   return !relativePath.split(/[\\/]/).some(part => excluded.has(part) || part === 'runner.config.json' || part === '.env' || part.startsWith('.env.') && part !== '.env.example' || part.endsWith('.log') || part.endsWith('.tsbuildinfo'));
 }

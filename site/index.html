@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lazybox · A workspace for coding agents</title>
+  <meta name="description" content="Run Claude Code and Codex in persistent workspaces and review changes on your Mac.">
+  <meta property="og:title" content="Lazybox · A workspace for coding agents">
+  <meta property="og:image" content="https://lazybox.ai/product/hero.webp">
+  <link rel="icon" href="./product/logo.svg">
+  <link rel="stylesheet" href="./product/style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="mast">
+    <a class="wordmark" href="./"><img src="./product/logo.svg" width="30" height="30" alt="">Lazybox</a>
+    <nav aria-label="Main navigation">
+      <a href="#install">Install</a>
+      <a href="./guide/">Guides</a>
+      <a href="https://github.com/AntoineToussaint/lazybox">GitHub</a>
+    </nav>
+  </header>
+  <main id="main">
+  <section class="hero">
+    <p class="release">V2 · Mac preview</p>
+    <h1>A workspace for<br />your coding agents.</h1>
+    <p class="lead">Run Claude Code and Codex side by side. See who needs an answer, review what changed, and keep the work running when you close the window.</p>
+    <a class="action" href="#install">Install from source <span aria-hidden="true">↓</span></a>
+    <picture>
+      <source media="(prefers-color-scheme: light)" srcset="./product/hero-light.webp" />
+      <img src="./product/hero.webp" alt="Lazybox workspaces, a running agent conversation and its published plan" width="1440" height="900" fetchpriority="high" />
+    </picture>
+  </section>
+  <section class="feature">
+    <div>
+      <h2>Pick up where an agent needs you.</h2>
+      <p>The inbox brings questions, approvals, and updates together across workspaces. Open the conversation to answer or steer the next step.</p>
+      <a href="./guide/guides/chat">Explore conversations →</a>
+    </div>
+    <img src="./product/chat-decisions.webp" loading="lazy" width="1440" height="900" alt="An agent’s question presented as choices inside a conversation" />
+  </section>
+  <section class="feature">
+    <div>
+      <h2>Review the work before it lands.</h2>
+      <p>Read the diff, leave a comment on a line, or ask a second agent to review. Keep findings beside the code as you decide what to ship.</p>
+      <a href="./guide/guides/review-agent-work">Walk through a review →</a>
+    </div>
+    <img src="./product/agent-review.webp" loading="lazy" width="1440" height="900" alt="An agent’s review findings beside the code changes they refer to" />
+  </section>
+  <section id="install" class="install">
+    <h2>Install the Mac preview</h2>
+    <p>Use an Apple Silicon Mac running macOS 13.5 or later. The build needs Xcode Command Line Tools, Go, Node.js, Rust, and about 8 GB of free space.</p>
+    <pre tabindex="0" aria-label="Installation commands"><code>git clone https://github.com/AntoineToussaint/lazybox.git
+cd lazybox
+make install</code></pre>
+    <p>Open Lazybox, connect Claude Code or Codex, then press <kbd>⌘N</kbd> to start a task.</p>
+    <a href="./guide/install#install-from-source">Full installation guide →</a>
+  </section>
+  </main>
+  <footer class="foot">
+    <a class="wordmark" href="./">Lazybox</a>
+    <a href="./v1/">V1 terminal app →</a>
+  </footer>
+</body>
+</html>

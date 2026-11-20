@@ -334,3 +334,5 @@ same commit through the release gates. Each channel reports its outcome in the a
 separate explicit operation. An interrupted action can leave
 `managed-build.lock` in the environment root. Confirm the build has ended
 before removing that lock and retrying.
+
+Managed Dev stop requests are durable files addressed to the launcher nonce in its control receipt. The launcher checks that exact file every 100 ms rather than relying on filesystem notification delivery; closing the control listener stops the checks. A request for another launcher generation has no effect.

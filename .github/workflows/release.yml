@@ -64,6 +64,9 @@ jobs:
   build:
     name: build · sign · notarize (macOS arm64)
     needs: gates
+    # Also collect package-install results for a manual candidate when an
+    # independent gate fails. The failed gate still fails the overall run.
+    if: ${{ !cancelled() && (needs.gates.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.version != '')) }}
     runs-on: macos-15
     timeout-minutes: 120
     outputs:
@@ -203,6 +206,7 @@ jobs:
   brew-install:
     name: Homebrew install (${{ matrix.os }})
     needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:

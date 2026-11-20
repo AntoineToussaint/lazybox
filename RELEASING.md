@@ -58,7 +58,8 @@ gh workflow run release.yml --ref main -f version=0.1.0-rc.1
 ```
 
 Supply either a candidate version or an existing tag. Candidate builds use a
-temporary updater key and exercise the Homebrew installation matrix. Tagged
+temporary updater key and exercise the Homebrew installation matrix even if
+an independent test gate fails. Any failed gate still fails the run. Tagged
 builds require the production updater key. Only a tag push publishes.
 
 ## What a build produces

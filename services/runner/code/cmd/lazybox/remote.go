@@ -426,6 +426,8 @@ func (c *cli) remote(args []string) error {
 	switch args[0] {
 	case "add":
 		return c.remoteAdd(args[1:])
+	case "add-kubernetes":
+		return c.remoteAddKubernetes(args[1:])
 	case "ls", "list":
 		return c.remoteList(args[1:])
 	case "rm", "remove":
@@ -433,7 +435,7 @@ func (c *cli) remote(args []string) error {
 	case "hosts":
 		return c.remoteHosts(args[1:])
 	}
-	return fail(exitUsage, "lazybox remote add <ssh-host> | ls | rm <name> | hosts")
+	return fail(exitUsage, "lazybox remote add <ssh-host> | add-kubernetes | ls | rm <name> | hosts")
 }
 
 // progress reports `remote add`'s steps: one JSON line each (--progress json,
@@ -494,7 +496,7 @@ func (c *cli) remoteAdd(args []string) error {
 		return fail(exitUsage, "%v", err)
 	}
 	remotes := c.remotes()
-	if existing, err := remotes.Load(*name); err == nil && existing.Host != host {
+	if existing, err := remotes.Load(*name); err == nil && (existing.Route == "kubernetes" || existing.Host != host) {
 		return fail(exitUsage, "%s already names %s; choose another --name, or `lazybox remote rm %s` first", *name, existing.Host, *name)
 	}
 	p := progress{c: c, json: *mode == "json"}
@@ -636,6 +638,78 @@ func (c *cli) remoteAdd(args []string) error {
 	return nil
 }
 
+func (c *cli) remoteAddKubernetes(args []string) error {
+	f := c.flags("remote add-kubernetes")
+	name := f.String("name", "", "local Runner name")
+	var target link.KubernetesTarget
+	f.StringVar(&target.Context, "context", "", "Kubernetes context")
+	f.StringVar(&target.Namespace, "namespace", "", "Runner namespace")
+	f.StringVar(&target.Workload, "workload", "", "deployment/name or statefulset/name")
+	f.StringVar(&target.Container, "container", "", "Runner container name")
+	positional, err := c.parse(f, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 0 {
+		return fail(exitUsage, "lazybox remote add-kubernetes --name NAME --context CONTEXT --namespace NS --workload KIND/NAME --container CONTAINER")
+	}
+	if err = link.CheckName(*name); err != nil {
+		return fail(exitUsage, "%v", err)
+	}
+	if err = target.Validate(); err != nil {
+		return fail(exitUsage, "%v", err)
+	}
+	target.Kubectl, err = exec.LookPath("kubectl")
+	if err != nil {
+		return fmt.Errorf("find kubectl: %w", err)
+	}
+	target.Kubectl, err = filepath.Abs(target.Kubectl)
+	if err != nil {
+		return err
+	}
+	remotes := c.remotes()
+	if _, err = os.Stat(filepath.Join(remotes.Dir(*name), "remote.json")); !errors.Is(err, os.ErrNotExist) {
+		if err != nil {
+			return err
+		}
+		return fail(exitUsage, "%s already exists; choose a different --name", *name)
+	}
+	keys, err := remotes.Keys().Keys()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, link.StepTimeout())
+	defer cancel()
+	route := link.KubernetesRoute{Target: target}
+	enrolment, err := link.Enrol(ctx, route, keys, machineName())
+	if err != nil {
+		return err
+	}
+	r := link.Remote{Name: *name, Route: route.Kind(), Host: route.Describe().Host, Kubernetes: &target,
+		RunnerKey: enrolment.RunnerKey, Fingerprint: enrolment.Fingerprint, RunnerID: enrolment.RunnerID,
+		Machine: enrolment.Machine, OS: "linux", Release: enrolment.Release, KeyID: enrolment.KeyID, AddedAt: time.Now().UTC()}
+	if err = remotes.Save(r); err != nil {
+		return err
+	}
+	pin, err := r.PinnedKey()
+	if err != nil {
+		return err
+	}
+	session, err := link.Dial(ctx, route, keys, pin, machineName())
+	if err != nil {
+		return fmt.Errorf("saved %s but the first connection failed: %w", r.Name, err)
+	}
+	defer session.Close()
+	if _, err = genconnect.NewRunnerServiceClient(session.HTTPClient(), "http://runner").Version(ctx, connect.NewRequest(&pb.VersionRequest{})); err != nil {
+		return fmt.Errorf("saved %s but its Runner did not answer: %w", r.Name, err)
+	}
+	if c.json {
+		return c.printJSON(r)
+	}
+	c.out("Added %s. Connect with lazybox link connect %s.\n", r.Name, r.Name)
+	return nil
+}
+
 func firstNonEmptyString(values ...string) string {
 	for _, v := range values {
 		if v != "" {
@@ -715,7 +789,11 @@ func (c *cli) remoteRemove(args []string) error {
 	result := map[string]any{"removed": r.Name, "revoked": false}
 	if !*keep {
 		ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
-		err = link.RevokeOverSSH(ctx, r.SSH(remotes.ControlDir()), r.KeyID)
+		route, routeErr := r.OwnerRoute(remotes.ControlDir())
+		err = routeErr
+		if err == nil {
+			err = link.Revoke(ctx, route, r.KeyID)
+		}
 		cancel()
 		if err != nil {
 			result["problem"] = "this computer's key is still enrolled on " + r.Host + ": " + err.Error() + ". Revoke it there with `lazybox link owners revoke " + r.KeyID + "`."
@@ -819,7 +897,11 @@ func (c *cli) linkConnect(args []string) error {
 		c.out("%s is already connected by another lazybox (pid %d).\n", r.Name, st.PID)
 		return nil
 	}
-	agent := &link.Agent{Route: r.SSH(remotes.ControlDir()), Keys: keys, RunnerKey: pin, ClientName: machineName(), Label: r.Name}
+	route, err := r.OwnerRoute(remotes.ControlDir())
+	if err != nil {
+		return err
+	}
+	agent := &link.Agent{Route: route, Keys: keys, RunnerKey: pin, ClientName: machineName(), Label: r.Name}
 	origin, token, err := agent.Listen()
 	if err != nil {
 		return err

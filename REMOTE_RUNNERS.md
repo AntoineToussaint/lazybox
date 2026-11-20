@@ -1156,3 +1156,28 @@ confirmed in primary documentation.
 - Noise: [specification](https://noiseprotocol.org/noise.html) (IK pattern, handshake hash for channel binding) · systemd: [`systemd.kill`](https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html) (`KillMode`) · [`systemd-run`](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html) (`--scope`) · [`loginctl`](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html) (linger)
 
 **In this repository:** [MULTI_RUNNER.md](MULTI_RUNNER.md), [MOBILE_CLOUD_HUB.md](MOBILE_CLOUD_HUB.md), [REMOTE.md](REMOTE.md), [DEVICE_EXPERIENCE.md](DEVICE_EXPERIENCE.md), [SESSION_HOSTS.md](SESSION_HOSTS.md), [RESOURCE_OWNERSHIP.md](RESOURCE_OWNERSHIP.md), [EXECUTION.md](EXECUTION.md), [ARCHITECTURE.md](ARCHITECTURE.md), [RELEASING.md](RELEASING.md), [CLAUDE_COMPLIANCE.md](CLAUDE_COMPLIANCE.md), [the competitive audit](audits/2026-11-17-competitive/README.md); code: `services/runner/code/listen.go`, `work.go`, `internal/transport/auth.go`, `internal/transport/device_auth.go`, `internal/processguard/guard.go`, `internal/installation/`, `packages/client-core/src/index.ts`, `apps/desktop/src-tauri/src/runners.rs`.
+
+## Kubernetes owner link
+
+For a Runner already deployed in Kubernetes, enroll the desktop's local
+Lazybox installation using the operator's kubeconfig and kubectl:
+
+```sh
+lazybox remote add-kubernetes --name pilot --context CONTEXT --namespace NAMESPACE --workload statefulset/RUNNER --container RUNNER
+```
+
+Use the names from the rendered workload. Lazybox stores the explicit context,
+namespace, workload and container alongside the pinned Runner key. It resolves
+the workload's pod on each connection. The desktop discovers the saved Runner
+through the normal Runner directory. For a CLI-only connection, use
+`lazybox link connect pilot`. Remove access using `lazybox remote rm pilot`.
+
+Run the service with one replica and persist its entire XDG data, configuration
+and state directories. Keep the Runner listeners on loopback. The operator's
+Kubernetes role needs to resolve the workload and pod and open a pod exec
+stream. Keep this role restricted to the Runner's operators. Each session
+still uses the existing authenticated owner handshake.
+
+A disconnected client can reconnect to the same running shell. Pod replacement
+ends the shell. Verify that a replacement pod can read the same owner identity,
+worktrees and transcripts from the volume.

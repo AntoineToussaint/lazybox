@@ -95,18 +95,24 @@
 .workspace-conversations{margin:0 0 6px 18px}
 
 /* The fold control sits where the folder icon was. */
-.workspace-row>.workspace-fold{position:absolute;left:7px;top:9px;width:22px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:4px;background:transparent;color:var(--text-muted);z-index:1}
+.workspace-row>.workspace-fold{position:absolute;right:59px;top:7px;width:22px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:4px;background:transparent;color:var(--text-muted);z-index:1}
 .workspace-row>.workspace-fold:hover,.workspace-row>.workspace-fold:focus-visible{background:var(--surface-selected);color:var(--text)}
-.workspace-row:has(>.workspace-fold)>.workspace-link>svg:first-child{visibility:hidden}
+.workspace-row:has(>.workspace-fold) .workspace-label>strong{padding-inline-end:22px}
+@media(max-width:760px){.workspace-shell .workspace-row>.workspace-fold{right:65px}.workspace-row:has(>.workspace-fold) .workspace-label>strong{padding-inline-end:28px}}
 
 .workspace-section-heading{margin:10px 10px 3px;color:var(--text-muted);font-size:calc(12px * var(--text-scale));font-weight:600}
 .workspace-section-dialog form{display:grid;gap:12px;padding:16px}
 .workspace-section-dialog label{display:grid;gap:6px}
 .workspace-section-dialog p{margin:0;color:var(--text-muted)}
 
-.recently-deleted{padding:8px 10px}
-.recently-deleted summary{cursor:pointer;color:var(--text-muted)}
+.recently-deleted{margin-top:14px;padding:8px;border-top:1px solid var(--line-subtle)}
+.recently-deleted summary{display:flex;align-items:center;gap:8px;padding:6px;cursor:pointer;color:var(--text-muted);font-weight:550;list-style:none}
+.recently-deleted summary::-webkit-details-marker{display:none}
+.recently-deleted summary:after{content:'›';margin-inline-start:auto}
+.recently-deleted details[open] summary:after{transform:rotate(90deg)}
 .recently-deleted ul{list-style:none;margin:4px 0 0;padding:0}
-.recently-deleted li{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;padding:4px 0;overflow-wrap:anywhere}
-.recently-deleted li>span{flex:1;min-width:0}
+.recently-deleted li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px 10px;padding:8px;border-radius:6px;background:var(--surface-raised);overflow-wrap:anywhere}
+.recently-deleted li+li{margin-top:4px}
+.deleted-item{display:grid;gap:3px;min-width:0}
 .recently-deleted small{color:var(--text-muted)}
+.recently-deleted small[role=status]{grid-column:1/-1}

@@ -133,11 +133,15 @@ try{
  fixture.sessions.push({...structuredClone({...alphaSession,agents:undefined}),id:'alpha-second',title:'Write the release notes',provider:'codex',profileId:'codex-default',status:'',busy:false,closed:true,createdAtUnixMillis:'1'});
  await page.reload();
  await expect(alpha.locator('xpath=..').locator('.workspace-conversations .conversation-row')).toHaveCount(2);
+ await expect(beta.locator('.workspace-link > svg:first-child')).toBeVisible();
+ await expect(beta.locator('.workspace-fold')).toHaveCount(0);
+ await expect(alpha.locator('.workspace-link > svg:first-child')).toBeVisible();
  const expanded=alpha.locator('xpath=..').locator('.workspace-conversations');
  await expect(expanded.getByRole('img',{name:'Claude',exact:true})).toBeVisible();
  await expect(expanded.getByRole('img',{name:'Codex',exact:true})).toBeVisible();
  await expect(agent).toHaveCount(0);
  await alpha.getByRole('button',{name:/^Fold the 2 conversations/}).click();
+ await expect(alpha.locator('.workspace-link > svg:first-child')).toBeVisible();
  await expect(agent.locator('.workspace-agent-label')).toHaveText('Harden the request handler against slow clients');
  await expect(agent.locator('.workspace-agent-more')).toHaveText('+1');
  await expect(agent.getByRole('img',{name:'Claude',exact:true})).toBeVisible();

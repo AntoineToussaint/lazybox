@@ -16,7 +16,7 @@ import {testViteCache} from './fixtures/vite-cache.mjs';
 const fixture=await startRunnerFixture();
 fixture.sessions[0].title='Harden the handler';
 const api=fixture.shipState('alpha','api');
-api.files=[{path:'src/handler.go',indexStatus:' ',worktreeStatus:'M'}];
+api.files=[{path:'src/handler.go',indexStatus:' ',worktreeStatus:'M',lines:{added:2,removed:1}}];
 const DIFF=`diff --git a/src/handler.go b/src/handler.go
 index 1111111..2222222 100644
 --- a/src/handler.go
@@ -46,6 +46,8 @@ try{
  await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');await page.getByRole('combobox',{name:'Session',exact:true}).selectOption('alpha-session');
  await openWorkspaceChanges(page);
  const changes=page.getByRole('region',{name:'Workspace changes'});
+ await expect(changes.locator('header .change-line-counts').first()).toContainText('+2−1');
+ await expect(changes.getByRole('navigation',{name:'Changed files'}).locator('.change-line-counts')).toHaveText('+2−1');
  const diff=changes.getByRole('grid',{name:'File diff'});
  await expect(diff).toContainText('log.Print("handle")');
  // No comments yet: the tray stays out of the way until asked for.

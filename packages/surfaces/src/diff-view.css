@@ -50,3 +50,32 @@
 .changes-file>input[type=checkbox]{width:auto;margin:0 6px 0 2px;flex:none;cursor:pointer;accent-color:var(--accent,var(--accent-solid-hover))}
 .changes-file.is-viewed>button{opacity:.55}
 .changes-file.is-viewed>button.selected{opacity:.8}
+
+.change-line-counts{display:inline-flex;gap:.4em;align-items:center;white-space:nowrap;font-variant-numeric:tabular-nums;font-size:.85em;margin-inline-start:.5em}
+.changes-columns nav .changes-file button .change-line-counts{flex:none;margin-inline-start:auto}
+.change-line-counts .is-add{color:var(--diff-add-text)}
+.change-line-counts .is-remove{color:var(--diff-del-text)}
+
+/* Keep the comparison controls and the file path readable as panes resize. */
+.changes-panel > .changes-toolbar {
+  align-items: center;
+  padding: 0 0 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+.changes-summary { flex: 1 1 240px; min-width: 0; }
+.changes-summary-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
+.changes-summary-line strong { overflow-wrap: anywhere; }
+.changes-summary-line .change-line-counts { margin: 0; }
+.changes-toolbar-actions,
+.changes-diff-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
+.changes-toolbar-actions .changes-compare { margin: 0; flex-wrap: wrap; }
+.changes-toolbar-actions .changes-refresh { display: inline-grid; place-items: center; }
+.changes-columns nav .changes-group h4 { display: flex; justify-content: space-between; gap: 8px; padding-inline: 8px; }
+.changes-group h4 span { color: var(--text-subtle); font-variant-numeric: tabular-nums; }
+.changes-columns nav .changes-file > button { align-items: baseline; }
+.changes-file > button > code { flex: 0 0 2ch; }
+.changes-file-path { min-width: 0; }
+.changes-file-directory { color: var(--text-subtle); }
+.changes-columns .diff-view > .changes-diff-header { flex-wrap: wrap; gap: 8px; }
+.changes-diff-header > strong { flex: 1 1 210px; min-width: 0; }

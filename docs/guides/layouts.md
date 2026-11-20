@@ -197,3 +197,7 @@ brings its tab forward (see [Conversation tabs](#conversation-tabs)).
 To glance at another conversation, process, command or file without changing
 your layout, `⌥`-click its row (or focus it and press `Space`): it opens in an
 overlay you can move and resize. See [Peek](chat.md#peek-without-leaving-the-page).
+
+The Changes summary and file list show additions and deletions where Git can
+count them. The sidebar places History at the bottom, with Recently deleted
+below it when there are pending deletions.

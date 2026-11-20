@@ -654,7 +654,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       onInsert={insertSnippet}
       onSend={text => send(undefined, text)}/>}
     {!embedded && <WindowTopbar connecting={connecting} info={info} sessionID={sessionID} session={session}/>}
-    {(error || connectionError || refreshError) && !(embedded && connectionError) && <div className="error" role="alert">{error || connectionError || refreshError}<button onClick={() => { setError(''); setRefreshError(''); }}>Dismiss</button></div>}
+    {(error || connectionError || refreshError) && !(embedded && connectionError) && <div className={sessionID ? "error" : "error session-launch-error"} role="alert"><span>{error || connectionError || refreshError}</span><button onClick={() => { setError(''); setRefreshError(''); }}>Dismiss</button></div>}
     {!info && !connecting && <div className="connection-retry"><button onClick={refresh}>Retry connection</button></div>}
     {!sessionID && !allowStart
       ? <div className="empty">Select an existing session to view its chat.</div>

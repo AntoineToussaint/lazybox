@@ -199,6 +199,15 @@ export function ChangesPanel({ workspaceId, viewState, sessionId = '', onShowSes
     else if (event.key === 's' && selection && !narrow) { event.preventDefault(); setDiffMode(diffMode === 'split' ? 'unified' : 'split'); }
   };
   const committed = showCommitted ? repos.reduce((sum, repo) => sum + repo.committed.length, 0) : 0, uncommitted = repos.reduce((sum, repo) => sum + repo.files.length, 0);
+  const totals = listed.reduce((sum, { file }) => {
+    if (file.lines) {
+      sum.added += file.lines.added;
+      sum.removed += file.lines.removed;
+      sum.counted++;
+    }
+    return sum;
+  }, { added: 0, removed: 0, counted: 0 });
+  const partialTotals = totals.counted !== listed.length || repos.some(repo => repo.error || repo.truncated || (showCommitted && (repo.committedError || repo.committedTruncated)));
   const turnPrompt = turnView && turnView.sessionId === sessionId ? turns.byNumber.get(turnView.turn)?.prompt || '' : '';
   const summary = turnView ? `Agent turn ${turnView.turn}${turnPrompt ? ` · “${turnPrompt}”` : ''}` : loading ? 'Reading changes…' : !committed && !uncommitted ? 'No changes yet' : [committed && `${plural(committed, 'file')} changed ${compare === START ? 'on the branch' : 'vs ' + compare}`, uncommitted && `${uncommitted} uncommitted`].filter(Boolean).join(' · ');
   const refresh = () => setRevision(value => value + 1);
@@ -225,7 +234,7 @@ export function ChangesPanel({ workspaceId, viewState, sessionId = '', onShowSes
     { label: 'Refresh changes', icon: 'refresh', run: refresh },
   ];
   return <section className="changes-panel" aria-label="Workspace changes" onKeyDown={keys} ref={setPanel}>
-    <ChangesHeader summary={summary} compare={compare} repos={repos} onCompare={changeCompare} sessionId={sessionId} turns={[...turns.byNumber.values()]} onRefresh={refresh} pending={pending} trayOpen={trayOpen && (!compact || pane === 'review')} onToggleTray={toggleTray} launcher={launcher} reviewScope={reviewScope}/>
+    <ChangesHeader summary={summary} lineCounts={!turnView && !loading && totals.counted > 0 ? <ChangeLineCounts {...totals} partial={partialTotals}/> : undefined} compare={compare} repos={repos} onCompare={changeCompare} sessionId={sessionId} turns={[...turns.byNumber.values()]} onRefresh={refresh} pending={pending} trayOpen={trayOpen && (!compact || pane === 'review')} onToggleTray={toggleTray} launcher={launcher} reviewScope={reviewScope}/>
     {launcher.error && <p className="error review-start-error" role="alert"><span>{launcher.error}</span><button aria-label="Dismiss" onClick={() => launcher.setError('')}>×</button></p>}
     {turnView ? <TurnChangesView key={compare} sessionId={turnView.sessionId} turn={turnView.turn}/> : <>
     {error && <p className="error" role="alert">{error}</p>}
@@ -239,13 +248,15 @@ export function ChangesPanel({ workspaceId, viewState, sessionId = '', onShowSes
       <div className="diff-view" ref={setDiffPane} onContextMenu={selection ? contextMenu('diff', () => fileItems(selection.member, selection.path), { member: selection.member, path: selection.path }) : undefined}>
         {selection
           ? <>
-            <header>
-              <strong>{selection.member}/{selection.path}</strong>
-              <button title="Open in the editor · Alt-click for a quick look" onClick={event => void fileLinks.open({ path: `${selection.member}/${selection.path}` }, event, { exact: true })}>Open file</button>
-              {!selection.committed && <label><input type="checkbox" checked={staged} onChange={event => setStaged(event.target.checked)}/> Staged</label>}
-              <label className="diff-viewed" title="Mark this file reviewed (v) · it is unmarked if its diff changes"><input type="checkbox" checked={viewed.isViewed(selectedKey)} onChange={event => markViewed(selectedKey, event.target.checked)}/> Viewed</label>
-              {listed.length > 0 && <span className="changes-viewed-count" role="status">{viewed.count(listedKeys)} of {listed.length} viewed</span>}
-              <DiffModeToggle mode={diffMode} narrow={narrow} onMode={setDiffMode}/>
+            <header className="changes-diff-header">
+              <strong title={`${selection.member}/${selection.path}`}>{selection.member}/{selection.path}</strong>
+              <div className="changes-diff-actions">
+                <button title="Open in the editor · Alt-click for a quick look" onClick={event => void fileLinks.open({ path: `${selection.member}/${selection.path}` }, event, { exact: true })}>Open file</button>
+                {!selection.committed && <label><input type="checkbox" checked={staged} onChange={event => setStaged(event.target.checked)}/> Staged</label>}
+                <label className="diff-viewed" title="Mark this file reviewed (v) · it is unmarked if its diff changes"><input type="checkbox" checked={viewed.isViewed(selectedKey)} onChange={event => markViewed(selectedKey, event.target.checked)}/> Viewed</label>
+                {listed.length > 0 && <span className="changes-viewed-count" role="status">{viewed.count(listedKeys)} of {listed.length} viewed</span>}
+                <DiffModeToggle mode={diffMode} narrow={narrow} onMode={setDiffMode}/>
+              </div>
             </header>
             <div className="diff-comparison">{selection.committed ? (compare === START ? 'Workspace start → latest commit' : `${compare} (merge base) → latest commit`) : staged ? 'Last commit → staged' : 'Staged → working tree (uncommitted)'}</div>
             <div className="diff-keys" aria-hidden="true"><kbd>n</kbd> <kbd>p</kbd> hunks · <kbd>⇧N</kbd> <kbd>⇧P</kbd> files · <kbd>v</kbd> viewed · <kbd>s</kbd> split</div>
@@ -254,7 +265,7 @@ export function ChangesPanel({ workspaceId, viewState, sessionId = '', onShowSes
                 // More unchanged lines come from the working file: only when it is this diff's new side.
                 loadFile: (selection.committed ? !selectedRepo?.files.some(file => file.path === selection.path) : !staged) ? () => readNewSide(selection.member, selection.path) : undefined }}/>
           </>
-          : <div className="diff-empty"><h3>{loading ? 'Reading changes…' : 'No changes yet'}</h3><p>Nothing has been committed or edited in this workspace since it started.</p></div>}
+          : <div className="diff-empty"><h3>{loading ? 'Reading changes…' : error ? 'Changes unavailable' : listed.length ? 'Select a file to review' : 'No changes in this comparison'}</h3></div>}
       </div>
       {trayOpen && <Resizer split={SPLITS.changesReview} label="review tray"/>}
       {trayOpen && <ReviewTray id={`${columnId}-review`} workspaceId={workspaceId} review={review} conversation={conversation} focusReview={focusReview} onJump={jump} onSend={(text, to) => sendToAgent(text, to)} onClose={() => showTray(false)}/>}
@@ -264,7 +275,14 @@ export function ChangesPanel({ workspaceId, viewState, sessionId = '', onShowSes
 }
 
 /** What changed in total, what it is compared with, the review tray, and a refresh. */
-function ChangesHeader({ summary, compare, repos, sessionId, turns, onCompare, onRefresh, pending, trayOpen, onToggleTray, launcher, reviewScope }: { summary: string; compare: string; repos: RepositoryChanges[]; sessionId: string; turns: TurnCheckpoint[]; onCompare(compare: string): void; onRefresh(): void; pending: number; trayOpen: boolean; onToggleTray(): void; launcher: ReviewLauncher; reviewScope: ReviewScope }) {
+function ChangeLineCounts({ added, removed, partial }: { added: number; removed: number; partial?: boolean }) {
+  return <span className="change-line-counts" title={partial ? 'Line counts available for some changes' : undefined}
+    aria-label={`${added} lines added, ${removed} lines removed${partial ? ' (partial)' : ''}`}>
+    <span className="is-add">+{added}</span><span className="is-remove">−{removed}</span>{partial && <span>partial</span>}
+  </span>;
+}
+
+function ChangesHeader({ summary, lineCounts, compare, repos, sessionId, turns, onCompare, onRefresh, pending, trayOpen, onToggleTray, launcher, reviewScope }: { summary: string; lineCounts?: React.ReactNode; compare: string; repos: RepositoryChanges[]; sessionId: string; turns: TurnCheckpoint[]; onCompare(compare: string): void; onRefresh(): void; pending: number; trayOpen: boolean; onToggleTray(): void; launcher: ReviewLauncher; reviewScope: ReviewScope }) {
   const turnView = parseTurnCompare(compare);
   // The followed conversation's finished turns, newest first; a turn asked for from another conversation too.
   const turnChoices = turns.filter(turn => turn.endedAtUnixMillis).reverse();
@@ -273,24 +291,26 @@ function ChangesHeader({ summary, compare, repos, sessionId, turns, onCompare, o
   const current = new Set(repos.map(repo => repo.branch));
   const others = [...new Set(repos.flatMap(repo => repo.branches))].filter(name => !defaults.includes(name) && !current.has(name)).sort();
   if (compare !== UNCOMMITTED && compare !== START && !turnView && !defaults.includes(compare) && !others.includes(compare)) others.unshift(compare);
-  return <header>
-    <div>
-      <strong>{summary}</strong>
+  return <header className="changes-toolbar">
+    <div className="changes-summary">
+      <div className="changes-summary-line"><strong>{summary}</strong>{lineCounts}</div>
       <small>{turnView ? 'What the agent changed in that turn. Choose another comparison for the whole workspace.' : compare === UNCOMMITTED ? 'Staged, unstaged and untracked files' : compare === START ? 'Since the workspace started, plus uncommitted work' : `Branch commits since it left ${compare}, plus uncommitted work`}</small>
     </div>
-    <label className="changes-compare">Compare with<select value={compare} onChange={event => onCompare(event.target.value)}>
-      <option value={UNCOMMITTED}>Uncommitted only</option>
-      <option value={START}>Workspace start</option>
-      {defaults.map(name => <option key={'d:' + name} value={name}>{name}</option>)}
-      {others.length > 0 && <optgroup label="Other branches">{others.map(name => <option key={name} value={name}>{name}</option>)}</optgroup>}
-      {(turnChoices.length > 0 || requestedTurn) && <optgroup label="Agent turns in this conversation">
-        {requestedTurn && <option value={compare}>Turn {turnView!.turn}</option>}
-        {turnChoices.map(turn => <option key={turn.turn} value={turnCompare(sessionId, turn.turn)}>Turn {turn.turn}{turn.prompt ? ` · ${turn.prompt.slice(0, 48)}` : ''}{turn.files ? '' : ' (no changes)'}</option>)}
-      </optgroup>}
-    </select></label>
-    <ReviewWithButton launcher={launcher} scope={reviewScope}/>
-    <button className="changes-review-toggle" aria-pressed={trayOpen} aria-label={`Review comments${pending ? `, ${pending} pending` : ''}`} onClick={onToggleTray}><Icon name="chat" size={14}/>Review{pending > 0 && <span aria-hidden="true">{pending}</span>}</button>
-    {!turnView && <button onClick={onRefresh}>Refresh changes</button>}
+    <div className="changes-toolbar-actions">
+      <label className="changes-compare">Compare with<select value={compare} onChange={event => onCompare(event.target.value)}>
+        <option value={UNCOMMITTED}>Uncommitted only</option>
+        <option value={START}>Workspace start</option>
+        {defaults.map(name => <option key={'d:' + name} value={name}>{name}</option>)}
+        {others.length > 0 && <optgroup label="Other branches">{others.map(name => <option key={name} value={name}>{name}</option>)}</optgroup>}
+        {(turnChoices.length > 0 || requestedTurn) && <optgroup label="Agent turns in this conversation">
+          {requestedTurn && <option value={compare}>Turn {turnView!.turn}</option>}
+          {turnChoices.map(turn => <option key={turn.turn} value={turnCompare(sessionId, turn.turn)}>Turn {turn.turn}{turn.prompt ? ` · ${turn.prompt.slice(0, 48)}` : ''}{turn.files ? '' : ' (no changes)'}</option>)}
+        </optgroup>}
+      </select></label>
+      <ReviewWithButton launcher={launcher} scope={reviewScope}/>
+      <button className="changes-review-toggle" aria-pressed={trayOpen} aria-label={`Review comments${pending ? `, ${pending} pending` : ''}`} onClick={onToggleTray}><Icon name="chat" size={14}/>Review{pending > 0 && <span aria-hidden="true">{pending}</span>}</button>
+      {!turnView && <button className="changes-refresh" aria-label="Refresh changes" title="Refresh changes" onClick={onRefresh}><Icon name="refresh" size={15}/></button>}
+    </div>
   </header>;
 }
 
@@ -333,11 +353,13 @@ function RepositoryFiles({ workspaceId, repo, compare, selection, conversation, 
   const showCommitted = compare !== UNCOMMITTED;
   const fileButton = (file: ChangedFile, isCommitted: boolean) => {
     const key = fileKey(repo.member, file.path, isCommitted), seen = isViewed(key);
+    const nameStart = file.path.lastIndexOf('/') + 1;
     return <div key={key} className={`changes-file${seen ? ' is-viewed' : ''}`}>
       <button data-file-key={key} className={selection?.member === repo.member && selection.path === file.path && selection.committed === isCommitted ? 'selected' : ''} onClick={() => onChoose(repo.member, file, isCommitted)}
         onContextMenu={menu && contextMenu('changed-file', () => menu(repo.member, file, isCommitted), { member: repo.member, path: file.path, committed: isCommitted })}>
         <code title={isCommitted ? 'Change since the workspace started' : 'Index / working tree status'}>{isCommitted ? file.indexStatus : file.indexStatus + file.worktreeStatus}</code>
-        <span>{file.path}{file.originalPath && <small>from {file.originalPath}</small>}</span>
+        <span className="changes-file-path" title={file.path}><span className="changes-file-directory">{file.path.slice(0, nameStart)}</span>{file.path.slice(nameStart)}{file.originalPath && <small>from {file.originalPath}</small>}</span>
+        {file.lines && <ChangeLineCounts {...file.lines}/>}
       </button>
       <input type="checkbox" aria-label={`Viewed ${file.path}`} title="Viewed" checked={seen} onChange={event => onViewed(key, event.target.checked)}/>
     </div>;
@@ -347,7 +369,7 @@ function RepositoryFiles({ workspaceId, repo, compare, selection, conversation, 
     <RepositoryShip workspaceId={workspaceId} repo={repo} conversation={conversation} launcher={launcher} onChanged={onChanged} onSendToAgent={onSendToAgent}/>
     {repo.error ? <p role="alert" className="error">{repo.error}</p> : <>
       {!showCommitted ? null : repo.committedError ? <p className="module-empty" role="status">Branch changes unavailable: {repo.committedError}</p> : repo.committed.length > 0 && <div className="changes-group">
-        <h4>{compare === START ? 'Committed on this branch' : `Committed vs ${compare}`}</h4>
+        <h4>{compare === START ? 'Committed on this branch' : `Committed vs ${compare}`} <span>{repo.committed.length}</span></h4>
         <details className="changes-commits">
           <summary>{plural(repo.commits.length, 'commit')}{compare === START ? (repo.base ? ` since ${repo.base.slice(0, 8)}` : '') : ` not on ${compare}`}</summary>
           <ol>{repo.commits.map(c => <li key={c.id}><code>{c.id.slice(0, 8)}</code><span>{c.subject}</span><small>{age(c.committedAtUnix)}</small></li>)}</ol>
@@ -356,7 +378,7 @@ function RepositoryFiles({ workspaceId, repo, compare, selection, conversation, 
         {repo.committedTruncated && <p role="status">Limited. Some branch changes are not shown.</p>}
       </div>}
       {repo.files.length > 0 && <div className="changes-group">
-        <h4>Uncommitted</h4>
+        <h4>Uncommitted <span>{repo.files.length}</span></h4>
         {repo.files.map(file => fileButton(file, false))}
         {repo.truncated && <p role="status">File list limited. Some changes are not shown.</p>}
       </div>}

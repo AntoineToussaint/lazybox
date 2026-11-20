@@ -145,3 +145,22 @@ button.workspace-pulls-overflow{display:none}
 .workspace-shell .new-session-dialog .open-form>.primary{min-height:40px}
 .github-inbox-options{display:grid;gap:8px;margin:8px 0 12px}
 .github-inbox-options label{display:flex;align-items:center;gap:8px}
+
+.new-session-dialog .agent-picker-button { min-height: 40px; }
+.new-session-dialog .agent-picker-title { white-space: normal; overflow-wrap: anywhere; }
+.new-session-dialog .agent-picker-version { display: none; }
+.new-session-dialog .agent-picker-button > svg,
+.new-session-dialog .agent-picker-button > .agent-preview { flex: none; }
+.new-session-dialog .setup-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.new-session-dialog .session-launch-error {
+  display: flex;
+  align-items: start;
+  gap: 6px 12px;
+  flex-wrap: wrap;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: calc(12px * var(--text-scale));
+  line-height: 1.5;
+}
+.new-session-dialog .session-launch-error > span { flex: 1 1 220px; min-width: 0; }
+.new-session-dialog .session-launch-error > button { flex: none; margin: 0 0 0 auto; }

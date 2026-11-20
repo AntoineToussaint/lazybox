@@ -20,7 +20,49 @@ import (
 const outputLimit = 1 << 20
 const fileLimit = 2000
 
-type File struct{ Path, OriginalPath, IndexStatus, WorktreeStatus string }
+type File struct {
+	Path, OriginalPath, IndexStatus, WorktreeStatus string
+	Lines                                           *LineCounts
+}
+
+type LineCounts struct{ Added, Removed uint32 }
+
+// attachLineCounts matches numstat records to the visible files. Binary files
+// and files missing from the comparison have no line counts.
+func attachLineCounts(ctx context.Context, root, comparison string, files []File) {
+	if len(files) == 0 {
+		return
+	}
+	raw, _, err := run(ctx, root, "diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z", "-M", comparison, "--")
+	if err != nil {
+		return
+	}
+	byPath := make(map[string]*LineCounts)
+	records := bytes.Split(raw, []byte{0})
+	for i := 0; i < len(records)-1; i++ {
+		fields := bytes.SplitN(records[i], []byte{'\t'}, 3)
+		if len(fields) != 3 {
+			continue
+		}
+		path := string(fields[2])
+		if path == "" {
+			if i+2 >= len(records)-1 {
+				break
+			}
+			path = string(records[i+2])
+			i += 2
+		}
+		added, addErr := strconv.ParseUint(string(fields[0]), 10, 32)
+		removed, removeErr := strconv.ParseUint(string(fields[1]), 10, 32)
+		if addErr == nil && removeErr == nil {
+			byPath[path] = &LineCounts{Added: uint32(added), Removed: uint32(removed)}
+		}
+	}
+	for i := range files {
+		files[i].Lines = byPath[files[i].Path]
+	}
+}
+
 type Status struct {
 	Branch, Head string
 	Files        []File
@@ -75,6 +117,14 @@ func run(ctx context.Context, root string, args ...string) ([]byte, bool, error)
 	return out.Bytes(), out.truncated, nil
 }
 func (Git) Status(ctx context.Context, root string) (Status, error) {
+	result, err := readStatus(ctx, root)
+	if err == nil {
+		attachLineCounts(ctx, root, result.Head, result.Files)
+	}
+	return result, err
+}
+
+func readStatus(ctx context.Context, root string) (Status, error) {
 	var result Status
 	raw, cut, err := run(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
@@ -114,11 +164,11 @@ func (Git) Status(ctx context.Context, root string) (Status, error) {
 	result.Branch = strings.TrimSpace(string(branch))
 	return result, nil
 }
-func (g Git) Diff(ctx context.Context, root, path string, staged bool) (Diff, error) {
+func (Git) Diff(ctx context.Context, root, path string, staged bool) (Diff, error) {
 	if !filepath.IsLocal(path) || path == "." || strings.ContainsRune(path, 0) {
 		return Diff{}, errors.New("relative changed-file path required")
 	}
-	status, err := g.Status(ctx, root)
+	status, err := readStatus(ctx, root)
 	if err != nil {
 		return Diff{}, err
 	}
@@ -202,6 +252,14 @@ func verifyBase(ctx context.Context, root, base string) error {
 // Committed lists the files changed from the merge base of base and HEAD to
 // HEAD, and the commits since base, newest first.
 func (Git) Committed(ctx context.Context, root, base string) (Committed, error) {
+	result, err := readCommitted(ctx, root, base)
+	if err == nil {
+		attachLineCounts(ctx, root, base+"...HEAD", result.Files)
+	}
+	return result, err
+}
+
+func readCommitted(ctx context.Context, root, base string) (Committed, error) {
 	var result Committed
 	if err := verifyBase(ctx, root, base); err != nil {
 		return result, err
@@ -255,11 +313,11 @@ func (Git) Committed(ctx context.Context, root, base string) (Committed, error) 
 }
 
 // CommittedDiff is one file's diff across the branch's commits since base.
-func (g Git) CommittedDiff(ctx context.Context, root, base, path string) (Diff, error) {
+func (Git) CommittedDiff(ctx context.Context, root, base, path string) (Diff, error) {
 	if !filepath.IsLocal(path) || path == "." || strings.ContainsRune(path, 0) {
 		return Diff{}, errors.New("relative changed-file path required")
 	}
-	committed, err := g.Committed(ctx, root, base)
+	committed, err := readCommitted(ctx, root, base)
 	if err != nil {
 		return Diff{}, err
 	}

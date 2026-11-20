@@ -34,7 +34,7 @@ func (s *Service) ListWorkspaceChanges(ctx context.Context, r *pb.WorkspaceChang
 		row.Branch = state.Branch
 		row.Truncated = state.Truncated
 		for _, f := range state.Files {
-			row.Files = append(row.Files, &pb.ChangedFile{Path: f.Path, OriginalPath: f.OriginalPath, IndexStatus: f.IndexStatus, WorktreeStatus: f.WorktreeStatus})
+			row.Files = append(row.Files, changedFile(f))
 		}
 		row.Branches, row.DefaultBranch, _ = s.gitInspector().Branches(ctx, path)
 		// Push state for the PR loop; a detached HEAD or a repository without
@@ -55,7 +55,7 @@ func (s *Service) ListWorkspaceChanges(ctx context.Context, r *pb.WorkspaceChang
 		}
 		row.CommittedTruncated = committed.Truncated
 		for _, f := range committed.Files {
-			row.Committed = append(row.Committed, &pb.ChangedFile{Path: f.Path, OriginalPath: f.OriginalPath, IndexStatus: f.IndexStatus})
+			row.Committed = append(row.Committed, changedFile(f))
 		}
 		for _, c := range committed.Commits {
 			row.Commits = append(row.Commits, &pb.Commit{Id: c.ID, Subject: c.Subject, CommittedAtUnix: c.Time})
@@ -111,4 +111,12 @@ func (s *Service) gitInspector() gitinspect.Inspector {
 		return s.Inspector
 	}
 	return gitinspect.Git{}
+}
+
+func changedFile(file gitinspect.File) *pb.ChangedFile {
+	result := &pb.ChangedFile{Path: file.Path, OriginalPath: file.OriginalPath, IndexStatus: file.IndexStatus, WorktreeStatus: file.WorktreeStatus}
+	if file.Lines != nil {
+		result.Lines = &pb.ChangedLineCounts{Added: file.Lines.Added, Removed: file.Lines.Removed}
+	}
+	return result
 }

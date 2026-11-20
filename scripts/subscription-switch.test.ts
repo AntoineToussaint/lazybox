@@ -84,6 +84,16 @@ test('the header says what the conversation waits for, not "Needs attention"', (
   assert.equal(inbox.reason, 'Limit reached');
 });
 
+test('a full weekly window blocks switching despite an available status', () => {
+  const full = profile('full', 'Apple', { state: 'available', windows: [{ name: 'seven_day', usedPercent: 100, resetAt: BigInt(at(18)) }] });
+  const nearlyFull = profile('nearly-full', 'CLI', { state: 'unknown', windows: [{ name: 'seven_day', usedPercent: 99.9 }] });
+  const choices = subscriptionChoices([full, nearlyFull], 'claude', '', noon);
+  assert.equal(bestChoice(choices)?.id, 'nearly-full');
+  assert.match(choices.find(choice => choice.id === 'full')?.detail || '', /^Limit reached/);
+  assert.match(choices[0].detail, /99% used/);
+  assert.equal(subscriptionChoices([full], 'claude', '', at(19) * 1000)[0].detail, 'Reset elapsed · usage unconfirmed');
+});
+
 test('the best other subscription is the ready one; a picker lists the current one first, then available, then by name', () => {
   const choices = subscriptionChoices(profiles, 'claude', 'work-2', noon);
   assert.deepEqual(choices.map(c => c.id), ['work-2', 'work-1', 'claude-default', 'work-3']);

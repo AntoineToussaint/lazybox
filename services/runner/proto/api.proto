@@ -966,7 +966,8 @@ message WorkspaceChangesRequest {
   // Ref to compare the branch's commits with (e.g. main, origin/main); empty is the commit the workspace started from.
   string compare = 2;
 }
-message ChangedFile { string path = 1; string original_path = 2; string index_status = 3; string worktree_status = 4; }
+message ChangedFile { string path = 1; string original_path = 2; string index_status = 3; string worktree_status = 4; ChangedLineCounts lines = 5; }
+message ChangedLineCounts { uint32 added = 1; uint32 removed = 2; }
 message Commit { string id = 1; string subject = 2; int64 committed_at_unix = 3; }
 // files are uncommitted changes. committed are the changes the branch's commits
 // made since base, the commit the workspace started from; commits lists them.
@@ -4382,6 +4383,8 @@ message PendingDeletion {
   string title = 4;
   int64 expires_at_unix_millis = 5;
   string failure = 6;
+  string workspace_name = 7;
+  repeated string repository_names = 8;
 }
 message ListPendingDeletionsRequest {}
 message ListPendingDeletionsResponse { repeated PendingDeletion deletions = 1; }

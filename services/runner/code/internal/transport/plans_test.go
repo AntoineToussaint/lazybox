@@ -1,10 +1,15 @@
 package transport
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/artifacts"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/telemetry"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"google.golang.org/grpc/codes"
@@ -157,3 +162,82 @@ func TestOrchestratorHoldsNewAgentsWhileReviewIsFull(t *testing.T) {
 }
 
 func nanos(v int64) *int64 { return &v }
+
+func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
+	o := newOrchestration(t)
+	ctx := timeout(t)
+	source := history(t, "base")
+	manager, err := collections.New(t.TempDir(), []collections.Repository{{ID: "api", Name: "api", Path: source}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.bench.Collections = manager
+	parent, err := manager.Create(ctx, "base", collections.Spec{Name: "Base", Members: []collections.MemberSpec{{RepositoryID: "api"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.orch, err = o.bench.OpenCollection("codex-default", parent.ID, "", accounts.Options{Permission: "ask", Workflow: "plan"}, "direct", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.orchKey = agentToken(t, o.orch.Env)
+	o.grant(t, &pb.OrchestratorCeiling{MaxChildren: 2, PlanRequired: true})
+	orch, owner := bearer(ctx, o.orchKey), bearer(ctx, ownerToken)
+	req := &pb.ProposePlanRequest{SessionId: o.orch.ID, OperationId: "snapshot", Tasks: []*pb.PlanTask{{Key: "a", Title: "Worker", Workspace: "pinned"}}}
+	spec, err := o.bench.Artifacts.Put(parent.ID, artifacts.Put{Title: "Acceptance", Kind: "spec", Format: "json", Content: `{"schema":"spec.v1","problem":"Reconnect","requirements":["Restore history"],"acceptanceCriteria":["One row after reconnect"]}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Contract = &pb.PlanContract{ArtifactId: spec.ID, Version: 1}
+	member := parent.Members[0]
+	dirty := filepath.Join(member.Path, "uncommitted")
+	if err = os.WriteFile(dirty, []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = o.client.ProposePlan(orch, req); err == nil {
+		t.Fatal("dirty baseline accepted")
+	}
+	if err = os.Remove(dirty); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := o.client.ProposePlan(orch, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Contract.GetVersion() != 1 || len(plan.Contract.GetAcceptanceCriteria()) != 1 || plan.Contract.Digest != artifacts.Digest(spec.Content) || len(plan.Baseline) != 1 || plan.Baseline[0].Commit != member.BaseCommit {
+		t.Fatalf("proposal missing review inputs: %v", plan)
+	}
+	if _, err = o.bench.Artifacts.Put(parent.ID, artifacts.Put{ID: spec.ID, Content: strings.ReplaceAll(spec.Content, "One row", "Two rows")}); err != nil {
+		t.Fatal(err)
+	}
+	git(t, member.Path, "commit", "--allow-empty", "-m", "after proposal")
+	m, err := o.client.UpdateMission(owner, &pb.UpdateMissionRequest{MissionId: o.mission, Change: &pb.UpdateMissionRequest_ApprovePlan{ApprovePlan: &pb.PlanDecision{PlanId: plan.Id, MaxChildren: 2}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := m.Tasks[0].Id
+	spawn := &pb.SpawnAgentRequest{SessionId: o.orch.ID, TaskId: task, Workspace: "same"}
+	if _, err = o.client.SpawnAgent(orch, spawn); err == nil {
+		t.Fatal("overrode pinned task")
+	}
+	spawn.Workspace = ""
+	view, err := o.client.SpawnAgent(orch, spawn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := o.bench.Get(view.Spawned.SessionId)
+	if err != nil || execution.Options.Workflow == "plan" || execution.Options.Permission != "ask" {
+		t.Fatalf("worker options: %v, %v", execution, err)
+	}
+	brief := <-o.fake.session(view.Spawned.SessionId).Applied
+	if !strings.Contains(brief.Text, "One row after reconnect") || strings.Contains(brief.Text, "Two rows after reconnect") {
+		t.Fatalf("wrong contract revision in child brief: %s", brief.Text)
+	}
+	child, err := manager.Get(view.Spawned.CollectionId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.ID == parent.ID || git(t, child.Members[0].Path, "rev-parse", "HEAD") != member.BaseCommit {
+		t.Fatal("child lost approved baseline")
+	}
+}

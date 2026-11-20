@@ -3234,6 +3234,8 @@ message MissionPlan {
   // The orchestrator that proposed it.
   string conversation_id = 12;
   string proposed_by = 13;
+  repeated PlanBaselineMember baseline = 14;
+  PlanContract contract = 15;
 }
 message ClaimLeaseRequest {
   string session_id = 1;
@@ -3273,6 +3275,7 @@ message ProposePlanRequest {
   string operation_id = 2;
   string summary = 3;
   repeated PlanTask tasks = 4;
+  PlanContract contract = 5;
 }
 message OrchestratorGrantChange {
   // Any session of the conversation that is to orchestrate.
@@ -4335,4 +4338,18 @@ message UndoDeletionRequest { string id = 1; }
 message DecideTerminalHandoffRequest {
   string handoff_id = 1;
   bool accept = 2;
+}
+
+message PlanBaselineMember {
+  string name = 1;
+  string repository_id = 2;
+  string commit = 3;
+}
+message PlanContract {
+  string artifact_id = 1;
+  uint32 version = 2;
+  // Resolved by the Runner from the proposing workspace.
+  string collection_id = 3;
+  string digest = 4;
+  repeated string acceptance_criteria = 5;
 }

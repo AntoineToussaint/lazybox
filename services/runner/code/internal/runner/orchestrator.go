@@ -313,6 +313,8 @@ func (b *Bench) agentTitle(ctx context.Context, e *Execution) string {
 
 // SpawnRequest is one `lazybox agents spawn`.
 type SpawnRequest struct {
+	contract                         *work.PlanContract
+	baseline                         []work.BaselineMember
 	Session, Operation               string
 	Title, Brief, Task               string
 	Profile, Model, Permission, Role string
@@ -415,7 +417,9 @@ func (b *Bench) Spawn(ctx context.Context, r SpawnRequest) (LineageView, error) 
 		return LineageView{}, fmt.Errorf("%w: a role is a short label", work.ErrRefused)
 	}
 	options := accounts.Options{Model: firstOf(r.Model, parent.Options.Model), Permission: permission, NoRotation: true}
-	if parent.Options.Workflow == "plan" {
+	// A pinned task enters execution only after the person approves the plan.
+	// Permission still comes from the parent and grant ceilings above.
+	if parent.Options.Workflow == "plan" && len(r.baseline) == 0 {
 		options.Workflow = "plan"
 	}
 	options.Instructions = fmt.Sprintf(childBriefing, b.agentTitle(ctx, parent), state.Title, role)
@@ -425,6 +429,18 @@ func (b *Bench) Spawn(ctx context.Context, r SpawnRequest) (LineageView, error) 
 	workspace := parent.CollectionID
 	switch r.Workspace {
 	case "", "same":
+	case "pinned":
+		if len(r.baseline) == 0 {
+			return LineageView{}, fmt.Errorf("%w: only an approved pinned task has a baseline", work.ErrRefused)
+		}
+		spec := collections.Spec{Name: truncateRunes(title, 120)}
+		for _, m := range r.baseline {
+			spec.Members = append(spec.Members, collections.MemberSpec{Name: m.Name, RepositoryID: m.Repository, BaseRef: m.Commit})
+		}
+		workspace, err = b.createChildWorkspace(ctx, spec, firstOf(r.Operation, fmt.Sprint(time.Now().UnixNano())))
+		if err != nil {
+			return LineageView{}, err
+		}
 	case "new":
 		if parent.CollectionID == "" || b.Collections == nil {
 			return LineageView{}, fmt.Errorf("%w: --workspace new needs a workspace to branch from; this conversation has none", work.ErrRefused)
@@ -458,6 +474,9 @@ func (b *Bench) Spawn(ctx context.Context, r SpawnRequest) (LineageView, error) 
 	parentTitle := b.agentTitle(ctx, parent)
 	text := title + "\n\n" + firstOf(strings.TrimSpace(r.Brief), "(No brief beyond the title: ask your orchestrator with `lazybox agents send parent` if it is unclear.)") +
 		fmt.Sprintf("\n\n(Task of the Lazybox mission “%s”, from your orchestrator “%s”. Run tests and builds with `lazybox run -- …`. When done: `lazybox agents report \"…\"`.)", state.Title, parentTitle)
+	if contract := r.contract; contract != nil {
+		text += fmt.Sprintf("\n\nApproved acceptance criteria (spec %s, version %d):\n- %s", contract.Artifact, contract.Version, strings.Join(contract.Criteria, "\n- "))
+	}
 	// The child's transcript shows its brief as an event from its orchestrator, never as the person's.
 	origin := agent.Origin{Kind: agent.OriginAgentBrief, Summary: "Task from “" + parentTitle + "”: " + title, Detail: role, From: parentTitle, Conversation: c.conversation, Session: parent.ID}
 	if _, err := b.deliverAgentMessage(ctx, child, "spawn-"+task+"-"+child.ID, text, origin, work.PromptSource{Kind: work.SourceAgent, Mission: state.ID, Task: task}); err != nil {
@@ -508,6 +527,10 @@ func (b *Bench) childWorkspace(ctx context.Context, parent, title, key, startFro
 	if len(spec.Members) == 0 {
 		return "", fmt.Errorf("%w: the workspace has no repository to branch from", work.ErrRefused)
 	}
+	return b.createChildWorkspace(ctx, spec, key)
+}
+
+func (b *Bench) createChildWorkspace(ctx context.Context, spec collections.Spec, key string) (string, error) {
 	created, err := b.Collections.Create(ctx, truncateRunes("agent/"+key, 128), spec)
 	if err != nil {
 		return "", err

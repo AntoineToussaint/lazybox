@@ -410,6 +410,14 @@ pub fn report(app: &tauri::AppHandle, error: String) {
 }
 
 pub fn open(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
+    open_with_updates(app, label, false)
+}
+
+fn open_with_updates(
+    app: &tauri::AppHandle,
+    label: &str,
+    check_updates: bool,
+) -> Result<(), String> {
     // No layout lock may be held while calling a native window API.
     let surface: Surface = {
         // None until the app is connected: while an installed release still
@@ -439,7 +447,12 @@ pub fn open(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
         }
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
-        return window.set_focus().map_err(|e| e.to_string());
+        window.set_focus().map_err(|e| e.to_string())?;
+        if check_updates {
+            app.emit_to(label, "menu-action", "help.updates")
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(());
     }
     mutate(app, |layout| layout.mark_open(label))?;
     let name = app.config().product_name.as_deref().unwrap_or("Lazybox");
@@ -463,6 +476,11 @@ pub fn open(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
             let _ = mutate(app, |layout| layout.close(label));
             return Err(error.to_string());
         }
+    };
+    let builder = if check_updates {
+        builder.initialization_script("window.lazyboxCheckUpdatesOnOpen = true")
+    } else {
+        builder
     };
     let builder = builder
         // Route file drops to the shared chat attachment flow (HTML5 File API).
@@ -1228,6 +1246,12 @@ pub fn menu_event(app: &tauri::AppHandle, id: &str) {
                 .find(|(_, w)| w.is_focused().unwrap_or(false))
                 .map(|(label, _)| label),
         );
+        if action == "help.updates" && (!is_workspace_window(&label) || label == "main") {
+            if let Err(error) = open_with_updates(app, "main", true) {
+                report(app, error);
+            }
+            return;
+        }
         if let Err(error) = app.emit_to(label.as_str(), "menu-action", action) {
             report(app, error.to_string());
         }

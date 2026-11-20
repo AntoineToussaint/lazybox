@@ -66,11 +66,12 @@ export function WorkspaceRepositoryDialog({
     // Creating starts on the name, its suggestion selected: typing replaces it.
     (dialog.current?.querySelector<HTMLInputElement>('[data-name-autofocus]') || dialog.current?.querySelector<HTMLInputElement>('[data-autofocus]'))?.focus();
   }, []);
+  const chosen = empty ? [] : [...selected];
   const suggested = (
       settings?.naming === "generated"
         ? generated.current || "New workspace"
         : suggestWorkspaceName(
-            [...selected]
+            chosen
               .map((id) => catalog?.entries.find((r) => r.identity === id)?.name || "")
               .filter(Boolean),
           )
@@ -93,8 +94,7 @@ export function WorkspaceRepositoryDialog({
     workspace?.members.map((m) => m.spec?.repositoryId || ""),
   );
   // Where each chosen repository's new branch starts ("from main ▾"; ⌥B).
-  const chosen = [...selected];
-  const [startInfo, setStartInfo] = useRepositoryStarts(api, empty ? [] : chosen);
+  const [startInfo, setStartInfo] = useRepositoryStarts(api, chosen);
   const [starts, setStarts] = useState<Record<string, string>>({}),
     [startPicker, setStartPicker] = useState<string>();
   const [copyLoaded, setCopyLoaded] = useState(!copy?.members.length);
@@ -141,9 +141,9 @@ export function WorkspaceRepositoryDialog({
     const request = {
       collectionId: workspace?.id || "",
       name: name.trim(),
-      repositoryIdentities: [...selected].sort(),
+      repositoryIdentities: [...chosen].sort(),
       branch: empty ? "" : branch,
-      startFrom: empty ? {} : startsFor([...selected], starts),
+      startFrom: empty ? {} : startsFor(chosen, starts),
       ...(repositoryRequestId ? { repositoryRequestId } : {}),
     };
     const spec = JSON.stringify(request);
@@ -211,12 +211,12 @@ export function WorkspaceRepositoryDialog({
               ? `Add repositories to ${workspace.name}`
               : copy ? "Clone workspace" : "New workspace"}
           </h2>
-          <p>
+          {(intro || workspace || copy) && <p>
             {intro ??
               (workspace
                 ? "Choose the repositories to include in this workspace."
-                : copy ? "Choose a name for the copy. Each repository gets a fresh branch." : "Choose repositories for this workspace.")}
-          </p>
+                : copy ? "Choose a name for the copy. Each repository gets a fresh branch." : "")}
+          </p>}
         </div>
         <button
           disabled={busy}
@@ -226,27 +226,22 @@ export function WorkspaceRepositoryDialog({
           ×
         </button>
       </DialogHeader>
+      {!workspace && (
+        <label className="empty-workspace-choice">
+          <input
+            type="checkbox"
+            checked={empty}
+            disabled={busy || !copyLoaded}
+            onChange={(e) => {
+              setBranchConflict("");
+              setEmpty(e.target.checked);
+              setStartPicker(undefined);
+            }}
+          />
+          Start without a repository
+        </label>
+      )}
       {copy && !copyLoaded && <p role="status">{copyError || "Loading the workspace’s repositories…"}</p>}
-      <div className="workspace-picker-body">
-      <RepositoryBrowser
-        selected={selected}
-        included={included}
-        disabled={busy || !copyLoaded}
-        initialQuery={initialQuery}
-        onSelected={(value) => {
-          setBranchConflict("");
-          setSelected(value);
-          setEmpty(false);
-        }}
-        onActivate={(identity) => {
-          setBranchConflict("");
-          setSelected((current) => new Set([...current, identity]));
-          setEmpty(false);
-          setFinishSoon(true);
-        }}
-        chooseRepositoryFolder={chooseRepositoryFolder}
-      />
-      </div>
       {!workspace && (
         <div className="workspace-create-details">
           <label className="workspace-name-field">
@@ -301,20 +296,28 @@ export function WorkspaceRepositoryDialog({
               <button type="button" className="link-button" disabled={busy} onClick={() => setEditingBranch(true)}>Edit branch</button>
             </p>
           ))}
-          <label className="empty-workspace-choice">
-            <input
-              type="checkbox"
-              checked={empty}
-              disabled={busy || !copyLoaded}
-              onChange={(e) => {
-                setEmpty(e.target.checked);
-                if (e.target.checked) setSelected(new Set());
-              }}
-            />
-            Start without repositories
-          </label>
         </div>
       )}
+      {!empty && <div className="workspace-picker-body">
+        <RepositoryBrowser
+          selected={selected}
+          included={included}
+          disabled={busy || !copyLoaded}
+          initialQuery={initialQuery}
+          onSelected={(value) => {
+            setBranchConflict("");
+            setSelected(value);
+            setEmpty(false);
+          }}
+          onActivate={(identity) => {
+            setBranchConflict("");
+            setSelected((current) => new Set([...current, identity]));
+            setEmpty(false);
+            setFinishSoon(true);
+          }}
+          chooseRepositoryFolder={chooseRepositoryFolder}
+        />
+      </div>}
       {!empty && (
         <div className="workspace-start-from-field">
           {/* Always one line, so choosing the first repository does not move the dialog under the pointer. */}
@@ -363,8 +366,8 @@ export function WorkspaceRepositoryDialog({
       )}
       <footer>
         <span>
-          {selected.size
-            ? `${selected.size} ${selected.size === 1 ? "repository" : "repositories"} selected`
+          {chosen.length
+            ? `${chosen.length} ${chosen.length === 1 ? "repository" : "repositories"} selected`
             : empty
               ? "Empty workspace"
               : ""}

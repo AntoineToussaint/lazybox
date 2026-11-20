@@ -760,7 +760,6 @@ func (e *Engine) endReplayLocked(ev agent.Event) {
 }
 
 func (e *Engine) receive() {
-	defer close(e.done)
 	for {
 		ev, err := e.provider.Receive(e.ctx)
 		if err != nil {
@@ -781,6 +780,8 @@ func (e *Engine) receive() {
 				e.observe(exit)
 				e.appendLocked(exit)
 			}
+			// Publish the end of the stream before Resume can observe its fault.
+			close(e.done)
 			e.mu.Unlock()
 			return
 		}
@@ -906,6 +907,7 @@ func (e *Engine) receive() {
 		}
 		e.mu.Unlock()
 		if !ok && !(retry && e.recordAgain(ev)) {
+			close(e.done)
 			return
 		}
 		e.commit(ev)

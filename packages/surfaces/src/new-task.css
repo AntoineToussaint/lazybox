@@ -33,7 +33,7 @@
 .new-task-repo-list li small{margin-left:auto;font-size:calc(10px * var(--text-scale));color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em}
 .new-task-repo-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .new-task-repo-list .new-task-repo-empty{color:var(--text-muted);cursor:default}
-.new-task-repo-list .new-task-repo-none{margin-top:4px;border-top:1px solid var(--line);border-radius:0 0 5px 5px;color:var(--text-subtle)}
+.new-task-repo-list .new-task-repo-none{margin-bottom:4px;border-bottom:1px solid var(--line);border-radius:5px 5px 0 0;color:var(--text-subtle)}
 .new-task-repo-more{padding:2px!important}
 .new-task-repo-more button{display:inline-flex;align-items:center;gap:6px;padding:5px 8px;border:0;background:transparent;color:var(--accent);font-size:calc(12px * var(--text-scale))}
 .new-task-repo-more button:hover{text-decoration:underline;background:transparent}

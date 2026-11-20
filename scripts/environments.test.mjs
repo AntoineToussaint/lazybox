@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
 import { environmentPaths, releasePath, includeSource, validateEnvironmentRoot, shareSubscriptions, sharedSubscriptionState, freezeRunnerReload } from './environments.mjs';
 import { startDesktopDevServer, desktopDevConfig, stopProcessGroup, spawnProcessGroup } from './desktop-dev.mjs';
 import { uiWatcher } from './ui-watch.mjs';
@@ -348,8 +349,9 @@ test('Dev rebuilds the CLI agents run whenever the Runner source changes, never 
   await writeFile(join(code, 'internal', 'x_test.go'), 'package internal\n');
   await settle(300);
   assert.equal(builds, 1);
-  // A burst of Go edits is one build, once they settle.
-  for (let i = 0; i < 4; i++) { await writeFile(join(code, 'internal', 'x.go'), `package internal\n// ${i}\n`); await settle(20); }
+  // Issue the burst in one turn. A loaded host can stretch an awaited
+  // 20 ms pause past the debounce interval, legitimately starting another build.
+  for (let i = 0; i < 4; i++) writeFileSync(join(code, 'internal', 'x.go'), `package internal\n// ${i}\n`);
   await until('the CLI was not rebuilt', async () => (await readFile(cli, 'utf8')).includes('build 2 end'));
   await settle(300);
   assert.equal(builds, 2);

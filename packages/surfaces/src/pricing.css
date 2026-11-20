@@ -24,7 +24,7 @@
 .price-table tbody tr:hover{background:var(--s-surface-hover)}
 .price-table tbody th{display:table-cell;vertical-align:middle}
 .price-model{display:block;overflow:hidden;text-overflow:ellipsis;font-family:var(--font-mono);font-size:calc(12.5px * var(--code-scale));color:var(--s-text)}
-.price-table tbody th small{display:block;margin-top:1px;font-size:calc(11px * var(--text-scale));color:var(--s-faint);font-family:var(--font-ui)}
+.price-table tbody th small{display:block;white-space:normal;overflow-wrap:anywhere;margin-top:1px;font-size:calc(11px * var(--text-scale));color:var(--s-faint);font-family:var(--font-ui)}
 .price-table tbody tr:has(th small) th,.price-table tbody tr:has(th small) td{height:48px}
 .price-source{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;padding:1px 7px;border-radius:9px;font-size:calc(11px * var(--text-scale));line-height:calc(18px * var(--text-scale));color:var(--s-muted);background:var(--s-raised)}
 .price-source.is-custom{color:var(--accent-strong);background:var(--s-accent-bg)}

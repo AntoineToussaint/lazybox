@@ -258,10 +258,10 @@ function selectionAt(point: { x: number; y: number } | null): { text: string; ra
 }
 
 const keyboardEvents = new WeakSet<Event>();
-let selectionAtPress: string | null = null;
+let selectionAtPress: ReturnType<typeof selectionAt> | null = null;
 
 /** The whole menu for a contextmenu event that reached the window: its items now, its label, and items still on their way. */
-export function menuForEvent(event: MouseEvent, keyboard: boolean): { items: MenuItem[]; label: string; later: Promise<MenuItem[]> | undefined } {
+export function menuForEvent(event: MouseEvent, keyboard: boolean, selection = selectionAt(keyboard ? null : { x: event.clientX, y: event.clientY })): { items: MenuItem[]; label: string; later: Promise<MenuItem[]> | undefined } {
   const target = elementOf(event.target)!;
   const found = [...(pendingSections.get(event) || [])];
   const ancestors: Element[] = [];
@@ -272,7 +272,7 @@ export function menuForEvent(event: MouseEvent, keyboard: boolean): { items: Men
   }
   const rank = (section: Section) => { const index = ancestors.indexOf(section.element); return index < 0 ? ancestors.length : index; };
   const sections = found.map((section, order) => ({ section, order })).sort((a, b) => rank(a.section) - rank(b.section) || a.order - b.order).map(value => value.section);
-  const { text, range } = selectionAt(keyboard ? null : { x: event.clientX, y: event.clientY });
+  const { text, range } = selection;
   // Each contribution is its items, or a slot its promise fills.
   const waiting: Promise<void>[] = [];
   const bodies = sections.map(section => {
@@ -313,8 +313,8 @@ function onContextMenu(event: MouseEvent) {
   if (target.closest('.context-menu')) return;
   // WebKit selects the word under a right-click before the event: a menu is
   // about what you selected, not what the click selected for you.
-  if (press === '' && !keyboard) document.getSelection()?.removeAllRanges();
-  const { items, label, later } = menuForEvent(event, keyboard);
+  if (press && !press.text && !keyboard) document.getSelection()?.removeAllRanges();
+  const { items, label, later } = menuForEvent(event, keyboard, keyboard ? undefined : press ?? undefined);
   const opened = openContextMenu({ x: event.clientX, y: event.clientY }, items, { keyboard, target, label });
   // Items that arrive later join the same menu, if it is still open.
   void later?.then(all => { if (state.menu?.openedAt === opened) emit({ menu: { ...state.menu, entries: normalizeMenu(all) } }); });
@@ -416,7 +416,8 @@ function installListeners() {
   };
   const pointerDown = (event: PointerEvent) => {
     menuPress = false;
-    if (event.button === 2 && event.pointerType === 'mouse') selectionAtPress = document.getSelection()?.toString() || '';
+    selectionAtPress = event.pointerType === 'mouse' && (event.button === 2 || (event.button === 0 && event.ctrlKey))
+      ? selectionAt({ x: event.clientX, y: event.clientY }) : null;
     // Outside a menu, a press closes it and goes on to what it hit, but closes
     // nothing else: a dialog or popover under the menu stays open.
     if (state.menu && !(event.target instanceof Element && event.target.closest('.context-menu'))) { claimPress(event); closeContextMenu(false); }
@@ -500,6 +501,7 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
   const [active, setActive] = useState(() => keyboard ? firstEnabled(entries) : -1);
   const [open, setOpen] = useState<{ index: number; keyboard: boolean; rect: DOMRect }>();
   const [placed, setPlaced] = useState(false);
+  const navigatingByKey = useRef(keyboard);
   const typed = useRef({ text: '', at: 0 });
   const pressed = useRef(-1), released = useRef(0);
   const hover = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -538,6 +540,7 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
   };
   const keydown = (event: ReactKeyboardEvent) => {
     if (event.target !== element.current && !(event.target instanceof Element && event.target.parentElement === element.current)) return;
+    navigatingByKey.current = true;
     const move = (to: number) => { event.preventDefault(); event.stopPropagation(); if (to >= 0) { setActive(to); setOpen(undefined); } };
     switch (event.key) {
       case 'ArrowDown': move(stepFocus(entries, active, 1)); return;
@@ -574,7 +577,11 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
           aria-haspopup={entry.submenu ? 'menu' : undefined} aria-expanded={entry.submenu ? open?.index === index : undefined}
           aria-label={action.label} title={reason} aria-description={reason || (action.shortcut ? shortcutLabel(action.shortcut) : undefined)}
           className={'context-menu-item' + (action.danger ? ' danger' : '') + (active === index ? ' is-active' : '')}
-          onPointerMove={() => {
+          onPointerMove={event => {
+            // WebKit hit-tests a stationary mouse again when the layout changes.
+            // That event must not move the highlight away from the keyboard.
+            if (navigatingByKey.current && event.pointerType === 'mouse' && !event.movementX && !event.movementY) return;
+            navigatingByKey.current = false;
             if (active !== index) setActive(action.disabled ? -1 : index);
             clearTimeout(hover.current);
             if (entry.submenu && open?.index !== index) hover.current = setTimeout(() => openSubmenu(index, false), 120);

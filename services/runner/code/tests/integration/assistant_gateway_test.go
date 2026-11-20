@@ -128,7 +128,7 @@ func TestClaudeHelpAssistantChangesSettingsOnlyWithApproval(t *testing.T) {
 		t.Skip("build-worker required")
 	}
 	proposal := `{"revision":2,"reason":"You asked new coding sessions to ask before running tools.","changes":{"permission":"ask"}}`
-	results := make(chan string, 4)
+	results := map[string]chan string{"toolu_read": make(chan string, 1), "toolu_update": make(chan string, 1)}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 		if !strings.Contains(r.URL.Path, "/messages") || strings.HasSuffix(r.URL.Path, "count_tokens") || !strings.Contains(string(raw), "Use only supplied context") {
@@ -144,15 +144,21 @@ func TestClaudeHelpAssistantChangesSettingsOnlyWithApproval(t *testing.T) {
 		}
 		_ = json.Unmarshal(raw, &body)
 		var last []struct {
-			Type    string          `json:"type"`
-			Content json.RawMessage `json:"content"`
+			ToolUseID string          `json:"tool_use_id"`
+			Type      string          `json:"type"`
+			Content   json.RawMessage `json:"content"`
 		}
 		if n := len(body.Messages); n > 0 {
 			_ = json.Unmarshal(body.Messages[n-1].Content, &last)
 		}
 		for _, block := range last {
-			if block.Type == "tool_result" {
-				results <- string(block.Content)
+			if result := results[block.ToolUseID]; block.Type == "tool_result" && result != nil {
+				// The SDK may repeat a result in subsequent requests. The test
+				// observes each tool independently and the server never blocks.
+				select {
+				case result <- string(block.Content):
+				default:
+				}
 			}
 		}
 		switch strings.Count(string(raw), `"tool_use_id"`) {
@@ -193,7 +199,7 @@ func TestClaudeHelpAssistantChangesSettingsOnlyWithApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case read := <-results:
+	case read := <-results["toolu_read"]:
 		if !strings.Contains(read, `\"revision\":2`) || !strings.Contains(read, `\"permission\":\"yolo\"`) {
 			t.Fatalf("read result: %s", read)
 		}
@@ -221,7 +227,7 @@ func TestClaudeHelpAssistantChangesSettingsOnlyWithApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case applied := <-results:
+	case applied := <-results["toolu_update"]:
 		if !strings.Contains(applied, `\"applied\":true`) {
 			t.Fatalf("update result: %s", applied)
 		}

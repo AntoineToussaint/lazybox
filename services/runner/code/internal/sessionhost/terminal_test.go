@@ -163,6 +163,13 @@ func TestTerminalScrollbackIsBounded(t *testing.T) {
 	readTerminal(t, c, &out, "ready", true)
 	_ = c.Input([]byte(strings.Repeat("x", 200) + "\n"))
 	readTerminal(t, c, &out, "got:"+strings.Repeat("x", 200), true)
+	// A PTY read can split the last line from its terminator. Include every
+	// byte of this reply before comparing the observed and retained tails.
+	if !strings.HasSuffix(out.String(), "\n") {
+		var ending strings.Builder
+		readTerminal(t, c, &ending, "\n", true)
+		out.WriteString(ending.String())
+	}
 	_ = c.Detach()
 	again, err := Attach(ctx, dir, c.ID(), 0)
 	if err != nil {

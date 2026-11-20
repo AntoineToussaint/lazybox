@@ -61,7 +61,8 @@ try {
       await expect(list).toBeVisible();
       // Search, Enter picks; a second one the same way.
       await search.fill('fixture-team/api');
-      await expect(list.getByRole('option').first()).toContainText('fixture-team/api');
+      await expect(list.getByRole('option').first()).toHaveText('Start without a repository');
+      await expect(list.getByRole('option', { selected: true })).toContainText('fixture-team/api');
       await page.keyboard.press('Enter');
       await expect(sheet.locator('.new-task-chip-name')).toHaveText(['fixture-team/api']);
       await search.fill('web');

@@ -159,7 +159,9 @@ Where things are:
 ## Updates
 
 Lazybox offers updates and never forces one. **Settings → About & updates** (or
-**Help → Check for updates…**) is where you decide:
+**Help → Check for updates…**) shows the result of a manual check. In a
+dedicated workspace, the result opens in that window. From a detached chat,
+artifact, console or web window, the native menu opens it in the main window.
 
 - **Check automatically** (on by default) asks for a new version when
   Lazybox opens and every six hours after. A check downloads one small file

@@ -19,7 +19,7 @@ async function run(name,engine){
  const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
  let browser,streaming;
  try{
-  await server.listen();browser=await engine.launch({headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(15000);
+  await server.listen();browser=await engine.launch(name==='chromium'?{headless:true,ignoreDefaultArgs:['--hide-scrollbars']}:{headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(15000);
   const errors=[];page.on('pageerror',e=>errors.push(String(e)));
   await page.route('**/GetSession',async route=>{await new Promise(resolve=>setTimeout(resolve,500));await route.continue();});
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
@@ -49,9 +49,39 @@ async function run(name,engine){
   // A reply streams in a delta every 30 ms. Whatever way the reader scrolls
   // up, following stops at once and nothing pulls them back down.
   channel.push({type:'operation_accepted',text:'Stream a long reply'});
-  let line=0;streaming=setInterval(()=>{line++;channel.push({type:'message_delta',text:`Streamed line ${line}. ${'More streamed words. '.repeat(line%5?3:12)}\n\n`});},30);
+  // Pace the producer from the rendered stream. A slow CI browser otherwise
+  // accumulates deltas while Playwright itself waits to sample the scrollTop.
+  // Each gesture still has to hold while new content is visibly arriving.
+  let line=0,stopped=false;
+  const stream=async()=>{
+   while(!stopped){
+    line++;
+    const marker=`Streamed line ${line}.`;
+    channel.push({type:'message_delta',text:`${marker} ${'More streamed words. '.repeat(line%5?3:12)}\n\n`});
+    await page.waitForFunction(text=>document.querySelector('.messages-content')?.textContent.includes(text),marker);
+    await pause(30);
+   }
+  };
+  streaming=()=>{stopped=true;};
+  const streamDone=stream();
+  // Test failures close the browser while the producer may be waiting for a paint.
+  streamDone.catch(()=>{});
   await expect(pane).toContainText('Streamed line 20');await expect.poll(gap,{message:'A followed stream stays at the bottom'}).toBeLessThan(3);
-  const settle=async how=>{let last=await top();for(let still=0,end=Date.now()+3000;still<3;){assert.ok(Date.now()<end,`${name}: ${how}: the pane never came to rest (it keeps moving with the stream)`);await pause(80);const now=await top();still=Math.abs(now-last)<1?still+1:0;last=now;}return last;};
+  const settle=how=>pane.evaluate(async(node,label)=>{
+   // Sample in the browser. Under load three Playwright round trips can
+   // exceed the entire deadline even when scrollTop never moves.
+   let last=node.scrollTop,stableSince=performance.now(),frames=0;
+   const start=stableSince;
+   for(;;){
+    await new Promise(requestAnimationFrame);
+    const now=performance.now(),top=node.scrollTop;
+    if(Math.abs(top-last)>=1){stableSince=now;frames=0;}
+    else frames++;
+    if(frames>=3&&now-stableSince>=240)return top;
+    if(now-start>3000&&now-stableSince<240)throw new Error(`${label}: scrollTop still moving (${last} → ${top})`);
+    last=top;
+   }
+  },`${name}: ${how}`);
   const holds=async(how,nudge=false)=>{
    const held=await settle(how),grown=await pane.evaluate(node=>node.scrollHeight);
    if(!nudge)assert.ok(held<grown-(await pane.evaluate(node=>node.clientHeight))-200,`${how}: the reader is clearly away from the bottom`);
@@ -83,7 +113,16 @@ async function run(name,engine){
   await page.keyboard.press('Home');await holds('Home mid-stream');
   await latest.click();await follows('The Latest pill after Home');
   // Dragging the scrollbar thumb.
+  // Give Chromium a classic track with no arrow buttons. With an OS-themed
+  // scrollbar the bottom of the track can be a down arrow instead of the thumb.
+  if(name==='chromium')await page.addStyleTag({content:`
+   .messages::-webkit-scrollbar{width:14px}
+   .messages::-webkit-scrollbar-button{display:none}
+   .messages::-webkit-scrollbar-thumb{background:#777;min-height:24px}
+  `});
+  await expect.poll(gap).toBeLessThan(3);
   const bar=await pane.evaluate(node=>{const r=node.getBoundingClientRect(),thumb=Math.max(20,node.clientHeight*node.clientHeight/node.scrollHeight);return{x:r.right-Math.max(3,(node.offsetWidth-node.clientWidth)/2),y:Math.min(r.top+node.clientHeight-thumb/2,r.top+node.scrollTop/node.scrollHeight*node.clientHeight+thumb/2),native:node.offsetWidth>node.clientWidth};});
+  if(name==='chromium')assert.ok(bar.native,'Chromium must exercise a real scrollbar drag');
   await page.mouse.move(bar.x,bar.y);await page.mouse.down();
   for(let step=1;step<=8;step++){await page.mouse.move(bar.x,bar.y-step*12);await pause(30);}
   if(!bar.native)await pane.evaluate(node=>{node.scrollTop-=600;return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});// An overlay scrollbar a headless engine does not draw: the held pointer is the drag.
@@ -105,10 +144,10 @@ async function run(name,engine){
   // Sending mid-stream, while reading, returns to the bottom and follows.
   await page.getByRole('textbox',{name:'Message',exact:true}).fill('One more thing');await page.getByRole('button',{name:'Send message',exact:true}).click();
   await follows('Sending a message');
-  clearInterval(streaming);streaming=undefined;
+  streaming();await streamDone;streaming=undefined;
   await page.screenshot({path:`/tmp/lazybox-chat-scroll-${name}.png`});
   assert.deepEqual(errors,[]);
   console.log(`PASS ${name}: true bottom after late header, resize and Mermaid; reading held mid-stream against wheel, PageUp, Home, ArrowUp and a scrollbar drag; Latest pill, End, wheel to bottom and send resume following; layout shifts above the viewport keep the reading position.`);
- }finally{clearInterval(streaming);await browser?.close();await server.close();await fixture.close();}
+ }finally{streaming?.();await browser?.close();await server.close();await fixture.close();}
 }
 for(const [name,engine] of Object.entries(engines))await run(name,engine);

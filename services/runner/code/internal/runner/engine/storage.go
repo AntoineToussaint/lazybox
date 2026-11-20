@@ -187,11 +187,11 @@ func (e *Engine) Streaming() bool {
 // reporting whether it did. It is what Resume does for a conversation whose
 // agent is live and adopted: no second agent is started.
 func (e *Engine) SettleTransportFault() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if !e.Streaming() {
 		return false
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	// A journal that failed is not mended by a live stream: that takes a
 	// re-attachment, which opens the journal again.
 	if e.state.Closed || e.detaching || strings.HasPrefix(e.state.Fault, "event capture failed") || !e.settleTransportFaultLocked() {

@@ -334,7 +334,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
   const pick = (identity: string) => { change({ identities: [...draft.identities, identity], empty: false }); setQuery(''); setActive(0); setListOpen(false); setProblem(undefined); };
   const remove = (identity: string) => change({ identities: draft.identities.filter(value => value !== identity) });
   const noRepository = () => { change({ identities: [], empty: true }); setQuery(''); setListOpen(false); setProblem(undefined); prompt.current?.focus(); };
-  const rows = options.length + 1; // the repositories, then "Start without a repository"
+  const rows = options.length + 1; // Keep the first search match active. ArrowUp from it selects the no-repository option above.
 
   const searchKeys = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing) return;
@@ -378,6 +378,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
       <button type="button" aria-label="Close new task" title={busy ? 'Keeps starting in the background' : 'Close · your message is kept'} onClick={() => busy ? moveToBackground() : onClose()}>×</button>
     </DialogHeader>
     <form onSubmit={submit} aria-busy={busy || undefined}>
+      <div className="new-task-fields">
       <textarea ref={prompt} className="new-task-prompt" aria-label="First message" rows={itemRef ? 2 : 4} data-item={itemRef ? '' : undefined} maxLength={100_000} disabled={busy} placeholder={itemRef ? `Anything to add about ${itemRef.key}? (optional)` : 'What should the agent do? Paste an issue link to start from it.'}
         value={draft.prompt} onChange={event => { change({ prompt: event.target.value }); setProblem(undefined); }} onKeyDown={promptKeys} onPaste={pasted}/>
 
@@ -405,23 +406,23 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
               onOpen={() => startPicker === identity ? closeStart(identity) : openStart(identity)}/>
             <button type="button" aria-label={`Remove ${label(identity)}`} disabled={busy} onClick={() => remove(identity)}><Icon name="close" size={12}/></button>
           </span>)}
-          {draft.empty && <span className="new-task-chip is-empty"><span>No repository</span><button type="button" aria-label="Choose repositories instead" disabled={busy} onClick={() => { change({ empty: false }); search.current?.focus(); }}><Icon name="close" size={11}/></button></span>}
+          {draft.empty && <span className="new-task-chip is-empty"><span>No repository</span><button type="button" aria-label="Choose repositories instead" disabled={busy} onClick={() => { change({ empty: false }); setListOpen(true); setActive(0); search.current?.focus(); }}><Icon name="close" size={11}/></button></span>}
           <input ref={search} id={`${id}-search`} role="combobox" aria-expanded={listOpen} aria-controls={`${id}-repos`} aria-autocomplete="list" autoComplete="off" spellCheck={false} disabled={busy}
             aria-activedescendant={listOpen ? `${id}-repo-${active}` : undefined} aria-label="Add a repository"
             placeholder={draft.identities.length || draft.empty ? 'Add another…' : 'Search your repositories…'}
             value={query} onChange={event => { setQuery(event.target.value); setActive(0); setListOpen(true); }} onFocus={() => { if (!draft.identities.length && !draft.empty) setListOpen(true); }} onClick={() => setListOpen(true)} onBlur={() => setListOpen(false)} onKeyDown={searchKeys}/>
         </div>
         {listOpen && <ul className="new-task-repo-list" id={`${id}-repos`} role="listbox" aria-label="Repositories" onMouseDown={event => event.preventDefault()}>
+          <li id={`${id}-repo-${options.length}`} role="option" aria-selected={active === options.length} className={`new-task-repo-none${active === options.length ? ' active' : ''}`} onPointerMove={() => setActive(options.length)} onClick={noRepository}>
+            <Icon name="folder" size={13}/><span>Start without a repository</span>
+          </li>
           {options.map((option, index) => <li key={option.entry.identity} id={`${id}-repo-${index}`} role="option" aria-selected={index === active} className={index === active ? 'active' : undefined}
             onPointerMove={() => setActive(index)} onClick={() => pick(option.entry.identity)}>
             <Icon name="repository" size={13}/><span className="new-task-repo-name">{label(option.entry.identity)}</span>{option.recent && <small>Recent</small>}
           </li>)}
           {!options.length && <li className="new-task-repo-empty" aria-disabled="true">{catalogLoading ? 'Loading your repositories…' : query ? `No repository matches “${query}”` : entries.length ? 'Every repository is chosen' : 'No repositories yet'}</li>}
-          <li id={`${id}-repo-${options.length}`} role="option" aria-selected={active === options.length} className={`new-task-repo-none${active === options.length ? ' active' : ''}`} onPointerMove={() => setActive(options.length)} onClick={noRepository}>
-            <Icon name="folder" size={13}/><span>Start without a repository</span>
-          </li>
-          <li className="new-task-repo-more" aria-hidden="true"><button type="button" tabIndex={-1} onClick={() => { onClose(); runAction('settings.open', 'repositories'); }}><Icon name="plus" size={12}/>Add repositories…</button></li>
         </ul>}
+        <div className="new-task-repo-more"><button type="button" disabled={busy} onClick={() => { onClose(); runAction('settings.open', 'repositories'); }}><Icon name="plus" size={12}/>Add repositories…</button></div>
         {startPicker && draft.identities.includes(startPicker) && !busy && <StartFromPicker api={api} identity={startPicker} repository={label(startPicker)} info={starts[startPicker]} current={startOf(startPicker)}
           onInfo={info => setStartInfo(startPicker, info)} onClose={() => closeStart(startPicker)}
           onPick={picked => { change({ starts: { ...draft.starts, [startPicker]: picked } }); closeStart(startPicker); }}/>}
@@ -475,6 +476,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
         ? <ReplaceRepositoryCopy key={replaced.identity} replacement={replaced} autoFocus onReplaced={() => { setReplaced(undefined); setError(''); void reloadCatalog(); void start(false); }}/>
         : (problem || error) && <p className="new-task-problem" role="alert">{problem?.message || error}</p>}
       {busy && <div className="new-task-progress" role="status"><span>{progress || 'Starting…'}</span><progress aria-label="Starting the task"/><small>Esc keeps it going in the background.</small></div>}
+      </div>
       <footer>
         <span className="new-task-keys" aria-hidden="true"><kbd>↵</kbd> start · <kbd>{mod}↵</kbd> in the background · {draft.identities.length && !draft.empty ? <><kbd>⌥B</kbd> start from</> : <><kbd>⇧↵</kbd> new line</>}</span>
         <button type="button" className="new-task-background" disabled={busy} title={`Start it and keep working here (${mod}↵)`} onClick={() => void start(true)}>Start in background</button>

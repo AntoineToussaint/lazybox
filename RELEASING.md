@@ -47,9 +47,20 @@ macOS, smoke-tests the built Runner and CLI, and publishes: a GitHub release
 for the tag (never marked *Latest*), `latest.json` on `v2-updates` (installed
 apps pick it up within six hours), and the cask. A tag with a prerelease
 suffix (`v2-v0.2.0-rc.1`) gets a prerelease and changes neither the feed nor
-the cask. **Actions → V2 Release → Run workflow** with an existing tag
+the cask. **Actions → Release → Run workflow** with an existing tag
 rebuilds it as a dry run: gates, build, signing, notarization, smoke test,
 artifacts on the run, nothing published.
+
+Before the first tag, run a candidate from the current main branch:
+
+```sh
+gh workflow run release.yml --ref main -f version=0.1.0-rc.1
+```
+
+Supply either a candidate version or an existing tag. Candidate builds use a
+temporary updater key and exercise the Homebrew installation matrix even if
+an independent test gate fails. Any failed gate still fails the run. Tagged
+builds require the production updater key. Only a tag push publishes.
 
 ## What a build produces
 

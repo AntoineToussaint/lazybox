@@ -219,6 +219,11 @@ try {
   const startButton = await sheet.locator('footer button.primary').boundingBox();
   assert.ok(startButton && startButton.y + startButton.height <= Math.min(680, box.y + box.height), `Start is inside the sheet, on screen, at 1024×680: ${JSON.stringify({ startButton, box })}`);
   await page.screenshot({ path: '.cache/start-from-issue-1024-light.png' });
+  await page.setViewportSize({ width: 800, height: 480 });
+  const fields = sheet.locator('.new-task-fields');
+  await expect.poll(() => fields.evaluate(node => node.scrollHeight - node.clientHeight)).toBeGreaterThan(0);
+  await fields.evaluate(node => { node.scrollTop = node.scrollHeight; });
+  await expect(sheet.locator('footer button.primary')).toBeInViewport({ ratio: 1 });
   await page.keyboard.press('Escape');
 
   assert.deepEqual(errors, [], 'no page errors');

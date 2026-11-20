@@ -16,6 +16,8 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/adapters/codex"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type fakeNativeAccount struct {
@@ -151,6 +153,54 @@ func TestSettingsCodexSignInRegistersLiveAndRetainsUsageWithoutStartingAgent(t *
 	if err != nil || len(refreshed.Availability.Windows) != 2 {
 		t.Fatal(refreshed, err)
 	}
+	renamed, err := s.RenameSubscription(context.Background(), &pb.RenameSubscriptionRequest{ProfileId: first.ProfileId, Label: "  Team  "})
+	if err != nil || renamed.Id != first.ProfileId || renamed.Label != "Team" || len(renamed.Availability.Windows) != 2 {
+		t.Fatal("rename lost account identity or usage", renamed, err)
+	}
+	saved, err := accounts.LoadProfiles(s.Bench.Config.SubscriptionState)
+	if err != nil || len(saved) != 1 || saved[0].ID != first.ProfileId || saved[0].Label != "Team" || saved[0].EnrollmentLabel == nil || *saved[0].EnrollmentLabel != "Work" {
+		t.Fatal("rename was not persisted with the original enrollment label", saved, err)
+	}
+	retry, err = s.AddSubscription(context.Background(), request())
+	if err != nil || retry.Id != first.Id || retry.Label != "Team" {
+		t.Fatal("enrollment retry lost the renamed account", retry, err)
+	}
+	info, err = s.Info(context.Background(), &pb.InfoRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range info.Profiles {
+		if p.Id == first.ProfileId && p.Label != "Team" {
+			t.Fatal("Info returned the old name")
+		}
+	}
+	if _, err := s.RenameSubscription(context.Background(), &pb.RenameSubscriptionRequest{ProfileId: first.ProfileId, Label: " "}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("blank name: %v", err)
+	}
+	if _, err := s.RenameSubscription(context.Background(), &pb.RenameSubscriptionRequest{ProfileId: "codex-default", Label: "Team"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("unmanaged account: %v", err)
+	}
+
+}
+
+func TestRenameSubscriptionIsOwnerOnly(t *testing.T) {
+	method := pb.RunnerService_RenameSubscription_FullMethodName
+	_, agentAllowed := agentRPCs[method]
+	_, terminalAllowed := terminalRPCs[method]
+	_, deviceAllowed := deviceRPCs[method]
+	if agentAllowed || terminalAllowed || deviceAllowed {
+		t.Fatalf("%s allows a scoped credential", method)
+	}
+	f := newAuthorityFixture(t)
+	ctx := timeout(t)
+	_, _, token := f.open(t)
+	request := &pb.RenameSubscriptionRequest{ProfileId: "codex-default", Label: "Work"}
+	if _, err := f.client.RenameSubscription(bearer(ctx, token), request); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("agent credential got %v, want PermissionDenied", err)
+	}
+	if _, err := f.client.RenameSubscription(ctx, request); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("no credential got %v, want Unauthenticated", err)
+	}
 }
 
 // Lazybox does not store Claude.ai credentials (CLAUDE_COMPLIANCE.md): a
@@ -215,6 +265,10 @@ func TestEnrollmentReceiptRecoversAfterRunnerRestartWithoutTokenReplay(t *testin
 		t.Fatal(err)
 	}
 	enrollmentState(t, service, flow.Id, "added")
+	if _, err := service.RenameSubscription(context.Background(), &pb.RenameSubscriptionRequest{ProfileId: flow.ProfileId, Label: "Renamed Work"}); err != nil {
+		t.Fatal(err)
+	}
+
 	if err = bench.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +282,11 @@ func TestEnrollmentReceiptRecoversAfterRunnerRestartWithoutTokenReplay(t *testin
 	if err != nil || receipt.Id != flow.Id || receipt.State != "added" || receipt.SignInUrl != "" || receipt.UserCode != "" {
 		t.Fatal(receipt, err)
 	}
+	retry, err := service.AddSubscription(context.Background(), &pb.AddSubscriptionRequest{RequestKey: "lost-ack", Provider: "codex", Label: "Work"})
+	if err != nil || retry.Id != flow.Id || retry.Label != "Renamed Work" {
+		t.Fatal("renaming must preserve the original enrollment request across restart", retry, err)
+	}
+
 	missing, err := service.GetSubscriptionEnrollment(context.Background(), &pb.SubscriptionEnrollmentRequest{RequestKey: "never-accepted", Provider: "codex"})
 	if err != nil || missing.State != "expired" || missing.Error != runner.ExpiredSignIn || strings.Contains(missing.Error, "tracked") {
 		t.Fatal(missing, err)
@@ -261,6 +320,14 @@ func TestSharedSubscriptionsAcrossRunnersAndRestart(t *testing.T) {
 	if err != nil || !info.SharedSubscriptions || len(info.Profiles) != 3 || !info.Profiles[2].Managed {
 		t.Fatal("other Runner did not discover enrollment", info, err)
 	}
+	if _, err := ws.RenameSubscription(context.Background(), &pb.RenameSubscriptionRequest{ProfileId: flow.ProfileId, Label: "Shared Work"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err = ds.Info(context.Background(), &pb.InfoRequest{})
+	if err != nil || len(info.Profiles) != 3 || info.Profiles[2].Id != flow.ProfileId || info.Profiles[2].Label != "Shared Work" {
+		t.Fatal("other Runner kept the old label", info, err)
+	}
+
 	data, _ := json.Marshal(info)
 	if strings.Contains(string(data), "fixture-shared-token") || strings.Contains(string(data), shared) {
 		t.Fatal("private credential or storage path leaked")

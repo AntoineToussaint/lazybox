@@ -109,3 +109,10 @@ test('telling the agent it is done', () => {
   assert.equal(doneMessage('acme login staging'), '`acme login staging` finished.');
   assert.equal(doneMessage('make a\nmake b', 2), 'The command failed (exit 2).\n\n```sh\nmake a\nmake b\n```');
 });
+
+test('repeating the destination gives each command its own home handoff', () => {
+  const commands = ['env -u ACME_TOKEN MODE=check bin/devbox status', 'bin/devbox validate'];
+  const text = ['First update the home checkout to main.', ...commands.map(command => `Run in the home checkout of api: \`${command}\``)].join('\n\n');
+  assert.deepEqual(homeOffers(text).map(({ command, target }) => ({ command, target })),
+    commands.map(command => ({ command, target: { kind: 'repository', repository: 'api' } })));
+});

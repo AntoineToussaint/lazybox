@@ -98,6 +98,9 @@ const (
 	// RunnerServiceCancelSubscriptionEnrollmentProcedure is the fully-qualified name of the
 	// RunnerService's CancelSubscriptionEnrollment RPC.
 	RunnerServiceCancelSubscriptionEnrollmentProcedure = "/lazybox.bench.v1.RunnerService/CancelSubscriptionEnrollment"
+	// RunnerServiceRenameSubscriptionProcedure is the fully-qualified name of the RunnerService's
+	// RenameSubscription RPC.
+	RunnerServiceRenameSubscriptionProcedure = "/lazybox.bench.v1.RunnerService/RenameSubscription"
 	// RunnerServiceRefreshSubscriptionProcedure is the fully-qualified name of the RunnerService's
 	// RefreshSubscription RPC.
 	RunnerServiceRefreshSubscriptionProcedure = "/lazybox.bench.v1.RunnerService/RefreshSubscription"
@@ -747,6 +750,7 @@ type RunnerServiceClient interface {
 	AddSubscription(context.Context, *connect.Request[gen.AddSubscriptionRequest]) (*connect.Response[gen.SubscriptionEnrollment], error)
 	GetSubscriptionEnrollment(context.Context, *connect.Request[gen.SubscriptionEnrollmentRequest]) (*connect.Response[gen.SubscriptionEnrollment], error)
 	CancelSubscriptionEnrollment(context.Context, *connect.Request[gen.SubscriptionEnrollmentRequest]) (*connect.Response[gen.SubscriptionEnrollment], error)
+	RenameSubscription(context.Context, *connect.Request[gen.RenameSubscriptionRequest]) (*connect.Response[gen.Profile], error)
 	RefreshSubscription(context.Context, *connect.Request[gen.RefreshSubscriptionRequest]) (*connect.Response[gen.Profile], error)
 	// Owner only. Forgets a subscription saved in Lazybox: its registry entry and
 	// its private folder (an imported token among them). Refused while a running
@@ -1363,6 +1367,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceCancelSubscriptionEnrollmentProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("CancelSubscriptionEnrollment")),
+			connect.WithClientOptions(opts...),
+		),
+		renameSubscription: connect.NewClient[gen.RenameSubscriptionRequest, gen.Profile](
+			httpClient,
+			baseURL+RunnerServiceRenameSubscriptionProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("RenameSubscription")),
 			connect.WithClientOptions(opts...),
 		),
 		refreshSubscription: connect.NewClient[gen.RefreshSubscriptionRequest, gen.Profile](
@@ -2598,6 +2608,7 @@ type runnerServiceClient struct {
 	addSubscription              *connect.Client[gen.AddSubscriptionRequest, gen.SubscriptionEnrollment]
 	getSubscriptionEnrollment    *connect.Client[gen.SubscriptionEnrollmentRequest, gen.SubscriptionEnrollment]
 	cancelSubscriptionEnrollment *connect.Client[gen.SubscriptionEnrollmentRequest, gen.SubscriptionEnrollment]
+	renameSubscription           *connect.Client[gen.RenameSubscriptionRequest, gen.Profile]
 	refreshSubscription          *connect.Client[gen.RefreshSubscriptionRequest, gen.Profile]
 	removeSubscription           *connect.Client[gen.RemoveSubscriptionRequest, gen.InfoResponse]
 	getGitHubConnection          *connect.Client[gen.GetGitHubConnectionRequest, gen.GitHubConnection]
@@ -2909,6 +2920,11 @@ func (c *runnerServiceClient) GetSubscriptionEnrollment(ctx context.Context, req
 // CancelSubscriptionEnrollment calls lazybox.bench.v1.RunnerService.CancelSubscriptionEnrollment.
 func (c *runnerServiceClient) CancelSubscriptionEnrollment(ctx context.Context, req *connect.Request[gen.SubscriptionEnrollmentRequest]) (*connect.Response[gen.SubscriptionEnrollment], error) {
 	return c.cancelSubscriptionEnrollment.CallUnary(ctx, req)
+}
+
+// RenameSubscription calls lazybox.bench.v1.RunnerService.RenameSubscription.
+func (c *runnerServiceClient) RenameSubscription(ctx context.Context, req *connect.Request[gen.RenameSubscriptionRequest]) (*connect.Response[gen.Profile], error) {
+	return c.renameSubscription.CallUnary(ctx, req)
 }
 
 // RefreshSubscription calls lazybox.bench.v1.RunnerService.RefreshSubscription.
@@ -3967,6 +3983,7 @@ type RunnerServiceHandler interface {
 	AddSubscription(context.Context, *connect.Request[gen.AddSubscriptionRequest]) (*connect.Response[gen.SubscriptionEnrollment], error)
 	GetSubscriptionEnrollment(context.Context, *connect.Request[gen.SubscriptionEnrollmentRequest]) (*connect.Response[gen.SubscriptionEnrollment], error)
 	CancelSubscriptionEnrollment(context.Context, *connect.Request[gen.SubscriptionEnrollmentRequest]) (*connect.Response[gen.SubscriptionEnrollment], error)
+	RenameSubscription(context.Context, *connect.Request[gen.RenameSubscriptionRequest]) (*connect.Response[gen.Profile], error)
 	RefreshSubscription(context.Context, *connect.Request[gen.RefreshSubscriptionRequest]) (*connect.Response[gen.Profile], error)
 	// Owner only. Forgets a subscription saved in Lazybox: its registry entry and
 	// its private folder (an imported token among them). Refused while a running
@@ -4579,6 +4596,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceCancelSubscriptionEnrollmentProcedure,
 		svc.CancelSubscriptionEnrollment,
 		connect.WithSchema(runnerServiceMethods.ByName("CancelSubscriptionEnrollment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceRenameSubscriptionHandler := connect.NewUnaryHandler(
+		RunnerServiceRenameSubscriptionProcedure,
+		svc.RenameSubscription,
+		connect.WithSchema(runnerServiceMethods.ByName("RenameSubscription")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceRefreshSubscriptionHandler := connect.NewUnaryHandler(
@@ -5833,6 +5856,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceGetSubscriptionEnrollmentHandler.ServeHTTP(w, r)
 		case RunnerServiceCancelSubscriptionEnrollmentProcedure:
 			runnerServiceCancelSubscriptionEnrollmentHandler.ServeHTTP(w, r)
+		case RunnerServiceRenameSubscriptionProcedure:
+			runnerServiceRenameSubscriptionHandler.ServeHTTP(w, r)
 		case RunnerServiceRefreshSubscriptionProcedure:
 			runnerServiceRefreshSubscriptionHandler.ServeHTTP(w, r)
 		case RunnerServiceRemoveSubscriptionProcedure:
@@ -6330,6 +6355,10 @@ func (UnimplementedRunnerServiceHandler) GetSubscriptionEnrollment(context.Conte
 
 func (UnimplementedRunnerServiceHandler) CancelSubscriptionEnrollment(context.Context, *connect.Request[gen.SubscriptionEnrollmentRequest]) (*connect.Response[gen.SubscriptionEnrollment], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.CancelSubscriptionEnrollment is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) RenameSubscription(context.Context, *connect.Request[gen.RenameSubscriptionRequest]) (*connect.Response[gen.Profile], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.RenameSubscription is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) RefreshSubscription(context.Context, *connect.Request[gen.RefreshSubscriptionRequest]) (*connect.Response[gen.Profile], error) {

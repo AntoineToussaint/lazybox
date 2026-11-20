@@ -10,7 +10,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
+	"unicode"
 )
 
 var profileID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
@@ -159,6 +161,57 @@ func writeProfiles(dir string, profiles []Profile) error {
 	}
 	err = errors.Join(folder.Sync(), folder.Close())
 	return err
+}
+
+var ErrSubscriptionLabel = errors.New("enter a subscription name of 1–64 bytes with no control characters")
+
+func NormalizeSubscriptionLabel(label string) (string, error) {
+	label = strings.TrimSpace(label)
+	if len(label) == 0 || len(label) > 64 || strings.IndexFunc(label, unicode.IsControl) >= 0 {
+		return "", ErrSubscriptionLabel
+	}
+	return label, nil
+}
+
+// RenameProfile updates the display name in the enrollment registry.
+func RenameProfile(state, id, label string) (Profile, error) {
+	label, err := NormalizeSubscriptionLabel(label)
+	if err != nil {
+		return Profile{}, err
+	}
+	if !filepath.IsAbs(state) || !profileID.MatchString(id) {
+		return Profile{}, os.ErrNotExist
+	}
+	dir := filepath.Join(state, "accounts")
+	lock, err := os.OpenFile(filepath.Join(dir, "enrollment.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return Profile{}, err
+	}
+	defer lock.Close()
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return Profile{}, errors.New("another subscription change is in progress; try again")
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	profiles, err := LoadProfiles(state)
+	if err != nil {
+		return Profile{}, err
+	}
+	for i := range profiles {
+		p := &profiles[i]
+		if p.ID != id {
+			continue
+		}
+		if p.Label == label {
+			return *p, nil
+		}
+		if p.EnrollmentLabel == nil {
+			original := p.Label
+			p.EnrollmentLabel = &original
+		}
+		p.Label = label
+		return *p, writeProfiles(dir, profiles)
+	}
+	return Profile{}, os.ErrNotExist
 }
 
 // StoreProfile commits an already authenticated isolated profile. Existing

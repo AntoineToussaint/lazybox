@@ -22,6 +22,6 @@ export function HelpItems({ settings = true }: { settings?: boolean }) {
     <hr/>
     {/* A report the person reads, then saves, copies or posts as a GitHub issue; nothing is uploaded (FeedbackDialog.tsx). */}
     <button onClick={() => openOnboarding('feedback')}><Icon name="chat" size={14}/><span>Send feedback…</span></button>
-    {settings && <button onClick={() => openOnboarding('updates')}><Icon name="download" size={14}/><span>Check for updates…</span></button>}
+    <button onClick={() => openOnboarding('updates')}><Icon name="download" size={14}/><span>Check for updates…</span></button>
   </>;
 }

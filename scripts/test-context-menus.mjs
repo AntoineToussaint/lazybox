@@ -143,13 +143,27 @@ try{
  await open(fileLink);
  assert.deepEqual((await labels()).slice(0,4),['Open','Open to the side','Quick look','Reveal in Files']);
  await item('Copy relative path').click();await expect.poll(copied).toBe('api/src/routes.ts');
+ // Hold the file until keyboard focus has moved into a new menu.
+ let releaseFile;
+ const fileGate=new Promise(resolve=>{releaseFile=resolve;});
+ let fileRequested=false;
+ await page.route('**/lazybox.bench.v1.RunnerService/ReadWorkspaceFile',async route=>{
+  if(route.request().postDataJSON()?.path==='api/src/routes.ts'){fileRequested=true;await fileGate;}
+  await route.continue();
+ });
  await open(fileLink);await item('Open to the side').click();
+ await expect.poll(()=>fileRequested).toBe(true);
  const editorPanel=page.locator('section.workspace-panel.panel-editor');
  await expect(editorPanel.getByRole('tab',{name:/routes\.ts/})).toBeVisible();
 
  // Keyboard: Shift+F10 on the focused element, arrows, type-ahead, Escape returns focus.
  await fileLink.focus();await page.keyboard.press('Shift+F10');
  await expect(menu).toBeVisible();
+ await expect(item('Open')).toBeFocused();
+ await item('Open to the side').dispatchEvent('pointermove',{pointerType:'mouse',movementX:0,movementY:0});
+ await expect(item('Open')).toBeFocused();
+ releaseFile();
+ await expect(editorPanel.locator('.monaco-editor')).toBeVisible();
  await expect(item('Open')).toBeFocused();
  await page.keyboard.press('ArrowDown');await expect(item('Open to the side')).toBeFocused();
  await page.keyboard.press('End');await expect(menu.locator('[role=menuitem]:not([aria-disabled])').last()).toBeFocused();

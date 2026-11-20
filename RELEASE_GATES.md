@@ -282,3 +282,11 @@ application error. The page-errors gate tests both browsers, retains genuine
 throws and rejected promises, and exercises caught fetches across navigation.
 
 The issue-start gate checks the action row at 1024×680 and 390×680. The new-task form scrolls its fields independently of the footer, including when agent controls wrap; repository selection and branch pickers remain covered by their existing gates.
+
+The context-menu gate holds file loading while keyboard focus enters a menu and
+injects a zero-motion pointer event: layout under a stationary pointer must not
+replace keyboard focus. Mermaid's reader-position gate holds the actual near-view
+observer notification until wheel movement is measured, then checks anchoring
+during rendering. The chat-scroll gate gives native scrollbars explicit track and
+thumb geometry before dragging; platform-dependent arrow buttons and minimum
+thumb sizes must not turn a drag into a click on a scroll arrow.

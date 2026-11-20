@@ -82,11 +82,18 @@ async function run(name,engine){
   await expect(latest,'ArrowUp stops following').toBeVisible();await settle('ArrowUp');
   await page.keyboard.press('Home');await holds('Home mid-stream');
   await latest.click();await follows('The Latest pill after Home');
+  // Fix the browser-owned thumb geometry for the drag. Native themes have
+  // different minimum thumb sizes and arrow buttons; guessing 20px can hit
+  // the bottom arrow instead of the thumb on Linux.
+  await page.addStyleTag({content:'.messages::-webkit-scrollbar{width:16px}.messages::-webkit-scrollbar-track{background:#eee}.messages::-webkit-scrollbar-thumb{background:#777;min-height:40px;border:0}.messages::-webkit-scrollbar-button{display:none;width:0;height:0}'});
+  await expect.poll(gap).toBeLessThan(3);
   // Dragging the scrollbar thumb.
-  const bar=await pane.evaluate(node=>{const r=node.getBoundingClientRect(),thumb=Math.max(20,node.clientHeight*node.clientHeight/node.scrollHeight);return{x:r.right-Math.max(3,(node.offsetWidth-node.clientWidth)/2),y:Math.min(r.top+node.clientHeight-thumb/2,r.top+node.scrollTop/node.scrollHeight*node.clientHeight+thumb/2),native:node.offsetWidth>node.clientWidth};});
+  const bar=await pane.evaluate(node=>{const r=node.getBoundingClientRect(),thumb=Math.max(40,node.clientHeight*node.clientHeight/node.scrollHeight);return{x:r.right-Math.max(3,(node.offsetWidth-node.clientWidth)/2),y:Math.min(r.top+node.clientHeight-thumb/2,r.top+node.scrollTop/node.scrollHeight*node.clientHeight+thumb/2),native:node.offsetWidth>node.clientWidth};});
   await page.mouse.move(bar.x,bar.y);await page.mouse.down();
   for(let step=1;step<=8;step++){await page.mouse.move(bar.x,bar.y-step*12);await pause(30);}
-  if(!bar.native)await pane.evaluate(node=>{node.scrollTop-=600;return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});// An overlay scrollbar a headless engine does not draw: the held pointer is the drag.
+  // Headless macOS WebKit has no painted scrollbar, even with custom CSS.
+  // Keep its held-pointer simulation; Linux exercises the actual native drag.
+  if(!bar.native)await pane.evaluate(node=>{node.scrollTop-=600;return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
   await page.mouse.up();await holds('A scrollbar drag mid-stream');
   // A layout shift above the viewport, such as an image or diagram rendering
   // in an earlier message, leaves what the reader looks at where it is.

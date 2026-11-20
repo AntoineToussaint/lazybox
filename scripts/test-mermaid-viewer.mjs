@@ -29,6 +29,23 @@ try{
  const page=await context.newPage();page.setDefaultTimeout(15000);
  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
  await page.addInitScript(()=>{window.__copies=[];Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__copies.push(text);}}});});
+ await page.addInitScript(()=>{
+  const NativeObserver=window.IntersectionObserver;
+  window.IntersectionObserver=class extends NativeObserver {
+   constructor(callback,options){
+    super((entries,observer)=>{
+     const ready=entries.filter(entry=>{
+      if(window.__holdEarlyDiagram&&options?.rootMargin==='600px 0px'&&entry.isIntersecting&&entry.target===document.querySelector('.mermaid-block')){
+       window.__releaseEarlyDiagram=()=>{window.__holdEarlyDiagram=false;callback([entry],observer);};
+       return false;
+      }
+      return true;
+     });
+     if(ready.length)callback(ready,observer);
+    },options);
+   }
+  };
+ });
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${session.id}#token=${fixture.token}`);
  await expect(page.locator('.messages:visible')).toContainText('DIAGRAM_END');
  const figure=page.locator('.mermaid-block').filter({hasText:'Mermaid diagram'}).last();
@@ -128,6 +145,7 @@ try{
  // and the text being read does not move when the diagram above it grows.
  const pending=page.locator('.mermaid-block').first();
  // The reader scrolls up with the wheel until the unrendered diagram is 300px above the pane.
+ await page.evaluate(()=>{window.__holdEarlyDiagram=true;});
  const distance=await pane.evaluate(node=>node.querySelector('.mermaid-block').getBoundingClientRect().bottom-node.getBoundingClientRect().top+300);
  const paneBox=await pane.boundingBox();await page.mouse.move(paneBox.x+paneBox.width/2,paneBox.y+40);
  const target=await pane.evaluate((node,d)=>node.scrollTop+d,distance);await page.mouse.wheel(0,distance);
@@ -135,6 +153,10 @@ try{
  await expect(page.getByRole('button',{name:'Jump to latest'})).toBeVisible();
  const reading=()=>pane.evaluate(node=>{const top=node.getBoundingClientRect().top;const row=[...node.querySelectorAll('.message')].find(m=>m.getBoundingClientRect().bottom>top);return{text:row.textContent.slice(0,40),offset:Math.round(row.getBoundingClientRect().top-top)};});
  const held=await reading();
+ // Hold the observer notification until wheel movement is measured. Otherwise
+ // rendering can legitimately change scrollTop before the wheel assertion.
+ await expect.poll(()=>page.evaluate(()=>typeof window.__releaseEarlyDiagram)).toBe('function');
+ await page.evaluate(()=>window.__releaseEarlyDiagram());
  await expect.poll(()=>page.locator('.mermaid-block img').count(),{timeout:10000}).toBe(2);
  const grown=await pending.evaluate(node=>node.getBoundingClientRect().height);assert.ok(grown>150,`the early diagram rendered above the reader (${grown}px)`);
  const after=await reading();assert.equal(after.text,held.text);assert.ok(Math.abs(after.offset-held.offset)<=2,`reading position held while a diagram above rendered (${held.offset} → ${after.offset})`);

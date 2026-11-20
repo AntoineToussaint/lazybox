@@ -574,7 +574,10 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
           aria-haspopup={entry.submenu ? 'menu' : undefined} aria-expanded={entry.submenu ? open?.index === index : undefined}
           aria-label={action.label} title={reason} aria-description={reason || (action.shortcut ? shortcutLabel(action.shortcut) : undefined)}
           className={'context-menu-item' + (action.danger ? ' danger' : '') + (active === index ? ' is-active' : '')}
-          onPointerMove={() => {
+          onPointerMove={event => {
+            // Layout can put an item under a stationary pointer and emit a
+            // zero-motion event. It must not replace keyboard focus.
+            if (!event.movementX && !event.movementY) return;
             if (active !== index) setActive(action.disabled ? -1 : index);
             clearTimeout(hover.current);
             if (entry.submenu && open?.index !== index) hover.current = setTimeout(() => openSubmenu(index, false), 120);

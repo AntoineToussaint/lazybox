@@ -40,6 +40,7 @@ type ListProps = {
   loaded?: boolean;
   refresh(): void;
   chooseRepositoryFolder?(): Promise<string | null>;
+  onWorkspaceCreated?(workspaceId: string): void;
   onNewConversation?(workspaceId: string): void;
   /** Where folded workspaces are remembered. */
   viewState?: ViewStateStore;
@@ -223,6 +224,7 @@ function WorkspaceList({
   loaded = true,
   refresh,
   chooseRepositoryFolder,
+  onWorkspaceCreated,
   onNewConversation,
   viewState,
   embedded = false,
@@ -324,9 +326,7 @@ function WorkspaceList({
             className="icon-button"
             aria-label="New workspace"
             title="New workspace"
-            onClick={() => {
-              setCreating(true);
-            }}
+            onClick={() => setCreating(true)}
           >
             <Icon name="plus" size={16} />
           </button>
@@ -362,6 +362,7 @@ function WorkspaceList({
             setCreating(false);
             setCopy(undefined);
             refresh();
+            if (onWorkspaceCreated) { onWorkspaceCreated(workspace.id); return; }
             onTarget({
               collectionId: workspace.id,
               sessionId: "",

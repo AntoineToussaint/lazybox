@@ -379,7 +379,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
     </DialogHeader>
     <form onSubmit={submit} aria-busy={busy || undefined}>
       <div className="new-task-fields">
-      <textarea ref={prompt} className="new-task-prompt" aria-label="First message" rows={itemRef ? 2 : 4} data-item={itemRef ? '' : undefined} maxLength={100_000} disabled={busy} placeholder={itemRef ? `Anything to add about ${itemRef.key}? (optional)` : 'What should the agent do? Paste an issue link to start from it.'}
+      <textarea ref={prompt} className="new-task-prompt" aria-label="First message" rows={itemRef ? 2 : 4} data-item={itemRef ? '' : undefined} maxLength={100_000} disabled={busy} placeholder={itemRef ? `Anything to add about ${itemRef.key}? (optional)` : 'What should the agent do? Leave blank to open a conversation.'}
         value={draft.prompt} onChange={event => { change({ prompt: event.target.value }); setProblem(undefined); }} onKeyDown={promptKeys} onPaste={pasted}/>
 
       <div className="new-task-item">

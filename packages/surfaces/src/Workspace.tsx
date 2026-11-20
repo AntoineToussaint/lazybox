@@ -211,6 +211,8 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const display = useDisplayDetail(viewState);
   const [settings, setSettings] = useState(false);
   const [extensionRequest, setExtensionRequest] = useState<{ panelId: string; request: NonNullable<ModuleProps['extensionRequest']> }>();
+  const [addSubscription, setAddSubscription] = useState(false);
+  useEffect(() => { if (!settings) setAddSubscription(false); }, [settings]);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('subscriptions');
   const [newSession, setNewSession] = useState(false);
   const [conversationCopy, setConversationCopy] = useState<ConversationCopy>();
@@ -544,9 +546,9 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     if (output && group && group.active === output.id && !group.minimized) { setMinimized(group.id, true); return; }
     showModule('console');
   }, () => !!workspaceID && !settings);
-  const beginConversation = (collectionId = workspaceID, copy?: ConversationCopy) => {
+  const beginConversation = (collectionId = workspaceID, copy?: ConversationCopy, autoStart = false) => {
     if (collectionId !== workspaceID) select({ collectionId, sessionId: '', commandId: '' });
-    setNavigatorOpen(false); setQuickStart(false); setConversationCopy(copy); setNewSession(true);
+    setNavigatorOpen(false); setQuickStart(autoStart); setConversationCopy(copy); setNewSession(true);
   };
   /** The group whose `+` started the conversation being created: it shows there. */
   const conversationGroup = useRef('');
@@ -775,7 +777,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     windows: otherWindows, canStartConversation: !!info && !pending && canShowNewSession, terminalReady, canOpenWorkspaceWindow: !!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId,
     showSession, selectWorkspace: select, closeSettings: () => setSettings(false),
     showPanel: kind => kind === 'terminal' ? showTerminal() : kind === 'changes' ? showChanges() : kind === 'agents' ? void bringBackAgents() : void showModule(kind),
-    openSettings: tab => { setSettingsTab(tab as SettingsTab); setSettings(true); },
+    openSettings: tab => { setAddSubscription(tab === 'add-subscription'); setSettingsTab(tab === 'add-subscription' ? 'subscriptions' : tab as SettingsTab); setSettings(true); },
     newConversation: () => beginConversation(), openWorkspaceWindow: () => void host?.openWorkspace?.(workspaceID),
     toggleEditing: () => { if (!settings) setEditing(value => !value); }, toggleConfiguring: () => { if (!settings) { setJSON(JSON.stringify(current.current, null, 2)); setConfiguring(value => !value); } },
   });
@@ -991,6 +993,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   };
   const moduleProps: SharedModuleProps = {
     workspaceId: workspaceID, chooseRepositoryFolder: host?.chooseRepositoryFolder, collections, error: catalogError, loaded: catalogLoaded, refresh: refreshCatalog,
+    onWorkspaceCreated: (id: string) => beginConversation(id, undefined, true),
     onNewConversation: beginConversation, onShowSession: showSession,
     onOpenHandoff: target => {
       if (target.collectionId !== workspaceID) {
@@ -1061,7 +1064,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       </div>)}
     {!fixedWorkspaceId && <AccountNotices onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }}/>}
     {settings
-      ? <SettingsPage onOpenExtensionPanel={openExtensionPanel} app={host?.app} zoom={host?.zoom} tab={settingsTab} onTab={setSettingsTab} onShowProcesses={() => showModule('processes')} onRunInShell={runInShell} chooseRepositoryFolder={host?.chooseRepositoryFolder} viewState={viewState} openSignIn={host?.openSignIn} copySignInCode={host?.copySignInCode}/>
+      ? <SettingsPage initialAddSubscription={addSubscription} onOpenExtensionPanel={openExtensionPanel} app={host?.app} zoom={host?.zoom} tab={settingsTab} onTab={setSettingsTab} onShowProcesses={() => showModule('processes')} onRunInShell={runInShell} chooseRepositoryFolder={host?.chooseRepositoryFolder} viewState={viewState} openSignIn={host?.openSignIn} copySignInCode={host?.copySignInCode}/>
       : <>
         {locked && <div className="layout-locked" role="status">
           <Icon name="lock" size={14}/>
@@ -1124,6 +1127,6 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       onShowPanel={(kind, target) => kind === 'terminal' ? showTerminal() : kind === 'changes' ? showChanges() : showPanelFor(kind, { ...target, commandId: '' })}
       onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }} onQuickLook={(path, line) => setQuickLook({ path, line })}
       describe={target => [collections.find(c => c.id === target.collectionId)?.name, info?.sessions.find(s => s.id === target.sessionId)?.title].filter(Boolean).join(' · ') || 'the workspace'}/>
-    {navigatorOpen && <WorkspaceNavigator viewState={viewState} target={page.selection} onTarget={target => target.sessionId ? showSession(target) : select(target)} collections={collections} error={catalogError} loaded={catalogLoaded} refresh={refreshCatalog} chooseRepositoryFolder={host?.chooseRepositoryFolder} onNewConversation={beginConversation} onClose={() => setNavigatorOpen(false)}/>}
+    {navigatorOpen && <WorkspaceNavigator viewState={viewState} target={page.selection} onTarget={target => target.sessionId ? showSession(target) : select(target)} collections={collections} error={catalogError} loaded={catalogLoaded} refresh={refreshCatalog} chooseRepositoryFolder={host?.chooseRepositoryFolder} onWorkspaceCreated={id => beginConversation(id, undefined, true)} onNewConversation={beginConversation} onClose={() => setNavigatorOpen(false)}/>}
   </main></WorkbenchContext.Provider>;
 }

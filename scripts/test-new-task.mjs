@@ -286,6 +286,8 @@ try {
   await expect(workspace).toBeHidden();
   const cloned = f.collections.at(-1);
   assert.equal(cloned.name, 'Cache follow-up');
+  await expect.poll(() => since('OpenSession').filter(m => m.body.collectionId === cloned.id).length).toBe(1);
+  await expect(page.getByRole('dialog', { name: 'New conversation', exact: true })).toBeHidden();
   const preparation = since('PrepareWorkspace').at(-1).body;
   assert.equal(preparation.branch, 'feature/cache-follow-up');
   assert.deepEqual(preparation.repositoryIdentities, ['github:fixture-team/api', 'github:fixture-team/web']);
@@ -303,7 +305,7 @@ try {
   await conversation.getByRole('button', { name: 'Start Codex ↗' }).click();
   await expect(conversation).toBeHidden();
   const tabs = page.locator('.dock-tab[data-kind="chat"]');
-  await expect(tabs).toHaveCount(1);
+  await expect(tabs).toHaveCount(2);
   const original = f.sessions.at(-1);
   assert.equal(original.collectionId, cloned.id);
   assert.equal(original.effort, 'high');
@@ -323,8 +325,8 @@ try {
   await page.keyboard.press('Escape');
 
   await page.locator('.workspace-row').filter({ hasText: cloned.name }).locator('.workspace-link').click();
-  await expect(tabs).toHaveCount(1);
-  await tabs.first().click({ button: 'right' });
+  await expect(tabs).toHaveCount(2);
+  await tabs.last().click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Clone conversation…' }).click();
   const copy = page.getByRole('dialog', { name: 'Clone conversation', exact: true });
   await expect(copy.getByRole('textbox', { name: 'Model', exact: true })).toHaveValue('gpt-6.2-sol');
@@ -333,7 +335,7 @@ try {
   await name.fill('Second approach');
   await copy.getByRole('button', { name: 'Start Codex ↗' }).click();
   await expect(copy).toBeHidden();
-  await expect(tabs).toHaveCount(2);
+  await expect(tabs).toHaveCount(3);
   await expect(tabs.filter({ hasText: 'Second approach' })).toBeVisible();
   const started = since('OpenSession').at(-1).body;
   assert.equal(started.collectionId, cloned.id);

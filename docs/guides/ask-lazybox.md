@@ -53,6 +53,7 @@ fixes it:
 
 - **Answer from the documentation.** It searches and reads these pages (the
   same ones Help → Documentation shows) and tells you which page it used.
+- **Start adding a subscription.** Choose **Add subscription** in the answer to open the sign-in dialog, then choose your provider and sign in.
 - **Propose a settings change** — suggested workspace names, default
   permissions for new sessions, and the Lazybox, Claude and Codex context. You
   see the current and proposed values with its reason, and nothing changes

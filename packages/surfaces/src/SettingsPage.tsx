@@ -181,7 +181,7 @@ function RenameSubscriptionDialog({ profile, onClose }: { profile: Profile; onCl
   </DraggableDialog>;
 }
 
-export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openSignIn, copySignInCode, chooseRepositoryFolder, tab: shownTab, onTab, onShowProcesses, onRunInShell }: { /** The desktop app: version and updates (Settings → About & updates). */ app?: AppHost; onOpenExtensionPanel?(choice?: import('./PanelRegistry').ExtensionPanelChoice): void; zoom?: ZoomHost; onShowProcesses?(): void; /** Types a command into a workspace's shell panel and shows it (Install Claude Code). */ onRunInShell?(command: string): Promise<void>; chooseRepositoryFolder?(): Promise<string | null>; viewState?: ViewStateStore; openSignIn?(url: string): Promise<void>; copySignInCode?(code: string): Promise<void>; tab?: SettingsTab; onTab?(tab: SettingsTab): void }) {
+export function SettingsPage({ initialAddSubscription = false, onOpenExtensionPanel, app, zoom, viewState, openSignIn, copySignInCode, chooseRepositoryFolder, tab: shownTab, onTab, onShowProcesses, onRunInShell }: { initialAddSubscription?: boolean; /** The desktop app: version and updates (Settings → About & updates). */ app?: AppHost; onOpenExtensionPanel?(choice?: import('./PanelRegistry').ExtensionPanelChoice): void; zoom?: ZoomHost; onShowProcesses?(): void; /** Types a command into a workspace's shell panel and shows it (Install Claude Code). */ onRunInShell?(command: string): Promise<void>; chooseRepositoryFolder?(): Promise<string | null>; viewState?: ViewStateStore; openSignIn?(url: string): Promise<void>; copySignInCode?(code: string): Promise<void>; tab?: SettingsTab; onTab?(tab: SettingsTab): void }) {
   const { api, info, refresh } = useRunner();
   const [query, setQuery] = useState('');
   const [ownTab, setOwnTab] = useState<SettingsTab>('subscriptions');
@@ -190,7 +190,7 @@ export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openS
   const [flowID, setFlowID] = useState(() => { try { return viewState?.getItem(storageKey) || ''; } catch { return ''; } });
   const [restoreRequest, setRestoreRequest] = useState<{ key: string; provider: string } | undefined>(() => { try { const value = JSON.parse(viewState?.getItem(`${storageKey}:request`) || 'null'); return value && typeof value.key === 'string' && ['codex', 'claude'].includes(value.provider) ? value : undefined; } catch { return undefined; } });
   const [flow, setFlow] = useState<SubscriptionEnrollment>();
-  const [adding, setAdding] = useState(false);
+  const [adding, setAdding] = useState(initialAddSubscription);
   const [provider, setProvider] = useState<'claude' | 'codex'>('codex');
   // Codex: the browser from this computer (its callback reaches Codex on the Runner's computer), a code from anywhere else.
   const [local] = useState(() => signInDefault(typeof location === 'undefined' ? '' : location.hostname) === 'browser');

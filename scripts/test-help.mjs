@@ -182,6 +182,15 @@ try {
   await page.screenshot({path: '.cache/help-welcome.png'});
   await page.keyboard.press('Escape');
 
+  await helpMenu('Ask Lazybox…');
+  const reply = fixture.openEvents(`assistant-${fixture.sessions.length}`);
+  reply.push({type: 'message_delta', text: '[Add subscription](#lazybox-add-subscription)'});
+  reply.push({type: 'turn_ended'});
+  await box.fill('Add a second subscription');
+  await box.press('Enter');
+  await panel.getByRole('button', {name: 'Add subscription', exact: true}).click();
+  await expect(page.getByRole('dialog', {name: 'Connect a subscription'})).toBeVisible();
+
   assert.deepEqual(errors, []);
   console.log('PASS: Ask Lazybox picks the agent itself (Claude, then Codex at a limit), names it in the header with a switch menu, starts on the first question, explains what is missing with its fixes and the docs, opens from Help, ⌘K, ]] h and ?, and the welcome shows the same check. Fixture only.');
 } finally { await browser?.close(); await server.close(); await fixture.close(); }

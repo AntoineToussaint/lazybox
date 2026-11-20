@@ -116,6 +116,7 @@ try {
   assert.equal(requests[0].body.requestKey, requests[1].body.requestKey);
   const created = f.collections.find((c) => c.name === "Datasource work");
   assert.equal(created.members.length, 2);
+  await expect.poll(() => f.mutations.filter(m => m.method === "OpenSession" && m.body.collectionId === created.id).length).toBe(1);
   await page.waitForLoadState("networkidle");
   await leave(() => page.reload());
   const row = page

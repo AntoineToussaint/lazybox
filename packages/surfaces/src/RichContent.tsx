@@ -1,3 +1,4 @@
+import { actionEnabled, runAction } from './actions';
 import { fileReference, type FileLink } from './file-reference';
 import { preloadEditor } from './editor-loader';
 import { isMac } from './workbench';
@@ -84,6 +85,9 @@ export const RichContent=memo(function RichContent({text,onOpenFile,document:doc
  if(docComponents)return <div className="rich-content rich-document"><Markdown remarkPlugins={[remarkGfm]} components={{...components,...docComponents}}>{text}</Markdown></div>;
  return <div className="rich-content">{rawJSON?<CodeBlock text={text} language="json"/>:<Markdown remarkPlugins={[remarkGfm]} components={{...components,
  a:({href,children})=>{
+  if (href === '#lazybox-add-subscription' && actionEnabled('settings.open')) {
+    return <button className="file-reference" onClick={() => runAction('settings.open', 'add-subscription')}>{children}</button>;
+  }
   const source = openSource && href && conversationSourceFromLink(href);
   if (source) return <a href={href} onClick={event => { event.preventDefault(); openSource(source); }}>{children}</a>;
   const file=href&&fileReference(href);return file&&onOpenFile?<button className="file-reference" title={fileTitle} onPointerEnter={preloadEditor} onClick={event=>onOpenFile(file,event)} onContextMenu={fileMenu(file)}>{children}</button>:components.a({href,children});},

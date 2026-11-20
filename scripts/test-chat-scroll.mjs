@@ -19,7 +19,7 @@ async function run(name,engine){
  const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
  let browser,streaming;
  try{
-  await server.listen();browser=await engine.launch({headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(15000);
+  await server.listen();browser=await engine.launch(name==='chromium'?{headless:true,ignoreDefaultArgs:['--hide-scrollbars']}:{headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(15000);
   const errors=[];page.on('pageerror',e=>errors.push(String(e)));
   await page.route('**/GetSession',async route=>{await new Promise(resolve=>setTimeout(resolve,500));await route.continue();});
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
@@ -83,7 +83,16 @@ async function run(name,engine){
   await page.keyboard.press('Home');await holds('Home mid-stream');
   await latest.click();await follows('The Latest pill after Home');
   // Dragging the scrollbar thumb.
+  // Give Chromium a classic track with no arrow buttons. With an OS-themed
+  // scrollbar the bottom of the track can be a down arrow instead of the thumb.
+  if(name==='chromium')await page.addStyleTag({content:`
+   .messages::-webkit-scrollbar{width:14px}
+   .messages::-webkit-scrollbar-button{display:none}
+   .messages::-webkit-scrollbar-thumb{background:#777;min-height:24px}
+  `});
+  await expect.poll(gap).toBeLessThan(3);
   const bar=await pane.evaluate(node=>{const r=node.getBoundingClientRect(),thumb=Math.max(20,node.clientHeight*node.clientHeight/node.scrollHeight);return{x:r.right-Math.max(3,(node.offsetWidth-node.clientWidth)/2),y:Math.min(r.top+node.clientHeight-thumb/2,r.top+node.scrollTop/node.scrollHeight*node.clientHeight+thumb/2),native:node.offsetWidth>node.clientWidth};});
+  if(name==='chromium')assert.ok(bar.native,'Chromium must exercise a real scrollbar drag');
   await page.mouse.move(bar.x,bar.y);await page.mouse.down();
   for(let step=1;step<=8;step++){await page.mouse.move(bar.x,bar.y-step*12);await pause(30);}
   if(!bar.native)await pane.evaluate(node=>{node.scrollTop-=600;return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});// An overlay scrollbar a headless engine does not draw: the held pointer is the drag.

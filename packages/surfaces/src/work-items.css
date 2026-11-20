@@ -31,17 +31,12 @@
 .item-source-text:focus-visible{outline:2px solid var(--focus);outline-offset:0}
 
 .new-task-item{position:relative;display:flex;flex-direction:column;min-width:0}
-/* A short window: the preview gives up its height first, so the sheet's own
-   fields and its footer stay inside it (the sheet never grows past the window). */
+/* Keep the actions visible while the fields and expanded preview scroll together. */
 .new-task-sheet.draggable-dialog[open]:has(.item-source){max-height:calc(100dvh - 16px)}
 .new-task-sheet form{flex:1 1 auto}
-.new-task-sheet form>*{flex-shrink:0}
-.new-task-sheet form>.new-task-item{flex-shrink:1;min-height:0}
-.new-task-sheet form>.new-task-item:has(.item-source-preview){min-height:calc(116px * var(--text-scale))}
-.new-task-item .item-source-preview{overflow:hidden}
-.new-task-item>.item-source{flex:1 1 auto;min-height:0}
-.new-task-item .item-source-preview{flex:1 1 auto;min-height:0}
-.new-task-item .item-source-text{flex:1 1 auto;min-height:48px}
+.new-task-fields{display:flex;flex-direction:column;gap:inherit;min-height:0}
+.new-task-sheet:has(.item-source) .new-task-fields{overflow-y:auto;overscroll-behavior:contain}
+.new-task-fields>*,.new-task-sheet footer{flex-shrink:0}
 /* With an issue the message is optional: the box gives the issue its room. */
 .new-task-sheet .new-task-prompt[data-item]{min-height:calc(56px * var(--text-scale))}
 /* The conversation shows what was sent at its own height. */

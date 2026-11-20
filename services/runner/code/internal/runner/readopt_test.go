@@ -254,6 +254,9 @@ func TestResumeReconnectsALiveAgentInPlace(t *testing.T) {
 	if hosts, _ := sessionhost.Hosts(filepath.Join(state, "hosts")); len(hosts) != 1 {
 		t.Fatalf("reconnecting left %d agent hosts", len(hosts))
 	}
+	if resumed.Engine == e.Engine {
+		t.Fatal("Resume kept the engine whose provider stream ended")
+	}
 	approveAndFinish(t, b, e.ID, pid)
 	// Again, now that nothing is wrong: Resume has nothing to do for a live
 	// conversation and says so; it never starts a second agent.

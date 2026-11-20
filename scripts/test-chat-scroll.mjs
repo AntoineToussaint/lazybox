@@ -46,6 +46,17 @@ async function run(name,engine){
   await expect.poll(gap,{message:'Sending should return to the latest turn'}).toBeLessThan(3);
   channel.push({type:'operation_accepted',text:'Continue from here'});channel.push({type:'message_delta',text:'LATEST_SENT_TURN'});await expect(pane).toContainText('LATEST_SENT_TURN');await expect.poll(gap).toBeLessThan(3);
 
+  // A compositor correction during an upward key scroll is not a new
+  // downward input, even when both positions are within the follow threshold.
+  await pane.evaluate(node=>{
+   node.scrollTop=node.scrollHeight;node.dispatchEvent(new Event('scroll'));
+   node.dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true,cancelable:true}));
+   node.scrollTop-=10;node.dispatchEvent(new Event('scroll'));
+   node.scrollTop+=2;node.dispatchEvent(new Event('scroll'));
+  });
+  await expect(latest,'A correction during upward scrolling must not resume following').toBeVisible();
+  await latest.click();await expect.poll(gap).toBeLessThan(3);
+
   // A reply streams in a delta every 30 ms. Whatever way the reader scrolls
   // up, following stops at once and nothing pulls them back down.
   channel.push({type:'operation_accepted',text:'Stream a long reply'});

@@ -297,3 +297,5 @@ regression checks this before native scrolling runs. Context-menu pointer
 ownership compares client coordinates because some WebKit builds report zero
 movementX/Y for real pointer motion. Subscription-switch uses the same runtime
 error collector as workspace reorder, including its refresh page.
+
+The chat-scroll gate also applies a small downward compositor correction during an upward key gesture: this must not resume following near the bottom. Near-bottom tolerance belongs to downward input; an unclassified scrollbar movement must reach the actual bottom. Link revocation tests join the serving side before checking its final audit record.

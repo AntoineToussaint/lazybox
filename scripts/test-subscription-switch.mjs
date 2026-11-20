@@ -1,3 +1,4 @@
+import {collectPageErrors} from './fixtures/page-errors.mjs';
 // Fixture only: a subscription limit, as the person meets it. An automatic
 // switch is one quiet line; without one, one card offers to switch to the best
 // other subscription, or to wait for the reset; a message sent meanwhile goes
@@ -46,7 +47,7 @@ const raw=chat=>Promise.all([expect(chat).not.toContainText(/exhausted|rate_limi
 try{
  await server.listen();await mkdir('.cache',{recursive:true});browser=await webkit.launch();
  const page=await browser.newPage({viewport:{width:1440,height:900},locale:'en-US'});page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=await collectPageErrors(page);
  const base=`http://127.0.0.1:${server.httpServer.address().port}`;
 
  // 1. Automatic: one quiet line says where the conversation went and when the old one resets.
@@ -205,8 +206,9 @@ try{
  assert.match(handoff.message.text,/Keep the notes concise/);
  assert.equal(handoff.sessionId,f.sessions.at(-1).id);
  assert.equal(f.mutations.filter(m=>m.method==='Apply').length,writes+1,'the handoff sends once');
+ for (const profile of f.profiles.filter(p=>p.provider==='claude')) f.subscriptionRefreshes.set(profile.id,{state:'available'});
  const refreshPage=await browser.newPage({viewport:{width:1440,height:900}});
- refreshPage.on('pageerror',error=>errors.push(String(error)));
+ await collectPageErrors(refreshPage,errors);
  await refreshPage.goto(`${base}/?view=workspace&collection=delta&session=delta-session#token=${f.token}`);
  const refreshCard=refreshPage.locator('.embedded-chat:visible').getByRole('region',{name:'Subscription limit'});
  const checkedBefore=f.calls.filter(call=>call.method==='RefreshSubscription').length;

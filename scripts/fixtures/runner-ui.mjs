@@ -135,6 +135,7 @@ export async function startRunnerFixture() {
   const catalogEntries=()=>{const rows=new Map();for(const r of catalogRemote)rows.set('github:'+r.fullName.toLowerCase(),{identity:'github:'+r.fullName.toLowerCase(),name:r.fullName});for(const r of discovery.roots.flatMap(root=>root.repositories||[]))rows.set(r.gitIdentity||r.path,{identity:r.gitIdentity||r.path,name:r.gitIdentity?.startsWith('github:')?r.gitIdentity.slice(7):r.name,path:r.path});for(const r of library){const identity=r.gitIdentity||'local:'+r.id;rows.set(identity,{...rows.get(identity),identity,name:r.gitIdentity?.startsWith('github:')?r.gitIdentity.slice(7):r.name||r.id,repositoryId:r.id});}return [...rows.values()];};
   const completeGitHub = () => { github.state = 'connected'; github.authMethod = 'github_app'; github.login = 'fixture-user'; github.userId = '42'; if (github.pendingSignIn) { github.pendingSignIn.state = 'connected'; github.pendingSignIn.userCode = ''; github.pendingSignIn.signInUrl = ''; } github.pendingSignIn = undefined; };
 
+  const subscriptionRefreshes = new Map();
   const profiles = [{ id: 'claude-default', provider: 'claude', isolation: 'inherited' }, { id: 'codex-default', provider: 'codex', isolation: 'inherited', availability: { state: 'available', plan: 'plus', observedAtUnixMillis: String(Date.now()), windows: [{ name: 'codex:primary', durationMinutes: '300', usedPercent: 45, resetAt: String(Math.floor(Date.now()/1000)+7200) }, { name: 'codex:secondary', durationMinutes: '10080', usedPercent: 60, resetAt: String(Math.floor(Date.now()/1000)+172800) }] } }];
   profiles.push({ id:'codex-saved', provider:'codex', label:'Saved Codex', managed:true, isolation:'environment', availability:{...structuredClone(profiles[1].availability),email:'codex-fixture@example.invalid'} });
   const enrollments = new Map();
@@ -732,7 +733,16 @@ actions:
         pins.push({method,body});return json({session});
       }
       case 'ListHistory': return json({sessions:visibleSessions().filter(s=>(body.collectionId===undefined||s.collectionId===body.collectionId)&&(!body.search||(s.title||`Conversation ${s.id}`).toLowerCase().includes(body.search.toLowerCase()))).map(s=>({...s,title:s.title||`Conversation ${s.id}`,conversationId:s.workId||s.id})),hasMore:false});
-      case 'RefreshSubscription': { const profile = profiles.find(p => p.id === body.profileId); if (!profile) return error('not_found', 'Unknown profile'); if (profile.provider === 'claude') profile.availability = {state:'available',plan:'max',windows:[{name:'five_hour',usedPercent:37,durationMinutes:'300',resetAt:String(Math.floor(Date.now()/1000)+3600)}]}; profile.availability.observedAtUnixMillis = String(Date.now()); profile.availability.windows[0].usedPercent += 5; return json(profile); }
+      case 'RefreshSubscription': {
+        const profile = profiles.find(p => p.id === body.profileId);
+        if (!profile) return error('not_found', 'Unknown profile');
+        if (subscriptionRefreshes.has(profile.id)) profile.availability = structuredClone(subscriptionRefreshes.get(profile.id));
+        // Newly added accounts may have no observation or usage windows yet.
+        profile.availability ??= {state:'unknown'};
+        profile.availability.observedAtUnixMillis = String(Date.now());
+        if (profile.availability.state === 'available' && profile.availability.windows?.length) profile.availability.windows[0].usedPercent = Math.min(100, profile.availability.windows[0].usedPercent + 5);
+        return json(profile);
+      }
       case 'ListCollections': { if (runner.listDelayMs) await new Promise(resolve => setTimeout(resolve, runner.listDelayMs)); return json({ collections: visibleCollections() }); }
       // The person's order, as the Runner keeps it (collections/arrangement.go): new ones first, then the kept order.
       case 'ArrangeWorkspaces': { if (runner.arrangeError) return error('unavailable', runner.arrangeError); mutations.push({method,body}); arrangement.splice(0, arrangement.length, ...new Set((body.collectionIds || []).filter(id => collections.some(c => c.id === id)))); return json({ collections: visibleCollections() }); }
@@ -1369,7 +1379,7 @@ actions:
   const publish = () => writeFile(endpoint, JSON.stringify({ url, token, runnerId: 'fixturerunneridentity' }), { mode: 0o600 });
   await publish();
   return { claudeAuth, arrangement, get runnerSettings() { return runnerSettings; }, freezeSession: id => frozenSessions.set(id, structuredClone(sessions.find(value => value.id === id))), thawSession: id => frozenSessions.delete(id), items, versionInfo, reviewBriefs, fileFinding, finishReview, authorFixed, resolveFinding, reopenFinding, exchange, power, config, extensions, browser, artifacts: artifactStore, themeFolder, remote, checkpoints, setCheckpoints, attachments, set telemetry(fn) { telemetry = fn; }, set attachmentReadDelayMs(value) { attachmentReadDelayMs = value; }, set terminalStartDelayMs(value) { terminalStartDelayMs = value; }, terminalOutput, set tailReadDelayMs(value) { tailReadDelayMs = value; }, runner, missions, processes, processHosting, terminals, commands, runtimeCommands, runtimes, runtimeFor, finishSetup, runtimeTiming, previewPort, startRun, startTerminalRun, streamCommand, claimedShares, githubRepositories, preparationFailures, prepared, startFrom, branchListings, ownership, replacedRepositories, refreshedRepositories, repositoryRequests, workspaceFiles, openEvents, reviews, reviewOf, diffs, workingFiles,
-    availability, acp, tracked,
+    availability, subscriptionRefreshes, acp, tracked,
     /** A conversation's open journal, without replacing it (openEvents starts a new one). */
     eventsOf: id => eventStreams.get(id),
     get url() { return url; }, get token() { return token; }, get runnerSettings() { return runnerSettings; }, endpoint, calls, mutations, pins, collections, sessions, homes, profiles, enrollments, completeEnrollment, failEnrollment, github, completeGitHub, library, ship, shipState,

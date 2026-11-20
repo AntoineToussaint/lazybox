@@ -22,10 +22,12 @@ hero:
 <div class="lb-install">
 
 ```sh
-brew install --cask AntoineToussaint/lazybox/lazybox-v2
+git clone https://github.com/AntoineToussaint/lazybox.git
+cd lazybox
+make install
 ```
 
-A Mac app for Apple Silicon. Or download the disk image from the [releases](https://github.com/AntoineToussaint/lazybox/releases); see [Install](/install).
+Build the preview on an Apple Silicon Mac running macOS 13.5 or later. See [Install](/install) for prerequisites.
 
 </div>
 

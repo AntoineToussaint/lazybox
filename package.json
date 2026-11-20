@@ -28,6 +28,7 @@
     "docs:screenshots": "node scripts/docs-screenshots.mjs",
     "scenario": "node --import tsx scenarios/run.ts",
     "test:scenarios": "node --import tsx scenarios/run.ts all --no-video",
+    "site:build": "node scripts/build-site.mjs",
     "docs:dev": "vitepress dev docs-site",
     "docs:build": "vitepress build docs-site",
     "docs:preview": "vitepress preview docs-site",

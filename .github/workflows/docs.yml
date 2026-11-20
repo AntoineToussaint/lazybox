@@ -1,21 +1,4 @@
-# The documentation site: docs/ rendered by VitePress (docs-site/) and
-# deployed to GitHub Pages. RELEASING.md, First release checklist, "Publish
-# the docs".
-#
-# It runs only when someone asks:
-#   - on a release tag (`v2-v<x.y.z>`, the tag release.yml builds), so the
-#     published docs describe the release people install;
-#   - by hand (Actions → Docs → Run workflow), from any branch or tag.
-# It never runs on a push to main: an unreleased change to the docs is not
-# published until the next release or a manual run.
-#
-# Before the first run: Settings → Pages → Build and deployment → Source:
-# GitHub Actions. Without that, the deploy job fails and nothing is published.
-#
-# In the monorepo this file sits in the export's overlay (scripts/export-repo/
-# root), so it never runs there: V1's site, lazybox.ai, has its own workflow.
-# The export writes it to this repository's .github/workflows.
-
+# Builds the public homepage, V2 guides and frozen V1 archive together.
 name: Docs
 
 on:
@@ -49,16 +32,15 @@ jobs:
         uses: actions/configure-pages@v5
       - name: Install
         run: npm ci --ignore-scripts --no-audit --no-fund
-      # docs:check builds the site and fails on a dead link or anchor. The base is
-      # the Pages path (/lazybox/ for a project site); source links name the ref built.
       - name: Build and check
         env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
           DOCS_BASE: ${{ steps.pages.outputs.base_path }}/
           DOCS_SOURCE_REF: ${{ github.ref_name }}
-        run: npm run docs:check
+        run: npm run site:build
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: .cache/docs-site
+          path: .cache/site
 
   deploy:
     name: deploy

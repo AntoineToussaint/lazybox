@@ -26,11 +26,26 @@ try{
  const dialog=page.getByRole('dialog',{name:'Delete workspace',exact:true});await expect(dialog).toBeVisible();await expect(dialog).toContainText('Beta release');await expect(dialog.getByRole('heading')).toHaveText('Delete workspace?');await expect(dialog.getByRole('button',{name:'Cancel',exact:true})).toBeFocused();await page.screenshot({path:'/tmp/lazybox-workspace-delete-dirty.png'});await page.getByRole('button',{name:'Cancel workspace deletion'}).click();await expect(dialog).toHaveCount(0);assert.equal(fixture.mutations.length,0);
  await actions.click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();await expect(dialog).toBeVisible();await expect(dialog.getByRole('button',{name:'Delete workspace',exact:true})).toBeDisabled();
  await expect(dialog).toContainText('running session');await expect(dialog).toContainText('Uncommitted or untracked files');await expect(dialog.getByRole('textbox')).toHaveCount(0);await dialog.getByLabel(/Stop .* active session/).check();await dialog.getByLabel('Discard these workspace files permanently').check();
+ await page.route('**/ScheduleDeletion',route=>route.fulfill({status:400,json:{code:'failed_precondition',message:'Member is not the expected worktree root'}}),{times:1});
+ const confirmDelete=dialog.getByRole('button',{name:'Delete workspace',exact:true});
+ await confirmDelete.click();
+ await expect(dialog.getByRole('alert')).toContainText('Member is not the expected worktree root');
+ await expect(confirmDelete).toBeEnabled();
+ assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,0);
+ await page.clock.install();
  await dialog.getByRole('button',{name:'Delete workspace',exact:true}).click();await expect(dialog).toHaveCount(0);await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).not.toContainText('Beta release');await expect(page.locator('.workspace-row button[aria-current=page]')).toContainText('Alpha feature');
  assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,1);
+ const undoNotice=page.getByText('Workspace moved to Recently deleted',{exact:true});
+ await expect(undoNotice).toBeVisible();
+ await page.clock.fastForward(30_000);
+ await expect(undoNotice).toBeVisible();
+ await page.clock.fastForward(30_001);
+ await expect(undoNotice).toHaveCount(0);
  // Recently deleted survives a reload and Undo restores the actual workspace.
  await page.reload();
  const trash = page.locator('.recently-deleted');
+ await expect(trash).toBeVisible();
+ assert.ok(await trash.evaluate(node => !!(node.parentElement.querySelector('.history-shortcut').compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)), 'Recently deleted follows History');
  await trash.getByText('Recently deleted (1)').click();
  await trash.getByRole('button',{name:'Undo deletion of Beta release'}).click();
  await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).toContainText('Beta release');

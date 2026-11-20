@@ -15,7 +15,15 @@ func (s *Service) GetProviderAvailability(ctx context.Context, r *pb.ProviderAva
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return wireAvailability(report), nil
+	result := wireAvailability(report)
+	if r.GetCheckUpdates() {
+		for _, provider := range result.Providers {
+			if provider.Installed && provider.Version != "" {
+				provider.LatestVersion = s.Bench.ProviderReleases.Latest(ctx, provider.Provider)
+			}
+		}
+	}
+	return result, nil
 }
 
 func wireAvailability(report availability.Report) *pb.ProviderAvailability {

@@ -46,3 +46,6 @@
   .live-bar-button>span{display:none}
   .live-bar-stop>span{display:inline!important}
 }
+
+.live-bar-command{cursor:pointer;border:1px solid var(--line);text-align:left}
+.live-bar-command:hover,.live-bar-command:focus-visible{border-color:var(--focus);text-decoration:underline}

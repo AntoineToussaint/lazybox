@@ -13,6 +13,8 @@ const fixture = await startRunnerFixture();
 // is turned on, and Subscription rotation installed and allowed, as the person
 // would in Settings; scripts/test-claude-compliance.mjs covers them off.
 fixture.runnerSettings.claudeSubscriptionSignIn = true;
+fixture.availability.codex.latestVersion = '0.99.0';
+fixture.availability.claude.latestVersion = '2.1.312';
 await fixture.extensions.handle('InstallExampleExtension', { example: 'subscription-rotation' });
 { const rotation = (await fixture.extensions.handle('ListExtensions', {})).value.extensions.find(e => e.id === 'subscription-rotation');
   await fixture.extensions.handle('ApproveExtension', { id: rotation.id, grants: rotation.grants, hosts: rotation.hosts }); }
@@ -48,6 +50,12 @@ try {
  await expect(page.getByText('No matching settings.',{exact:true})).toBeVisible();
  await expect(page.getByRole('button',{name:'Ask Lazybox',exact:true})).toBeVisible();
  await settingsSearch.press('Escape');
+ await expect(page.getByText('Codex update available',{exact:true})).toBeVisible();
+ await page.getByRole('button',{name:'Review update',exact:true}).first().click();
+ const updateSettings=page.locator('.settings-group').filter({has:page.getByRole('heading',{name:'Agent updates',exact:true})});
+ await expect(updateSettings).toContainText('Installed 0.98.0 · New release 0.99.0');
+ await expect(updateSettings.getByRole('link',{name:'Update instructions'})).toBeVisible();
+ await expect(updateSettings.getByRole('button',{name:'Check Lazybox updates'})).toBeVisible();
  await page.getByRole('tab',{name:'Subscriptions',exact:true}).click();
 
  const codex=page.getByRole('article',{name:'Saved Codex subscription',exact:true});

@@ -133,7 +133,12 @@ including captured uncommitted changes, and executes the same command in each.
 Commands run with a private home and temporary directory, without the reviewer's
 credentials or host network access. They can read system toolchains and their
 checkout, and write only inside that checkout. macOS uses sandbox-exec; Linux
-requires bubblewrap and enabled unprivileged namespaces. An unavailable sandbox
+requires bubblewrap and enabled unprivileged namespaces. On Ubuntu 24.04,
+AppArmor also needs its distribution-provided `bwrap-userns-restrict` profile
+(from `apparmor-profiles`) loaded by the administrator. CI installs and loads
+that profile before testing; it does not disable the system-wide restriction.
+See [Ubuntu's AppArmor guidance](https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007)
+for the profile's purpose and deployment considerations. An unavailable sandbox
 refuses execution; it never falls back to unrestricted host commands. Dependencies
 must already be in the captured tree or available from the system toolchain;
 network installation and user-home caches are unavailable. Each execution is

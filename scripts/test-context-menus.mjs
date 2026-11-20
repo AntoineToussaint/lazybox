@@ -143,6 +143,12 @@ try{
  await open(fileLink);
  assert.deepEqual((await labels()).slice(0,4),['Open','Open to the side','Quick look','Reveal in Files']);
  await item('Copy relative path').click();await expect.poll(copied).toBe('api/src/routes.ts');
+ // Let the file finish loading while the next keyboard menu owns focus.
+ const loading=Promise.withResolvers();
+ await page.route('**/ReadWorkspaceFile',async route=>{
+  if(route.request().postDataJSON().path==='api/src/routes.ts')await loading.promise;
+  await route.continue();
+ });
  await open(fileLink);await item('Open to the side').click();
  const editorPanel=page.locator('section.workspace-panel.panel-editor');
  await expect(editorPanel.getByRole('tab',{name:/routes\.ts/})).toBeVisible();
@@ -150,6 +156,9 @@ try{
  // Keyboard: Shift+F10 on the focused element, arrows, type-ahead, Escape returns focus.
  await fileLink.focus();await page.keyboard.press('Shift+F10');
  await expect(menu).toBeVisible();
+ await expect(item('Open')).toBeFocused();
+ loading.resolve();
+ await expect(editorPanel.locator('.monaco-editor')).toBeVisible();
  await expect(item('Open')).toBeFocused();
  await page.keyboard.press('ArrowDown');await expect(item('Open to the side')).toBeFocused();
  await page.keyboard.press('End');await expect(menu.locator('[role=menuitem]:not([aria-disabled])').last()).toBeFocused();

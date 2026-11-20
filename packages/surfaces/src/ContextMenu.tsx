@@ -500,6 +500,7 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
   const [active, setActive] = useState(() => keyboard ? firstEnabled(entries) : -1);
   const [open, setOpen] = useState<{ index: number; keyboard: boolean; rect: DOMRect }>();
   const [placed, setPlaced] = useState(false);
+  const navigatingByKey = useRef(keyboard);
   const typed = useRef({ text: '', at: 0 });
   const pressed = useRef(-1), released = useRef(0);
   const hover = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -538,6 +539,7 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
   };
   const keydown = (event: ReactKeyboardEvent) => {
     if (event.target !== element.current && !(event.target instanceof Element && event.target.parentElement === element.current)) return;
+    navigatingByKey.current = true;
     const move = (to: number) => { event.preventDefault(); event.stopPropagation(); if (to >= 0) { setActive(to); setOpen(undefined); } };
     switch (event.key) {
       case 'ArrowDown': move(stepFocus(entries, active, 1)); return;
@@ -574,7 +576,11 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
           aria-haspopup={entry.submenu ? 'menu' : undefined} aria-expanded={entry.submenu ? open?.index === index : undefined}
           aria-label={action.label} title={reason} aria-description={reason || (action.shortcut ? shortcutLabel(action.shortcut) : undefined)}
           className={'context-menu-item' + (action.danger ? ' danger' : '') + (active === index ? ' is-active' : '')}
-          onPointerMove={() => {
+          onPointerMove={event => {
+            // WebKit hit-tests a stationary mouse again when the layout changes.
+            // That event must not move the highlight away from the keyboard.
+            if (navigatingByKey.current && event.pointerType === 'mouse' && !event.movementX && !event.movementY) return;
+            navigatingByKey.current = false;
             if (active !== index) setActive(action.disabled ? -1 : index);
             clearTimeout(hover.current);
             if (entry.submenu && open?.index !== index) hover.current = setTimeout(() => openSubmenu(index, false), 120);

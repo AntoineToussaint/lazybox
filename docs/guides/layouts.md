@@ -58,7 +58,7 @@ in the sidebar, each Runner's workspaces move within its own section.
 Right-click a workspace and choose **Clone workspace…** to start with the same
 repositories and base branches. Give the copy a name and Lazybox suggests a
 fresh working branch. **New workspace** and **New task** both remember the
-last repository selection, including an empty workspace.
+last repository selection, including an empty workspace. Creating or cloning a workspace opens its first conversation with your usual agent settings. If the account is unavailable, choose another in the conversation dialog.
 
 ## Conversation tabs
 

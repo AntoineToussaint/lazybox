@@ -48,6 +48,7 @@ export type ModuleProps = {
   viewState?: ViewStateStore;
   onOpenViewer?(sessionId: string, commandId: string): Promise<void>;
   onOpenChat?(): void;
+  onWorkspaceCreated?(workspaceId: string): void;
   onNewConversation?(workspaceId: string): void;
   onShowSession?(target: ViewTarget): void;
   onOpenHandoff?: OpenHandoffConversation;

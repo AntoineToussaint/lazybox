@@ -47,6 +47,50 @@ func TestReviewEvidenceIsRecordedOnTheAttempt(t *testing.T) {
 	}
 }
 
+func TestBoundReviewOnlyInvalidatedByLaterRevisionObservations(t *testing.T) {
+	old := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidenceCommit, Member: "api", Head: "old"}}
+	verdict := Recorded{Seq: 2, Evidence: Evidence{Kind: EvidenceReview, Outcome: OutcomePass, ContractDigest: "spec", Revisions: map[string]string{"api": "reviewed"}}}
+	checks := Recorded{Seq: 3, Evidence: Evidence{Kind: EvidenceRun, Revisions: map[string]string{"api": "reviewed"}}}
+	_, flags, _ := judge(&Task{Evidence: []Recorded{old, verdict, checks}})
+	if slices.Contains(flags, FlagStale) {
+		t.Fatal("old observation invalidated the newer review")
+	}
+	checks.Revisions["api"] = "next"
+	trust, flags, _ := judge(&Task{Evidence: []Recorded{old, verdict, checks}})
+	if trust == TrustVerified || !slices.Contains(flags, FlagStale) {
+		t.Fatal("review survived a subsequent revision change")
+	}
+}
+
+func TestUnboundReviewCannotClearPinnedCandidateBlockers(t *testing.T) {
+	checks := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidencePR, Member: "api", Head: "abc", Outcome: OutcomePass}}
+	bound := Recorded{Seq: 2, Evidence: Evidence{Kind: EvidenceReview, Ref: "review:candidate", ContractDigest: "spec", Revisions: map[string]string{"api": "abc"}, Outcome: OutcomeFail, Blockers: 1}}
+	turn := Recorded{Seq: 3, Evidence: Evidence{Kind: EvidenceReview, Ref: "review:turn", Outcome: OutcomePass}}
+	task := Task{Evidence: []Recorded{checks, bound, turn}}
+	if trust, flags, _ := judge(&task); trust == TrustVerified || !slices.Contains(flags, FlagBlockers) {
+		t.Fatalf("unrelated turn review cleared candidate blockers: %s %v", trust, flags)
+	}
+	settled := bound
+	settled.Seq, settled.Outcome, settled.Blockers = 4, OutcomePass, 0
+	task.Evidence = append(task.Evidence, settled)
+	if trust, flags, _ := judge(&task); trust != TrustVerified || slices.Contains(flags, FlagBlockers) {
+		t.Fatalf("settled candidate blockers still active: %s %v", trust, flags)
+	}
+}
+
+func TestFreshPinnedAttemptDoesNotInheritVerifiedEvidence(t *testing.T) {
+	pr := Recorded{Seq: 1, Evidence: Evidence{Attempt: "first", Kind: EvidencePR, Member: "api", Head: "abc", Outcome: OutcomePass}}
+	task := Task{Attempts: []*Attempt{{ID: "next", Dispatch: &Dispatch{}}}, Evidence: []Recorded{pr}}
+	if trust, flags, _ := judge(&task); trust != TrustClaimed || !slices.Contains(flags, FlagNoEvidence) {
+		t.Fatalf("fresh worker inherited checks: %s %v", trust, flags)
+	}
+	pr.Attempt = "next"
+	task.Evidence = append(task.Evidence, pr)
+	if trust, _, _ := judge(&task); trust != TrustVerified {
+		t.Fatalf("current worker checks ignored: %s", trust)
+	}
+}
+
 func TestInvalidateReviewPreservesAttemptOrderingAndReplay(t *testing.T) {
 	dir := t.TempDir()
 	s := newStore(t, dir)

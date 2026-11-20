@@ -119,6 +119,9 @@ func derive(s *State, t *Task, obs Observations, done map[string]bool) TaskView 
 	case v.Attempt != nil && v.Attempt.Ended && v.Attempt.Outcome != "handoff" && (!reported || report.Seq < v.Attempt.StartSeq):
 		v.Status, v.Trust = StatusFailed, TrustObserved
 		v.Reason = fmt.Sprintf("Its conversation ended (%s) without a report", firstNonEmpty(v.Attempt.Outcome, "stopped"))
+	case live && v.Attempt.Dispatch != nil && v.Attempt.Started.IsZero():
+		v.Status, v.Trust = StatusWorking, TrustObserved
+		v.Reason = "Workspace and conversation reserved; waiting for task brief delivery"
 	case gateOpen:
 		v.Status, v.Trust, v.Gate = StatusNeedsYou, v.EvidenceTrust, gate.Gate
 		v.Reason = "Reported done, waiting for you to accept · " + evidence
@@ -206,11 +209,15 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 		return TrustClaimed, []string{FlagNoEvidence}, "no run or check recorded"
 	}
 	newest := map[string]string{} // member → newest head the Runner saw
-	var run, review *Recorded
+	var run, review, boundReview *Recorded
 	prs := map[string]*Recorded{} // repository → latest pull request evidence
 	order := []string{}
+	attempt := t.Current()
 	for i := range t.Evidence {
 		r := &t.Evidence[i]
+		if attempt != nil && attempt.Dispatch != nil && r.Attempt != attempt.ID {
+			continue
+		}
 		switch r.Kind {
 		case EvidenceRun:
 			for member, head := range r.Revisions {
@@ -225,6 +232,9 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 			}
 		case EvidenceReview:
 			review = r
+			if r.ContractDigest != "" {
+				boundReview = r
+			}
 		case EvidencePR:
 			if r.Member != "" && r.Head != "" && r.Outcome == OutcomePass {
 				// A passing PR head is the head the checks ran on; a later run
@@ -264,6 +274,36 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 	}
 	// Open blockers from the latest agent review keep the work from verified:
 	// checks passing on code a reviewer found wrong do not vouch for it.
+	if boundReview != nil {
+		// A passing turn or PR review cannot settle blockers on the pinned candidate.
+		if boundReview.Outcome == OutcomeFail {
+			review = boundReview
+		}
+		moved := boundReview.State == "stale"
+		for _, later := range t.Evidence {
+			if later.Seq <= boundReview.Seq || later.Attempt != boundReview.Attempt {
+				continue
+			}
+			if later.Kind == EvidenceCommit || later.Kind == EvidencePR {
+				if h, ok := boundReview.Revisions[later.Member]; ok && later.Head != "" && later.Head != h {
+					moved = true
+				}
+			}
+			if later.Kind == EvidenceRun {
+				for member, h := range later.Revisions {
+					if before, ok := boundReview.Revisions[member]; ok && before != h {
+						moved = true
+					}
+				}
+			}
+		}
+		if moved {
+			return TrustObserved, appendOnce(flags, FlagStale), "workspace revisions changed or could not be verified; review the current candidate"
+		}
+		if boundReview.Outcome == OutcomeUnknown || boundReview.Outcome == OutcomePending {
+			return TrustObserved, flags, "waiting for a completed review of the current candidate"
+		}
+	}
 	blocked := review != nil && review.Outcome == OutcomeFail
 	incomplete := review != nil && review.State == "verification" && review.Outcome != OutcomePass
 	if blocked {

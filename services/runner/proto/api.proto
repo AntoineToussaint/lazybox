@@ -3454,6 +3454,8 @@ message MissionEvidence {
   string collection_id = 13; string session_id = 14; string command_id = 15;
   string output_path = 16; string detail = 17;
   int64 at_unix_millis = 18;
+  map<string,string> revisions = 19;
+  string contract_digest = 20;
 }
 message MissionEvent {
   uint64 seq = 1; int64 at_unix_millis = 2; string type = 3; uint32 version = 4;

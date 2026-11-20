@@ -64,6 +64,7 @@ type Task struct {
 }
 
 type Attempt struct {
+	Dispatch     *Dispatch
 	ID           string
 	Task         string
 	Conversation string
@@ -459,7 +460,7 @@ func (s *State) foldTask(e Event) error {
 				return err
 			}
 		}
-		t.Attempts = append(t.Attempts, &Attempt{ID: p.Attempt, Task: t.ID, Conversation: p.Conversation, Workspace: p.Workspace, Execution: p.Execution, New: p.New, Parent: p.Parent, Grant: p.Grant, Role: p.Role, Permission: p.Permission, Profile: p.Profile})
+		t.Attempts = append(t.Attempts, &Attempt{Dispatch: p.Dispatch, ID: p.Attempt, Task: t.ID, Conversation: p.Conversation, Workspace: p.Workspace, Execution: p.Execution, New: p.New, Parent: p.Parent, Grant: p.Grant, Role: p.Role, Permission: p.Permission, Profile: p.Profile})
 	case AttemptStarted:
 		p, _ := decode[AttemptPayload](e)
 		a := t.Current()

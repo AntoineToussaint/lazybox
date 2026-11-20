@@ -135,12 +135,20 @@ type (
 		Kind  string `json:"kind"`
 		After string `json:"after"`
 	}
+	Dispatch struct {
+		ParentTitle   string `json:"parent_title"`
+		ParentSession string `json:"parent_session"`
+		Title         string `json:"title"`
+		Brief         string `json:"brief"`
+		Model         string `json:"model,omitempty"`
+	}
 	AttemptPayload struct {
-		Task         string `json:"task"`
-		Attempt      string `json:"attempt"`
-		Conversation string `json:"conversation"`
-		Workspace    string `json:"workspace,omitempty"`
-		Execution    string `json:"execution,omitempty"`
+		Dispatch     *Dispatch `json:"dispatch,omitempty"`
+		Task         string    `json:"task"`
+		Attempt      string    `json:"attempt"`
+		Conversation string    `json:"conversation"`
+		Workspace    string    `json:"workspace,omitempty"`
+		Execution    string    `json:"execution,omitempty"`
 		// New: the conversation was started for this task.
 		New bool `json:"new,omitempty"`
 		// Outcome, on attempt.ended: deleted, handoff or stopped.
@@ -186,13 +194,14 @@ const (
 // request with its checks (pr:<owner/name>#<n>@<sha>).
 type Evidence struct {
 	// Corrects retracts a prior review pass without changing its ordering or attempt.
-	Corrects uint64 `json:"corrects,omitempty"`
-	Kind     string `json:"kind"`
-	Ref      string `json:"ref"`
-	Task     string `json:"task"`
-	Attempt  string `json:"attempt,omitempty"`
-	Title    string `json:"title,omitempty"`
-	Outcome  string `json:"outcome"`
+	Corrects       uint64 `json:"corrects,omitempty"`
+	ContractDigest string `json:"contract_digest,omitempty"`
+	Kind           string `json:"kind"`
+	Ref            string `json:"ref"`
+	Task           string `json:"task"`
+	Attempt        string `json:"attempt,omitempty"`
+	Title          string `json:"title,omitempty"`
+	Outcome        string `json:"outcome"`
 	// ExitCode is the command's own status; absent for a pipe (`lazybox log`).
 	ExitCode *int `json:"exit_code,omitempty"`
 	Piped    bool `json:"piped,omitempty"`

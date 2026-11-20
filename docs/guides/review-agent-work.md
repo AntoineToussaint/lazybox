@@ -295,3 +295,5 @@ making the repair look older than its findings. A repair that completes before
 delivery bookkeeping is saved is reconciled once the sent state is recorded.
 
 A completed repair is consumed at most once: its checkpoint sequence, not just its second-resolution timestamp, prevents a duplicate callback from advancing another round.
+
+For a Mission-bound verification loop, each repair must be committed before rechecking. The next round captures that committed candidate and updates the evidence revision; dirty candidates or changed workspace membership stop the recheck. The approved contract and attempt stay pinned.

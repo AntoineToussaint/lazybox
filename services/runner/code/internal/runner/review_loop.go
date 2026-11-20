@@ -361,11 +361,31 @@ func (b *Bench) sendRereview(workspace string, run reviews.Run) error {
 			return captureErr
 		}
 		if len(run.Rounds[len(run.Rounds)-1].Input) == 0 {
-			scope, captureErr := b.captureReviewInput(b.ctx, conversationOf(reviewer), collection, run.Compare)
+			var heads map[string]string
+			if run.ContractDigest != "" {
+				members, err := b.planBaseline(b.ctx, workspace)
+				if err != nil {
+					return fmt.Errorf("commit the repaired Mission candidate before rechecking: %w", err)
+				}
+				if len(members) != len(run.MemberHeads) {
+					return errors.New("Mission workspace membership changed during repair")
+				}
+				heads = map[string]string{}
+				for _, member := range members {
+					if _, ok := run.MemberHeads[member.Name]; !ok {
+						return errors.New("Mission workspace membership changed during repair")
+					}
+					heads[member.Name] = member.Commit
+				}
+			}
+			scope, captureErr := b.captureReviewInput(b.ctx, conversationOf(reviewer), collection, run.Compare, heads)
 			if captureErr != nil {
 				return captureErr
 			}
 			run, err = b.Reviews.UpdateRun(workspace, run.ID, func(r *reviews.Run) error {
+				if heads != nil {
+					r.MemberHeads = heads
+				}
 				r.Input = scope.input
 				r.Rounds[len(r.Rounds)-1].Input = scope.input
 				return nil

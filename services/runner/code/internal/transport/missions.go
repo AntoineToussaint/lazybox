@@ -421,6 +421,10 @@ func wireAttempt(a *work.Attempt, live work.Liveness) *pb.MissionAttempt {
 	if live.Session != "" {
 		out.SessionId = live.Session
 	}
+	if a.Dispatch != nil && a.Started.IsZero() {
+		out.Live = "reserved"
+		out.LiveDetail = "waiting for the worker brief"
+	}
 	if a.Ended {
 		out.EndedAtUnixMillis = millis(a.EndedAt)
 		out.Live = work.LiveClosed
@@ -429,7 +433,7 @@ func wireAttempt(a *work.Attempt, live work.Liveness) *pb.MissionAttempt {
 }
 
 func wireEvidence(r work.Recorded) *pb.MissionEvidence {
-	out := &pb.MissionEvidence{Ref: r.Ref, Kind: r.Kind, Title: r.Title, Outcome: r.Outcome, Piped: r.Piped, Member: r.Member, Repository: r.Repository, Head: r.Head, Number: r.Number, Url: r.URL, State: r.State, CollectionId: r.Workspace, SessionId: r.Execution, CommandId: r.Command, OutputPath: r.OutputPath, Detail: r.Detail, AtUnixMillis: millis(r.At)}
+	out := &pb.MissionEvidence{ContractDigest: r.ContractDigest, Revisions: r.Revisions, Ref: r.Ref, Kind: r.Kind, Title: r.Title, Outcome: r.Outcome, Piped: r.Piped, Member: r.Member, Repository: r.Repository, Head: r.Head, Number: r.Number, Url: r.URL, State: r.State, CollectionId: r.Workspace, SessionId: r.Execution, CommandId: r.Command, OutputPath: r.OutputPath, Detail: r.Detail, AtUnixMillis: millis(r.At)}
 	if r.ExitCode != nil {
 		code := int32(*r.ExitCode)
 		out.ExitCode = &code

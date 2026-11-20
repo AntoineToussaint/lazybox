@@ -48,11 +48,16 @@ type ReviewInput struct {
 
 // Run is one agent review.
 type Run struct {
-	Verification   []VerificationCheck `json:"verification,omitempty"`
-	ID             string              `json:"id"`
-	TemplateID     string              `json:"templateId,omitempty"`
-	Input          []ReviewInput       `json:"input,omitempty"`
-	ResultArtifact string              `json:"resultArtifact,omitempty"`
+	Verification    []VerificationCheck `json:"verification,omitempty"`
+	ContractDigest  string              `json:"contractDigest,omitempty"`
+	ReviewAttempt   string              `json:"reviewAttempt,omitempty"`
+	ReviewWorkspace string              `json:"reviewWorkspace,omitempty"`
+	MemberHeads     map[string]string   `json:"memberHeads,omitempty"`
+
+	ID             string        `json:"id"`
+	TemplateID     string        `json:"templateId,omitempty"`
+	Input          []ReviewInput `json:"input,omitempty"`
+	ResultArtifact string        `json:"resultArtifact,omitempty"`
 	// The reviewer: its conversation (session and conversation id, which
 	// outlives a resumed session), title, how people name the agent, and the
 	// subscription it runs on.

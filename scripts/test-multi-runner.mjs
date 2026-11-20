@@ -307,7 +307,14 @@ try {
       await page.keyboard.press(tab);
       await page.keyboard.press(tab);
       await expect(sheet.getByRole('textbox', { name: 'First message' })).toBeFocused();
-      // Working remembers the previous choice to start without a repository.
+      // Working remembers the empty workspace chosen earlier. Reopen its picker
+      // using the keyboard and choose the first visible option from the search field.
+      await sheet.getByRole('button', { name: 'Choose repositories instead' }).focus();
+      await page.keyboard.press('Enter');
+      await expect(sheet.getByRole('combobox', { name: 'Add a repository' })).toBeFocused();
+      await page.keyboard.press('ArrowUp');
+      await page.keyboard.press('Enter');
+      await expect(sheet.getByRole('textbox', { name: 'First message' })).toBeFocused();
       await page.keyboard.press('Enter');
       await expect(sheet).toHaveCount(0);
       await expect.poll(() => mutations(working, 'Apply').filter(m => m.body.message?.text === 'Tidy the release script').length).toBe(1);

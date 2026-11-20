@@ -23,21 +23,22 @@ type Tokens struct {
 	CacheWrite1h *int64 `json:"cacheWrite1h,omitempty"`
 }
 type Record struct {
-	ID           string    `json:"id"`
-	Scope        Scope     `json:"scope"`
-	Agent        string    `json:"agent"` // Empty means child attribution unavailable.
-	Parent       string    `json:"parent,omitempty"`
-	Model        string    `json:"model"`
-	Source       string    `json:"source"` // gateway or sdk
-	ResponseID   string    `json:"responseId,omitempty"`
-	Status       string    `json:"status"` // pending, complete, partial, failed, interrupted
-	Tokens       Tokens    `json:"tokens"`
-	Nanos        *int64    `json:"nanos,omitempty"` // API-equivalent token cost, never an invoice.
-	Costs        *Costs    `json:"costs,omitempty"` // Nanos by part; absent when unpriced.
-	PriceVersion string    `json:"priceVersion,omitempty"`
-	Reason       string    `json:"reason,omitempty"`
-	Tier         string    `json:"tier,omitempty"`
-	ObservedAt   time.Time `json:"observedAt"`
+	ID            string    `json:"id"`
+	Scope         Scope     `json:"scope"`
+	Agent         string    `json:"agent"` // Empty means child attribution unavailable.
+	Parent        string    `json:"parent,omitempty"`
+	Model         string    `json:"model"`
+	Source        string    `json:"source"` // gateway or sdk
+	ResponseID    string    `json:"responseId,omitempty"`
+	Status        string    `json:"status"` // pending, complete, partial, failed, interrupted
+	Tokens        Tokens    `json:"tokens"`
+	Nanos         *int64    `json:"nanos,omitempty"` // API-equivalent token cost, never an invoice.
+	Costs         *Costs    `json:"costs,omitempty"` // Nanos by part; absent when unpriced.
+	PriceVersion  string    `json:"priceVersion,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	Tier          string    `json:"tier,omitempty"`
+	ObservedAt    time.Time `json:"observedAt"`
+	latestRequest *Record   // Candidate request, verified against the cumulative delta.
 }
 type ContextDetail struct {
 	Name   string `json:"name"`

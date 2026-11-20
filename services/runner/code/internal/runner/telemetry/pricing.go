@@ -12,6 +12,7 @@ type Rate struct {
 	CacheWrite5m int64  `json:"cacheWrite5m"`
 	CacheWrite1h int64  `json:"cacheWrite1h"`
 	MaxInput     int64  `json:"maxInput,omitempty"`
+	longContext  bool
 }
 type RateCard map[string]Rate
 
@@ -31,17 +32,16 @@ func DefaultRates() RateCard {
 	add([]string{"claude-sonnet-5-5"}, Rate{Input: 2000, Output: 10000, CacheRead: 100, CacheWrite5m: 2500, CacheWrite1h: 4000})
 	c["codex/gpt-5.4"] = Rate{Version: "openai-standard-2026-11-02", Input: 2500, Output: 15000, CacheRead: 250, MaxInput: 272000}
 	c["codex/gpt-5.3-codex"] = Rate{Version: "openai-standard-2026-11-02", Input: 1750, Output: 14000, CacheRead: 175}
-	// Published standard rates, in nanos per token. The estimator currently
-	// supports one context tier per model and excludes usage above MaxInput.
+	// Published standard rates, in nanos per token. A model with verified long-context rates has a separate price above MaxInput.
 	// https://developers.openai.com/api/docs/pricing
 	// https://openai.com/api/
 	const openAI = "openai-standard-2026-11-19"
-	c["codex/gpt-6.2-astra"] = Rate{Version: openAI, Input: 8000, Output: 40000, CacheRead: 400, MaxInput: 272000}
-	c["codex/gpt-6.2-sol"] = Rate{Version: openAI, Input: 2000, Output: 10000, CacheRead: 100, MaxInput: 272000}
-	c["codex/gpt-6.1-sol"] = c["codex/gpt-6.2-sol"]
+	c["codex/gpt-6.2-astra"] = Rate{Version: openAI, Input: 8000, Output: 40000, CacheRead: 400, MaxInput: 272000, longContext: true}
+	c["codex/gpt-6.2-sol"] = Rate{Version: openAI, Input: 2000, Output: 10000, CacheRead: 100, MaxInput: 272000, longContext: true}
+	c["codex/gpt-6.1-sol"] = Rate{Version: openAI, Input: 2000, Output: 10000, CacheRead: 100, MaxInput: 272000}
 	c["codex/gpt-6.1-terra"] = Rate{Version: openAI, Input: 1000, Output: 5000, CacheRead: 50, MaxInput: 272000}
 	c["codex/gpt-6-astra"] = Rate{Version: openAI, Input: 10000, Output: 50000, CacheRead: 1000, MaxInput: 272000}
-	c["codex/gpt-6-sol"] = Rate{Version: openAI, Input: 2000, Output: 10000, CacheRead: 200, MaxInput: 272000}
+	c["codex/gpt-6-sol"] = Rate{Version: openAI, Input: 2000, Output: 10000, CacheRead: 200, MaxInput: 272000, longContext: true}
 	c["codex/gpt-6-luna"] = Rate{Version: openAI, Input: 100, Output: 500, CacheRead: 10, MaxInput: 272000}
 	c["codex/gpt-5.5"] = Rate{Version: openAI, Input: 5000, Output: 30000, CacheRead: 500, MaxInput: 272000}
 
@@ -76,8 +76,16 @@ func (c RateCard) Price(r Record) Record {
 		return r
 	}
 	if rate.MaxInput > 0 && *r.Tokens.Input+*r.Tokens.CacheRead+*r.Tokens.CacheWrite5m+*r.Tokens.CacheWrite1h > rate.MaxInput {
-		r.Reason = "Long-context price requires an explicit rate"
-		return r
+		if !rate.longContext {
+			r.Reason = "Long-context price requires an explicit rate"
+			return r
+		}
+		rate.Input *= 2
+		rate.CacheRead *= 2
+		rate.CacheWrite5m *= 2
+		rate.CacheWrite1h *= 2
+		rate.Output = rate.Output * 3 / 2
+		rate.Version += "-long-context"
 	}
 	var total int64
 	var costs Costs

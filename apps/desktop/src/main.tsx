@@ -53,13 +53,13 @@ const desktopWebViews: NativeWebViews = {
   },
 };
 const openLink = (url: string) => invoke<void>('open_link', { url });
-/** The UI zoom is the host's: one level for every window, kept across launches (View → Zoom). */
+/** Settings controls the host's saved default zoom. */
 const desktopZoom: ZoomHost = {
-  get: () => invoke<number>('ui_zoom'),
+  get: () => invoke<number>('default_ui_zoom'),
   set: level => invoke<number>('set_ui_zoom', { level }),
   subscribe(listener) {
     let disposed = false, stop: (() => void) | undefined;
-    void listen<number>('ui-zoom', event => listener(event.payload)).then(unlisten => { if (disposed) unlisten(); else stop = unlisten; });
+    void listen<number>('ui-default-zoom', event => listener(event.payload)).then(unlisten => { if (disposed) unlisten(); else stop = unlisten; });
     return () => { disposed = true; stop?.(); };
   },
 };
@@ -343,7 +343,7 @@ async function configureWindowTitleBar() {
   // The zoom too, so the room is right on the first draw (the buttons are not zoomed).
   const [titleBar, zoom] = await Promise.all([
     invoke<{ window: TitleBarInset; popout: TitleBarInset; fullScreen: boolean } | null>('title_bar').catch(() => null),
-    firstRun ? Promise.resolve(1) : desktopZoom.get().catch(() => 1),
+    firstRun ? Promise.resolve(1) : invoke<number>('ui_zoom').catch(() => 1),
   ]);
   if (!titleBar) return;
   configureTitleBar({ ...titleBar,
@@ -351,6 +351,6 @@ async function configureWindowTitleBar() {
     onPopoutFullScreen: listener => listenHere('title-bar-popout-full-screen', listener),
     startDragging: popout => invoke<void>('title_bar_drag', { popout }),
     doubleClick: popout => invoke<void>('title_bar_double_click', { popout }),
-    ...(firstRun ? {} : { zoom: { ...desktopZoom, get: async () => zoom } }) });
+    ...(firstRun ? {} : { zoom: { get: async () => zoom, subscribe: listener => listenHere('ui-zoom', listener) } }) });
 }
 void configureWindowTitleBar().finally(() => createRoot(document.getElementById('root')!).render(<React.StrictMode><WindowErrorBoundary development={import.meta.env.DEV}>{firstRun ? <FirstRun/> : <DesktopApp/>}</WindowErrorBoundary></React.StrictMode>));

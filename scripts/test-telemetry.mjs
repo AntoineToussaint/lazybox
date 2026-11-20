@@ -37,5 +37,20 @@ try{
  await expect(page.getByText('Runner disconnected.',{exact:true})).toBeVisible({timeout:10000});await expect(page.getByRole('button',{name:'Retry now',exact:true})).toBeVisible();
  await expect(page.getByText('Could not load saved conversations.',{exact:true})).toHaveCount(0);
  await page.unroute('**/Info');await page.getByRole('button',{name:'Retry now',exact:true}).click();await expect(page.getByText('Runner disconnected.',{exact:true})).toHaveCount(0);
+ // Codex has token types for its latest request instead of semantic categories.
+ const codex = await browser.newPage({viewport:{width:1500,height:1100}});
+ await codex.route('**/GetTelemetry',route=>route.fulfill({json:{
+   groups:[{scope:{execution:'alpha-session'},source:'sdk',model:'gpt-6.2-sol',records:'1',nanos:'340500000',tokens:{input:'66000',cacheRead:'300000',output:'1100'}}],
+   contexts:[{scope:{execution:'alpha-session'},agent:'root',model:'gpt-6.2-sol',used:'367100',capacity:'475000',source:'sdk_token_breakdown',
+     categories:[['uncached_input','66000'],['cached_input','300000'],['reasoning_output','800'],['other_output','300']].map(([name,tokens])=>({name,tokens,kind:'used',included:true}))}]
+ }}));
+ await codex.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
+ await codex.getByRole('button',{name:'Context and token cost'}).click();
+ const codexPanel=codex.locator('.context-popover');
+ for(const label of ['Uncached input','Cached input','Reasoning output','Other output']) await expect(codexPanel).toContainText(label);
+ await expect(codexPanel).toContainText('Token types from the latest Codex request.');
+ await expect(codexPanel.locator('.token-cost>summary')).toContainText('$0.3405');
+ await expect(codexPanel).not.toContainText('Category breakdown not reported.');
+ await codex.close();
  assert.deepEqual(errors,[]);assert.equal(fixture.mutations.length,0);console.log('PASS: normalized context, deferred counts, partial pricing, disconnect/retry recovery. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

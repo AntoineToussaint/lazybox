@@ -132,11 +132,11 @@ export type NativeWebViews = {
 };
 /** A web page in a window of its own (a detached Web panel). */
 export type WebWindowTarget = { webId: string; url: string; collectionId: string };
-/** The UI zoom a native host applies to every window and keeps across launches. */
+/** The default UI zoom the native host saves across launches. */
 export type ZoomHost = {
   get(): Promise<number>;
   set(level: number): Promise<number>;
-  /** Calls `listener` whenever the zoom changes (a menu shortcut, another window); returns the unsubscribe. */
+  /** Calls `listener` whenever the saved zoom setting changes; returns the unsubscribe. */
   subscribe(listener: (level: number) => void): () => void;
 };
 /**
@@ -276,7 +276,7 @@ export type TitleBarHost = {
   /** A double-click on an empty part of a header: zoom, minimize or nothing, as the system setting says. */
   doubleClick(popout: boolean): Promise<void>;
   /** The UI zoom, which scales CSS pixels and not the buttons. */
-  zoom?: ZoomHost;
+  zoom?: Pick<ZoomHost, 'get' | 'subscribe'>;
 };
 export type SurfaceHost = {
   saveTarget(target: SurfaceTarget): Promise<void>;

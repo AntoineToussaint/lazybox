@@ -1,3 +1,4 @@
+import { ConnectError } from '@lazybox/client-core';
 import { useEffect, useState } from 'react';
 import type { Collection, WorkspaceDeletionPreview } from '@lazybox/protocol';
 import { ConfirmCheckbox, ConfirmDialog, ConfirmWarning } from './ConfirmDialog';
@@ -20,7 +21,7 @@ export function DeleteWorkspaceDialog({ workspace, onClose, onDeleted }: {
     const control = new AbortController();
     setPreview(undefined); setError('');
     void api.previewWorkspaceDeletion({ collectionId: workspace.id }, { signal: control.signal })
-      .then(setPreview, error => { if (!control.signal.aborted) setError(String(error)); });
+      .then(setPreview, error => { if (!control.signal.aborted) setError(ConnectError.from(error).rawMessage); });
     return () => control.abort();
   }, [api, workspace.id, settled]);
   const active = preview?.activeSessionIds.length || 0;

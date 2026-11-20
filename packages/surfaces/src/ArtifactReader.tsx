@@ -1,6 +1,8 @@
 import { Children, isValidElement, memo, useCallback, useEffect, useMemo, useState, type MouseEvent, type ReactNode, type RefObject } from 'react';
 import Markdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { isShellLanguage, shellScript } from './code-run';
+import { homeOffers, type HomeTarget } from './home-run';
 import { CodeBlock } from './RichContent';
 import { MermaidDiagram } from './MermaidDiagram';
 import { Icon } from './Icons';
@@ -64,6 +66,7 @@ type BodyProps = {
   idPrefix?: string;
   /** Source lines (1-based) whose row, item or paragraph a comparison marks as changed. */
   marked?: ReadonlySet<number>;
+  onReviewShell?(command: string, target?: HomeTarget): void;
 };
 
 /**
@@ -72,7 +75,7 @@ type BodyProps = {
  * code with its language and copy, Mermaid diagrams, footnotes. Raw HTML is
  * never interpreted and external images are not loaded.
  */
-export const DocumentBody = memo(function DocumentBody({ markdown, headings, scroller, idPrefix = 'doc-', marked }: BodyProps) {
+export const DocumentBody = memo(function DocumentBody({ markdown, headings, scroller, idPrefix = 'doc-', marked, onReviewShell }: BodyProps) {
   const byLine = useMemo(() => new Map((headings || []).map(entry => [entry.line, entry])), [headings]);
   const components = useMemo<Components>(() => {
     // A row, item or paragraph that starts on a changed line is marked; its own children are not.
@@ -88,7 +91,15 @@ export const DocumentBody = memo(function DocumentBody({ markdown, headings, scr
         <a className="doc-anchor" href={`#${entry.id}`} aria-hidden="true" tabIndex={-1} onClick={event => { event.preventDefault(); scrollToId(scroller?.current || null, entry.id); }}>#</a>{children}
       </Tag>;
     };
+    const explicitHomes = new Map(onReviewShell ? homeOffers(markdown, Infinity, true).filter(offer => offer.explicit).map(offer => [offer.command, offer.target]) : []);
+    const review = (command: string) => command && onReviewShell && <button type="button" className="artifact-shell-review" onClick={() => onReviewShell(command, explicitHomes.get(command))}>Review in terminal</button>;
     return {
+      code: ({ children, className, node }) => {
+        const command = flatText(children);
+        const standalone = node?.position && !markdown.slice(0, node.position.start.offset).split('\n').at(-1)?.trim()
+          && !markdown.slice(node.position.end.offset).split('\n')[0].trim();
+        return <><code className={className}>{children}</code>{!className && standalone && explicitHomes.has(command) && review(command)}</>;
+      },
       ...(marked ? { tr: markable('tr'), li: markable('li'), p: markable('p') } : {}),
       h1: heading('h1'), h2: heading('h2'), h3: heading('h3'), h4: heading('h4'), h5: heading('h5'), h6: heading('h6'),
       blockquote: ({ node, children }) => {
@@ -110,7 +121,7 @@ export const DocumentBody = memo(function DocumentBody({ markdown, headings, scr
         if (!isValidElement<{ className?: string; children?: ReactNode }>(child)) return <pre>{children}</pre>;
         const language = /language-([^\s]+)/.exec(child.props.className || '')?.[1]?.toLowerCase() || '';
         const text = flatText(child.props.children).replace(/\n$/, '');
-        return language === 'mermaid' ? <MermaidDiagram eager text={text} sourceView={source => <CodeBlock text={source} language="mermaid"/>}/> : <CodeBlock text={text} language={language} label={languageName(language)}/>;
+        return language === 'mermaid' ? <MermaidDiagram eager text={text} sourceView={source => <CodeBlock text={source} language="mermaid"/>}/> : <CodeBlock text={text} language={language} label={languageName(language)} action={isShellLanguage(language) ? review(shellScript(text, language)) : undefined}/>;
       },
       a: ({ href, children, id, className }) => {
         if (href?.startsWith('#')) {
@@ -123,7 +134,7 @@ export const DocumentBody = memo(function DocumentBody({ markdown, headings, scr
       img: ({ alt }) => <span className="content-reference">{alt || 'Image reference'}</span>,
       section: ({ node, children, className }) => (className || '').includes('footnotes') || node?.properties?.dataFootnotes !== undefined ? <section className="doc-footnotes" aria-label="Footnotes">{children}</section> : <section className={className}>{children}</section>,
     };
-  }, [byLine, scroller, marked]);
+  }, [byLine, scroller, marked, markdown, onReviewShell]);
   return <div className="doc-body">
     <Markdown remarkPlugins={[remarkGfm]} remarkRehypeOptions={{ clobberPrefix: idPrefix }} rehypePlugins={[rehypeCallouts]} components={components}>{markdown}</Markdown>
   </div>;

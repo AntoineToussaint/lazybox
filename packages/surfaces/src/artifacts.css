@@ -333,3 +333,9 @@
 .artifact-card.is-retired .artifact-card-actions button{display:inline-flex;align-items:center;gap:5px}
 .artifact-card.is-restored{opacity:.75}
 .artifact-card:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+.artifact-terminal{display:flex;flex-direction:column;flex:0 0 min(36vh,340px);min-height:130px;border-top:1px solid var(--line);background:var(--surface)}
+.artifact-terminal>header{display:flex;align-items:center;gap:10px;padding:4px 10px;color:var(--text-soft);font-size:calc(12px * var(--text-scale))}
+.artifact-terminal>header>span{flex:1;color:var(--text-subtle)}
+.artifact-page .artifact-shell-review{margin-inline-start:6px;padding:2px 8px;border-radius:5px;border:1px solid var(--line);background:var(--surface-hover);color:var(--text);font:500 calc(12px * var(--text-scale)) var(--font-ui);cursor:pointer}
+.artifact-page .artifact-shell-review:hover{border-color:var(--focus)}

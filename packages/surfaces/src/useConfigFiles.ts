@@ -139,8 +139,7 @@ export function useConfigFilesBridge(primary: boolean, viewState?: ViewStateStor
     return () => { control.abort(); clearInterval(timer); window.removeEventListener('focus', focus); unregister(); if (updater) updater = undefined; };
   }, [api]);
 
-  // The desktop app's zoom: known before the file is applied over it, and a
-  // change from the View menu or ⌘= ⌘− ⌘0 written to the file (the main window only).
+  // Load and mirror the desktop’s saved default. Window shortcuts are local.
   useEffect(() => {
     if (!zoom) { zoomLevel.current = undefined; setZoomKnown(true); return; }
     let alive = true;

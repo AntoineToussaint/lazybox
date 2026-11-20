@@ -256,7 +256,7 @@ export function AppearanceSettings({ store, zoom }: { store?: ViewStateStore; zo
       <SettingsRow label="Ligatures" description="Join character pairs such as => and != when the code font has them.">
         <span className="settings-row-control settings-switch"><input type="checkbox" role="switch" aria-label="Ligatures" checked={typography.ligatures} onChange={e => type({ ligatures: e.target.checked })}/></span>
       </SettingsRow>
-      <SettingsRow label="Zoom" htmlFor="appearance-zoom" description={zoom ? <>Everything, in every window. <kbd>⌘=</kbd> <kbd>⌘−</kbd> <kbd>⌘0</kbd> from anywhere; kept across launches.</> : <>Use your browser's zoom: <kbd>⌘+</kbd> <kbd>⌘−</kbd> <kbd>⌘0</kbd>. The desktop app keeps its zoom in settings.yaml.</>}>
+      <SettingsRow label="Zoom" htmlFor="appearance-zoom" description={zoom ? <>Saved app-wide zoom. <kbd>⌘=</kbd> <kbd>⌘−</kbd> <kbd>⌘0</kbd> adjust the focused window until it closes.</> : <>Use your browser's zoom: <kbd>⌘+</kbd> <kbd>⌘−</kbd> <kbd>⌘0</kbd>. The desktop app keeps its zoom in settings.yaml.</>}>
         {zoom ? <span className="appearance-inline appearance-zoom">
           <button type="button" aria-label="Zoom out" onClick={() => setZoom(Math.round(((zoomLevel ?? 1) - 0.1) * 100) / 100)}><Icon name="zoomOut" size={14}/></button>
           <input id="appearance-zoom" type="range" min={50} max={200} step={5} value={Math.round((zoomLevel ?? 1) * 100)} onChange={e => setZoom(Number(e.target.value) / 100)}/>

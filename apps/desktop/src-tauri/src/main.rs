@@ -190,6 +190,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             capture::capture_window,
             capture::focus_window,
             appearance::ui_zoom,
+            appearance::default_ui_zoom,
             appearance::set_ui_zoom,
             appearance::share_preference,
             release::app_info,

@@ -23,7 +23,7 @@
 #   TAURI_SIGNING_PRIVATE_KEY (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD), with its
 #   public half committed as packaging/updater.pub.
 #
-# workflow_dispatch rebuilds an existing tag as a dry run: gates, build, sign,
+# workflow_dispatch builds a candidate or rebuilds an existing tag: gates, build, sign,
 # notarize, smoke test, and the artifacts uploaded to the run — nothing published.
 
 name: Release
@@ -36,7 +36,11 @@ on:
     inputs:
       tag:
         description: "Existing tag to build as a dry run, e.g. v2-v0.1.0 (publishes nothing)"
-        required: true
+        required: false
+        type: string
+      version:
+        description: "Candidate version on the selected ref (instead of an existing tag), e.g. 0.1.0-rc.1"
+        required: false
         type: string
 
 permissions:
@@ -77,15 +81,17 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
 
       - name: Resolve the version from the tag
         id: version
         working-directory: .
         env:
-          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          AMBIGUOUS: ${{ inputs.tag != '' && inputs.version != '' }}
+          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && (inputs.tag || format('v2-v{0}', inputs.version)) || github.ref_name }}
         run: |
           set -euo pipefail
+          if [[ "$AMBIGUOUS" == true ]]; then echo "::error::Choose either tag or version"; exit 1; fi
           if [[ ! "$RAW_TAG" =~ ^v2-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
             echo "::error::A V2 release tag is v2-v<major>.<minor>.<patch>[-pre], got '$RAW_TAG'"
             exit 1
@@ -101,6 +107,7 @@ jobs:
           echo "Lazybox $version (tag $RAW_TAG, prerelease=$prerelease)"
 
       - name: Require the updater signing key
+        if: github.event_name == 'push' || inputs.tag != ''
         # Every installed app verifies updates against the public key it was
         # built with; a release without the private key could never be
         # installed as an update. RELEASING.md: "Updater key".
@@ -166,9 +173,10 @@ jobs:
       - name: Build the release
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_FLAGS: ${{ (github.event_name == 'push' || inputs.tag != '') && '--publishable' || '' }}
           CARGO_BUILD_JOBS: "4"
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ (github.event_name == 'push' || inputs.tag != '') && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ (github.event_name == 'push' || inputs.tag != '') && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY || '' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -176,7 +184,7 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY_PATH: ${{ steps.apikey.outputs.path }}
-        run: make release VERSION="$VERSION" RELEASE_FLAGS=--publishable
+        run: make release VERSION="$VERSION" RELEASE_FLAGS="$RELEASE_FLAGS"
 
       - name: Show what was built
         env:

@@ -1173,7 +1173,8 @@ through the normal Runner directory. For a CLI-only connection, use
 `lazybox link connect pilot`. Remove access using `lazybox remote rm pilot`.
 
 Run the service with one replica and persist its entire XDG data, configuration
-and state directories. Keep the Runner listeners on loopback. The operator's
+and state directories. The foreground Runner writes its owner endpoint to the
+standard state path. Keep the Runner listeners on loopback. The operator's
 Kubernetes role needs to resolve the workload and pod and open a pod exec
 stream. Keep this role restricted to the Runner's operators. Each session
 still uses the existing authenticated owner handshake.

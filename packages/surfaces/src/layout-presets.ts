@@ -21,7 +21,7 @@ const sidebar = column([1 - AGENTS_SHARE, AGENTS_SHARE], g('collections'), g('ag
  * declares them (scripts/action-manifest.test.ts keeps the two in step). The
  * Runner checks layout files against it (actions.manifest.json).
  */
-export const layoutPanelKinds = ['collections', 'agents', 'chat', 'console', 'terminal', 'assistant', 'changes', 'usage', 'sessions', 'missions', 'pulls', 'processes', 'actions', 'preview', 'web', 'browser', 'files', 'editor', 'artifacts', 'extension'] as const;
+export const layoutPanelKinds = ['collections', 'agents', 'chat', 'console', 'terminal', 'assistant', 'training', 'changes', 'usage', 'sessions', 'missions', 'pulls', 'processes', 'actions', 'preview', 'web', 'browser', 'files', 'editor', 'artifacts', 'extension'] as const;
 
 export const DEFAULT_PRESET = 'chat-focus';
 export const builtinPresets: readonly LayoutPreset[] = [

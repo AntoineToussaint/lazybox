@@ -241,6 +241,18 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 	if child.ID == parent.ID || git(t, child.Members[0].Path, "rev-parse", "HEAD") != member.BaseCommit {
 		t.Fatal("child lost approved baseline")
 	}
+	_, err = o.bench.Artifacts.Put(child.ID, artifacts.Put{Title: "Scratch plan", Kind: "plan", Content: "Unapproved local criteria"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := o.client.StartReview(owner, &pb.StartReviewRequest{CollectionId: child.ID, SourceSessionId: view.Spawned.SessionId, ProfileId: "codex-default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewerBrief := briefOf(t, o.fake.session(review.Session.Id).Applied)
+	if !strings.Contains(reviewerBrief.Text, "Approved Mission contract") || !strings.Contains(reviewerBrief.Text, plan.Contract.Digest) || !strings.Contains(reviewerBrief.Text, "One row after reconnect") || strings.Contains(reviewerBrief.Text, "Unapproved local criteria") {
+		t.Fatalf("wrong reviewer contract: %s", reviewerBrief.Text)
+	}
 	spawn.TaskId = m.Plans[0].Tasks[1].TaskId
 	spawn.OperationId = strings.Repeat("k", 125) + "b"
 	other, err := o.client.SpawnAgent(orch, spawn)

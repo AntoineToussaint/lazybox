@@ -585,8 +585,6 @@ func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution,
 	if b.Preferences != nil {
 		template = b.Preferences.Snapshot().Review.Template
 	}
-	brief := reviews.Brief(reviews.BriefInput{Reviewer: label, Author: authorLabel, Conversation: sourceTitle, Goal: b.reviewGoal(source), Plan: b.reviewPlan(workspace.ID),
-		Scope: scope.label, Diff: scope.diff, Files: scope.files, Evidence: b.reviewEvidence(source), Template: template, Focus: focus, Guidance: preset.Guidance + reviewCompletionInstructions(req.TemplateID)})
 	title := preset.Title + " · " + scope.label + " · " + label
 	if b.History != nil {
 		_ = b.History.Rename(ctx, e.ID, title)
@@ -602,12 +600,34 @@ func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution,
 		run.Detail += " " + fallback
 	}
 	run.Fallback, run.Focus = fallback, focus
+	var contract *work.PlanContract
 	if b.Work != nil {
 		for _, at := range b.Work.Attempts() {
-			if at.Attempt.Conversation == run.SourceConversation {
-				run.Mission, run.Task = at.Mission, at.Task
-				break
+			if at.Attempt.Conversation != run.SourceConversation {
+				continue
 			}
+			run.Mission, run.Task = at.Mission, at.Task
+			state, err := b.Work.Mission(at.Mission)
+			if err != nil {
+				_ = e.Engine.Close()
+				return nil, reviews.Run{}, err
+			}
+			if _, plan := state.ApprovedTaskPlan(at.Attempt.Grant, at.Task); plan != nil {
+				contract = plan.Contract
+			}
+			break
+		}
+	}
+	workspacePlan := ""
+	if contract == nil {
+		workspacePlan = b.reviewPlan(workspace.ID)
+	}
+	brief := reviews.Brief(reviews.BriefInput{Reviewer: label, Author: authorLabel, Conversation: sourceTitle, Goal: b.reviewGoal(source), Plan: workspacePlan,
+		Scope: scope.label, Diff: scope.diff, Files: scope.files, Evidence: b.reviewEvidence(source), Template: template, Focus: focus, Guidance: preset.Guidance + reviewCompletionInstructions(req.TemplateID)})
+	if contract != nil {
+		brief += fmt.Sprintf("\n\n## Approved Mission contract\n\nSpec %s, version %d, digest %s. Record what you verified for each criterion and any gaps.\n", contract.Artifact, contract.Version, contract.Digest)
+		for _, criterion := range contract.Criteria {
+			brief += "\n> " + strings.ReplaceAll(criterion, "\n", "\n> ") + "\n"
 		}
 	}
 	run.BriefOperation = "review-brief-" + strings.TrimPrefix(e.ID, "e_")

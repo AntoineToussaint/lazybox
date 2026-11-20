@@ -132,7 +132,9 @@ require in branch protection.
 
 Each run records its profile, catalog fingerprint, initial/final source digest,
 platform, command/arguments, result, exit code and elapsed time per gate. A failed
-gate does not suppress later diagnostic results. Cancellation leaves explicit
+gate does not suppress later diagnostic results in `make check-release`.
+Staging uses `--fail-fast`: the first failure stops execution, with all remaining
+gates recorded as `not-run`. Such a receipt cannot promote. Cancellation leaves explicit
 not-run results. Each gate owns a process group, has a deadline, and uses the
 existing launcher cleanup for its descendants. Cleanup failure cannot become a
 passing gate.

@@ -200,3 +200,31 @@ test('a run the source changed under names the files that changed', async t => {
   const report = { profile: 'ui', status: 'failed', results: [{ id: 'one', status: 'passed', exitCode: 0, durationMs: 1 }], sourceChanged: ['docs/shot.png'] };
   assert.match(summarizeGateReport(report), /source changed during the run[^]*`docs\/shot\.png`/);
 });
+
+test('fail-fast staging stops after failure and cannot promote skipped gates', async t => {
+  const f = await fixture(t), seen = [];
+  const report = await runGateCatalog(f.root, 'release', {
+    snapshot, failFast: true, execute: async gate => {
+      seen.push(gate.id);
+      return { status: 'failed', exitCode: 1 };
+    },
+  });
+  assert.deepEqual(seen, ['one']);
+  assert.equal(report.results[1].status, 'not-run');
+  assert.equal(report.status, 'failed');
+  const catalog = await loadGateCatalog(f.root);
+  assert.throws(() => validateReleaseReceipt(report, catalog, 'source-digest'));
+});
+
+test('fail-fast still runs every gate on success and produces a promotable receipt', async t => {
+  const f = await fixture(t), seen = [];
+  const report = await runGateCatalog(f.root, 'release', {
+    snapshot, failFast: true, execute: async gate => {
+      seen.push(gate.id);
+      return pass();
+    },
+  });
+  assert.deepEqual(seen, ['one', 'two']);
+  const catalog = await loadGateCatalog(f.root);
+  validateReleaseReceipt(report, catalog, 'source-digest');
+});

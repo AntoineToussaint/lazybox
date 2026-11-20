@@ -417,16 +417,24 @@ func (s *session) rotate(reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tried := map[string]bool{s.profile.ID: true}
-	candidates := []accounts.Profile{}
+	var available, probes []accounts.Profile
+	now := time.Now()
 	current := s.adapter.profiles()
 	for _, id := range s.adapter.Eligible {
 		for _, p := range current {
-			if p.ID == id && !tried[id] && s.adapter.State.Eligible(id, time.Now()) {
-				tried[id] = true
-				candidates = append(candidates, p)
+			if p.ID != id || tried[id] || p.Provider != s.profile.Provider || p.Isolation != "environment" {
+				continue
+			}
+			tried[id] = true
+			switch s.adapter.State.RotationCapacity(id, now) {
+			case accounts.CapacityReported:
+				available = append(available, p)
+			case accounts.ProbeAllowed:
+				probes = append(probes, p)
 			}
 		}
 	}
+	candidates := append(available, probes...)
 	if len(candidates) == 0 {
 		return errors.New("no enabled subscription has available capacity; authenticate or wait for reset")
 	}
@@ -557,6 +565,10 @@ func (s *session) switchLocked(reason string, candidates []accounts.Profile, con
 		p, open := candidate.profile, candidate.open
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
+		}
+		if !requested && !s.adapter.State.Eligible(p.ID, time.Now()) {
+			failures = append(failures, fmt.Errorf("%s: capacity no longer available", p.ID))
+			continue
 		}
 		attempt, stop := context.WithCancel(s.ctx)
 		native, err := s.adapter.Native.Open(attempt, open)

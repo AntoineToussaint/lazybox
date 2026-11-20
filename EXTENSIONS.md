@@ -146,6 +146,10 @@ accountPolicy:
   conversation's pool is the policy's accounts (or every other signed-in
   account of the provider), minus Settings → Subscriptions → *Automatic
   switching* exclusions, and an explicit per-conversation opt-out still wins.
+  The supervisor skips subscriptions with a reported account limit or full
+  usage window still in effect. It tries subscriptions reported available
+  before accounts with unknown capacity or an elapsed reset, preserving pool
+  order among accounts with the same standing.
   The rotation supervisor asks again at **every** limit whether a policy
   covers the provider (`rotation.Adapter.Switching`): turning the extension
   off, removing it, or removing a grant stops switching for running

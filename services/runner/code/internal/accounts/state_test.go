@@ -59,3 +59,31 @@ func TestUsageWindowsMergeWithoutInventingMissingDataAndPersistIndependently(t *
 		t.Fatal("missing account invented quota")
 	}
 }
+
+func TestRotationCapacityChecksAllWindows(t *testing.T) {
+	state, err := OpenState(filepath.Join(t.TempDir(), "availability.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err = state.Observe("a", agent.AccountObservation{State: "available", Windows: []agent.UsageWindow{
+		{Name: "session", UsedPercent: 100, ResetAt: now.Add(-time.Minute).Unix()},
+		{Name: "weekly", UsedPercent: 100, ResetAt: now.Add(time.Hour).Unix()},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if state.Eligible("a", now) {
+		t.Fatal("the weekly limit still blocks rotation")
+	}
+	if got := state.RotationCapacity("a", now.Add(time.Hour)); got != ProbeAllowed {
+		t.Fatalf("after both windows reset, capacity = %v, want probe allowed", got)
+	}
+	if err = state.Observe("a", agent.AccountObservation{State: "available", Windows: []agent.UsageWindow{
+		{Name: "weekly", UsedPercent: 100},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if state.Eligible("a", now.Add(time.Hour)) {
+		t.Fatal("a full window without a reset still blocks rotation")
+	}
+}

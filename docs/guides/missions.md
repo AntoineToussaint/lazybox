@@ -99,3 +99,19 @@ Dispatch reserves the task’s budget slot, workspace ID and conversation ID in 
 For a worker with an approved spec contract, commit the candidate in each changed member and choose **Changes → Review with…**. A changes review captures the diff and records its member revisions and contract digest. Keep the worker’s workspace clean during review. If a member moves, is dirty or becomes unreadable when the review finishes, the outcome is unknown. Repeat the review on the current candidate. A later recorded commit or run on a different revision can also invalidate the earlier verdict. The Mission evidence returned by `lazybox missions show MISSION_ID --json` includes the member-to-commit map and contract digest. The person still accepts the task.
 
 A fresh pinned worker starts with its own evidence. The board keeps earlier attempts in the task history and evaluates the current attempt’s checks and reviews. A passing turn review cannot clear blockers from a review of the pinned candidate.
+
+### Test the workers together
+
+From an owner terminal, report the pinned tasks for acceptance and finish a passing Changes review for each current worker. Use the same approved plan and spec throughout. Supply a finite shell check that exercises the repositories together from the workspace root. For a plan whose members are named `runner` and `client`, this might be a reconnect scenario hosted by the client.
+
+```sh
+lazybox mission integrate MISSION_ID --plan PLAN_ID --key reconnect-1 --check 'sh client/tests/reconnect.sh runner'
+lazybox missions show MISSION_ID --json
+lazybox mission promote MISSION_ID --candidate CANDIDATE_ID
+```
+
+Integration merges the reviewed commits into a dedicated workspace and runs the check there. The candidate ID is also the workspace ID. Its console holds the command output. The Mission records the check, command ID, tested commits and result. On a conflict or failed check, inspect the repair task and workspace. Request changes before accepting the individual tasks, have the workers repair and obtain fresh reviews, then repeat the same check with a new key. For tasks already accepted, propose a new reviewed plan for the replacement inputs.
+
+Retry an interrupted request with its original key, plan and check. The Runner reconciles a recorded check from the command journal. If it cannot identify a check, it preserves the workspace and records the interruption as a failed candidate. A fresh key starts another candidate.
+
+Promotion is an explicit owner decision. It verifies the worker reviews, clean candidate commits and current accepted generation. The accepted manifest advances once. The next candidate starts from those accepted commits, which local Git refs retain. The original base worktrees remain available for planning. Publishing to upstream repositories is a separate operation.

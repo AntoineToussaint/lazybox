@@ -26,6 +26,11 @@ func TestMissionPlanApproveAndSpawnByTask(t *testing.T) {
 	if out := r.cli(env, "", "agents", "spawn", "--title", "ad hoc"); out.code == 0 || !strings.Contains(out.err.Error(), "lazybox mission plan") {
 		t.Fatalf("spawn before a plan: %+v", out)
 	}
+	for _, args := range [][]string{{"mission", "integrate", mission.Id, "--plan", "test", "--key", "test", "--check", "false"}, {"mission", "promote", mission.Id, "--candidate", "test"}} {
+		if got := r.cli(env, "", args...); got.code != exitDenied {
+			t.Fatalf("agent integration mutation: %+v", got)
+		}
+	}
 	plan := "summary: index first, docs alongside\ntasks:\n  - key: index\n    title: Index the corpus\n    paths: [search/]\n    estimate_usd: 4\n  - key: docs\n    title: Document search\n    paths: [search/README.md]\n    estimate_usd: 1\n"
 	out := r.cli(env, plan, "mission", "plan", "-")
 	if out.code != 0 || !strings.Contains(out.stdout, "2 tasks, est. $5.00") || !strings.Contains(out.stdout, "search/README.md is in index and docs") {

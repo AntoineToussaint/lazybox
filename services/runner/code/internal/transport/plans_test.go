@@ -183,7 +183,7 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 	o.orchKey = agentToken(t, o.orch.Env)
 	o.grant(t, &pb.OrchestratorCeiling{MaxChildren: 2, PlanRequired: true})
 	orch, owner := bearer(ctx, o.orchKey), bearer(ctx, ownerToken)
-	req := &pb.ProposePlanRequest{SessionId: o.orch.ID, OperationId: "snapshot", Tasks: []*pb.PlanTask{{Key: "a", Title: "Worker", Workspace: "pinned"}}}
+	req := &pb.ProposePlanRequest{SessionId: o.orch.ID, OperationId: "snapshot", Tasks: []*pb.PlanTask{{Key: "a", Title: "Worker", Workspace: "pinned"}, {Key: "b", Title: "Worker", Workspace: "pinned"}}}
 	spec, err := o.bench.Artifacts.Put(parent.ID, artifacts.Put{Title: "Acceptance", Kind: "spec", Format: "json", Content: `{"schema":"spec.v1","problem":"Reconnect","requirements":["Restore history"],"acceptanceCriteria":["One row after reconnect"]}`})
 	if err != nil {
 		t.Fatal(err)
@@ -215,12 +215,13 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := m.Tasks[0].Id
+	task := m.Plans[0].Tasks[0].TaskId
 	spawn := &pb.SpawnAgentRequest{SessionId: o.orch.ID, TaskId: task, Workspace: "same"}
 	if _, err = o.client.SpawnAgent(orch, spawn); err == nil {
 		t.Fatal("overrode pinned task")
 	}
 	spawn.Workspace = ""
+	spawn.OperationId = strings.Repeat("k", 125) + "a"
 	view, err := o.client.SpawnAgent(orch, spawn)
 	if err != nil {
 		t.Fatal(err)
@@ -240,4 +241,14 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 	if child.ID == parent.ID || git(t, child.Members[0].Path, "rev-parse", "HEAD") != member.BaseCommit {
 		t.Fatal("child lost approved baseline")
 	}
+	spawn.TaskId = m.Plans[0].Tasks[1].TaskId
+	spawn.OperationId = strings.Repeat("k", 125) + "b"
+	other, err := o.client.SpawnAgent(orch, spawn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Spawned.CollectionId == child.ID {
+		t.Fatal("distinct pinned tasks share a writable workspace")
+	}
+
 }

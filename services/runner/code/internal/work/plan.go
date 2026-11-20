@@ -443,7 +443,12 @@ func (s *Store) ProposePlan(mission string, actor Actor, key string, p PlanPaylo
 	}
 	state, events, err := s.Append(mission, Draft{Subject: "plan:" + p.Plan, Type: PlanProposed, Actor: actor, Idempotency: key, Payload: p})
 	if err == nil && len(events) == 0 {
-		p.Plan = existingSubject(state, key, "plan:")
+		event, _ := state.Event(key)
+		previous := state.PlanOf(strings.TrimPrefix(event.Subject, "plan:"))
+		if event.Type != PlanProposed || previous == nil || previous.Grant != p.Grant || previous.ProposedBy.Conversation != actor.Conversation {
+			return nil, "", refuse("operation key already used for a different operation")
+		}
+		p.Plan = previous.Plan
 	}
 	return state, p.Plan, err
 }

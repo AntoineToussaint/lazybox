@@ -46,11 +46,13 @@ async function run(scheme) {
   const grant = fixture.missions.handle('UpdateMission', { missionId: m.id, grant: { sessionId: 'alpha-session', ceiling: { maxChildren: 3, planRequired: true } } });
   assert.ok(!grant.error, JSON.stringify(grant.error));
   const plan = fixture.missions.proposePlan('alpha-session', { summary: 'index first, then rank; docs alongside', tasks: [
-    { key: 'index', title: 'Index the corpus', brief: 'Objective: a token index\nDone when: go test ./search passes', role: 'worker', workspace: 'new', paths: ['search/'], estimateUsd: 4 },
+    { key: 'index', title: 'Index the corpus', brief: 'Objective: a token index\nDone when: go test ./search passes', role: 'worker', workspace: 'pinned', paths: ['search/'], estimateUsd: 4 },
     { key: 'rank', title: 'Rank results', role: 'worker', permission: 'read-only', paths: ['search/rank.go'], estimateUsd: 3, after: ['index'] },
     { key: 'docs', title: 'Document search', role: 'writer', paths: ['docs/search.md'], estimateUsd: 1.5 },
   ] });
 
+  plan.contract = { artifactId: 'search-spec', version: 2, acceptanceCriteria: ['Search restores the last query'] };
+  plan.baseline = [{ name: 'api', repositoryId: 'api', commit: 'e3f54af31fae8eb7' }];
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
   const page = await context.newPage();
   const errors = []; page.on('pageerror', error => errors.push(String(error)));
@@ -82,6 +84,10 @@ async function run(scheme) {
   await line.getByRole('button', { name: 'Review plan…' }).click();
   const sheet = page.getByRole('dialog', { name: 'Plan for Ship search' });
   await expect(sheet).toBeVisible();
+  await expect(sheet).toContainText('Spec search-spec · version 2');
+  await expect(sheet).toContainText('Search restores the last query');
+  await expect(sheet).toContainText('e3f54af31fae');
+  await expect(sheet.locator('[data-key=index]')).toContainText('workspace at starting revisions');
   await expect(sheet.locator('h2')).toContainText('Search lead proposes 3 agents');
   await expect(sheet.locator('.plan-tasks > li')).toHaveCount(3);
   await expect(sheet.locator('.plan-tasks > li').nth(0)).toContainText('Index the corpus');

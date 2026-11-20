@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -437,7 +438,11 @@ func (b *Bench) Spawn(ctx context.Context, r SpawnRequest) (LineageView, error) 
 		for _, m := range r.baseline {
 			spec.Members = append(spec.Members, collections.MemberSpec{Name: m.Name, RepositoryID: m.Repository, BaseRef: m.Commit})
 		}
-		workspace, err = b.createChildWorkspace(ctx, spec, firstOf(r.Operation, fmt.Sprint(time.Now().UnixNano())))
+		// Collection creation keys are Runner-wide. Hash the complete scoped
+		// operation so long keys and keys reused by other missions stay distinct.
+		operation := firstOf(r.Operation, fmt.Sprint(time.Now().UnixNano()))
+		digest := sha256.Sum256([]byte(state.ID + "\x00" + r.Task + "\x00" + operation))
+		workspace, err = b.createChildWorkspace(ctx, spec, fmt.Sprintf("pinned/%x", digest))
 		if err != nil {
 			return LineageView{}, err
 		}

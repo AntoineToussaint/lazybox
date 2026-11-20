@@ -121,3 +121,5 @@
 .review-verification section { padding-block: 8px; border-top: 1px solid var(--border); }
 .review-verification p { margin-block: 4px; overflow-wrap: anywhere; }
 .review-verification button { margin-inline-end: 6px; }
+.reviewer-notice{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;padding:8px 12px;border-bottom:1px solid var(--line);color:var(--text-muted);font-size:calc(12px * var(--text-scale))}
+.reviewer-notice strong{color:var(--text)}

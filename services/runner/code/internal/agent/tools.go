@@ -6,6 +6,9 @@ import "encoding/json"
 // managed commands.
 const CommandTool = "lazybox_command"
 
+// ReviewFindingTool writes a proposed finding for the current reviewer only.
+const ReviewFindingTool = "lazybox_review_finding"
+
 const InteractiveCommandAction = "interactive"
 
 // IsInteractiveCommand identifies the command action whose approval the Runner owns.

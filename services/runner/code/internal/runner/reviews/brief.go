@@ -43,17 +43,19 @@ Correctness bugs, regressions, missing or wrong tests, security and data-loss ri
 // ReportInstructions is the {{report}} section: how findings reach Lazybox.
 const ReportInstructions = `## How to report
 
-File every finding with the Lazybox CLI, one call per finding. A finding only in your reply is lost.
+File one finding at a time with the Runner’s review finding tool (lazybox_review_finding or mcp__lazybox__review_finding). Pass file, startLine, optional endLine, severity, title and body. Wait for the saved finding ID before saying it was filed. This tool does not spawn a command or require shell network access.
+
+If the tool is unavailable, use the Lazybox CLI:
 
     lazybox review add --file <repository>/<path> --line <N>[-<M>] --severity blocker|major|minor|nit --title "<one line>" --body "<what is wrong, why it matters, what to do>"
 
 - --file is relative to the workspace root (api/src/handler.go); --line is the line as the file is now; a range such as 12-18 is fine.
 - blocker: wrong or unsafe to merge · major: should be fixed before merging · minor: worth fixing · nit: taste.
 - Filing the same file, line and title again (or the same --key) updates that finding instead of adding another. ` + "`lazybox review list`" + ` shows what you filed.
-- If your shell cannot reach Lazybox (a sandbox without network), run the same command through Lazybox's command tool.
+- If filing cannot be confirmed, include each finding’s file, lines, severity, title and body in your reply and mark it as unfiled.
 - To ask the author about its intent, run ` + "`lazybox ask author \"<question>\"`" + `; its reply comes back to you. Ask only what the code cannot tell you.
 
-You are read-only: never edit files, commit, push or open pull requests. You may run read-only commands, such as the tests, with ` + "`lazybox run -- <command>`" + `.
+You are read-only: never edit files, commit, push or open pull requests. Route implementation and merging back to the author conversation. You may run read-only commands, such as the tests, with ` + "`lazybox run -- <command>`" + `.
 
 When you are done, end your turn with a short summary: what you checked, your findings by severity, and what you could not verify.`
 

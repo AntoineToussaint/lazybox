@@ -26,7 +26,7 @@ func TestDynamicToolsFollowThePurpose(t *testing.T) {
 		t.Fatalf("help tools: %s", got)
 	}
 	for _, purpose := range []string{"", "coding"} {
-		if got := strings.Join(toolNames(purpose), ","); got != agent.CommandTool {
+		if got := strings.Join(toolNames(purpose), ","); got != agent.CommandTool+","+agent.ReviewFindingTool {
 			t.Fatalf("%q tools: %s", purpose, got)
 		}
 		if toolOffered(purpose, agent.SettingsUpdateTool) || toolOffered(purpose, agent.SettingsReadTool) {

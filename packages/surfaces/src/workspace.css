@@ -382,3 +382,6 @@
 .detached-message-actions .primary{background:var(--accent-solid);border-color:var(--accent-solid);color:var(--on-accent-solid)}
 .detached-message-actions .primary:hover:not(:disabled){background:var(--accent-solid-hover)}
 .workspace-owner-uncertain{display:inline-flex;align-items:center;align-self:center;flex:none;color:var(--warn)}
+
+.history-refresh-error{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;padding:4px 10px;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.workspace-shell .history-refresh-error button{padding:2px 0;border:0;background:transparent;color:var(--text-soft);text-decoration:underline}

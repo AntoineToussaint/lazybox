@@ -148,7 +148,7 @@ try {
  await page.screenshot({path:`${shots}/home-checkouts-run.png`});
  // The exit reaches the conversation without another click.
  await expect.poll(()=>applies().length).toBe(1);
- assert.equal(applies()[0].body.message.text,'Done: `env -u ACME_TOKEN ./bin/acme login staging` finished (exit 0).');
+ assert.equal(applies()[0].body.message.text,'`env -u ACME_TOKEN ./bin/acme login staging` completed successfully.');
  await expect(offers.locator('.home-run-row').nth(0)).toContainText('Told Claude');
  await page.screenshot({path:`${shots}/home-checkouts-told.png`});
 
@@ -188,7 +188,7 @@ try {
  const homeRun=offers.locator('.home-run-row').nth(2);
  await expect(homeRun).toContainText('Told Claude');
  assert.equal(applies().length,2,'gcloud completion is sent without clicking Tell');
- assert.equal(applies().at(-1).body.message.text,'Done: `gcloud auth application-default login` finished (exit 0).');
+ assert.equal(applies().at(-1).body.message.text,'`gcloud auth application-default login` completed successfully.');
  let failedReportId;
  await page.route('**/Apply',async route=>{
   const body=route.request().postDataJSON();

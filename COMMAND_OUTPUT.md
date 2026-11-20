@@ -505,3 +505,7 @@ its output. Lazybox-managed commands open in the live console. A command
 run directly by the agent opens that tool call in Activity, where output
 appears as the provider reports it. Output redirected to a file stays in
 that file.
+
+Interactive commands appear as command steps in the conversation. A
+successful exit appears in plain language, with a numeric exit code shown
+for failures.

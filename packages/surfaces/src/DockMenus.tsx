@@ -164,7 +164,7 @@ export function groupMenuItems(group: GroupView, handle: DockHandle, commands: G
     !!clone && { label: 'Clone conversation…', icon: 'plus', run: clone },
     { label: 'Split right', icon: 'split-right', shortcut: keys.split, run: () => commands.splitWith(group.id, panel, 'right') },
     { label: 'Split down', icon: 'split-down', run: () => commands.splitWith(group.id, panel, 'below') },
-    docked && { label: group.maximized ? 'Restore layout' : 'Maximize', icon: group.maximized ? 'restore' : 'maximize', shortcut: keys.maximize, run: () => handle.toggleMaximize(panel.id) },
+    docked && { label: group.maximized ? 'Restore layout' : 'Maximize', icon: group.maximized ? 'restore' : 'maximize', shortcut: keys.maximize, run: () => handle.toggleMaximize(panel.id, 'pointer') },
     docked && group.canMinimize && { label: group.minimized ? 'Restore' : 'Minimize', icon: group.minimized ? 'chevron' : 'minimize', run: () => commands.minimize(group.id, !group.minimized) },
     docked && { label: 'Float over the page', icon: 'float', run: () => handle.float(panel.id) },
     docked
@@ -193,7 +193,7 @@ export function GroupActions({ group, handle, commands, keys }: { group: GroupVi
   if (!panel) return null;
   const name = commands.title(panel);
   return <>
-    {group.location === 'grid' && <button className="icon-button dock-maximize" aria-label={group.maximized ? 'Restore layout' : `Maximize ${name}`} title={group.maximized ? 'Restore layout' : 'Maximize · double-click a tab'} onClick={() => handle.toggleMaximize(panel.id)}><Icon name={group.maximized ? 'restore' : 'maximize'} size={14}/></button>}
+    {group.location === 'grid' && <button className="icon-button dock-maximize" aria-label={group.maximized ? 'Restore layout' : `Maximize ${name}`} title={group.maximized ? 'Restore layout' : 'Maximize · double-click a tab'} onClick={() => handle.toggleMaximize(panel.id, 'pointer')}><Icon name={group.maximized ? 'restore' : 'maximize'} size={14}/></button>}
     {group.location === 'floating' && <button className="icon-button dock-back" aria-label={`Dock ${name} into the page`} title="Dock into the page" onClick={() => handle.dockBack(group.id)}><Icon name="back" size={14}/></button>}
     {group.location === 'popout' && <button type="button" className="dock-put-back" title={`Put ${name} back where it was in the main window, and close this window${keys.putBack ? ` (${keys.putBack})` : ''}`} onClick={() => handle.dockBack(group.id)}><Icon name="put-back" size={13}/><span>Put back in main window</span></button>}
     <ActionMenu className="dock-group-menu" label={`${name} panel actions`}>

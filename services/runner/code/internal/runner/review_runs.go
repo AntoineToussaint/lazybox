@@ -988,10 +988,13 @@ func (b *Bench) ReviewRunView(run reviews.Run) reviews.Run {
 
 // FindingRequest is one finding from `lazybox review add`.
 type FindingRequest struct {
-	File               string
-	StartLine, EndLine int
-	Severity, Title    string
-	Body, Key          string
+	File      string `json:"file"`
+	StartLine int    `json:"startLine"`
+	EndLine   int    `json:"endLine"`
+	Severity  string `json:"severity"`
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	Key       string `json:"key"`
 }
 
 // AddReviewFinding files a finding from the reviewer execution session. The

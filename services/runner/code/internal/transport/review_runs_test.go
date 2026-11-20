@@ -120,7 +120,7 @@ func TestStartReviewBriefsAReadOnlyReviewerWhoseFindingsLandInTheTray(t *testing
 	case <-ctx.Done():
 		t.Fatal("the brief never reached the reviewer")
 	}
-	for _, want := range []string{"Do op-handler", "## What to review: Turn 1", "git -C ", "api/handler.go (", "lazybox review add --file", "You are read-only"} {
+	for _, want := range []string{"Do op-handler", "## What to review: Turn 1", "git -C ", "api/handler.go (", "lazybox_review_finding", "lazybox review add --file", "You are read-only"} {
 		if !strings.Contains(brief.Text, want) {
 			t.Errorf("brief lacks %q:\n%s", want, brief.Text)
 		}
@@ -146,6 +146,16 @@ func TestStartReviewBriefsAReadOnlyReviewerWhoseFindingsLandInTheTray(t *testing
 	again, err := f.client.AddReviewFinding(reviewer, finding)
 	if err != nil || !again.Updated || again.Finding.Id != c.Id || again.Finding.Severity != "major" {
 		t.Fatal(again, err)
+	}
+	args := json.RawMessage(`{"file":"api/handler.go","startLine":3,"endLine":4,"severity":"major","title":"The error is logged, not returned","body":"Return it so callers can retry."}`)
+	result, err := f.codex.Session.Open.Tools(ctx, agent.ReviewFindingTool, args)
+	var saved struct {
+		FindingID string `json:"findingId"`
+		ReviewID  string `json:"reviewId"`
+		Updated   bool   `json:"updated"`
+	}
+	if err != nil || json.Unmarshal([]byte(result), &saved) != nil || saved.FindingID != c.Id || saved.ReviewID != run.Id || !saved.Updated {
+		t.Fatalf("direct finding tool: %s (%v)", result, err)
 	}
 	finding.Severity, finding.Title = "blocker", "Handle never reports failure"
 	if _, err = f.client.AddReviewFinding(reviewer, finding); err != nil {

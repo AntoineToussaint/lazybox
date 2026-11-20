@@ -20,7 +20,7 @@ import type { FileReference } from './view-state';
  * (with Vim editing and prompt recall), and the send, attach, snippet and
  * interrupt controls. The draft itself is owned by the chat.
  */
-export function Composer({ textarea, fileInput, agentName, embedded, session, sessionID, viewState, keymap, limited, message, files, attachments, missingFiles, uncertainSend, handedOver, sending, canCompose, canAttach, canSend, permissionPrompt, onSubmit, onChange, onDictate, onRecallKey, onRemoveMissingFile, onDropMissingFiles, onDismissHandover, onOpenSnippets, onSelectFiles, onInterrupt, interruptInBar = false, onError, slash, info }: {
+export function Composer({ textarea, fileInput, agentName, embedded, session, sessionID, viewState, keymap, limited, message, files, attachments, missingFiles, uncertainSend, handedOver, sending, canCompose, canAttach, canSend, permissionPrompt, onSubmit, onChange, onDictate, onRecallKey, onOpenPromptHistory, onRemoveMissingFile, onDropMissingFiles, onDismissHandover, onOpenSnippets, onSelectFiles, onInterrupt, interruptInBar = false, onError, slash, info }: {
   textarea: RefObject<HTMLTextAreaElement | null>;
   fileInput: RefObject<HTMLInputElement | null>;
   agentName: string;
@@ -50,6 +50,7 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
   onChange(text: string): void;
   /** Dictated words shown before they are kept (not saved); `onChange` keeps the result. */
   onDictate?(text: string): void;
+  onOpenPromptHistory?(): void;
   /** Prompt recall (↑/↓); true when it handled the key. */
   onRecallKey(event: KeyboardEvent<HTMLTextAreaElement>, vimMode?: VimMode): boolean;
   onRemoveMissingFile(index: number): void;
@@ -164,6 +165,7 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
     </div>}
     <div className="row">
       {info}
+      {onOpenPromptHistory && <button type="button" className="icon-button" aria-label="Prompt history" title="Prompt history · ↑ and ↓ recall sent prompts" disabled={sending} onClick={onOpenPromptHistory}><Icon name="history"/></button>}
       <button type="button" className="icon-button" aria-label="Snippets" title={`Snippets · ${keymap['snippets.open']}`} disabled={!canCompose || sending} onClick={onOpenSnippets}><Icon name="snippets"/></button>
       <button type="button" className="attachment" aria-label={embedded ? 'Attach files' : undefined} disabled={!canAttach} onClick={() => fileInput.current?.click()}>{embedded ? <><Icon name="attach"/> <span className="attachment-label">Attach</span></> : '+ Attach files'}</button>
       <input ref={fileInput} hidden aria-label="Attach files" type="file" multiple onChange={e => { onSelectFiles(e.target.files); e.target.value = ''; }}/>

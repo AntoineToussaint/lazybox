@@ -201,9 +201,14 @@ try{
   await lastCard().getByRole('button',{name:'Open conversation'}).click();
   await expect(chat().locator('.chat-heading')).toContainText(`Review · Changes · ${run.reviewerLabel}`);
   await expect(chat().locator('.messages:visible')).toContainText(`Asked ${run.reviewerLabel} to review Claude's work`);
+  await expect(chat().getByRole('note',{name:'Read-only review'})).toBeVisible();
   await chat().locator('.chat-heading').getByLabel('Session actions',{exact:true}).click();
  };
  const backToWork=async()=>{await page.getByRole('navigation',{name:'Workspaces'}).getByText('Harden the handler',{exact:true}).first().click();await expect(chat().locator('.messages:visible')).toContainText('REPLY_ONE');};
+ await openReviewer(viaMenu);
+ await page.keyboard.press('Escape');
+ await chat().getByRole('button',{name:'Open author conversation',exact:true}).click();
+ await expect(chat().locator('.messages:visible')).toContainText('REPLY_ONE');
  await openReviewer(viaMenu);
  await page.getByRole('button',{name:'Cancel review'}).click();
  await expect.poll(()=>cancels().length).toBe(3);

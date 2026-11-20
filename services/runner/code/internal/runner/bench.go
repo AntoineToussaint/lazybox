@@ -1096,6 +1096,18 @@ func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args
 	if agent.BrowserTool(name) {
 		return b.browserTool(ctx, e, name, args)
 	}
+	if name == agent.ReviewFindingTool {
+		var request FindingRequest
+		if err := json.Unmarshal(args, &request); err != nil {
+			return "", err
+		}
+		finding, updated, run, err := b.AddReviewFinding(ctx, e.ID, request)
+		if err != nil {
+			return "", err
+		}
+		data, err := json.Marshal(map[string]any{"findingId": finding.ID, "reviewId": run.ID, "updated": updated})
+		return string(data), err
+	}
 	if name != "lazybox_command" {
 		return "", agent.ErrUnsupported
 	}

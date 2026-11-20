@@ -70,7 +70,11 @@ export function mcpServers(purpose: string, browser = false, call: typeof callRu
     member: z.string().optional(), expected: z.string().optional(), regression: z.string().optional(),
     name: z.string().optional().describe('start_action: the action to start, as actions lists it; omit for the default action.'), restart: z.boolean().optional().describe('start_action: restart it if it is running.'),
   }, async args => ({ content: [{ type: 'text', text: await call('lazybox_command', args) }] }));
-  return { lazybox: createSdkMcpServer({ name: 'lazybox', version: '0.1.0', tools: [commandTool] }), ...(browser ? { [browserServerName]: browserServer(call) } : {}) };
+  const reviewFinding = tool('review_finding', 'File one proposed finding in the current agent review. Only the assigned reviewer can file it. Returns the saved finding ID.', {
+    file: z.string().describe('Workspace-relative repository/path'), startLine: z.number().int().positive(), endLine: z.number().int().positive().optional(),
+    severity: z.enum(['blocker', 'major', 'minor', 'nit']), title: z.string(), body: z.string(), key: z.string().optional(),
+  }, async args => ({ content: [{ type: 'text', text: await call('lazybox_review_finding', args) }] }));
+  return { lazybox: createSdkMcpServer({ name: 'lazybox', version: '0.1.0', tools: [commandTool, reviewFinding] }), ...(browser ? { [browserServerName]: browserServer(call) } : {}) };
 }
 
 async function open(options: any) {
@@ -80,6 +84,7 @@ async function open(options: any) {
     ...nativeOptions(options, process.env),
     mcpServers: mcpServers(options.purpose, options.browser === true),
     canUseTool: async (name, original, context): Promise<PermissionResult> => {
+      if (name === 'mcp__lazybox__review_finding') return { behavior: 'allow', updatedInput: original };
       if (name === 'mcp__lazybox__command' && original.action === 'interactive') {
         // The Runner presents the command in its own handoff card.
         return { behavior: 'allow', updatedInput: original };

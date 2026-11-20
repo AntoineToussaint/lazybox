@@ -461,7 +461,10 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   useWebViewer(openWeb);
   useKeyboardAction('web.open', () => { openWeb({ url: '', newPanel: !shownPanels(livePage()).some(panel => panel.kind === 'web' && !panel.detached) }); });
   // Ask Lazybox (Help menu, ⌘K, ]] h): its panel on this page, with the message box focused.
-  useKeyboardAction('help.ask', () => { if (showModule('assistant')) requestAsk(); });
+  useKeyboardAction('help.training', () => showModule('training'));
+  useKeyboardAction('help.ask', question => {
+    if (showModule('assistant')) requestAsk(typeof question === 'string' ? question : undefined);
+  });
   /** Show this workspace's terminal: the open panel, or one docked beside the work. It starts a shell only when none is running. */
   const showTerminal = () => { if (workspaceID && showModule('terminal')) requestTerminal(workspaceID); };
   // A panel asked for in another workspace is shown once that workspace's page is.
@@ -888,7 +891,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   useKeyboardAction('layout.split', () => splitActive('right'), hasActive);
   useKeyboardAction('layout.split-down', () => splitActive('below'), hasActive);
   useKeyboardAction('layout.close', closeActive, () => hasActive() && !activePanel()!.detached);
-  useKeyboardAction('layout.maximize', () => dock.current?.toggleMaximize(), hasActive);
+  useKeyboardAction('layout.maximize', (_, source) => dock.current?.toggleMaximize(undefined, source === 'keys' ? 'keys' : undefined), hasActive);
   // ⌃⇥ walks every tab: the active group's, then the next group's (one tab a group is one group a step, as before).
   useKeyboardAction('layout.next-group', () => dock.current?.cycleTabs(1), docked);
   useKeyboardAction('layout.previous-group', () => dock.current?.cycleTabs(-1), docked);

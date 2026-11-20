@@ -14,6 +14,7 @@ import { useFileOpener, type OpenModifiers } from './file-links';
 import type { FileLink } from './file-reference';
 import { useTranscript } from './useTranscript';
 import { useLiveStatus } from './LiveIndicator';
+import { PromptHistoryDialog } from './PromptHistoryDialog';
 import { savePrompt } from './prompt-history';
 import { saveSnippetUse } from './snippet-usage';
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
@@ -38,6 +39,7 @@ import { useFileDrop } from './useFileDrop';
 import { NewSessionForm, useSessionLauncher, type ConversationCopy } from './NewSessionForm';
 import { agentTitle } from './providers';
 import { ChatHeader, ChatStatus, SessionHeader, SessionInspection, WindowTopbar, type HeaderStats } from './ChatHeader';
+import { showConversation, showReview } from './review-client';
 import { ReviewChatButton, useChatReview } from './ReviewFromChat';
 import { refreshWorkspaceReview } from './useWorkspaceReview';
 import { TelemetryPanel } from './TelemetryPanel';
@@ -397,6 +399,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // How much tool activity this conversation shows: the default, or its own.
   const display = useDisplayDetail(viewState);
   const activity = useConversationActivity(viewState, session?.conversationId || sessionID, mode === 'agent' && !!sessionID);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const recall = usePromptRecall({
     viewState, sessionID, conversationKey: session?.conversationId || sessionID, conversation,
     onRecall: text => {
@@ -668,6 +671,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {fileLinks.element}
           {slash.dialogs}
           {chatReview.dialog}
+          {chatReview.asReviewer && <div className="reviewer-notice" role="note" aria-label="Read-only review">
+            <span><strong>Read-only review</strong> · Use the author conversation to apply findings and merge.</span>
+            {embedded && <><button type="button" onClick={() => showConversation({ collectionId: chatReview.workspaceId, sessionId: chatReview.asReviewer!.sourceSessionId })}>Open author conversation</button>
+              <button type="button" onClick={() => showReview({ collectionId: chatReview.workspaceId, reviewId: chatReview.asReviewer!.id })}>Review tray</button></>}
+          </div>}
           {transcript.error && <TranscriptNotice error={transcript.error} onRetry={transcript.retry}/>}
           {handoffMessage && session?.collectionId && onOpenHandoff && <ConversationHandoff source={session} message={handoffMessage}
             open={onOpenHandoff} onClose={() => setHandoffMessage(undefined)}/>}
@@ -700,6 +708,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {!transcript.error && <LiveBar api={api} session={session} sessionID={sessionID} live={live} disconnected={disconnected} activity={transcript.activity} viewState={viewState} onInterrupt={() => void interrupt()}
             onOpenCommand={openCommand} onOpenFile={session?.collectionId ? openFile : undefined}/>}
           {!transcript.error && !disconnected && <QueuedMessages session={session} queued={queued} turnRunning={transcript.turnRunning} live={live} agentName={agentName} activity={transcript.activity} delivery={queuedDelivery} sendNowKey={sendNowKey}/>}
+          {historyOpen && sessionID && <PromptHistoryDialog key={sessionID} conversationId={session?.conversationId || sessionID} messages={conversation}
+            onClose={() => setHistoryOpen(false)} onPick={text => {
+              recall.reset(); setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles);
+              setHistoryOpen(false); requestAnimationFrame(() => composer.current?.focus());
+            }}/>}
           <Composer textarea={composer} fileInput={fileInput} agentName={agentName} embedded={embedded} session={session} sessionID={sessionID} viewState={viewState} keymap={keymap}
             limited={limited} message={message} files={files} attachments={boxes} missingFiles={missingFiles} uncertainSend={uncertainSend} handedOver={handedOver}
             sending={sending} canCompose={canCompose} canAttach={canAttach} canSend={canSend}
@@ -710,6 +723,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             onChange={text => { if (sendingRef.current) return; recall.reset(); setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); }}
             onDictate={setMessage}
             onRecallKey={recall.onKeyDown}
+            onOpenPromptHistory={canCompose && sessionID ? () => setHistoryOpen(true) : undefined}
             onRemoveMissingFile={i => { const next = missingFiles.filter((_, index) => index !== i); setMissingFiles(next); setUncertainSend(''); setError(''); persistDraft(message, files, next); }}
             onDropMissingFiles={() => { setMissingFiles([]); setUncertainSend(''); setError(''); persistDraft(message, files, []); requestAnimationFrame(() => composer.current?.focus()); }}
             onDismissHandover={() => setHandedOver('')}

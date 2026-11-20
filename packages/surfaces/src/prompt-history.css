@@ -1,0 +1,8 @@
+.prompt-history-dialog{width:min(620px,calc(100vw - 28px));max-height:75vh;overflow:auto}
+.prompt-history-dialog header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.prompt-history-dialog h2{margin:0}
+.prompt-history-dialog input{width:100%;margin:12px 0 0}
+.prompt-history-dialog ul{list-style:none;margin:8px 0 0;padding:0}
+.prompt-history-dialog li{display:flex;align-items:start;gap:8px;padding:5px 0;border-bottom:1px solid var(--line)}
+.prompt-history-dialog li>button:first-child{min-width:0;flex:1;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere}
+.prompt-history-dialog .activity-time{flex:none}

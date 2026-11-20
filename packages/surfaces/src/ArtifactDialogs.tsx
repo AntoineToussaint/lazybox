@@ -167,7 +167,7 @@ export function SaveToRepositoryDialog({ artifact, collection, onClose, onSaved 
   const { api } = useRunner();
   const members = collection?.members.map(member => member.spec?.name || '').filter(Boolean) || [];
   const [member, setMember] = useState(() => artifact.trackedPath.split('/')[0] || members[0] || '');
-  const [path, setPath] = useState(() => artifact.trackedPath ? artifact.trackedPath.split('/').slice(1).join('/') : suggestedPath('', artifact.title));
+  const [path, setPath] = useState(() => artifact.trackedPath ? artifact.trackedPath.split('/').slice(1).join('/') : suggestedPath('', artifact.title).replace(/\.md$/, artifact.format === 'json' ? '.json' : '.md'));
   const [track, setTrack] = useState(!artifact.trackedPath);
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [replace, setReplace] = useState<{ path: string; version: string }>();
   const modal = useModal(onClose, busy);

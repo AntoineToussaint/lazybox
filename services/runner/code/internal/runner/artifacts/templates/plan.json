@@ -1,0 +1,10 @@
+{
+  "schema": "plan.v1",
+  "goal": "Release the feature",
+  "steps": [
+    "Verify the build"
+  ],
+  "completionChecks": [
+    "Smoke test passes"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "schema": "todo-list.v1",
+  "items": [
+    {
+      "id": "verify",
+      "text": "Verify the build",
+      "status": "todo"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "schema": "spec.v1",
+  "problem": "Describe the user need",
+  "requirements": [
+    "Describe required behavior"
+  ],
+  "acceptanceCriteria": [
+    "Describe an observable outcome"
+  ]
+}

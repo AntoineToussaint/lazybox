@@ -5,7 +5,7 @@
 // and `fileChanged`, which stands in for the Runner's file watcher.
 import { createHash, randomUUID } from 'node:crypto';
 
-const KINDS = new Set(['plan', 'report', 'spec', 'notes', 'other']);
+const KINDS = new Set(['plan', 'report', 'spec', 'notes', 'todo-list', 'other']);
 const digest = text => createHash('sha256').update(text).digest('hex');
 
 export function artifactFixture({ workspaceFiles, mutations }) {

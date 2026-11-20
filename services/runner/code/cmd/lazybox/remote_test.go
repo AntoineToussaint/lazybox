@@ -489,6 +489,18 @@ func TestRemoteRunnerOverKubernetesExec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	paths, err := installation.UserPaths(func(key string) string {
+		if key == "HOME" {
+			return w.host
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(paths.Locator()); err != nil {
+		t.Fatal(err)
+	}
 	bin := filepath.Dir(w.ssh)
 	const fakeKubectl = `#!/bin/sh
 set -eu

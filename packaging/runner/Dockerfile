@@ -22,8 +22,6 @@ ENV XDG_DATA_HOME=/var/lib/lazybox/data \
     XDG_STATE_HOME=/var/lib/lazybox/state \
     PATH=/opt/lazybox/bin:$PATH
 
-ENV LAZYBOX_V2_ENDPOINT=$XDG_DATA_HOME/lazybox/state/endpoint.json
-
 WORKDIR /var/lib/lazybox
 USER 10001:10001
 ENTRYPOINT ["/opt/lazybox/bin/lazybox-runner", "serve"]

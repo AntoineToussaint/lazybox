@@ -33,6 +33,7 @@ import { RunnerSection } from './RunnerControl';
 import { OrchestrationProcessSettings } from './OrchestrationProcessSettings';
 import { AboutSettings } from './AboutSettings';
 import { Resizer } from './Resizer';
+import { runAction } from './actions';
 import { SPLITS } from './resizable-model';
 
 
@@ -78,6 +79,16 @@ export const settingsTabs: { id: SettingsTab; label: string; icon: string; group
   { id: 'runners', label: 'Runners', icon: 'collections', group: 'System' },
   { id: 'runner', label: 'Runner', icon: 'processes', group: 'System' },
   { id: 'about', label: 'About & updates', icon: 'sparkle', group: 'System' },
+];
+
+const settingsTopics: { id: SettingsTab; label: string; keywords: string; anchor?: string }[] = [
+  { id: 'chat', label: 'Activity detail', anchor: 'chat-activity-detail', keywords: 'quiet smart verbose output command commands ran logs tool tools activity less noisy fold hide reduce verbosity transcript' },
+  { id: 'chat', label: 'Conversation tabs', anchor: 'chat-conversation-tabs', keywords: 'open close preview conversations chat tabs' },
+  { id: 'appearance', label: 'Display and zoom', keywords: 'theme dark light font text size zoom scale colour color' },
+  { id: 'extensions', label: 'Extensions', keywords: 'plugin plugins installed panels' },
+  { id: 'agents', label: 'Agent configuration', keywords: 'claude codex model effort permissions acp terminal' },
+  { id: 'subscriptions', label: 'Subscription accounts', keywords: 'sign in login account claude codex usage limit rotation switch' },
+  { id: 'repositories', label: 'Repository home checkouts', keywords: 'git checkout clone home folder github' },
 ];
 
 const usedText = (percent: number) => `${percent.toLocaleString(undefined, { maximumFractionDigits: 1 })}% used`;
@@ -127,6 +138,7 @@ function SubscriptionCard({ profile, now, refreshing, error, onRefresh, footer }
 }
 export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openSignIn, copySignInCode, chooseRepositoryFolder, tab: shownTab, onTab, onShowProcesses, onRunInShell }: { /** The desktop app: version and updates (Settings → About & updates). */ app?: AppHost; onOpenExtensionPanel?(choice?: import('./PanelRegistry').ExtensionPanelChoice): void; zoom?: ZoomHost; onShowProcesses?(): void; /** Types a command into a workspace's shell panel and shows it (Install Claude Code). */ onRunInShell?(command: string): Promise<void>; chooseRepositoryFolder?(): Promise<string | null>; viewState?: ViewStateStore; openSignIn?(url: string): Promise<void>; copySignInCode?(code: string): Promise<void>; tab?: SettingsTab; onTab?(tab: SettingsTab): void }) {
   const { api, info, refresh } = useRunner();
+  const [query, setQuery] = useState('');
   const [ownTab, setOwnTab] = useState<SettingsTab>('subscriptions');
   const tab = shownTab || ownTab, setTab = (next: SettingsTab) => { setOwnTab(next); onTab?.(next); };
   const storageKey = `${viewState?.scope || viewState?.key}:subscription-enrollment`;
@@ -345,6 +357,20 @@ export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openS
     return () => timers.forEach(clearTimeout);
   });
   const select = (next: SettingsTab, focus = false) => { setTab(next); if (focus) requestAnimationFrame(() => document.getElementById(`${next}-tab`)?.focus()); };
+  const words = query.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+  const terms = words.filter(word => !['the', 'a', 'in', 'to', 'of', 'how', 'do', 'i', 'show', 'can', 'make'].includes(word));
+  const results = terms.length ? [...settingsTopics, ...settingsTabs.map(section => ({ ...section, keywords: section.group, anchor: undefined }))]
+    .filter(result => terms.every(term => `${result.label} ${result.keywords}`.toLowerCase().includes(term)))
+    .filter((result, index, all) => all.findIndex(item => item.id === result.id && item.label === result.label) === index) : [];
+  const openResult = (result: typeof results[number]) => {
+    setQuery('');
+    select(result.id, !result.anchor);
+    if (result.anchor) requestAnimationFrame(() => {
+      const heading = document.getElementById(result.anchor!);
+      heading?.scrollIntoView({ block: 'start' });
+      heading?.focus({ preventScroll: true });
+    });
+  };
   const onTabKey = (event: KeyboardEvent) => {
     const index = settingsTabs.findIndex(t => t.id === tab), last = settingsTabs.length - 1;
     const next = ({ ArrowDown: index + 1, ArrowRight: index + 1, ArrowUp: index - 1, ArrowLeft: index - 1, Home: 0, End: last } as Record<string, number>)[event.key];
@@ -358,7 +384,18 @@ export function SettingsPage({ onOpenExtensionPanel, app, zoom, viewState, openS
    <div className="settings-layout">
     <aside className="settings-sidebar">
       <h1 id="settings-title">Settings</h1>
-      <nav className="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical" onKeyDown={onTabKey}>
+      <form className="settings-search" role="search" onSubmit={event => { event.preventDefault(); if (results[0]) openResult(results[0]); }}>
+        <input type="search" aria-label="Search settings" placeholder="Search settings…" value={query} onChange={event => setQuery(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Escape' && query) { event.stopPropagation(); setQuery(''); } }}/>
+        {query.trim() && <div className="settings-search-results">
+          <ul aria-label="Settings search results">
+            {results.map(result => <li key={`${result.id}:${result.label}`}><button type="button" onClick={() => openResult(result)}>{result.label}<small>{settingsTabs.find(section => section.id === result.id)?.label}</small></button></li>)}
+          </ul>
+          {!results.length && <p role="status">No matching settings.</p>}
+          <button type="button" className="settings-ask" onClick={() => runAction('help.ask')}><Icon name="ask" size={15}/> Ask Lazybox</button>
+        </div>}
+      </form>
+      <nav hidden={!!query.trim()} className="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical" onKeyDown={onTabKey}>
         {settingsTabs.map((t, i) => <Fragment key={t.id}>
           {t.group !== settingsTabs[i - 1]?.group && <span className="settings-nav-group" aria-hidden="true">{t.group}</span>}
           <button type="button" id={`${t.id}-tab`} role="tab" aria-selected={tab === t.id} aria-controls={`${t.id}-panel`} tabIndex={tab === t.id ? 0 : -1} onClick={() => select(t.id)}><Icon name={t.icon} size={15}/><span>{t.label}</span></button>

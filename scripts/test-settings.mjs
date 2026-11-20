@@ -38,6 +38,18 @@ try {
  await page.getByRole('button',{name:'Settings',exact:true}).click();
  await expect(page.getByRole('tab',{name:'Subscriptions',exact:true})).toHaveAttribute('aria-selected','true');
  await expect(page.getByRole('heading',{name:'Settings',exact:true})).toBeVisible();
+ const settingsSearch=page.getByRole('searchbox',{name:'Search settings'});
+ await settingsSearch.fill('less verbose');
+ await expect(page.getByRole('button',{name:'Activity detail Chat',exact:true})).toBeVisible();
+ await settingsSearch.press('Enter');
+ await expect(page.getByRole('tab',{name:'Chat',exact:true})).toHaveAttribute('aria-selected','true');
+ await expect(page.getByRole('heading',{name:'Activity detail',exact:true})).toBeFocused();
+ await settingsSearch.fill('no setting matches these words');
+ await expect(page.getByText('No matching settings.',{exact:true})).toBeVisible();
+ await expect(page.getByRole('button',{name:'Ask Lazybox',exact:true})).toBeVisible();
+ await settingsSearch.press('Escape');
+ await page.getByRole('tab',{name:'Subscriptions',exact:true}).click();
+
  const codex=page.getByRole('article',{name:'Saved Codex subscription',exact:true});
  await expect(codex.locator('.subscription-email')).toHaveText('codex-fixture@example.invalid');
  await expect(codex).toContainText('45% used');await expect(codex).toContainText('60% used');

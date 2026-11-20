@@ -17,7 +17,7 @@ export function SettingsHeader({ id, title, description, actions }: { id?: strin
 /** A titled group of rows on one surface. */
 export function SettingsGroup({ id, title, description, children, className = "" }: { id?: string; title?: string; description?: ReactNode; children: ReactNode; className?: string }) {
   return <section className={`settings-group ${className}`.trim()}>
-    {(title || description) && <div className="settings-group-heading">{title && <h3 id={id}>{title}</h3>}{description && <p>{description}</p>}</div>}
+    {(title || description) && <div className="settings-group-heading">{title && <h3 id={id} tabIndex={id ? -1 : undefined}>{title}</h3>}{description && <p>{description}</p>}</div>}
     <div className="settings-group-body">{children}</div>
   </section>;
 }

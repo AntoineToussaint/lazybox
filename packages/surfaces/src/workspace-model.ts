@@ -594,10 +594,13 @@ export function previewTab(page: WorkspacePage, panelID: string): WorkspacePage 
  */
 export function closeTab(page: WorkspacePage, panelID: string): WorkspacePage {
   const group = groupOf(page, panelID), panel = group?.panels.find(value => value.id === panelID), next = removeFromPage(page, panelID);
-  if (!group || !panel || !isChatTab(panel) || group.active !== panelID || group.panels.length < 2) return next;
-  const index = group.panels.indexOf(panel), neighbour = group.panels[index + 1] || group.panels[index - 1];
-  const fronted = mapPageGroups(next, value => value.id === group.id ? { ...value, active: neighbour.id } : value);
-  return isChatTab(neighbour) && sameConversation(resolveTarget(panel, page.selection), page.selection) ? withSelection(fronted, resolveTarget(neighbour, page.selection)) : fronted;
+  if (!group || !panel || panel.kind !== 'chat') return next;
+  const index = group.panels.indexOf(panel);
+  const neighbour = group.active === panelID ? group.panels[index + 1] || group.panels[index - 1] : undefined;
+  const fronted = neighbour ? mapPageGroups(next, value => value.id === group.id ? { ...value, active: neighbour.id } : value) : next;
+  if (!sameConversation(resolveTarget(panel, page.selection), page.selection)) return fronted;
+  const other = neighbour && isChatTab(neighbour) ? neighbour : visibleChats(fronted).find(candidate => groupOf(fronted, candidate.id)?.active === candidate.id);
+  return withSelection(fronted, other ? resolveTarget(other, page.selection) : { ...page.selection, sessionId: '', commandId: '' });
 }
 /** What "Close other tabs" (or "Close tabs to the right") closes: tabs of the panel's group, never the sidebar's lists nor a card for a window. */
 export function tabsToClose(page: WorkspacePage, panelID: string, which: 'others' | 'right'): Panel[] {

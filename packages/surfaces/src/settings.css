@@ -253,3 +253,12 @@ p.settings-empty[role=status]{border-style:solid;border-color:transparent;text-a
 .sound-volume{display:flex;align-items:center;gap:10px;color:var(--s-muted)}
 .sound-volume input[type=range]{flex:1;min-width:0;accent-color:var(--accent-solid)}
 .sound-volume output{min-width:3.5ch;text-align:right;font-variant-numeric:tabular-nums;font-size:calc(12px * var(--text-scale));color:var(--s-text)}
+
+.settings-search{margin:0 0 12px}
+.settings-search input[type=search]{width:100%;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--s-text);font:inherit}
+.settings-tabs[hidden]{display:none}
+.settings-search-results ul{list-style:none;margin:6px 0;padding:0;max-height:35vh;overflow:auto}
+.settings-search-results button{width:100%;display:flex;justify-content:space-between;gap:6px;text-align:left;padding:7px 9px;border:0;border-radius:6px;background:transparent;color:var(--s-text);cursor:pointer}
+.settings-search-results button:hover,.settings-search-results button:focus-visible{background:var(--surface-hover)}
+.settings-search-results small,.settings-search-results p{color:var(--s-faint)}
+.settings-search-results .settings-ask{justify-content:flex-start;align-items:center}

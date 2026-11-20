@@ -22,7 +22,7 @@ f.openEvents('codex-session').push({type:'command_catalog',providerDataJson:data
 const manyModels=['gpt-6.1-sol','gpt-6-astra','gpt-6-luna','gpt-5.5','gpt-5.5-mini','gpt-5.4','gpt-5.4-mini','gpt-5.3','gpt-5.2','gpt-5.1','gpt-5','gpt-5-mini'].map(value=>({value,displayName:value.toUpperCase(),description:''}));
 f.sessions.push({...structuredClone(f.sessions[1]),id:'codex-default-session',conversationId:'codex-default-conversation',title:'Work refactor',provider:'codex',profileId:'codex-default',model:'',modelReported:false,permission:'yolo',busy:false,status:'ready',capabilities:{...f.sessions[1].capabilities,liveModel:true,livePermission:true,resume:true,steer:true}});
 f.openEvents('codex-default-session').push({type:'command_catalog',providerDataJson:data({models:manyModels})});
-const server=await createServer({...testViteCache(import.meta.url),configFile:false,logLevel:'error',root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:f.url}}}});let browser;
+const server=await createServer({...testViteCache(import.meta.url),configFile:false,logLevel:'error',root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:f.url}}}});let browser;let releasePermissionRestart=()=>{};
 const mod='Meta';
 const applies=()=>f.mutations.filter(m=>m.method==='Apply');
 try{
@@ -225,9 +225,19 @@ try{
  await page.keyboard.press('Escape');
  await expect(permissionCard).toHaveCount(0);await expect(betaMessage).toBeFocused();
  assert.equal(f.mutations.filter(m=>m.method==='RestartWithPermission').length,0,'Esc restarts nothing');
+ // Hold the restart response: the old composer must not take input that a
+ // replacement session would discard, nor may Restart submit twice.
+ let permissionRequested;
+ const requested=new Promise(resolve=>{permissionRequested=resolve;});
+ const permissionResponse=new Promise(resolve=>{releasePermissionRestart=resolve;});
+ await page.route('**/RestartWithPermission',async route=>{permissionRequested();await permissionResponse;await route.continue();});
  await page.keyboard.type('/permissions yolo');await page.keyboard.press('Enter');
  await expect(permissionCard.getByRole('button',{name:'Restart',exact:true})).toBeFocused();
  await page.keyboard.press('Enter');
+ await requested;
+ await expect(betaMessage).toBeDisabled();
+ await expect(permissionCard).toContainText('Restarting');
+ releasePermissionRestart();
  await expect.poll(()=>f.mutations.findLast(m=>m.method==='RestartWithPermission')?.body).toEqual({sessionId:'beta-session',mode:'yolo'});
  await expect(permissionCard).toHaveCount(0);await expect(betaMessage).toBeFocused();
  await page.keyboard.type('/model ');
@@ -344,4 +354,4 @@ try{
 
  assert.deepEqual(errors,[]);
  console.log('PASS: / opens the grouped command menu (Lazybox · Claude · Snippets) with icons, names, hints and descriptions; it filters and ranks as you type, Esc closes it; /permissions and /model run for real (for Claude and Codex: the provider\'s models, the Runner\'s list where the agent lists none, the current one marked and a no-op, a live switch, one clear restart card where needed) and leave one line in the conversation; a restart card (model or permissions) takes the keyboard, Enter restarts, Esc cancels, and the message box has the keyboard back, with no click; the agent\'s commands complete for arguments and go as the prompt; a snippet is inserted; an unknown /word asks first; a path is a message; /detail and /help act; ⌘K lists the commands and gives a borrowed draft back, a command run from it keeps the draft (and its saved copy), and its Open the review tray opens the tray without starting a review; the ⋯ menu offers the models; the header\'s model name and the message box\'s model label open the /model choices, by click or Tab and Enter; Vim insert mode works. Fixture only.');
-}finally{await browser?.close();await server.close();await f.close?.();}
+}finally{releasePermissionRestart();await browser?.close();await server.close();await f.close?.();}

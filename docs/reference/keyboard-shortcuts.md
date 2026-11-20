@@ -40,6 +40,7 @@ Work from anywhere in the window, including while a dialog is open for the palet
 | Open settings | `⌘,` | `Ctrl+,` |
 | Switch between light and dark | — | — |
 | Open the inbox | `]] i` | `]] i` |
+| Training Wheels | — | — |
 | Ask Lazybox | `]] h` | `]] h` |
 | Welcome and getting started | — | — |
 | What's new | — | — |

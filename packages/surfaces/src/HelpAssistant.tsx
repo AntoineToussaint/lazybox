@@ -35,8 +35,10 @@ const set = (store: ViewStateStore | undefined, key: string, value: string) => {
  * The assistant answers from the documentation and proposes settings changes
  * the person approves (SettingsProposal.tsx); it never runs commands.
  */
-export function HelpAssistant({ workspaceId, workspaceName, viewState, sessionKey, focusToken, onPurpose }: {
+export function HelpAssistant({ question, setQuestion, workspaceId, workspaceName, viewState, sessionKey, focusToken, onPurpose }: {
   /** The workspace the panel is in: its usage is attributed there, and its name told to the assistant. */
+  question?: string;
+  setQuestion(value?: string): void;
   workspaceId: string;
   workspaceName?: string;
   viewState?: ViewStateStore;
@@ -78,7 +80,7 @@ export function HelpAssistant({ workspaceId, workspaceName, viewState, sessionKe
   };
   const saveDraft = (text: string) => { setDraft(text); try { writeDraft(viewState, 'help-start', { text, files: [], operationId: '' }); } catch { /* kept while open */ } };
 
-  const ask = async (text: string) => {
+  const ask = async (text: string, coaching = false) => {
     const question = text.trim();
     if (!question || starting || pick.kind !== 'ready') return;
     setStarting(true); setError('');
@@ -93,7 +95,7 @@ export function HelpAssistant({ workspaceId, workspaceName, viewState, sessionKe
         try { writeDraft(viewState, id, { text: question, files: [], operationId: '' }); } catch { /* shown below */ }
         setError(`Your question is still in the message box; send it again. ${String(e)}`);
       }
-      saveDraft('');
+      if (coaching) setQuestion(undefined); else saveDraft('');
       adopt(id); refreshRunner();
       focus();
     } catch (e) {
@@ -132,6 +134,11 @@ export function HelpAssistant({ workspaceId, workspaceName, viewState, sessionKe
 
   return <section ref={root} className="help-assistant">
     {header}
+    {question !== undefined && <form className="training-wheels" onSubmit={event => { event.preventDefault(); void ask(question, true); }}>
+      <label>Question from Training Wheels<textarea value={question} disabled={starting} onChange={event => setQuestion(event.target.value)}/></label>
+      <button disabled={starting || pick.kind !== 'ready' || !question.trim()}>Ask in a new conversation</button>
+      <button type="button" onClick={() => setQuestion(undefined)}>Dismiss</button>
+    </form>}
     {error && <div className="error help-assistant-error" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
     {sessionId
       ? <ChatPanel key={sessionId} collectionId={workspaceId} purpose="help" embedded showCommands={false} initialSessionId={sessionId} viewState={viewState}

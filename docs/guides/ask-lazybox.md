@@ -62,3 +62,9 @@ fixes it:
 
 The panel's **Switch** menu also starts a planning or summary conversation
 instead; both are advice only, like the help assistant.
+
+## Training Wheels
+
+Open **Help → Training Wheels** and select **Enable coaching**. After you use the panel controls to maximize or restore the layout three times, the panel can show your configured shortcut. Using the shortcut silences that tip for the window session. **Dismiss tip** remembers your choice. Turning coaching off clears the counts.
+
+The tip and shortcut guide work offline. **Ask Lazybox** opens an editable follow-up question. Send it to start a new help conversation. Your existing draft stays available.

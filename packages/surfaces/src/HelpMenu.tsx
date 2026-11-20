@@ -14,6 +14,7 @@ export function HelpItems({ settings = true }: { settings?: boolean }) {
   return <>
     {/* The help assistant panel, its message box focused (HelpAssistant.tsx). */}
     <button onClick={() => runAction('help.ask', undefined, 'menu')}><Icon name="ask" size={14}/><span>Ask Lazybox…</span></button>
+    <button onClick={() => runAction('help.training', undefined, 'menu')}><Icon name="keyboard" size={14}/><span>Training Wheels</span></button>
     <button onClick={() => openOnboarding('welcome')}><Icon name="sparkle" size={14}/><span>Welcome &amp; getting started</span></button>
     <button onClick={() => openOnboarding('whats-new')}><Icon name="notes" size={14}/><span>What's new</span></button>
     {settings && <button onClick={() => openOnboarding('shortcuts')}><Icon name="keyboard" size={14}/><span>Keyboard shortcuts</span></button>}

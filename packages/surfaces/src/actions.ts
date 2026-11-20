@@ -195,6 +195,7 @@ const tail = [
   // While it is idle, a send. Also while dictating: the last words settle first.
   { id: 'chat.send-now', title: 'Send now', group: 'Message box', icon: 'send', keys: 'Mod+Enter', scope: 'agent', keywords: 'interrupt stop queue queued immediately urgent skip the queue' },
   // The help assistant (HelpAssistant.tsx): opens the Ask Lazybox panel and its message box.
+  { id: 'help.training', title: 'Training Wheels', group: 'General', icon: 'keyboard', keys: '', scope: 'global', keywords: 'coaching tips shortcuts' },
   { id: 'help.ask', title: 'Ask Lazybox', group: 'General', icon: 'chat', keys: '] ] h', scope: 'global', keywords: 'help assistant question how docs agent claude codex support', menu: { section: 'Help', title: 'Ask Lazybox…', separatorBefore: true } },
   { id: 'help.welcome', title: 'Welcome and getting started', group: 'General', icon: 'sparkle', keys: '', scope: 'global', overDialogs: true, keywords: 'onboarding first run start tour help', menu: { section: 'Help', title: 'Welcome to Lazybox' } },
   { id: 'help.whats-new', title: "What's new", group: 'General', icon: 'notes', keys: '', scope: 'global', overDialogs: true, keywords: 'release notes changelog update version help', menu: { section: 'Help', title: "What's New" } },
@@ -288,7 +289,8 @@ export function chordFromEvent(event: Pick<KeyboardEvent, 'key' | 'code' | 'ctrl
 
 // ---- Handlers ------------------------------------------------------------
 
-type Handler = { run(argument?: unknown): void; enabled?(): boolean };
+export type ActionSource = 'keys' | 'menu' | 'palette' | 'other';
+type Handler = { run(argument?: unknown, source?: ActionSource): void; enabled?(): boolean };
 const handlers = new Map<string, Set<{ current: Handler }>>();
 let revision = 0;
 const listeners = new Set<() => void>();
@@ -317,7 +319,7 @@ export function useActions(record: Partial<Record<ActionId, Handler | Handler['r
   }, [ids]);
 }
 /** One handler for one action while mounted. */
-export function useAction(id: ActionId, run: (argument?: unknown) => void, enabled?: () => boolean) {
+export function useAction(id: ActionId, run: Handler['run'], enabled?: () => boolean) {
   useActions({ [id]: { run, enabled } } as Partial<Record<ActionId, Handler>>);
 }
 function enabledHandlers(id: string) {
@@ -333,10 +335,10 @@ let lastKeyRun = { id: '', at: 0 };
  * Run an action: every enabled handler in this window, plus listeners of the
  * `lazybox-action` event (the sidebar's j/k navigation). True when a handler ran.
  */
-export function runAction(id: string, argument?: unknown, source: 'keys' | 'menu' | 'palette' | 'other' = 'other'): boolean {
+export function runAction(id: string, argument?: unknown, source: ActionSource = 'other'): boolean {
   if (source === 'keys') lastKeyRun = { id, at: Date.now() };
   const ready = enabledHandlers(id);
-  for (const ref of ready) ref.current.run(argument);
+  for (const ref of ready) ref.current.run(argument, source);
   window.dispatchEvent(new CustomEvent('lazybox-action', { detail: id }));
   return ready.length > 0;
 }

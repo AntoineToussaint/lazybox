@@ -24,6 +24,7 @@ test('only protocol-1 requests with an id are answered; the rest is ignored', ()
   assert.equal(parseBridgeRequest(req('__proto__'))?.reply?.error?.code, 'unknown-method');
   assert.equal(parseBridgeRequest({ lazybox: 1, id: 'a', method: 'hello', params: [1] })?.reply?.error?.code, 'bad-request');
   assert.equal(parseBridgeRequest(req('messages.send', { text: 'x'.repeat(70_000) }))?.reply?.error?.code, 'too-large');
+  assert.equal(parseBridgeRequest(req('messages.send', { text: '界'.repeat(24000) }))?.reply?.error?.code, 'too-large');
   const cyclic: Record<string, unknown> = { lazybox: 1, id: 'a', method: 'hello' }; cyclic.params = { self: cyclic };
   assert.equal(parseBridgeRequest(cyclic)?.reply?.error?.code, 'too-large');
   assert.deepEqual(parseBridgeRequest(req('sessions.list', { limit: 3 }))?.request, { id: 'r1', method: 'sessions.list', params: { limit: 3 } });

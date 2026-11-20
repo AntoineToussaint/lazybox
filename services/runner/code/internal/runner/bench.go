@@ -628,12 +628,16 @@ func (b *Bench) OpenAssistant(profile, purpose, contextText string, options acco
 }
 
 func (b *Bench) open(profile, cwd, resume string, options accounts.Options, gatewayID, workID, previous, collectionID, purpose, suppliedContext string, emptyWorkspace bool, fork ...conversationFork) (*Execution, error) {
-	if err := b.ReloadProfiles(); err != nil {
-		return nil, err
-	}
 	id := commands.ID()
 	if len(fork) > 0 {
 		id = fork[0].id
+	}
+	return b.openWithID(id, profile, cwd, resume, options, gatewayID, workID, previous, collectionID, purpose, suppliedContext, emptyWorkspace, fork...)
+}
+
+func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Options, gatewayID, workID, previous, collectionID, purpose, suppliedContext string, emptyWorkspace bool, fork ...conversationFork) (*Execution, error) {
+	if err := b.ReloadProfiles(); err != nil {
+		return nil, err
 	}
 	b.mu.Lock()
 	activeCount := 0

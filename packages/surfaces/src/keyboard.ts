@@ -1,7 +1,7 @@
 import { readPreference, writePreference } from "./view-state";
 import { useEffect, useRef, useState } from "react";
 import type { ViewStateStore } from "@lazybox/platform";
-import { actionDefinition, actionDefinitions, bindings, canonicalBinding, canonicalKey, defaultKeys, isChord, isLoneModifier, isMac, joinBindings, resolveMod, runAction, useAction, type ActionId } from "./actions";
+import { actionDefinition, actionDefinitions, bindings, canonicalBinding, canonicalKey, defaultKeys, isChord, isLoneModifier, isMac, joinBindings, resolveMod, runAction, useAction, type ActionId, type ActionSource } from "./actions";
 import { writeConfig, type ConfigWriteResult } from "./config-writer";
 /** Every keyboard action, from the action registry (actions.ts). */
 export const keyboardActions = actionDefinitions.map((definition) => ({ id: definition.id as Action, label: definition.title as string, scope: definition.scope as string, keys: definition.keys as string, group: definition.group as string }));
@@ -315,7 +315,7 @@ export function invokeAction(id: Action) {
   runAction(id);
 }
 /** Registers what an action does while the component is mounted; see useAction in actions.ts. */
-export function useKeyboardAction(id: Action, callback: () => void, enabled?: () => boolean) {
+export function useKeyboardAction(id: Action, callback: (argument?: unknown, source?: ActionSource) => void, enabled?: () => boolean) {
   useAction(id, callback, enabled);
 }
 function eventKey(e: KeyboardEvent) {

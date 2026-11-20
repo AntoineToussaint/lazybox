@@ -6,7 +6,7 @@
 
 The first increment provides file-backed collection definitions through `workspace export-definition` and `workspace realize`. A plan can request `workspace: pinned` and name an exact structured spec artifact revision. The approval sheet displays the captured member commits and acceptance criteria. Child execution starts on those commits and receives the approved criteria. The grant and parent permission ceilings still apply. [Collection commands](COLLECTIONS.md#reusing-a-collection-definition) · [Mission planning](docs/guides/missions.md#starting-workers-from-a-fixed-base)
 
-The definition library UI, Git ref retention for long-lived baselines, crash reconciliation before attempt recording, criterion-level review verdicts and candidate promotion remain pending. Workspace startup and productivity measurements require the pilot.
+Phase two reserves pinned workers before allocation, replays unfinished dispatch after session adoption, and binds a changes review to the approved contract digest and captured member heads. Human acceptance remains the final task gate. The definition library UI, Git ref retention for long-lived baselines, individual criterion verdicts and candidate promotion remain pending. Workspace startup and productivity measurements require the pilot.
 
 ## Product contract
 

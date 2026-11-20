@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { coachState, dismissMaximizeTip, enableCoach, recordMaximize } from '../packages/surfaces/src/training-wheels';
+
+test('coaching counts enabled use, forgets on disable, and respects learned and dismissed shortcuts', () => {
+  enableCoach(false);
+  const toggle = () => recordMaximize('pointer');
+  toggle();
+  enableCoach(true);
+  toggle();
+  toggle();
+  assert.equal(coachState(), 'waiting');
+  enableCoach(false);
+  assert.equal(coachState(), 'off');
+  enableCoach(true);
+  toggle();
+  assert.equal(coachState(), 'waiting');
+  toggle();
+  toggle();
+  assert.equal(coachState(), 'tip');
+  recordMaximize('keys');
+  toggle();
+  assert.equal(coachState(), 'waiting');
+  enableCoach(false);
+  enableCoach(true);
+  toggle();
+  toggle();
+  toggle();
+  dismissMaximizeTip();
+  toggle();
+  assert.equal(coachState(), 'waiting');
+});

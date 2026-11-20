@@ -19,9 +19,7 @@ start() {
 }
 
 operator() {
-    docker exec "$runner" sh -c '
-        exec lazybox --endpoint "$XDG_DATA_HOME/lazybox/state/endpoint.json" "$@"
-    ' operator "$@"
+    docker exec "$runner" lazybox "$@"
 }
 
 wait_for_runner() {

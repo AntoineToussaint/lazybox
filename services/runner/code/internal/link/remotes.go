@@ -18,8 +18,9 @@ import (
 // reach it and the Runner key it pinned. `<config>/remotes/<name>/remote.json`,
 // 0600. It holds no secret; the keys are the KeyProvider's.
 type Remote struct {
-	Name  string `json:"name"`
-	Route string `json:"route"`
+	Kubernetes *KubernetesTarget `json:"kubernetes,omitempty"`
+	Name       string            `json:"name"`
+	Route      string            `json:"route"`
 	// Host is the ssh destination; Command the lazybox on the host; Runner
 	// the host's registered Runner the link serves.
 	Host    string `json:"host"`
@@ -49,6 +50,19 @@ func (r Remote) PinnedKey() ([]byte, error) {
 // SSH is the route to it.
 func (r Remote) SSH(controlDir string) SSHRoute {
 	return SSHRoute{Host: r.Host, Remote: r.Command, Runner: r.Runner, ControlDir: controlDir}
+}
+
+// OwnerRoute is the saved transport used for enrollment and reconnect.
+func (r Remote) OwnerRoute(controlDir string) (OwnerRoute, error) {
+	switch r.Route {
+	case "", "ssh":
+		return r.SSH(controlDir), nil
+	case "kubernetes":
+		if r.Kubernetes != nil {
+			return KubernetesRoute{Target: *r.Kubernetes}, r.Kubernetes.Validate()
+		}
+	}
+	return nil, fmt.Errorf("%s has an invalid remote route %q", r.Name, r.Route)
 }
 
 // LinkStatus is what `lazybox link connect` writes beside the endpoint, for

@@ -334,18 +334,15 @@ type Enrolment struct {
 	Release     string `json:"release"`
 }
 
-// Enrol adds this client's public keys to the host Runner's owners over SSH
+// Enrol adds this client's public keys to the host Runner's owners over the selected route
 // and returns the Runner key to pin.
-func Enrol(ctx context.Context, r SSHRoute, keys ClientKeys, name string) (Enrolment, error) {
+func Enrol(ctx context.Context, r OwnerRoute, keys ClientKeys, name string) (Enrolment, error) {
 	identity, err := keys.IdentityPublic()
 	if err != nil {
 		return Enrolment{}, err
 	}
-	words := []string{r.Remote}
-	if r.Runner != "" {
-		words = append(words, "--runner", r.Runner)
-	}
-	words = append(words, "link", "owners", "add", "--name", name, "--channel-key", Encode(keys.ChannelPublic()), "--identity-key", Encode(identity), "--via", "ssh", "--json")
+	words := r.ownerCommand()
+	words = append(words, "link", "owners", "add", "--name", name, "--channel-key", Encode(keys.ChannelPublic()), "--identity-key", Encode(identity), "--via", r.Kind(), "--json")
 	out, err := r.Run(ctx, nil, words...)
 	if err != nil {
 		return Enrolment{}, fmt.Errorf("adding this computer as an owner: %w", err)
@@ -367,12 +364,9 @@ func Enrol(ctx context.Context, r SSHRoute, keys ClientKeys, name string) (Enrol
 	return e, nil
 }
 
-// Revoke removes this client's key from the host's owners over SSH.
-func RevokeOverSSH(ctx context.Context, r SSHRoute, keyID string) error {
-	words := []string{r.Remote}
-	if r.Runner != "" {
-		words = append(words, "--runner", r.Runner)
-	}
+// Revoke removes this client's key from the host's owners over the selected route.
+func Revoke(ctx context.Context, r OwnerRoute, keyID string) error {
+	words := r.ownerCommand()
 	words = append(words, "link", "owners", "revoke", keyID, "--json")
 	_, err := r.Run(ctx, nil, words...)
 	return err

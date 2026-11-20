@@ -258,6 +258,7 @@ function selectionAt(point: { x: number; y: number } | null): { text: string; ra
 }
 
 const keyboardEvents = new WeakSet<Event>();
+const movedPointerEvents = new WeakSet<Event>();
 let selectionAtPress: string | null = null;
 
 /** The whole menu for a contextmenu event that reached the window: its items now, its label, and items still on their way. */
@@ -414,7 +415,15 @@ function installListeners() {
     if (event.button !== 0 || event.detail === 0) return; // a keyboard click is its own gesture
     event.preventDefault(); event.stopImmediatePropagation();
   };
+  let pointerPosition: { x: number; y: number } | undefined;
+  const pointerMove = (event: PointerEvent) => {
+    // Some WebKit builds report movementX/Y as zero even for real movement.
+    if (!pointerPosition || pointerPosition.x !== event.clientX || pointerPosition.y !== event.clientY) movedPointerEvents.add(event);
+    pointerPosition = { x: event.clientX, y: event.clientY };
+    press.move(event);
+  };
   const pointerDown = (event: PointerEvent) => {
+    pointerPosition = { x: event.clientX, y: event.clientY };
     menuPress = false;
     if (event.button === 2 && event.pointerType === 'mouse') selectionAtPress = document.getSelection()?.toString() || '';
     // Outside a menu, a press closes it and goes on to what it hit, but closes
@@ -432,7 +441,7 @@ function installListeners() {
   window.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('pointerdown', pointerDown, true);
-  window.addEventListener('pointermove', press.move, true);
+  window.addEventListener('pointermove', pointerMove, true);
   window.addEventListener('pointerup', press.cancel, true);
   window.addEventListener('pointercancel', press.cancel, true);
   window.addEventListener('click', press.click, true);
@@ -448,7 +457,7 @@ function installListeners() {
     window.removeEventListener('contextmenu', onContextMenu);
     window.removeEventListener('keydown', onKeyDown, true);
     window.removeEventListener('pointerdown', pointerDown, true);
-    window.removeEventListener('pointermove', press.move, true);
+    window.removeEventListener('pointermove', pointerMove, true);
     window.removeEventListener('pointerup', press.cancel, true);
     window.removeEventListener('pointercancel', press.cancel, true);
     window.removeEventListener('click', press.click, true);
@@ -577,7 +586,7 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
           onPointerMove={event => {
             // Layout can put an item under a stationary pointer and emit a
             // zero-motion event. It must not replace keyboard focus.
-            if (!event.movementX && !event.movementY) return;
+            if (!movedPointerEvents.has(event.nativeEvent)) return;
             if (active !== index) setActive(action.disabled ? -1 : index);
             clearTimeout(hover.current);
             if (entry.submenu && open?.index !== index) hover.current = setTimeout(() => openSubmenu(index, false), 120);

@@ -37,6 +37,9 @@ try{
  // The clipboard is observed, not used; every contextmenu records whether its default was prevented once all listeners ran.
  await context.addInitScript(()=>{
   window.__copied=[];
+  const rememberPointer=event=>{window.__pointerPosition={clientX:event.clientX,clientY:event.clientY};};
+  window.addEventListener('pointermove',rememberPointer,true);
+  window.addEventListener('pointerdown',rememberPointer,true);
   Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__copied.push(text);},readText:async()=>'pasted from clipboard',write:async items=>{for(const item of items)for(const type of item.types)await item.getType(type).catch(()=>{});},read:async()=>[]}});
   // Links never leave: what would open in the browser is recorded.
   window.__opened=[];window.open=url=>{window.__opened.push(String(url));return null;};
@@ -160,7 +163,7 @@ try{
  await fileLink.focus();await page.keyboard.press('Shift+F10');
  await expect(menu).toBeVisible();
  await expect(item('Open')).toBeFocused();
- await item('Open to the side').dispatchEvent('pointermove',{pointerType:'mouse',movementX:0,movementY:0});
+ await item('Open to the side').dispatchEvent('pointermove',{pointerType:'mouse',...await page.evaluate(()=>window.__pointerPosition),movementX:0,movementY:0});
  await expect(item('Open')).toBeFocused();
  releaseFile();
  await expect(editorPanel.locator('.monaco-editor')).toBeVisible();

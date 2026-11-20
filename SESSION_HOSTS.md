@@ -591,3 +591,12 @@ behaviour quickly or reliably:
   exhaustion);
 - a command is refused before its host is launched when the registry is full,
   and `Cancel` no longer holds the command's lock across a host write.
+
+
+New hosts advertise a per-attachment control capability. Request resolution uses
+an authenticated, acknowledged control connection: it completes before detach
+can hand ownership to the next Runner, and a full agent-output buffer cannot
+block the acknowledgement. A superseded attachment cannot resolve requests.
+Older hosts without the capability keep their existing asynchronous resolve
+protocol; this guarantee applies when the host was launched with the new binary.
+No live user host is restarted by this change.

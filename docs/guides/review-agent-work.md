@@ -287,3 +287,9 @@ Automatic reactions are not available: every send is yours.
 
 Codex can list workspace actions and read or wait for managed command output
 without a per-call approval. Starting or cancelling commands retains its approval.
+
+
+Repair delivery uses the repair operation's checkpoint start as its time boundary,
+including after a delivery retry. Provider acknowledgement can arrive later without
+making the repair look older than its findings. A repair that completes before
+delivery bookkeeping is saved is reconciled once the sent state is recorded.

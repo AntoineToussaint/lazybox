@@ -128,6 +128,7 @@ type host struct {
 }
 
 type conn struct {
+	owner   string
 	c       net.Conn
 	writeMu sync.Mutex
 	enc     *json.Encoder
@@ -287,17 +288,33 @@ func (h *host) abandon() {
 }
 
 func (h *host) handle(raw net.Conn) {
-	c := &conn{c: raw, enc: json.NewEncoder(raw), done: make(chan struct{})}
+	c := &conn{owner: rand.Text(), c: raw, enc: json.NewEncoder(raw), done: make(chan struct{})}
 	defer c.close()
 	// Nothing unauthenticated may make the host buffer more than a hello.
 	in := &capped{r: raw, n: helloLimit}
 	dec := json.NewDecoder(bufio.NewReaderSize(in, 64<<10))
 	_ = raw.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var hello frame
-	if err := dec.Decode(&hello); err != nil || (hello.Op != "hello" && hello.Op != "probe") || subtle.ConstantTimeCompare([]byte(hello.Token), []byte(h.cfg.Token)) != 1 {
+	if err := dec.Decode(&hello); err != nil || (hello.Op != "hello" && hello.Op != "probe" && hello.Op != "resolve") || subtle.ConstantTimeCompare([]byte(hello.Token), []byte(h.cfg.Token)) != 1 {
 		return
 	}
 	in.uncap()
+	if hello.Op == "resolve" {
+		// A separate control connection cannot be blocked behind agent output.
+		// Only the current attachment may invalidate one of its requests.
+		h.mu.Lock()
+		current := h.client != nil && hello.Owner != "" && subtle.ConstantTimeCompare([]byte(hello.Owner), []byte(h.client.owner)) == 1
+		if current {
+			h.resolveLocked(string(hello.Line))
+		}
+		h.mu.Unlock()
+		if !current {
+			_ = c.send(frame{Op: "error", Text: ErrSuperseded.Error()})
+		} else {
+			_ = c.send(frame{Op: "resolved"})
+		}
+		return
+	}
 	if hello.Op == "probe" {
 		// Inspection only: never supersedes the attached client.
 		h.mu.Lock()
@@ -338,7 +355,7 @@ func (h *host) handle(raw net.Conn) {
 	}
 	h.ackLocked(hello.Ack)
 	replay, cursor, sent := h.replayLocked(), h.acked, h.sent
-	welcome := frame{Op: "welcome", Protocol: Protocol, AgentPID: h.agent, Proxy: h.proxy, Spawned: h.spawned, Exited: h.exited}
+	welcome := frame{Op: "welcome", Owner: c.owner, Protocol: Protocol, AgentPID: h.agent, Proxy: h.proxy, Spawned: h.spawned, Exited: h.exited}
 	if h.terminal != nil {
 		// The snapshot ends exactly where live output begins: each byte is
 		// seen once, either here or in a later chunk.

@@ -217,8 +217,21 @@ func (b *Bench) sendFindings(workspace string, run reviews.Run, ids []string) er
 		}
 		message += "\n\nRecorded acceptance checks and execution receipts follow. Reproduce the failure, repair the behavior, and retain confirmed reproductions as regression tests in the repository's existing test suite. Explain the test path and invocation to the reviewer.\n\n" + string(recipes)
 	}
+	// The checkpoint starts during delivery, before the provider acknowledges it.
+	sentAt := time.Now().Unix()
 	if err = b.sendLazyboxMessage(b.ctx, source, operation, message, origin); err != nil {
 		return err
+	}
+	// A retried delivery can already have a checkpoint from before restart.
+	if b.Checkpoints != nil {
+		if record, err := b.Checkpoints.List(conversationOf(source)); err == nil {
+			for _, turn := range record.Turns {
+				if turn.OperationID == operation {
+					sentAt = turn.Before.At.Unix()
+					break
+				}
+			}
+		}
 	}
 	heads := map[string]string{}
 	for _, f := range findings {
@@ -231,9 +244,14 @@ func (b *Bench) sendFindings(workspace string, run reviews.Run, ids []string) er
 		return err
 	}
 	_, err = b.Reviews.Update(workspace, func(rv *reviews.Review) error {
-		reviews.FindingsSent(rv, run.ID, ids, "Lazybox", run.SourceLabel, time.Now().Unix())
+		reviews.FindingsSent(rv, run.ID, ids, "Lazybox", run.SourceLabel, sentAt)
 		return nil
 	})
+	if err == nil {
+		// A fast author can finish before the sent state is saved. Reconcile that
+		// exact operation; AuthorTurnEnded's phase guard makes this idempotent.
+		b.authorTurnEnded(source, operation, []reviews.Match{{Workspace: workspace, Run: run, Role: reviews.RoleAuthor}})
+	}
 	return err
 }
 

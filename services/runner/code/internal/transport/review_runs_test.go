@@ -523,6 +523,19 @@ func TestVerificationRepairsAndRerunsFrozenChecks(t *testing.T) {
 	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
 	applied(t, f.claude, "Missing acceptance output")
 	runUntil(t, f, func(r *pb.ReviewRun) bool { return r.Phase == "fixing" })
+	record, err := f.bench.Checkpoints.List(f.conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rv, err := f.bench.Reviews.Load(f.mine.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, turn := range record.Turns {
+		if turn.OperationID == "review-"+strings.TrimPrefix(started.Run.Id, "rv-")+"-findings-1" && rv.Runs[0].FixingSince > turn.Before.At.Unix() {
+			t.Fatalf("repair starts at %d before its findings boundary %d", turn.Before.At.Unix(), rv.Runs[0].FixingSince)
+		}
+	}
 	if err := os.WriteFile(filepath.Join(f.mine.Members[0].Path, "acceptance.txt"), []byte("correct"), 0600); err != nil {
 		t.Fatal(err)
 	}

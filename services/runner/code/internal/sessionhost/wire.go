@@ -174,6 +174,8 @@ type frame struct {
 	Size *Size  `json:"size,omitempty"`
 	// spawn
 	Spec *Spec `json:"spec,omitempty"`
+	// Owner is a per-attachment capability for acknowledged control requests.
+	Owner string `json:"owner,omitempty"`
 	// send / msg; resolve carries the request's raw JSON-RPC id as Line
 	Seq         uint64          `json:"seq,omitempty"`
 	Line        json.RawMessage `json:"line,omitempty"`

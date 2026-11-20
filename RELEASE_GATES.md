@@ -290,3 +290,10 @@ observer notification until wheel movement is measured, then checks anchoring
 during rendering. The chat-scroll gate gives native scrollbars explicit track and
 thumb geometry before dragging; platform-dependent arrow buttons and minimum
 thumb sizes must not turn a drag into a click on a scroll arrow.
+
+
+End in a streaming chat immediately resumes following the latest output; its
+regression checks this before native scrolling runs. Context-menu pointer
+ownership compares client coordinates because some WebKit builds report zero
+movementX/Y for real pointer motion. Subscription-switch uses the same runtime
+error collector as workspace reorder, including its refresh page.

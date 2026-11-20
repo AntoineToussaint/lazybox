@@ -77,6 +77,8 @@ async function run(name,engine){
   await wheel((await gap())+20000);await follows('Wheeling back to the bottom');
   // Keyboard.
   await pane.focus();await page.keyboard.press('PageUp');await holds('PageUp mid-stream');
+  const endGap=await pane.evaluate(node=>{node.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true,cancelable:true}));return node.scrollHeight-node.clientHeight-node.scrollTop;});
+  assert.ok(endGap<3,'End resumes following immediately, before native scrolling or another streamed delta');
   await page.keyboard.press('End');await follows('End');
   await page.keyboard.press('ArrowUp');await page.keyboard.press('ArrowUp');await page.keyboard.press('ArrowUp');await page.keyboard.press('ArrowUp');
   await expect(latest,'ArrowUp stops following').toBeVisible();await settle('ArrowUp');

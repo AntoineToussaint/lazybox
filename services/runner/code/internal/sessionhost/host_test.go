@@ -1029,3 +1029,47 @@ func TestCommandDeadlineSurvivesRunnerDetach(t *testing.T) {
 		t.Fatalf("deadline lost on detach: %+v", exit)
 	}
 }
+
+func TestResolveConfirmedBeforeReattachAndRejectsStaleOwner(t *testing.T) {
+	dir := root(t)
+	first, _ := started(t, dir)
+	if err := first.Send(json.RawMessage(`{"method":"ask","params":7}`)); err != nil {
+		t.Fatal(err)
+	}
+	request := next(t, first)
+	second, err := Attach(deadline(t), dir, first.ID(), request.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Resolve(json.RawMessage("7")); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("stale owner resolved request: %v", err)
+	}
+	pending := next(t, second)
+	if !pending.Redelivered || pending.Seq != request.Seq {
+		t.Fatalf("stale owner removed request: %+v", pending)
+	}
+	// Resolution must not wait behind a full agent-output channel.
+	for i := 0; i < cap(second.frames)+20; i++ {
+		if err := second.Send(json.RawMessage(`{"method":"echo","params":"buffered"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventually(t, "output buffer never filled", func() bool { return len(second.frames) == cap(second.frames) })
+	if err := second.Resolve(json.RawMessage("7")); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	third, err := Attach(deadline(t), dir, first.ID(), request.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer third.Detach()
+	if err := third.Send(json.RawMessage(`{"method":"echo","params":"after resolution"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if name, _ := method(t, next(t, third)); name != "echoed" {
+		t.Fatalf("resolved request replayed: %s", name)
+	}
+}

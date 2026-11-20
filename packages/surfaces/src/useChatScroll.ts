@@ -103,6 +103,11 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   // On the window, after the app's own handlers: a key one of them used is not a scroll.
   const key=(event:KeyboardEvent)=>{
    if(event.defaultPrevented||event.altKey||event.ctrlKey||event.metaKey||!pane.contains(event.target as Node)||editable(event.target))return;
+   // End is an explicit request to follow the latest output. Do not wait
+   // for native smooth scrolling: streaming can move its target meanwhile.
+   if(event.key==='End'&&!innerScroller(event.target,pane,false)){
+    event.preventDefault();intent.current=undefined;setFollowing(true);pin(pane);return;
+   }
    const up=UP_KEYS.has(event.key)||(event.key===' '&&event.shiftKey);
    if((up||DOWN_KEYS.has(event.key))&&!innerScroller(event.target,pane,up))intend(up?'up':'down',800,event.key==='End'?Infinity:event.key==='ArrowDown'?40:pane.clientHeight*.85);
   };

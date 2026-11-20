@@ -1,4 +1,5 @@
 import { artifactFormat } from './artifact-formats';
+import { documentSnapshot, exportDocumentHTML, type DocumentHeading } from './artifact-export';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Artifact, ArtifactVersion, Collection } from '@lazybox/protocol';
 import { ActionMenu } from './ActionMenu';
@@ -119,9 +120,8 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   useEffect(() => () => clearTimeout(statusTimer.current), []);
   const scroller = useRef<HTMLDivElement>(null);
   const [scrolled, setScrolled] = useState(false);
-  // Print asked for from the Changes view: the document is shown first, and printed once it is.
-  const [printPending, setPrintPending] = useState(false);
-  const printNow = useRef<() => void>(() => {});
+  const [pendingExport, setPendingExport] = useState<'print' | 'html'>();
+  const exportNow = useRef<(format: 'print' | 'html') => void>(() => {});
 
   // The latest version, again whenever the list says the artifact changed.
   const stamp = summary ? `${summary.updatedAtUnixMillis}:${summary.title}:${summary.kind}:${summary.trackedPath}:${summary.trackingProblem}:${retiredStamp(summary)}` : '';
@@ -232,13 +232,10 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   });
 
   useEffect(() => {
-    if (!printPending || view !== 'document' || reading === undefined) return;
-    setPrintPending(false);
-    // After the document's first paint, so the sheet copies what is on screen.
-    // Not cancelled by the effect's cleanup: clearing the flag re-runs this effect before the frame.
-    // Unmounted by then, the page has no document and nothing prints (printDocument).
-    requestAnimationFrame(() => printNow.current());
-  }, [printPending, view, reading]);
+    if (!pendingExport || view !== 'document' || reading === undefined) return;
+    setPendingExport(undefined);
+    requestAnimationFrame(() => exportNow.current(pendingExport));
+  }, [pendingExport, view, reading]);
 
   if (missing) return <div className="artifact-page is-empty"><p className="module-empty">This artifact was deleted.</p>{onBack && <button onClick={onBack}>Back to artifacts</button>}</div>;
   if (!artifact) return <div className="artifact-page is-empty">{error ? <p className="artifact-error" role="alert">{error}<button onClick={() => setPoll(value => value + 1)}>Retry</button></p> : <p className="module-empty" role="status">Opening artifact…</p>}</div>;
@@ -285,29 +282,42 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   const retiredBy = artifact.retired?.by?.kind === 'agent' ? 'an agent' : 'you';
   const copy = async (text: string, said: string) => { try { await navigator.clipboard.writeText(text); say(said); } catch (e) { setError(`Copy failed: ${errorText(e)}`); } };
   const exportContent = structured ? currentText : Preview ? content : latestContent;
-  const download = (source = false) => {
-    const payload = source ? content : exportContent;
-    if (payload === undefined) return;
-    const filename = `${slug(artifact.title)}.${source ? 'json' : extension}`;
-    const url = URL.createObjectURL(new Blob([payload], { type: `${source ? 'application/json' : mime};charset=utf-8` }));
+  const downloadFile = (payload: string, extension: string, mime: string) => {
+    const filename = `${slug(artifact.title)}.${extension}`;
+    const url = URL.createObjectURL(new Blob([payload], { type: `${mime};charset=utf-8` }));
     const link = document.createElement('a'); link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     say(`Downloaded ${filename}`);
   };
-  const shownAt = version?.createdAtUnixMillis || artifact.updatedAtUnixMillis;
-  const print = () => {
-    setError('');
-    if (view !== 'document') { setView('document'); setPrintPending(true); return; }
-    printNow.current();
+  const download = (source = false) => {
+    const payload = source ? content : exportContent;
+    if (payload !== undefined) downloadFile(payload, source ? 'json' : extension, source ? 'application/json' : mime);
   };
-  printNow.current = () => {
+  const shownAt = version?.createdAtUnixMillis || artifact.updatedAtUnixMillis;
+  const exportRendered = (format: 'print' | 'html') => {
+    setError('');
+    if (view !== 'document') { setView('document'); setPendingExport(format); return; }
+    exportNow.current(format);
+  };
+  exportNow.current = format => {
+    if (view !== 'document') return;
+    const node = documentRef.current;
+    if (!node) return;
     const sheet = { title: artifact.title, eyebrow: kindLabel[kind], meta: [`Version ${shown}${shown !== latestNumber ? ` of ${latestNumber}` : ''}`, new Date(Number(shownAt)).toLocaleDateString(undefined, { dateStyle: 'long' }), capital(versionOrigin(version)), collection?.name || ''].filter(Boolean) };
-    // A diagram still drawing would print as a placeholder: wait for it, briefly.
     const started = Date.now();
     const ready = () => {
-      const node = documentRef.current;
-      if (node && (node.querySelector('.diagram-pending, .module-empty') && Date.now() - started < 4000)) { say('Preparing the diagrams for print…'); setTimeout(ready, 120); return; }
-      void printDocument(sheet, node).catch(error => setError(`Could not open the print dialog: ${errorText(error)}`));
+      if (node !== documentRef.current) return;
+      if (node.querySelector('.diagram-pending') && Date.now() - started < 4000) {
+        say('Preparing diagrams…');
+        setTimeout(ready, 120);
+        return;
+      }
+      if (format === 'html') {
+        const dark = document.documentElement.dataset.scheme === 'dark';
+        downloadFile(exportDocumentHTML(sheet, node, dark), 'html', 'text/html');
+      } else {
+        void printDocument(sheet, node).catch(error => setError(`Could not open the print dialog: ${errorText(error)}`));
+      }
     };
     ready();
   };
@@ -359,7 +369,8 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
           <button type="button" disabled={exportContent === undefined} onClick={() => void copy(exportContent ?? '', `Copied ${formatLabel}.`)}><Icon name="copy"/><span>{Preview ? 'Copy HTML source' : 'Copy as Markdown'}</span></button>
           <button type="button" disabled={exportContent === undefined} onClick={() => download()}><Icon name="download"/><span>Download .{extension}</span></button>
           {structured && <button type="button" disabled={content === undefined} onClick={() => download(true)}><Icon name="download"/><span>Download .json</span></button>}
-          {!Preview && <><button type="button" disabled={reading === undefined} onClick={print}><Icon name="print"/><span>Print or save as PDF…</span></button>
+          {!Preview && <><button type="button" disabled={reading === undefined} onClick={() => exportRendered('html')}><Icon name="download"/><span>Download .html</span></button>
+          <button type="button" disabled={reading === undefined} onClick={() => exportRendered('print')}><Icon name="print"/><span>Print or save as PDF…</span></button>
           <button type="button" disabled={!collection?.members.length} onClick={() => setDialog('save')}><Icon name="repository"/><span>Save to repository…</span></button>
           <button type="button" disabled={!collection?.members.length} onClick={() => setDialog('issue')}><Icon name="external"/><span>Create GitHub issue…</span></button></>}
         </ActionMenu>
@@ -418,7 +429,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
                 </div>
               </header>
               {shown !== latestNumber && <div className="artifact-old-version" role="note"><Icon name="history" size={14}/><span>You are viewing v{shown} of {latestNumber}.</span><button type="button" className="link-button" onClick={() => { setSelected(0); setBase(shown); setView('changes'); }}>What changed since</button><button type="button" className="link-button" onClick={() => { setSelected(0); setBase(0); }}>Back to latest</button>{!artifact.trackedPath && !artifact.retired && <button type="button" className="link-button" disabled={content === undefined || republishing} onClick={() => content !== undefined && void saveRevision(content, `Republished v${shown}.`)}>Republish v{shown}</button>}</div>}
-              <div ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <pre className="artifact-html-source">{content}</pre> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : <DocumentBody markdown={reading} headings={headings} scroller={scroller} onReviewShell={reviewShell}/>}</div>
+              <div key={`${artifact.id}:${shown}:${view}`} ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <pre className="artifact-html-source">{content}</pre> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : <DocumentBody markdown={reading} headings={headings} scroller={scroller} onReviewShell={reviewShell}/>}</div>
             </div>
             {outline.length > 0 && <aside className="doc-toc-rail"><TableOfContents entries={outline} active={active} scroller={scroller}/></aside>}
           </div>
@@ -498,24 +509,16 @@ function RenameField({ value, onDone }: { value: string; onDone(title: string): 
  * shown by the print stylesheet alone, and is removed after the print dialog
  * closes. "Save as PDF" is the system print dialog's own choice.
  */
-export async function printDocument({ title, eyebrow, meta }: { title: string; eyebrow: string; meta: string[] }, rendered: HTMLElement | null) {
-  if (!rendered) return;
+export async function printDocument(metadata: DocumentHeading, rendered: HTMLElement) {
   dismissPrintSheet?.();
   const sheet = document.createElement('div');
   sheet.className = 'artifact-print-sheet';
-  const heading = document.createElement('header');
-  const kind = document.createElement('p'); kind.className = 'print-eyebrow'; kind.textContent = eyebrow;
-  const h1 = document.createElement('h1'); h1.textContent = title;
-  const small = document.createElement('p'); small.className = 'print-meta'; small.textContent = meta.join('  ·  ');
-  heading.append(kind, h1, small);
-  const body = rendered.cloneNode(true) as HTMLElement;
-  // Interactive chrome (copy buttons, diagram controls, anchors) is not part of a printed page.
-  body.querySelectorAll('button, [role="toolbar"], .doc-anchor, .diagram-zoom, .diagram-help').forEach(node => node.remove());
+  const { heading, body } = documentSnapshot(metadata, rendered);
   sheet.append(heading, body);
   document.body.append(sheet);
   document.documentElement.classList.add('printing-artifact');
   const previous = document.title;
-  document.title = title;
+  document.title = metadata.title;
   const cleanup = () => {
     if (dismissPrintSheet !== cleanup) return;
     dismissPrintSheet = undefined;

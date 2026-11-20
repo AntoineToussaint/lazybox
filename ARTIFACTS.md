@@ -372,6 +372,9 @@ The **Export** menu has:
 - **Copy as Markdown**: the selected version.
 - **Download .md**: named after the title, for example
   `datasource-migration-plan.md`.
+- **Download .html**: saves the selected version as a standalone HTML document
+  with inline styles and embedded rendered diagrams. HTML artifacts download
+  their original source.
 - **Print or save as PDF…**: prints the rendered document alone, as a
   document: a title block (kind, title, version, date, author, workspace),
   22 × 20 mm page margins, page numbers, light callouts, tables whose rows do

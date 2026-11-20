@@ -24,7 +24,9 @@ operator() {
 
 wait_for_runner() {
     for attempt in $(seq 1 30); do
-        if operator info >/dev/null 2>&1; then
+        if docker exec "$runner" sh -c '
+            exec lazybox --endpoint "$XDG_DATA_HOME/lazybox/state/endpoint.json" info
+        ' >/dev/null 2>&1; then
             return 0
         fi
         sleep 1

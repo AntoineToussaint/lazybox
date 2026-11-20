@@ -97,3 +97,5 @@ Dispatch reserves the task’s budget slot, workspace ID and conversation ID in 
 ### Reviewing a candidate
 
 For a worker with an approved spec contract, commit the candidate in each changed member and choose **Changes → Review with…**. A changes review captures the diff and records its member revisions and contract digest. Keep the worker’s workspace clean during review. If a member moves, is dirty or becomes unreadable when the review finishes, the outcome is unknown. Repeat the review on the current candidate. A later recorded commit or run on a different revision can also invalidate the earlier verdict. The Mission evidence returned by `lazybox missions show MISSION_ID --json` includes the member-to-commit map and contract digest. The person still accepts the task.
+
+A fresh pinned worker starts with its own evidence. The board keeps earlier attempts in the task history and evaluates the current attempt’s checks and reviews. A passing turn review cannot clear blockers from a review of the pinned candidate.

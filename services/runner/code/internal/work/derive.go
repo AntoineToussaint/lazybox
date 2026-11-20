@@ -212,8 +212,12 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 	var run, review, boundReview *Recorded
 	prs := map[string]*Recorded{} // repository → latest pull request evidence
 	order := []string{}
+	attempt := t.Current()
 	for i := range t.Evidence {
 		r := &t.Evidence[i]
+		if attempt != nil && attempt.Dispatch != nil && r.Attempt != attempt.ID {
+			continue
+		}
 		switch r.Kind {
 		case EvidenceRun:
 			for member, head := range r.Revisions {
@@ -271,9 +275,13 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 	// Open blockers from the latest agent review keep the work from verified:
 	// checks passing on code a reviewer found wrong do not vouch for it.
 	if boundReview != nil {
+		// A passing turn or PR review cannot settle blockers on the pinned candidate.
+		if boundReview.Outcome == OutcomeFail {
+			review = boundReview
+		}
 		moved := boundReview.State == "stale"
 		for _, later := range t.Evidence {
-			if later.Seq <= boundReview.Seq || (later.Attempt != "" && later.Attempt != boundReview.Attempt) {
+			if later.Seq <= boundReview.Seq || later.Attempt != boundReview.Attempt {
 				continue
 			}
 			if later.Kind == EvidenceCommit || later.Kind == EvidencePR {

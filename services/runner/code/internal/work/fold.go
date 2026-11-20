@@ -25,7 +25,10 @@ type State struct {
 	Grants   []*Grant
 	Messages []*Message
 	// Plans are orchestrators' proposals and the person's decisions (plan.go).
-	Plans []*Plan
+	Plans             []*Plan
+	Candidates        []Candidate
+	Generation        uint64
+	AcceptedCandidate string
 	// Leases and Overlaps: advisory path leases and the overlaps the Runner
 	// observed between tasks (lease.go).
 	Leases   []*Lease
@@ -308,6 +311,8 @@ func (s *State) fold(e Event) error {
 		return refuse("an agent cannot record %s", e.Type)
 	}
 	switch e.Type {
+	case CandidateReserved, CandidateReady, CandidateChecked, CandidateAccepted:
+		return s.foldCandidate(e)
 	case GrantIssued, GrantRevoked, MessageSent:
 		return s.foldGrant(e)
 	case PlanProposed, PlanApproved, PlanRejected, BudgetRaised, BudgetWarning, BudgetExhausted:

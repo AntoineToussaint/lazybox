@@ -93,6 +93,10 @@ func (s *Service) UpdateMission(ctx context.Context, r *pb.UpdateMissionRequest)
 	var state *work.State
 	created, session := "", ""
 	switch c := r.Change.(type) {
+	case *pb.UpdateMissionRequest_PrepareCandidate:
+		state, created, err = s.Bench.PrepareCandidate(ctx, id, key, c.PrepareCandidate.PlanId, c.PrepareCandidate.CheckArgv)
+	case *pb.UpdateMissionRequest_PromoteCandidate:
+		state, err = s.Bench.PromoteCandidate(ctx, id, c.PromoteCandidate.CandidateId)
 	case *pb.UpdateMissionRequest_Edit:
 		state, err = store.EditMission(id, work.Human, key, c.Edit.GetTitle(), c.Edit.GetBrief())
 	case *pb.UpdateMissionRequest_Cancel:
@@ -324,6 +328,15 @@ func millis(t time.Time) int64 {
 // observations. full adds the event log.
 func (s *Service) wireMission(ctx context.Context, state *work.State, readErr error, full bool) *pb.Mission {
 	out := &pb.Mission{Id: state.ID, Title: state.Title, Brief: state.Brief, Process: state.Process.Preset, ProcessDigest: state.Process.Digest, Autonomy: int32(state.Process.Autonomy), CreatedAtUnixMillis: millis(state.Created), UpdatedAtUnixMillis: millis(state.Updated), Canceled: state.Canceled, Seq: state.Seq, Ignored: uint32(state.Ignored)}
+	out.AcceptedGeneration, out.AcceptedCandidateId = state.Generation, state.AcceptedCandidate
+	for _, c := range state.Candidates {
+		w := &pb.IntegrationCandidate{Id: c.ID, PlanId: c.Plan, BaseGeneration: c.Generation, State: c.State, CommandId: c.Command, Detail: c.Detail, CheckArgv: c.Check, TaskReviews: c.Reviews, RepairTaskId: c.RepairTask, Revisions: map[string]string{}}
+		for _, m := range c.Members {
+			w.Revisions[m.Name] = m.Commit
+		}
+		out.Candidates = append(out.Candidates, w)
+	}
+
 	if readErr != nil {
 		out.Error = readErr.Error()
 		return out

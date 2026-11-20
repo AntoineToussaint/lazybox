@@ -87,3 +87,16 @@ func TestVerificationRejectsWrongRevisionAndLegacyReceipt(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairCompletionCannotAdvanceTwoRoundsInSameSecond(t *testing.T) {
+	run := Run{ID: "review", TemplateID: VerificationTemplate, Phase: PhaseFixing, Loop: LoopAuto, Round: 2, MaxRounds: 3, FixingSince: 10, Rounds: []Round{{N: 1}, {N: 2, AuthorTurn: 3}}}
+	rv := Review{Runs: []Run{run}}
+	action, err := AuthorTurnEnded(&rv, run.ID, 3, 10, 1, 10)
+	if err != nil || action.Rereview || rv.Runs[0].Round != 2 || rv.Runs[0].Phase != PhaseFixing {
+		t.Fatalf("duplicate repair advanced another round: %+v %+v %v", rv.Runs[0], action, err)
+	}
+	action, err = AuthorTurnEnded(&rv, run.ID, 4, 10, 1, 10)
+	if err != nil || !action.Rereview || rv.Runs[0].Round != 3 {
+		t.Fatalf("new repair in the same second was lost: %+v %+v %v", rv.Runs[0], action, err)
+	}
+}

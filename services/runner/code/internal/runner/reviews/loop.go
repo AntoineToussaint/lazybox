@@ -352,6 +352,13 @@ func AuthorTurnEnded(rv *Review, runID string, turn int, startedAt int64, files 
 	if !r.Active() || r.Phase != PhaseFixing || startedAt < r.FixingSince {
 		return Action{}, nil
 	}
+	// Completion and delivery reconciliation can overlap. A repair already
+	// consumed by a round cannot advance another, even within the same second.
+	for _, previous := range r.Rounds {
+		if previous.AuthorTurn > 0 && turn <= previous.AuthorTurn {
+			return Action{}, nil
+		}
+	}
 	author := firstNonEmpty(r.SourceLabel, "The author")
 	if files == 0 && r.TemplateID == VerificationTemplate {
 		why := "The author ended the repair turn without changing files. Decide whether the acceptance criterion or the proposed repair needs to change."

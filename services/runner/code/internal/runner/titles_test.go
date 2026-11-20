@@ -138,15 +138,35 @@ func TestAFailedTitleKeepsTheFallbackAndRetriesOnALaterTurn(t *testing.T) {
 }
 
 func TestAProviderThatCannotNameIsNotAskedAgain(t *testing.T) {
-	b, e, fake := openTitled(t, nil)
+	var calls atomic.Int32
+	b, e, fake := openTitled(t, func(string) (string, error) {
+		calls.Add(1)
+		return "", agent.ErrUnsupported
+	})
 	endTurn(fake)
-	endTurn(fake)
-	time.Sleep(100 * time.Millisecond)
+	// A visible fallback predates the asynchronous naming request. Wait for
+	// that request to finish, not for a fixed scheduling allowance to pass.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b.titling.mu.Lock()
+		tries, running := b.titling.tries[conversationOf(e)], b.titling.running[conversationOf(e)]
+		b.titling.mu.Unlock()
+		if tries > 0 && !running {
+			if tries != titleAttempts {
+				t.Fatalf("unsupported provider remains retryable: %d", tries)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("title request did not finish: tries=%d running=%v", tries, running)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Invoke the same hook synchronously so a forbidden second request cannot
+	// arrive after the assertion and silently escape the test.
+	b.nameConversation(e)
 	shownTitle(t, b, e, "Start a plan, we want to look at SOTA but the goal…")
-	b.titling.mu.Lock()
-	tries := b.titling.tries[conversationOf(e)]
-	b.titling.mu.Unlock()
-	if tries != titleAttempts {
-		t.Fatalf("an unsupported provider is asked again: %d", tries)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("asked an unsupported provider %d times", got)
 	}
 }

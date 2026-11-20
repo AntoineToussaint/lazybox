@@ -293,3 +293,5 @@ Repair delivery uses the repair operation's checkpoint start as its time boundar
 including after a delivery retry. Provider acknowledgement can arrive later without
 making the repair look older than its findings. A repair that completes before
 delivery bookkeeping is saved is reconciled once the sent state is recorded.
+
+A completed repair is consumed at most once: its checkpoint sequence, not just its second-resolution timestamp, prevents a duplicate callback from advancing another round.

@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { createContext, useMemo } from 'react';
 
 const previewElements = new Set((
   'a abbr article aside b blockquote br caption code col colgroup dd details div dl dt em figcaption figure footer ' +
@@ -7,7 +7,7 @@ const previewElements = new Set((
 ).split(' '));
 const previewAttributes = new Set('alt aria-label class colspan dir height id lang open role rowspan scope style title width'.split(' '));
 
-function htmlPreview(source: string): string {
+export function htmlPreview(source: string): string {
   // Template content is inert while parsing and filtering. Only the filtered
   // result reaches the sandbox, whose CSP also blocks external CSS and images.
   const template = document.createElement('template');
@@ -28,9 +28,11 @@ function htmlPreview(source: string): string {
     template.innerHTML;
 }
 
-function HtmlPreview({ source }: { source: string }) {
+export const OpenHtmlInBrowserContext = createContext<((html: string) => Promise<void>) | undefined>(undefined);
+
+export function HtmlPreview({ source, title = 'HTML artifact preview' }: { source: string; title?: string }) {
   const preview = useMemo(() => htmlPreview(source), [source]);
-  return <iframe className="artifact-html-preview" title="HTML artifact preview" sandbox="" srcDoc={preview}/>;
+  return <iframe className="artifact-html-preview" title={title} sandbox="" srcDoc={preview}/>;
 }
 
 const markdown = { extension: 'md', mime: 'text/markdown', label: 'Markdown', Preview: undefined };

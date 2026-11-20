@@ -432,19 +432,9 @@ fn open_with_updates(
             .cloned()
             .ok_or("Unknown window surface")?
     };
-    let displays = monitors(app)?;
-    let placement = placement::fit(surface.geometry.as_ref(), &displays)?;
+    // An open window already owns its placement and zoom. Restoring its
+    // saved geometry here can move it to a different monitor as it comes forward.
     if let Some(window) = app.get_window(label) {
-        if !window.is_maximized().map_err(|e| e.to_string())?
-            && !window.is_fullscreen().map_err(|e| e.to_string())?
-        {
-            window
-                .set_size(tauri::LogicalSize::new(placement.width, placement.height))
-                .map_err(|e| e.to_string())?;
-            window
-                .set_position(tauri::PhysicalPosition::new(placement.x, placement.y))
-                .map_err(|e| e.to_string())?;
-        }
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
@@ -454,6 +444,8 @@ fn open_with_updates(
         }
         return Ok(());
     }
+    let displays = monitors(app)?;
+    let placement = placement::fit(surface.geometry.as_ref(), &displays)?;
     mutate(app, |layout| layout.mark_open(label))?;
     let name = app.config().product_name.as_deref().unwrap_or("Lazybox");
     let kind = if label == "main" {
@@ -1667,6 +1659,166 @@ mod external_link_tests {
         ] {
             assert!(external_link(bad).is_err(), "{bad}");
         }
+    }
+}
+
+/// Private copies for the browser. They are scoped to this app process.
+#[derive(Default)]
+pub struct HtmlPreviews(Mutex<Option<tempfile::TempDir>>);
+
+#[tauri::command]
+pub fn open_html_preview_in_browser(
+    app: tauri::AppHandle,
+    window: Webview,
+    previews: State<'_, HtmlPreviews>,
+    html: String,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    if !is_document_window(window.label()) || html.len() > 4 << 20 {
+        return Err("HTML preview is unavailable for this file".into());
+    }
+    let browser = html_preview_browser()?;
+    let mut folder = previews.0.lock().map_err(|error| error.to_string())?;
+    if folder.is_none() {
+        *folder = Some(tempfile::tempdir().map_err(|error| error.to_string())?);
+    }
+    let directory = folder
+        .as_ref()
+        .ok_or("HTML preview folder is unavailable")?;
+    let mut file = tempfile::Builder::new()
+        .prefix("lazybox-preview-")
+        .suffix(".html")
+        .tempfile_in(directory.path())
+        .map_err(|error| error.to_string())?;
+    // Require the same restrictions even if the desktop command is invoked
+    // directly by one of our views instead of the file preview button.
+    const POLICY: &str = "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'\">";
+    file.write_all(POLICY.as_bytes())
+        .map_err(|error| error.to_string())?;
+    file.write_all(html.as_bytes())
+        .map_err(|error| error.to_string())?;
+    app.opener()
+        .open_path(file.path().to_string_lossy(), browser)
+        .map_err(|_| "Could not open the HTML preview in your browser")?;
+    file.keep().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn html_preview_browser() -> Result<Option<String>, String> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
+    let url = NSURL::URLWithString(&NSString::from_str("https://localhost/"))
+        .ok_or("Could not look up the default browser")?;
+    NSWorkspace::sharedWorkspace()
+        .URLForApplicationToOpenURL(&url)
+        .and_then(|application| application.path())
+        .map(|path| Some(path.to_string()))
+        .ok_or_else(|| "Could not find your default browser".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn html_preview_browser() -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+fn is_document_window(label: &str) -> bool {
+    is_workspace_window(label)
+        || ["artifact-", "chat-", "console-"].iter().any(|prefix| {
+            label
+                .strip_prefix(*prefix)
+                .is_some_and(crate::layout::valid_id)
+        })
+}
+
+#[tauri::command]
+pub async fn save_artifact_export(
+    app: tauri::AppHandle,
+    window: Webview,
+    filename: String,
+    content: String,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    if !is_document_window(window.label()) {
+        return Err("Only Lazybox document views can save an artifact export".into());
+    }
+    let (label, extension) = artifact_export_format(&filename)?;
+    let parent = window.window();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(path) = app
+            .dialog()
+            .file()
+            .set_parent(&parent)
+            .set_title("Save artifact")
+            .set_file_name(filename)
+            .add_filter(label, &[extension])
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let path = path.into_path().map_err(|_| "Expected a local file")?;
+        write_artifact_export(&path, content.as_bytes())
+            .map_err(|error| format!("Could not save the file: {error}"))?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| "Could not open the save dialog".to_string())?
+}
+
+fn artifact_export_format(filename: &str) -> Result<(&'static str, &'static str), String> {
+    let (stem, extension) = filename
+        .rsplit_once('.')
+        .ok_or("Invalid artifact filename")?;
+    if stem.is_empty()
+        || stem.len() > 60
+        || !stem
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err("Invalid artifact filename".into());
+    }
+    match extension {
+        "md" => Ok(("Markdown", "md")),
+        "html" => Ok(("HTML", "html")),
+        "json" => Ok(("JSON", "json")),
+        _ => Err("Unsupported artifact export format".into()),
+    }
+}
+
+fn write_artifact_export(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    let folder = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+    let mut file = tempfile::NamedTempFile::new_in(folder)?;
+    file.write_all(content)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod artifact_export_tests {
+    use super::*;
+
+    #[test]
+    fn filters_export_formats_and_rejects_paths_as_default_names() {
+        for name in ["project-plan.md", "project-plan.html", "project-plan.json"] {
+            assert!(artifact_export_format(name).is_ok(), "{name}");
+        }
+        for name in ["../plan.md", "/tmp/plan.md", "plan", "plan.sh", ".md"] {
+            assert!(artifact_export_format(name).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn saves_exact_bytes_to_the_chosen_file() {
+        let folder = tempfile::tempdir().expect("export folder");
+        let path = folder.path().join("chosen-name.md");
+        fs::write(&path, "old document").expect("existing file");
+        let markdown = "# Résumé\n\nSaved as Markdown.\n";
+        write_artifact_export(&path, markdown.as_bytes()).expect("saved export");
+        assert_eq!(
+            fs::read(&path).expect("read saved file"),
+            markdown.as_bytes()
+        );
     }
 }
 

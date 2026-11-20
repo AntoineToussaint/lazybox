@@ -1,3 +1,9 @@
+import { createContext } from 'react';
+
+/** The native app saves through a system dialog. The browser downloads a Blob. */
+export type SaveArtifactExport = (filename: string, content: string) => Promise<boolean>;
+export const ArtifactExportContext = createContext<SaveArtifactExport | undefined>(undefined);
+
 export type DocumentHeading = { title: string; eyebrow: string; meta: string[] };
 
 export function documentSnapshot({ title, eyebrow, meta }: DocumentHeading, rendered: HTMLElement) {

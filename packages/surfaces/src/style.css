@@ -157,6 +157,8 @@ small{color:var(--text-muted);font-size:calc(11px * var(--text-scale));overflow-
 .file-preview-dialog button{white-space:nowrap;font-size:calc(12px * var(--text-scale));min-height:30px;padding:5px 10px}
 .file-preview-dialog .file-preview-toolbar{padding:8px 16px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;font-size:calc(12px * var(--text-scale));border-bottom:1px solid var(--line);flex:none}
 .file-preview-dialog .file-preview-content{flex:1;min-height:0;max-height:none;overflow:auto;padding:20px 28px}
+.file-preview-dialog .file-preview-content.rendered-html{display:flex;flex-direction:column;padding:0;overflow:hidden}
+.file-preview-dialog .rendered-html>iframe{flex:1;width:100%;min-height:0;border:0;color-scheme:light;background:Canvas}
 .file-preview-dialog .file-preview-content.source-view{padding:0;display:flex;flex-direction:column;overflow:hidden}
 .workspace-code-editor{flex:1;height:100%;min-height:0;width:100%;overflow:hidden}
 .file-unsaved{padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--warn-bg-strong);font-size:calc(13px * var(--text-scale))}

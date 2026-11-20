@@ -109,6 +109,9 @@ export type AgentWindowProps = {
   onViewChange?: (target: SurfaceTarget) => void | Promise<void>;
   onOpenHandoff?: OpenHandoffConversation;
   onChatTitle?(title: PanelTitle): void;
+  /** Text from a colocated panel, held until this chat’s draft is ready. */
+  draftAddition?: { text: string };
+  onDraftAdded?(): void;
   onSessionChange?: (sessionId: string, collectionId?: string) => void;
   onOpenViewer?: (sessionId: string, commandId: string) => void | Promise<void>;
   /** Shows one of this conversation's managed commands in the host's command console. */
@@ -139,7 +142,7 @@ export function AgentWindow(props: AgentWindowProps) {
   </RunnerProvider>;
 }
 
-export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, copy, workingDirectory = '', emptyWorkspace = false, initialSessionId = '', collectionId = '', embedded = false, showCommands = true, allowStart = true, autoStart = false, onOpenChat, initialCommandId = '', initialCommandsOpen, mode = 'agent', viewState, onViewChange, onSessionChange, onOpenViewer, onOpenCommand, onShowBrowser, onOpenHandoff, onChatTitle, keyboardHint = null }: Omit<AgentWindowProps, 'connection'> & { keyboardHint?: KeyHint | null }) {
+export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, copy, workingDirectory = '', emptyWorkspace = false, initialSessionId = '', collectionId = '', embedded = false, showCommands = true, allowStart = true, autoStart = false, onOpenChat, initialCommandId = '', initialCommandsOpen, mode = 'agent', viewState, onViewChange, onSessionChange, onOpenViewer, onOpenCommand, onShowBrowser, onOpenHandoff, onChatTitle, draftAddition, onDraftAdded, keyboardHint = null }: Omit<AgentWindowProps, 'connection'> & { keyboardHint?: KeyHint | null }) {
   const { api, info, connecting, error: connectionError, refresh, revision } = useRunner();
   const keymap = useKeymap(viewState);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -238,12 +241,21 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // this render has not seen it yet, and saving now survives this view
   // remounting. While a send is in flight the text waits: the send empties the
   // box when it is confirmed, and would erase it (and the draft it retries).
-  useComposeRequests(sessionID, shown && canCompose && !sending, text => {
+  const appendPanelDraft = (text: string) => {
     const current = viewState ? readDraft(viewState, sessionID).text : message;
     const next = current + (current.trim() ? '\n\n' : '') + text;
     setMessage(next); persistDraft(next, files, missingFiles); setUncertainSend(''); sendAttempt.current = null;
     requestAnimationFrame(() => { const node = composer.current; if (node) { node.focus(); node.setSelectionRange(node.value.length, node.value.length); } });
-  }, api);
+  };
+  const draftReady = shown && canCompose && !sending;
+  useComposeRequests(sessionID, draftReady, appendPanelDraft, api);
+  const lastDraftAddition = useRef<typeof draftAddition>(undefined);
+  useEffect(() => {
+    if (session?.id !== sessionID || !draftReady || !draftAddition || lastDraftAddition.current === draftAddition) return;
+    lastDraftAddition.current = draftAddition;
+    appendPanelDraft(draftAddition.text);
+    onDraftAdded?.();
+  });
 
   useEffect(() => {
     const control = new AbortController(); lifetime.current = control;

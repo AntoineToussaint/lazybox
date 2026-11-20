@@ -119,6 +119,7 @@ export const SPLITS = {
   artifactHistory: { name: 'artifact-history', side: 'end', min: 240, max: 520, keep: 360 },
   /** A chat in its own window: the artifacts shown beside it. */
   detachedArtifacts: { name: 'detached-artifacts', side: 'end', min: 320, max: 1400, keep: 320 },
+  artifactChat: { name: 'artifact-chat', side: 'end', min: 320, max: 760, keep: 360 },
   settingsNav: { name: 'settings-nav', side: 'start', min: 160, max: 360, keep: 420 },
   docsNav: { name: 'docs-nav', side: 'start', min: 160, max: 440, keep: 360, collapsible: true },
   snippetList: { name: 'snippet-list', side: 'start', min: 160, max: 420, keep: 240 },

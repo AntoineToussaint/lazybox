@@ -120,6 +120,9 @@ try{
  await page.keyboard.press('Enter');
  await expect(artifactPage.getByRole('note')).toContainText('You are viewing v1 of 2.');
  await expect(artifactPage.locator('.artifact-document')).not.toContainText('Phase four');
+ await artifactPage.getByLabel('Export',{exact:true}).click();
+ const [olderMarkdown]=await Promise.all([page.waitForEvent('download'),page.getByRole('button',{name:'Download .md',exact:true}).click()]);
+ assert.equal(await readFile(await olderMarkdown.path(),'utf8'),plan1,'Markdown export uses the selected revision');
  await artifactPage.getByRole('button',{name:'Back to latest'}).click();
  await expect(artifactPage.locator('.artifact-document')).toContainText('Phase four');
 
@@ -145,7 +148,32 @@ try{
  await expect(detached.locator('.artifact-document')).toContainText('Phase four');
  assert.match(detached.url(),/view=artifact/);
  await detached.screenshot({path:'.cache/artifacts-window.png'});
+ // Focus from the same opener, then from a separate browsing context in
+ // the same browser session. The selected historical version survives both.
+ await detached.getByLabel('Version',{exact:true}).selectOption('1');
+ await expect(detached.locator('.artifact-old-version')).toContainText('v1 of 2');
+ await detached.evaluate(()=>{window.__focusCalls=0;window.focus=()=>{window.__focusCalls++;};});
+ const detach=renamed.getByRole('button',{name:'Open in its own window'});
+ await detach.click();
+ await expect.poll(()=>detached.evaluate(()=>window.__focusCalls)).toBe(1);
+ const other=await context.newPage();
+ await other.goto(new URL('/popout.html',page.url()).href);
+ const target=new URL(detached.url()).searchParams;
+ await other.evaluate(async ({ token, collectionId, artifactId })=>{
+  const { browserWorkspaceHost }=await import('/src/browser-host.ts');
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(location.origin+'\0'+token));
+  const scope=Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('');
+  await browserWorkspaceHost(scope,token).openArtifact({ collectionId,artifactId });
+ },{token:fixture.token,collectionId:target.get('collection'),artifactId:target.get('artifact')});
+ await expect.poll(()=>detached.evaluate(()=>window.__focusCalls)).toBe(2);
+ assert.equal(context.pages().length,3,'a second opener must focus the same artifact window');
+ await expect(detached.getByLabel('Version',{exact:true})).toHaveValue('1');
+ await other.close();
  await detached.close();
+ const [reopened]=await Promise.all([context.waitForEvent('page'),detach.click()]);
+ await expect(reopened.getByRole('heading',{name:'Datasource rollout plan',level:1})).toBeVisible();
+ await reopened.close();
+
 
  // An agent's `lazybox artifact put` appears in the list.
  fixture.artifacts.agentPut({collectionId:'alpha',sessionId:session.id,conversationId:'conversation-alpha',title:'Review findings',kind:'report',content:'# Review findings\n\nNo blockers.\n'});
@@ -269,15 +297,15 @@ try{
  await expect(reportPage.getByLabel('Kind',{exact:true})).toHaveValue('report');
  await expect(reportPage.getByText('Report',{exact:true}).filter({visible:true})).toHaveCount(1);
  await expect(reportPage.locator('.doc-title-block')).not.toContainText('Report');
- // At 1000 px: a smaller title close under the toolbar, a wide text column, the outline beside it.
+ // At 1000 px the title has room to breathe and the outline stays alongside the prose.
  const layout=()=>reportPage.evaluate(article=>{
   const box=node=>node.getBoundingClientRect(),scroller=article.querySelector('.artifact-scroll'),toolbar=box(article.querySelector('.artifact-toolbar')),title=article.querySelector('.doc-title'),rail=article.querySelector('.doc-toc-rail');
   return {text:box(article.querySelector('.doc-body > p')).width,title:parseFloat(getComputedStyle(title).fontSize),titleTop:box(title).top-toolbar.bottom,rail:getComputedStyle(rail).display==='none'?0:box(rail).width,overflow:scroller.scrollWidth-scroller.clientWidth,pageOverflow:document.documentElement.scrollWidth-innerWidth};
  });
  const wide=await layout();
  assert.ok(wide.text>=660,`a ${wide.text}px text column at 1000 px`);
- assert.ok(wide.title>=28&&wide.title<=36,`a ${wide.title}px title`);
- assert.ok(wide.titleTop<=32,`the title ${wide.titleTop}px under the toolbar`);
+ assert.ok(wide.title>=38&&wide.title<=48,`a ${wide.title}px title`);
+ assert.ok(wide.titleTop>=34&&wide.titleTop<=58,`the title ${wide.titleTop}px under the toolbar`);
  assert.ok(wide.rail>0&&wide.rail<=200,`a ${wide.rail}px outline`);
  await expect(reportPage.getByRole('navigation',{name:'On this page'})).toBeVisible();
  await expect(reportPage.locator('.doc-contents-menu')).toBeHidden();
@@ -297,7 +325,7 @@ try{
  await expect(reportPage.getByRole('navigation',{name:'On this page'})).toBeHidden();
  const narrow=await layout();
  assert.equal(narrow.rail,0);
- assert.ok(narrow.text>=820-2*36-2,`the text column is ${narrow.text}px without the outline (${wide.text}px beside it)`);
+ assert.ok(narrow.text>=820-2*50,`the text column is ${narrow.text}px without the outline (${wide.text}px beside it)`);
  await reportPage.locator('.doc-contents-menu > summary').click();
  const outline=reader.getByRole('group',{name:'On this page menu'});
  await expect(outline.getByRole('button')).toHaveCount(7);
@@ -310,7 +338,7 @@ try{
  await expect(reportPage.getByRole('navigation',{name:'On this page'})).toBeHidden();
  const phone=await layout();
  assert.ok(phone.overflow<=0&&phone.pageOverflow<=0,`no horizontal scroll at 360 px (${phone.overflow}, ${phone.pageOverflow})`);
- assert.ok(phone.title<=26,`a ${phone.title}px title at 360 px`);
+ assert.ok(phone.title>=26&&phone.title<=32,`a ${phone.title}px title at 360 px`);
  await expect(reportPage.getByLabel('Kind',{exact:true})).toBeVisible();
  await reader.screenshot({path:'.cache/artifacts-report-360.png'});
  await reader.close();

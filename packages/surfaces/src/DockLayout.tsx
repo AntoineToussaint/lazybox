@@ -155,6 +155,7 @@ const sidebarOf = (layout: LayoutNode | null): { group: Group; ids: string[]; at
 export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(props, ref) {
   const container = useRef<HTMLDivElement>(null);
   const api = useRef<DockviewApi>(undefined);
+  const pendingPopouts = useRef(new Map<string, Promise<boolean>>());
   const latest = useRef(props); latest.current = props;
   /** Set while this component changes dockview, so the change is not reported back as the person's. */
   const applying = useRef(0);
@@ -750,10 +751,20 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
       announce(`Tab ${index + step + 1} of ${panels.length}: ${next.title || 'panel'}`);
     },
     popout: async panelID => {
+      const pending = pendingPopouts.current.get(panelID);
+      if (pending) return pending;
       const dock = api.current, panel = panelOf(panelID);
       if (!dock || !panel) return false;
+      if (panel.group.api.location.type === 'popout') {
+        panel.api.setActive();
+        panel.group.api.getWindow().focus();
+        return true;
+      }
       const target = panel.group.panels.length > 1 ? panel : panel.group;
-      return dock.addPopoutGroup(target, { popoutUrl: latest.current.popoutUrl });
+      const opened = dock.addPopoutGroup(target, { popoutUrl: latest.current.popoutUrl })
+        .finally(() => pendingPopouts.current.delete(panelID));
+      pendingPopouts.current.set(panelID, opened);
+      return opened;
     },
     float: panelID => {
       const dock = api.current, panel = panelOf(panelID);

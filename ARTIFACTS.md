@@ -309,16 +309,16 @@ title, it names the document. The kind is shown there only, never again as a
 pill in the title block.
 
 - **The title block** sits 24 px under the toolbar: the title in the display
-  face, 24 px narrow to 34 px wide (double-click to rename, Enter to save,
+  face, with responsive sizing (double-click to rename, Enter to save,
   Escape to cancel), then one small line: who made the shown version, when,
   the **version picker**, and the reading time. The page shows one title: a
   leading `# Title` that repeats the artifact's title, or nearly does (a
   "(final)" or a subtitle added, a word changed: `repeatsTitle` in
   `artifact-reader.ts`), is hidden and the artifact's title stands. "Synced
   with `path`" and a tracking problem sit above the title.
-- **The document** is typeset for long reading: the column takes the room
-  there is up to a 76-ch measure, in Inter at 16 px with 1.7 line height, with
-  16 to 36 px gutters; headings with anchors, Newsreader for titles
+- **The document** aligns its title, headings, prose, tables, code and diagrams
+  on one left edge. Prose uses a measure of up to 76 ch, in Inter at 16 px
+  with 1.7 line height and responsive gutters; headings with anchors, Newsreader for titles
   (both bundled, so the desktop app needs no network). Blockquotes that open
   with `> **Note**`, `**Tip**`, `**Important**`, `**Warning**`, `**Caution**`
   or `**Decision**` (or GitHub's `> [!NOTE]`) become callouts; a bold title
@@ -356,11 +356,15 @@ The page follows new versions by itself.
   beside the page. It is never sent for you. The reference has the title,
   the kind, the version, an outline of the headings, and the
   `lazybox artifact get ID` command so the agent can read the whole text. In
-  its own window, where no conversation is beside it, the reference is
-  copied instead.
+  its own window, **Discuss in chat** opens a resizable chat beside the
+  artifact and puts a reference to the selected version or excerpt in the
+  draft. It starts with the source conversation when available, and you can
+  switch to another conversation in the workspace or start one explicitly.
+  **Copy artifact reference** is also available in the artifact actions menu.
 - **Open in its own window** opens the page in its own native window on
   desktop (`open_artifact`, one window per artifact) or browser window on
-  the web (`?view=artifact`). Closing that window changes nothing.
+  the web (`?view=artifact`). Opening the same artifact again focuses its
+  existing window and preserves the version and reading position.
 - **⋯** has Rename, Open source message (opens the conversation and scrolls
   to the message, with the usual highlight), Open source file, Stop syncing
   with file, Retire (or Restore, when retired), and Delete… (asks first).
@@ -370,7 +374,7 @@ The page follows new versions by itself.
 The **Export** menu has:
 
 - **Copy as Markdown**: the selected version.
-- **Download .md**: named after the title, for example
+- **Download .md**: saves the selected version, named after the title, for example
   `datasource-migration-plan.md`.
 - **Download .html**: saves the selected version as a standalone HTML document
   with inline styles and embedded rendered diagrams. HTML artifacts download
@@ -425,9 +429,8 @@ on the artifact side:
   own window from ⌘K; that window does not open the artifact chosen.
 - **HTML artifacts** export their original HTML. The print action is
   available for rendered documents, including structured documents.
-- **Desktop download** uses the webview’s download handling for
-  `<a download>`. The artifact-reader browser test exercises this path in
-  Chromium.
+- **Desktop export** opens the system Save dialog for Markdown, HTML or JSON.
+  The browser uses its standard download flow.
 - **Page numbers** use CSS page margin boxes (`@bottom-center`). They are
   tested in Chromium (`npm run test:artifact-reader` prints the sample design
   doc to `.cache/artifact-reader-print.pdf`); WebKit, the macOS desktop

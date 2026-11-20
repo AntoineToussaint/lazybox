@@ -278,7 +278,9 @@ request. What you allow for the whole workspace is saved in the workspace's
 
 Links in the agent's answer work: a `path:line` opens the file in the Editor
 (`⌥`-click opens a quick look instead), and `⌥`-click on a web link opens it in
-a [Web panel](run-your-app.md#browse-beside-your-work-the-web-panel).
+a [Web panel](run-your-app.md#browse-beside-your-work-the-web-panel). HTML
+quick look has **Open in Lazybox** and **Open in browser**. Both render a
+static preview with embedded styles and images.
 
 ## Run the commands it gives you
 

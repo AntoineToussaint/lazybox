@@ -11,34 +11,39 @@
 }
 html[data-scheme=light] .artifact-page,html[data-scheme=light] .doc-diff{--reader-bg:var(--surface-raised);--reader-text:var(--text-soft);--reader-heading:var(--text)}
 
-/* The reading column and its outline. The column takes the room there is, up
-   to a readable measure; the outline sits beside it once the reader is wide
-   enough to spare it 200 px (900 px), and is the title block's "On this page"
-   menu below that. Narrow, the gutters shrink to 16 px. */
-.doc-layout{--measure:76ch;--gutter:clamp(16px,4cqi,36px);display:grid;grid-template-columns:minmax(0,1fr);justify-content:center;column-gap:clamp(16px,2.5cqi,32px);padding:14px var(--gutter) 96px;font-family:var(--font-reading);font-size:var(--reading-size)}
+/* The reading column starts at a shared gutter. Wide material has its own
+   measure, with a sticky outline beside it where the reader has room. */
+.doc-layout{
+  --measure:76ch;
+  --wide-measure:108ch;
+  --gutter:clamp(20px,5cqi,72px);
+  display:grid;grid-template-columns:minmax(0,var(--wide-measure));justify-content:start;
+  column-gap:clamp(24px,3.5cqi,56px);
+  padding:clamp(28px,4.5cqi,62px) var(--gutter) 96px;
+  font-family:var(--font-reading);font-size:var(--reading-size)
+}
 .doc-column{min-width:0;font-size:var(--reading-size)}
 .doc-toc-rail{display:none}
 @container artifact-reader (min-width:900px){
-  .doc-layout.has-toc{grid-template-columns:minmax(0,1fr) minmax(110px,150px)}
+  .doc-layout.has-toc{grid-template-columns:minmax(0,var(--wide-measure)) minmax(142px,190px)}
   .doc-toc-rail{display:block;min-width:0}
   .doc-meta .doc-contents-menu{display:none}
 }
 @container artifact-reader (max-width:640px){
-  .doc-layout{padding:12px 16px 80px}
-  .doc-body h2{font-size:1.3em}
+  .doc-layout{padding:24px 18px 72px}
   .doc-anchor{display:none}
 }
 
 /* The title block: the title, then one quiet line of who wrote it and when,
    the version, reading time. The kind is the toolbar's; a document's own
    opening h1 that repeats the title is hidden (withoutRepeatedTitle). */
-.doc-title-block{margin:0 0 1em;padding-bottom:.75em;border-bottom:1px solid var(--line-subtle)}
+.doc-title-block{margin:0 0 1.5em;padding-bottom:1.15em;border-bottom:1px solid var(--line-subtle)}
 .doc-eyebrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:.7em;min-width:0}
 .artifact-page .doc-version select{appearance:none;-webkit-appearance:none;position:absolute;inset:0;width:100%;height:100%;min-width:0;border:0;border-radius:0;padding:0;margin:0;background:transparent;box-shadow:none;opacity:0;font:inherit;cursor:pointer}
-/* 24 px narrow to 34 px wide, following the reader's width and the text size. */
-.doc-title{margin:0;font-family:var(--font-display);font-optical-sizing:auto;font-size:clamp(1.5em,1em + 1.6cqi,2.125em);line-height:1.12;font-weight:520;letter-spacing:-.014em;color:var(--text-strong);text-wrap:balance;overflow-wrap:break-word;cursor:text}
-.doc-title-block .artifact-rename{width:100%;box-sizing:border-box;padding:2px 8px;margin-left:-9px;border-radius:8px;border:1px solid var(--accent-line);background:var(--surface-sunken);color:var(--text-strong);font-family:var(--font-display);font-size:clamp(1.5em,1em + 1.6cqi,2.125em);line-height:1.12;font-weight:520;letter-spacing:-.014em}
-.doc-meta{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;margin-top:.55em;font-size:calc(12px * var(--text-scale));line-height:20px;color:var(--text-subtle);font-variant-numeric:tabular-nums}
+/* The title takes its scale from the reader width and the text preference. */
+.doc-title{margin:0;font-family:var(--font-display);font-optical-sizing:auto;font-size:clamp(1.8em,1.25em + 2.25cqi,3em);line-height:1.04;font-weight:540;letter-spacing:-.027em;color:var(--text-strong);text-wrap:balance;overflow-wrap:break-word;cursor:text}
+.doc-title-block .artifact-rename{width:100%;box-sizing:border-box;padding:2px 8px;margin-left:-9px;border-radius:8px;border:1px solid var(--accent-line);background:var(--surface-sunken);color:var(--text-strong);font-family:var(--font-display);font-size:clamp(1.8em,1.25em + 2.25cqi,3em);line-height:1.04;font-weight:540;letter-spacing:-.027em}
+.doc-meta{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin-top:1em;font-size:calc(12px * var(--text-scale));line-height:20px;color:var(--text-subtle);font-variant-numeric:tabular-nums}
 .doc-dot{width:2px;height:2px;border-radius:50%;background:var(--text-faint);flex:none}
 .doc-author{display:inline-flex;align-items:center;gap:5px}
 .doc-author-icon{display:inline-flex;align-items:center;color:var(--text-faint)}
@@ -54,8 +59,7 @@ html[data-scheme=light] .artifact-page,html[data-scheme=light] .doc-diff{--reade
 
 /* Body text. */
 .doc-body{font-family:var(--font-reading);font-size:1em;line-height:1.72;color:var(--reader-text);letter-spacing:-.003em;font-feature-settings:'cv11','ss03';overflow-wrap:break-word;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased}
-.doc-layout .doc-title-block,.doc-layout .doc-body>*:not(.mermaid-block,.doc-table,.code-block){max-inline-size:var(--measure);margin-inline:auto}
-.doc-layout .doc-body>.mermaid-block,.doc-layout .doc-body>.doc-table,.doc-layout .doc-body>.code-block{max-inline-size:110ch;margin-inline:auto}
+.doc-layout .doc-title-block,.doc-layout .artifact-old-version,.doc-layout .doc-body>*:not(.mermaid-block,.doc-table,.code-block){max-inline-size:var(--measure)}
 .doc-body>:first-child{margin-top:0}
 .doc-body p{margin:0 0 1.15em}
 .doc-body strong{font-weight:620;color:var(--reader-heading)}
@@ -69,6 +73,11 @@ html[data-scheme=light] .artifact-page,html[data-scheme=light] .doc-diff{--reade
 .doc-body h3{margin:1.7em 0 .5em;font-size:1.15em;line-height:1.38;font-weight:630;letter-spacing:-.012em}
 .doc-body h4,.doc-body h5,.doc-body h6{margin:1.7em 0 .45em;font-size:1em;font-weight:640}
 .doc-body h1+*,.doc-body h2+*,.doc-body h3+*,.doc-body h4+*{margin-top:0}
+.doc-layout .doc-body > h2{margin-block:1.75em .5em;font-size:1.55em;letter-spacing:-.032em}
+.doc-layout .doc-body > h3{margin-block:1.45em .4em}
+.doc-layout .doc-body > h2:first-child,.doc-layout .doc-body > h3:first-child{margin-top:0}
+.doc-layout .doc-body > p{margin-bottom:1em}
+@container artifact-reader (max-width:640px){.doc-layout .doc-body > h2{font-size:1.35em}}
 .doc-heading:focus{outline:none}
 .doc-anchor{position:absolute;left:-1.1em;width:1em;color:var(--text-faint)!important;text-decoration:none!important;font-weight:500;opacity:0;transition:opacity .12s}
 .doc-heading:hover .doc-anchor{opacity:1}
@@ -112,12 +121,12 @@ html[data-scheme=light] .doc-body :not(pre)>code{background:var(--surface-sunken
 .doc-callout.is-decision .doc-callout-body{font-size:1.06em;line-height:1.6;color:var(--reader-heading)}
 
 /* Tables: their own frame, a sticky header, quiet zebra rows, wrapping cells. */
-.doc-table{margin:1.6em 0;max-height:min(70vh,640px);overflow:auto;border:1px solid var(--line);border-radius:12px;background:var(--reader-bg);overscroll-behavior-x:contain}
+.doc-table{margin:1.3em 0 1.7em;max-height:min(70vh,640px);overflow:auto;border:1px solid var(--line);border-radius:12px;background:var(--reader-bg);overscroll-behavior-x:contain}
 .doc-table:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .doc-table table{width:100%;border-collapse:separate;border-spacing:0;font-size:.875em;line-height:1.55;font-variant-numeric:tabular-nums}
-.doc-table th,.doc-table td{padding:.72em 1em;text-align:left;vertical-align:top;border-bottom:1px solid var(--line-subtle);min-width:8ch;overflow-wrap:break-word;word-break:normal}
+.doc-table th,.doc-table td{padding:.82em 1.05em;text-align:left;vertical-align:top;border-bottom:1px solid var(--line-subtle);min-width:8ch;overflow-wrap:break-word;word-break:normal}
 .doc-table tr>:first-child{min-width:12ch}
-.doc-table thead th{position:sticky;top:0;z-index:1;background:var(--surface-hover);color:var(--text-tertiary);font-weight:620;font-size:.93em;letter-spacing:.005em;white-space:nowrap;border-bottom:1px solid var(--line)}
+.doc-table thead th{position:sticky;top:0;z-index:1;background:var(--surface-hover);color:var(--text-secondary);font-weight:650;font-size:.91em;letter-spacing:.012em;white-space:nowrap;border-bottom:1px solid var(--line)}
 html[data-scheme=light] .doc-table thead th{background:var(--surface-sunken)}
 .doc-table tbody td{color:var(--reader-text)}
 .doc-table tbody tr:nth-child(even) td{background:var(--surface-sunken)}
@@ -157,14 +166,14 @@ html[data-scheme=light] .doc-table tbody tr:nth-child(even) td{background:var(--
 .doc-footnotes a[data-footnote-backref]{margin-left:.35em;text-decoration:none}
 
 /* "On this page". */
-.doc-toc{position:sticky;top:24px;max-height:calc(100dvh - 120px);overflow:auto;padding-left:2px;font-family:var(--font-reading)}
-.doc-toc-title{margin:0 0 10px;font-size:calc(11px * var(--text-scale));font-weight:650;letter-spacing:.08em;text-transform:uppercase;color:var(--text-subtle)}
-.doc-toc ol{list-style:none;margin:0;padding:0;border-left:1px solid var(--line-subtle)}
-.doc-toc li a{display:block;margin-left:-1px;padding:4px 0 4px 12px;border-left:2px solid transparent;font-size:calc(12.5px * var(--text-scale));line-height:1.4;color:var(--text-muted);text-decoration:none;transition:color .12s,border-color .12s}
-.doc-toc li.is-sub a{padding-left:22px;font-size:calc(12px * var(--text-scale))}
-.doc-toc li a:hover{color:var(--text)}
-.doc-toc li a[aria-current]{color:var(--reader-heading);border-left-color:var(--accent);font-weight:560}
-.doc-toc li a:focus-visible{outline:2px solid var(--focus);outline-offset:-2px;border-radius:4px}
+.doc-toc{position:sticky;top:24px;max-height:calc(100dvh - 120px);overflow:auto;padding:13px 10px 10px;border:1px solid var(--line-subtle);border-radius:12px;background:var(--surface-sunken);font-family:var(--font-reading);scrollbar-width:thin}
+.doc-toc-title{margin:0 8px 9px;font-size:calc(11px * var(--text-scale));font-weight:650;letter-spacing:.055em;text-transform:uppercase;color:var(--text-subtle)}
+.doc-toc ol{list-style:none;margin:0;padding:0}
+.doc-toc li a{display:block;padding:5px 8px;border-radius:6px;font-size:calc(12.5px * var(--text-scale));line-height:1.4;color:var(--text-subtle);text-decoration:none;transition:color .12s,background .12s}
+.doc-toc li.is-sub a{padding-left:17px;font-size:calc(12px * var(--text-scale))}
+.doc-toc li a:hover{color:var(--text);background:var(--surface-hover)}
+.doc-toc li a[aria-current]{color:var(--accent-strong);background:var(--accent-bg);font-weight:620}
+.doc-toc li a:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
 
 /* The rendered comparison of two versions. */
 .doc-diff{font-family:var(--font-reading);--reading-size:calc(14.5px * var(--text-scale))}

@@ -96,6 +96,15 @@ try {
  await expect(panel.getByRole('tab',{name:'api',exact:true})).toHaveAttribute('aria-selected','true');
  await expect(screen).toContainText('fixture shell in Alpha feature / api');
  assert.equal(calls('OpenTerminal').at(-1).body.directory,'api');
+ const strip = panel.getByRole('tablist',{name:'Terminals'});
+ const overflow = await strip.evaluate(node => {
+  node.style.maxWidth = '160px';
+  const scrollable = node.scrollWidth > node.clientWidth;
+  const clearance = node.getBoundingClientRect().bottom - node.querySelector('.terminal-tab').getBoundingClientRect().bottom;
+  node.style.removeProperty('max-width');
+  return {scrollable,clearance};
+ });
+ assert.ok(overflow.scrollable && overflow.clearance >= 8, 'the horizontal scrollbar has room below the terminal tabs');
  await page.screenshot({path:'/tmp/lazybox-terminal.png'});
  await panel.getByRole('button',{name:'Close terminal api',exact:true}).click();
  await expect(panel.getByRole('tab',{name:'api',exact:true})).toHaveCount(0);

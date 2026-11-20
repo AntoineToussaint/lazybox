@@ -253,7 +253,7 @@ export const SLOW_RTT_MS = 300;
 export const rttText = (ms: number | undefined) => ms && ms > 0 ? `${Math.round(ms)} ms` : '';
 
 /** The route a remote Runner is reached by, as a short label. */
-export const routeLabel = (route: string | undefined) => ({ ssh: 'SSH', tailnet: 'Tailnet', relay: 'Relay', socket: 'Container' } as Record<string, string>)[route || ''] || (route || '').toUpperCase();
+export const routeLabel = (route: string | undefined) => ({ ssh: 'SSH', kubernetes: 'Kubernetes', tailnet: 'Tailnet', relay: 'Relay', socket: 'Container' } as Record<string, string>)[route || ''] || (route || '').toUpperCase();
 
 /** One computer of the window: this one, or another reached over a link. */
 export type Machine<T> = { id: string; label: string; remote: boolean; host?: string; route?: string; rttMs?: number; state: string; problem?: string; rows: T[] };

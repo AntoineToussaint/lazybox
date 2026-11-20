@@ -377,14 +377,25 @@ func TestStreamsFlowThroughTheLinkAsTheyAreWritten(t *testing.T) {
 	newUpstream(t, state)
 	keys := newClient(t)
 	enrol(t, state, keys)
-	agent := &Agent{Route: newPipeRoute(serveOptions(state)), Keys: keys, RunnerKey: runnerPublic(t, state), ClientName: "Test laptop", Label: "build-box"}
+	route := newPipeRoute(serveOptions(state))
+	agent := &Agent{Route: route, Keys: keys, RunnerKey: runnerPublic(t, state), ClientName: "Test laptop", Label: "build-box"}
 	base, token, err := agent.Listen()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = agent.Run(ctx) }()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = agent.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+		// Serve writes its final audit entry after the client disconnects.
+		// Join it before TempDir cleanup removes its state directory.
+		route.cut()
+		for _, stream := range route.streams {
+			<-stream.done
+		}
+	}()
 	waitFor(t, func() bool { return agent.Status().State == "connected" })
 	req, _ := http.NewRequest(http.MethodPost, base+RPCPath+"WatchEvents", strings.NewReader("{}"))
 	req.Header.Set("Authorization", "Bearer "+token)

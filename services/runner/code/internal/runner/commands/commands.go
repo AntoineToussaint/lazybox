@@ -21,7 +21,10 @@ import (
 )
 
 type Spec struct {
-	SessionID string `json:"sessionId"`
+	// Isolated records that the command owner applied verification isolation.
+	Isolated      bool   `json:"isolated,omitempty"`
+	MaxDurationMs int64  `json:"maxDurationMs,omitempty"`
+	SessionID     string `json:"sessionId"`
 	// CollectionID, with no SessionID, makes a workspace run: published from a
 	// workspace terminal and shown in every conversation of that workspace.
 	CollectionID string `json:"collectionId,omitempty"`
@@ -299,6 +302,14 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 		c.once.Do(func() {})
 		m.items[state.ID] = c
 	}
+	// Stop legacy verification commands: their unrestricted authority cannot
+	// survive an upgrade to isolated verification. Ordinary commands still outlive it.
+	for _, command := range m.items {
+		state := command.Status()
+		if state.Spec.Kind == "verification" && !state.Spec.Isolated && !state.Done {
+			_ = command.Cancel()
+		}
+	}
 	// The limits are read here, not in the goroutine: a test that shortens them
 	// for its own Manager would otherwise race with every earlier Manager's watcher.
 	go m.watchFollowers(followSilence, pipeIdle)
@@ -403,12 +414,15 @@ func (m *Manager) register(spec Spec, host *sessionhost.Client) (*Command, error
 	if spec.SessionID != "" && (spec.TerminalID != "" || spec.ShareWith != "") {
 		return nil, errors.New("only a workspace run comes from a terminal or is shared")
 	}
+	if spec.Kind == "verification" && (spec.SessionID == "" || spec.Action == "" || len(spec.Argv) == 0) {
+		return nil, errors.New("verification commands require a reviewer session, recipe identity and argv")
+	}
 	// A hook run (POWER.md) is a program or, for a webhook, a pipe the Runner
 	// writes the request's log to.
 	if spec.CollectionID != "" && spec.Kind != KindHook && (len(spec.Argv) > 0) != (spec.Kind != "") {
 		return nil, errors.New("a workspace run is a pipe, a workspace command has a kind")
 	}
-	if spec.Kind != "" && (spec.Kind != "setup" && spec.Kind != "archive" && spec.Kind != "action" && spec.Kind != "integration" && spec.Kind != KindHook && spec.Kind != KindRunner || spec.TerminalID != "" || spec.ShareWith != "") {
+	if spec.Kind != "" && (spec.Kind != "setup" && spec.Kind != "archive" && spec.Kind != "action" && spec.Kind != KindHook && spec.Kind != KindRunner && spec.Kind != "verification" && spec.Kind != "integration" || spec.TerminalID != "" || spec.ShareWith != "") {
 		return nil, errors.New("invalid workspace command")
 	}
 	if spec.StopGraceMs < 0 || spec.StopGraceMs > 60_000 {
@@ -744,6 +758,13 @@ func (m *Manager) Start(spec Spec) (*Command, error) {
 	if len(spec.Argv) == 0 || !filepath.IsAbs(spec.Cwd) {
 		return nil, errors.New("managed command requires argv and absolute cwd")
 	}
+	if spec.Kind == "verification" {
+		var err error
+		spec, err = isolateVerification(spec)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if m.hostRoot != "" {
 		return m.startHosted(spec)
 	}
@@ -779,7 +800,14 @@ func (m *Manager) Start(spec Spec) (*Command, error) {
 		return c, nil
 	}
 	go func() {
+		var timer *time.Timer
+		if spec.MaxDurationMs > 0 {
+			timer = time.AfterFunc(time.Duration(spec.MaxDurationMs)*time.Millisecond, func() { _ = guard.Stop() })
+		}
 		outcome, err := guard.Wait()
+		if timer != nil {
+			timer.Stop()
+		}
 		c.finish(exitCode(outcome), outcome.Signal, err)
 	}()
 	return c, nil
@@ -821,7 +849,7 @@ func (m *Manager) startHosted(spec Spec) (*Command, error) {
 		return c, nil
 	}
 	beforeSpawn()
-	err = host.Spawn(ctx, sessionhost.Spec{Path: spec.Argv[0], Args: spec.Argv[1:], Env: spec.Env, Cwd: spec.Cwd, Stream: true, StopGraceMs: spec.StopGraceMs})
+	err = host.Spawn(ctx, sessionhost.Spec{Path: spec.Argv[0], Args: spec.Argv[1:], Env: spec.Env, Cwd: spec.Cwd, Stream: true, StopGraceMs: spec.StopGraceMs, MaxDurationMs: spec.MaxDurationMs})
 	if err != nil {
 		_ = m.backend.Stop(ctx, m.hostRoot, host.ID())
 		c.finish(nil, "", fmt.Errorf("start failed: %w", err))

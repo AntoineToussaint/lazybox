@@ -154,8 +154,15 @@ func newPipeRoute(t *testing.T, opts ServeOptions) *pipeRoute {
 	p := &pipeRoute{opts: opts, served: make(chan error, 64)}
 	t.Cleanup(func() {
 		p.cut()
-		for _, stream := range p.streams {
-			<-stream.done // Serve finishes writing the link audit before TempDir cleanup.
+		p.mu.Lock()
+		streams := append([]*recorder(nil), p.streams...)
+		p.mu.Unlock()
+		for _, stream := range streams {
+			select {
+			case <-stream.done:
+			case <-time.After(5 * time.Second):
+				t.Error("link server did not finish before fixture cleanup")
+			}
 		}
 	})
 	return p
@@ -374,6 +381,16 @@ func TestRevokingAnOwnerEndsItsLiveSession(t *testing.T) {
 		t.Fatal("the session outlived its key by more than a second")
 	}
 	t.Logf("session ended %s after the revoke", time.Since(revoked).Round(time.Millisecond))
+	// The client observes the socket closing before Serve appends its audit
+	// entry. Join the server before reading the record it owns.
+	select {
+	case err := <-route.served:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("revoked session server did not finish")
+	}
 	data, _ := os.ReadFile(filepath.Join(state, "audit.jsonl"))
 	if !strings.Contains(string(data), "key revoked") {
 		t.Fatalf("audit: %s", data)

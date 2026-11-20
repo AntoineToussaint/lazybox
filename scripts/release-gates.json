@@ -126,6 +126,7 @@
     { "id": "conversation-load", "scope": "ui", "script": "test:conversation-load" },
     { "id": "updates", "scope": "ui", "script": "test:updates" },
     { "id": "feedback", "scope": "ui", "script": "test:feedback" },
+    { "id": "page-errors", "scope": "ui", "script": "test:page-errors" },
     { "id": "scenarios", "scope": "ui", "script": "test:scenarios", "timeoutMs": 600000 }
   ],
   "external": [

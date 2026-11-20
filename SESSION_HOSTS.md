@@ -152,7 +152,9 @@ notices in the conversation.
   fails again; one whose host is gone cannot be re-attached at all. Provider
   faults (limits, sign-in, billing, a turn's error) are never cleared this way.
 - Resume on a live conversation with such a fault re-attaches it in place, as
-  a restart would (`Bench.reconnect`: Detach, then adopt): no second agent is
+  a restart would (`Bench.reconnect`: Detach, then adopt). A receive loop
+  that has not returned can already have lost its supervisor; Resume never
+  clears a transport fault on that evidence alone. No second agent is
   started. If the host is gone, or cannot be adopted (it is stopped), the
   conversation ends as interrupted and resumes natively.
 - The Runner's own writes (the journal, the saved snapshot, metering, account
@@ -589,3 +591,12 @@ behaviour quickly or reliably:
   exhaustion);
 - a command is refused before its host is launched when the registry is full,
   and `Cancel` no longer holds the command's lock across a host write.
+
+
+New hosts advertise a per-attachment control capability. Request resolution uses
+an authenticated, acknowledged control connection: it completes before detach
+can hand ownership to the next Runner, and a full agent-output buffer cannot
+block the acknowledgement. A superseded attachment cannot resolve requests.
+Older hosts without the capability keep their existing asynchronous resolve
+protocol; this guarantee applies when the host was launched with the new binary.
+No live user host is restarted by this change.

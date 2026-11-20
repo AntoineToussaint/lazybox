@@ -111,6 +111,70 @@ rounds, and can review every turn that changes files. When the default
 reviewer is not installed or signed in, a fresh conversation of the author's
 agent reviews, and the review's card says so in a quiet line.
 
+### Verify behavior with another agent
+
+In the workspace's **New tab** menu, choose **Behavior verification**. This
+starts an independent reviewer and an automatic repair loop, bounded by the
+configured review round limit. The reviewer derives acceptance criteria from
+the goal and registers independent executable checks.
+
+The reviewer runs a check with the managed-command tool's **verify** action,
+or through the CLI available to every agent backend.
+
+```sh
+lazybox review verify --name "restart recovery" --member api \
+  --expected "existing tasks survive a failed poll and restart" \
+  --regression "retain this scenario in the provider recovery suite" \
+  -- go test ./provider -run TestPollRecovery
+```
+
+The Runner creates independent Git checkouts of the captured base and candidate,
+including captured uncommitted changes, and executes the same command in each.
+Commands run with a private home and temporary directory, without the reviewer's
+credentials or host network access. They can read system toolchains and their
+checkout, and write only inside that checkout. macOS uses sandbox-exec; Linux
+requires bubblewrap and enabled unprivileged namespaces. On Ubuntu 24.04,
+AppArmor also needs its distribution-provided `bwrap-userns-restrict` profile
+(from `apparmor-profiles`) loaded by the administrator. CI installs and loads
+that profile before testing; it does not disable the system-wide restriction.
+See [Ubuntu's AppArmor guidance](https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007)
+for the profile's purpose and deployment considerations. An unavailable sandbox
+refuses execution; it never falls back to unrestricted host commands. Dependencies
+must already be in the captured tree or available from the system toolchain;
+network installation and user-home caches are unavailable. Each execution is
+capped at fifteen minutes by its session host, including while the Runner is
+restarting or preparing other reviews. Managed output survives Runner restarts.
+
+The recipe is frozen once registered. Repeating it returns the same round's
+command IDs; if preparation was interrupted before a side launched, retry starts
+that missing side without repeating an existing execution. Changing its assertion or command requires a new criterion. The
+**Acceptance checks** section in the Review tray shows each round's revisions,
+exit results, state, and buttons to open base and candidate output. The report
+artifact retains the reviewer account and Runner-recorded results, with one
+version per completed round.
+
+The reviewer files actionable failures as blockers. Lazybox sends them and the
+recorded reproduction recipes to the author, asking it to repair the behavior
+and retain confirmed reproductions in the existing regression suite. When the
+author changes files, Lazybox captures a new candidate and reruns the frozen
+checks. The reviewer inspects the output and resolves or reopens findings.
+Regression proposals remain attached to the checks for the reviewer to follow up.
+
+A successful verification requires isolated executions bound to the exact current
+member, base and candidate commits, plus resolved
+blockers. Zero checks, incomplete snapshots, interrupted execution and missing
+results produce **Acceptance verification incomplete · needs you**, including in
+mission evidence and conversation badges. Legacy or mismatched completed receipts
+are invalidated and their mission evidence and report corrected; the original
+report remains in artifact history. Start a new review to replace those receipts. Repeated
+blockers, a repair turn without changes, and the round limit also escalate.
+The report identifies ambiguous intent and remaining coverage gaps for the
+person to decide. Passing commands establish only the assertions they execute.
+
+Pause holds later rounds, Resume continues a pending recheck, and Cancel ends
+running verification commands and the review. Checkouts are retained with the
+review conversation and removed when its checkpoints are deleted.
+
 ## Undo a turn: checkpoints
 
 Before every agent turn, and again after it, Lazybox saves a checkpoint of every
@@ -220,3 +284,16 @@ focus and every five minutes otherwise; merged or closed ones once a day for
 a week. Unchanged pull requests cost nothing against GitHub's rate limit; if
 the limit is reached, checking pauses and the panel says until when.
 Automatic reactions are not available: every send is yours.
+
+Codex can list workspace actions and read or wait for managed command output
+without a per-call approval. Starting or cancelling commands retains its approval.
+
+
+Repair delivery uses the repair operation's checkpoint start as its time boundary,
+including after a delivery retry. Provider acknowledgement can arrive later without
+making the repair look older than its findings. A repair that completes before
+delivery bookkeeping is saved is reconciled once the sent state is recorded.
+
+A completed repair is consumed at most once: its checkpoint sequence, not just its second-resolution timestamp, prevents a duplicate callback from advancing another round.
+
+For a Mission-bound verification loop, each repair must be committed before rechecking. The next round captures that committed candidate and updates the evidence revision; dirty candidates or changed workspace membership stop the recheck. The approved contract and attempt stay pinned.

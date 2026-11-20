@@ -7,7 +7,7 @@
    its folder do not slide as "59s" becomes "1m 0s". With nothing after them they take the row. */
 .live-bar-row>.live-activity:has(~ .live-bar-code){flex:0 0 auto;width:clamp(15ch,30%,27ch)}
 .live-bar-row>.live-activity:not(:has(~ .live-bar-code)){flex:1 1 0}
-.live-bar-code{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 7px;border-radius:5px;background:var(--surface-selected);color:var(--text);font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11.5px * var(--code-scale))}
+.live-bar .live-bar-code{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:1px 7px;border-radius:5px;background:var(--surface-selected);color:var(--text);font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11.5px * var(--code-scale))}
 .live-bar-where{flex:0 2 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted)}
 .live-bar-where>code{font-family:var(--font-mono,ui-monospace,monospace);font-size:calc(11px * var(--code-scale));color:var(--text-tertiary);background:none;padding:0}
 .live-bar-actions{display:inline-flex;align-items:center;gap:2px;margin-left:auto;flex:none}

@@ -65,3 +65,16 @@ func TestPlanUpdatesAreOneChecklistPerTurn(t *testing.T) {
 		t.Fatal("an empty plan is not a call")
 	}
 }
+
+func TestManagedCommandApprovalDependsOnAction(t *testing.T) {
+	for _, action := range []string{"actions", "read", "tail", "wait", "start", "start_action", "cancel", "unknown", ""} {
+		args := json.RawMessage(`{"action":"` + action + `"}`)
+		wantApproval := action != "actions" && action != "read" && action != "tail" && action != "wait"
+		if got := toolApproval("lazybox_command", args) != ""; got != wantApproval {
+			t.Errorf("action %q: approval = %v, want %v", action, got, wantApproval)
+		}
+	}
+	if toolApproval("lazybox_command", json.RawMessage(`{`)) == "" {
+		t.Fatal("malformed arguments bypass approval")
+	}
+}

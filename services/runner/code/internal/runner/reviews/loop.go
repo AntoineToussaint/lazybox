@@ -36,12 +36,13 @@ const (
 
 // Why a loop ended.
 const (
-	StopClean     = "clean"
-	StopMaxRounds = "max_rounds"
-	StopStuck     = "stuck"
-	StopError     = "error"
-	StopStopped   = "stopped"
-	StopTakenOver = "taken_over"
+	StopClean      = "clean"
+	StopMaxRounds  = "max_rounds"
+	StopStuck      = "stuck"
+	StopUnverified = "unverified"
+	StopError      = "error"
+	StopStopped    = "stopped"
+	StopTakenOver  = "taken_over"
 	// StopCancelled: the person cancelled the review (CancelReview): the
 	// reviewer's turn interrupted, its session ended, its findings kept.
 	StopCancelled = "cancelled"
@@ -57,15 +58,16 @@ const maxRoundsLimit = 10
 
 // Round is one pass of the reviewer.
 type Round struct {
-	N          int    `json:"n"`
-	Trigger    string `json:"trigger"`
-	AuthorTurn int    `json:"authorTurn,omitempty"`
-	StartedAt  int64  `json:"startedAt"`
-	EndedAt    int64  `json:"endedAt,omitempty"`
-	Filed      int    `json:"filed,omitempty"`
-	Resolved   int    `json:"resolved,omitempty"`
-	StillOpen  int    `json:"stillOpen,omitempty"`
-	Blockers   int    `json:"blockers,omitempty"`
+	Input      []ReviewInput `json:"input,omitempty"`
+	N          int           `json:"n"`
+	Trigger    string        `json:"trigger"`
+	AuthorTurn int           `json:"authorTurn,omitempty"`
+	StartedAt  int64         `json:"startedAt"`
+	EndedAt    int64         `json:"endedAt,omitempty"`
+	Filed      int           `json:"filed,omitempty"`
+	Resolved   int           `json:"resolved,omitempty"`
+	StillOpen  int           `json:"stillOpen,omitempty"`
+	Blockers   int           `json:"blockers,omitempty"`
 	// Sent: the round's message (the re-review) was delivered.
 	Sent bool `json:"sent,omitempty"`
 }
@@ -215,6 +217,10 @@ func RoundEnded(rv *Review, runID string, now int64) (Action, error) {
 		why := fmt.Sprintf("The blocker “%s” (%s) is still open after two fixes: decide how to proceed.", stuck.Title, stuck.ID)
 		r.stop(now, StopStuck, why)
 		return Action{Escalate: why}, nil
+	case round.Blockers == 0 && r.TemplateID == VerificationTemplate && !VerificationComplete(*r):
+		why := "Acceptance verification is incomplete. Inspect the recorded checks and resolve missing execution or unclear criteria."
+		r.stop(now, StopUnverified, why)
+		return Action{Escalate: why}, nil
 	case round.Blockers == 0:
 		if r.Loop == LoopOff {
 			r.Phase = PhaseDone
@@ -296,7 +302,7 @@ func (r *Run) stop(now int64, reason, text string) {
 	r.StopReason, r.Phase = reason, PhaseDone
 	r.Detail = text
 	kind := "stopped"
-	if reason == StopStuck || reason == StopMaxRounds || reason == StopError {
+	if reason == StopStuck || reason == StopMaxRounds || reason == StopError || reason == StopUnverified {
 		kind = "escalated"
 	}
 	r.note(now, kind, "Lazybox", text, "")
@@ -346,12 +352,24 @@ func AuthorTurnEnded(rv *Review, runID string, turn int, startedAt int64, files 
 	if !r.Active() || r.Phase != PhaseFixing || startedAt < r.FixingSince {
 		return Action{}, nil
 	}
+	// Completion and delivery reconciliation can overlap. A repair already
+	// consumed by a round cannot advance another, even within the same second.
+	for _, previous := range r.Rounds {
+		if previous.AuthorTurn > 0 && turn <= previous.AuthorTurn {
+			return Action{}, nil
+		}
+	}
 	author := firstNonEmpty(r.SourceLabel, "The author")
+	if files == 0 && r.TemplateID == VerificationTemplate {
+		why := "The author ended the repair turn without changing files. Decide whether the acceptance criterion or the proposed repair needs to change."
+		r.stop(now, StopStuck, why)
+		return Action{Escalate: why}, nil
+	}
 	if files == 0 {
 		r.note(now, "fixing", author, fmt.Sprintf("Turn %d ended without changing files; still waiting.", turn), "")
 		return Action{}, nil
 	}
-	if r.Paused {
+	if r.Paused && r.TemplateID != VerificationTemplate {
 		r.note(now, "fixing", author, fmt.Sprintf("Turn %d changed %s; the loop is paused, so no re-review.", turn, plural(files, "file", "files")), "")
 		return Action{}, nil
 	}
@@ -359,6 +377,9 @@ func AuthorTurnEnded(rv *Review, runID string, turn int, startedAt int64, files 
 	r.Rounds = append(r.Rounds, Round{N: r.Round, Trigger: "author_turn", AuthorTurn: turn, StartedAt: now})
 	r.Phase, r.State = PhaseReviewing, RunRunning
 	r.note(now, "round_started", "Lazybox", fmt.Sprintf("Round %d: %s changed %s in turn %d; %s re-reviews that turn against its open findings.", r.Round, author, plural(files, "file", "files"), turn, r.ReviewerLabel), "")
+	if r.Paused {
+		return Action{}, nil
+	}
 	return Action{Rereview: true}, nil
 }
 
@@ -401,7 +422,7 @@ func Control(rv *Review, runID, action, mode string, maxRounds int, now int64) e
 		}
 		r.stop(now, StopTakenOver, "You took over: the loop stopped; the conversations are yours.")
 	case ControlLoop:
-		if r.TemplateID != "" {
+		if r.TemplateID != "" && r.TemplateID != VerificationTemplate {
 			return errors.New("review templates run one pass per captured snapshot")
 		}
 		m, err := LoopMode(mode)

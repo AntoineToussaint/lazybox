@@ -112,6 +112,11 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   // On the window, after the app's own handlers: a key one of them used is not a scroll.
   const key=(event:KeyboardEvent)=>{
    if(event.defaultPrevented||event.altKey||event.ctrlKey||event.metaKey||!pane.contains(event.target as Node)||editable(event.target))return;
+   // End is an explicit request to follow the latest output. Do not wait
+   // for native smooth scrolling: streaming can move its target meanwhile.
+   if(event.key==='End'&&!innerScroller(event.target,pane,false)){
+    event.preventDefault();intent.current=undefined;setFollowing(true);pin(pane);return;
+   }
    const up=UP_KEYS.has(event.key)||(event.key===' '&&event.shiftKey);
    if((up||DOWN_KEYS.has(event.key))&&!innerScroller(event.target,pane,up))intend(up?'up':'down',800,event.key==='End'?Infinity:event.key==='ArrowDown'?40:pane.clientHeight*.85);
   };
@@ -150,14 +155,16 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
    // A pane clamped to its new bottom (content folding below), or moved by its
    // own resize, is not the reader moving.
    if(moved<0&&gap>1&&!resized(pane))setFollowing(false);
-   else if(moved>0&&(gap<FOLLOW_THRESHOLD||intent.current?.bottom))setFollowing(true);
+   // A compositor/anchor correction during an upward gesture is not a
+   // request to follow. Only downward intent gets the near-bottom tolerance.
+   else if(moved>0&&intent.current?.direction!=='up'&&(gap<=1||(intent.current?.direction==='down'&&(gap<FOLLOW_THRESHOLD||intent.current.bottom))))setFollowing(true);
   }else if(following.current){
    if(movedUp)setFollowing(false);
    // Browser layout scrolls are not evidence that the user stopped following.
    else if(resized(pane)||dimensions.current.content!==pane.scrollHeight){pin(pane);return;}
    // A scroll nobody pressed for (find in page) that leaves the bottom.
    else if(gap>=FOLLOW_THRESHOLD)setFollowing(false);
-  }else if(gap<=1)setFollowing(true);
+  }else if(moved>0&&gap<=1)setFollowing(true);
   measure(pane);reader.view.scrollTop=top;
   if(following.current)anchor.current=undefined;else capture(pane);
   if(nearTop(pane))loadEarlier(pane);

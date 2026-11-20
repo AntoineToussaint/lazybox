@@ -269,6 +269,8 @@ service RunnerService {
   // The findings of the review an execution is the reviewer (or the author)
   // of, from `lazybox review list`. The same agent rule as AddReviewFinding.
   rpc ListReviewFindings(ListReviewFindingsRequest) returns (ReviewFindings);
+  // Execute a frozen acceptance recipe for the caller’s active verification review.
+  rpc RunReviewVerification(RunReviewVerificationRequest) returns (ReviewVerificationCheck);
   // The reviewer's verdict on one of its own findings in a later round
   // (`lazybox review resolve|reopen <id> --note`): resolved, or still open.
   // The same agent rule as AddReviewFinding; only findings of its own review.
@@ -2584,6 +2586,7 @@ message ReviewRun {
   string member = 39;
   string template_id = 40;
   string result_artifact_id = 41;
+  repeated ReviewVerificationCheck verification = 42;
 }
 message WorkspaceReview {
   repeated ReviewComment comments = 1;
@@ -4371,6 +4374,34 @@ message UndoDeletionRequest { string id = 1; }
 message DecideTerminalHandoffRequest {
   string handoff_id = 1;
   bool accept = 2;
+}
+
+message RunReviewVerificationRequest {
+  string session_id = 1;
+  string name = 2;
+  string member = 3;
+  string expected = 4;
+  repeated string argv = 5;
+  string regression = 6;
+}
+message ReviewVerificationCheck {
+  string name = 1;
+  string member = 2;
+  string expected = 3;
+  repeated string argv = 4;
+  string regression = 5;
+  repeated ReviewVerificationExecution runs = 6;
+}
+message ReviewVerificationExecution {
+  uint32 round = 1;
+  string base = 2;
+  string candidate = 3;
+  string base_command_id = 4;
+  string candidate_command_id = 5;
+  optional int32 base_exit = 6;
+  optional int32 candidate_exit = 7;
+  string state = 8;
+  string detail = 9;
 }
 
 message PlanBaselineMember {

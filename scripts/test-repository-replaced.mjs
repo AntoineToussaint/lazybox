@@ -38,7 +38,9 @@ try {
     for (const chip of await sheet.locator('.new-task-chip').all()) await chip.getByRole('button', { name: /^Remove / }).click();
     const search = sheet.getByRole('combobox', { name: 'Add a repository' });
     await search.focus(); await search.fill(repository);
-    await expect(sheet.getByRole('listbox', { name: 'Repositories' }).getByRole('option').first()).toContainText(repository);
+    const match = sheet.getByRole('listbox', { name: 'Repositories' }).getByRole('option').filter({ hasText: repository });
+    await expect(match).toBeVisible();
+    await expect(match).toHaveAttribute('aria-selected', 'true');
     await page.keyboard.press('Enter');
     await expect(sheet.locator('.new-task-chip-name')).toHaveText([repository]);
     if (branch) {

@@ -245,6 +245,9 @@ func TestResumeReconnectsALiveAgentInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resume refused a live agent: %v", err)
 	}
+	if resumed.Engine == e.Engine {
+		t.Fatal("Resume kept the failed receive loop instead of reattaching the host")
+	}
 	if resumed.ID != e.ID {
 		t.Fatalf("Resume started another execution %s instead of reconnecting %s", resumed.ID, e.ID)
 	}

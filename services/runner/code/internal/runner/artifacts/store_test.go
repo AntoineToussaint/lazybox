@@ -413,3 +413,28 @@ func TestStructuredTemplatesCoverEveryKind(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewRoundsPublishOnceAcrossReopen(t *testing.T) {
+	root := t.TempDir()
+	store, _ := open(t, root)
+	source := Source{Kind: "agent", SessionID: "reviewer", TurnID: "round-1"}
+	first, err := store.PublishReview("alpha", "review-1", "Acceptance checks", "first", "test/v1", source)
+	if err != nil || first.Latest() != 1 {
+		t.Fatal(first, err)
+	}
+	source.TurnID = "round-2"
+	second, err := store.PublishReview("alpha", "review-1", "Acceptance checks", "second", "test/v1", source)
+	if err != nil || second.Latest() != 2 {
+		t.Fatal(second, err)
+	}
+	reopened, _ := open(t, root)
+	retry, err := reopened.PublishReview("alpha", "review-1", "Acceptance checks", "duplicate", "test/v1", source)
+	if err != nil || retry.Latest() != 2 || retry.Content != "second" {
+		t.Fatal(retry, err)
+	}
+	source.TurnID = "round-1"
+	prior, err := reopened.PublishReview("alpha", "review-1", "Acceptance checks", "stale", "test/v1", source)
+	if err != nil || prior.ContentVersion != 1 || prior.Content != "first" {
+		t.Fatal(prior, err)
+	}
+}

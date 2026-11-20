@@ -37,6 +37,9 @@ try{
  // The clipboard is observed, not used; every contextmenu records whether its default was prevented once all listeners ran.
  await context.addInitScript(()=>{
   window.__copied=[];
+  const rememberPointer=event=>{window.__pointerPosition={clientX:event.clientX,clientY:event.clientY};};
+  window.addEventListener('pointermove',rememberPointer,true);
+  window.addEventListener('pointerdown',rememberPointer,true);
   Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__copied.push(text);},readText:async()=>'pasted from clipboard',write:async items=>{for(const item of items)for(const type of item.types)await item.getType(type).catch(()=>{});},read:async()=>[]}});
   // Links never leave: what would open in the browser is recorded.
   window.__opened=[];window.open=url=>{window.__opened.push(String(url));return null;};
@@ -143,13 +146,16 @@ try{
  await open(fileLink);
  assert.deepEqual((await labels()).slice(0,4),['Open','Open to the side','Quick look','Reveal in Files']);
  await item('Copy relative path').click();await expect.poll(copied).toBe('api/src/routes.ts');
- // Let the file finish loading while the next keyboard menu owns focus.
- const loading=Promise.withResolvers();
- await page.route('**/ReadWorkspaceFile',async route=>{
-  if(route.request().postDataJSON().path==='api/src/routes.ts')await loading.promise;
+ // Hold the file until keyboard focus has moved into a new menu.
+ let releaseFile;
+ const fileGate=new Promise(resolve=>{releaseFile=resolve;});
+ let fileRequested=false;
+ await page.route('**/lazybox.bench.v1.RunnerService/ReadWorkspaceFile',async route=>{
+  if(route.request().postDataJSON()?.path==='api/src/routes.ts'){fileRequested=true;await fileGate;}
   await route.continue();
  });
  await open(fileLink);await item('Open to the side').click();
+ await expect.poll(()=>fileRequested).toBe(true);
  const editorPanel=page.locator('section.workspace-panel.panel-editor');
  await expect(editorPanel.getByRole('tab',{name:/routes\.ts/})).toBeVisible();
 
@@ -157,7 +163,9 @@ try{
  await fileLink.focus();await page.keyboard.press('Shift+F10');
  await expect(menu).toBeVisible();
  await expect(item('Open')).toBeFocused();
- loading.resolve();
+ await item('Open to the side').dispatchEvent('pointermove',{pointerType:'mouse',...await page.evaluate(()=>window.__pointerPosition),movementX:0,movementY:0});
+ await expect(item('Open')).toBeFocused();
+ releaseFile();
  await expect(editorPanel.locator('.monaco-editor')).toBeVisible();
  await expect(item('Open')).toBeFocused();
  await page.keyboard.press('ArrowDown');await expect(item('Open to the side')).toBeFocused();

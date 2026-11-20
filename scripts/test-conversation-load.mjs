@@ -9,18 +9,19 @@
 // server and browser: through a Runner that has no ReadSessionTail (the full
 // replay, as before) and through one that has it. The time from the window's
 // first read of the conversation to its last turn on screen is bounded
-// absolutely (generously, for a loaded machine) and relative to the replay,
-// which fails if opening falls back to the full replay. Then: scrolling up
+// absolutely (generously, for a loaded machine). The RPC cursors assert that
+// opening uses the tail without replaying retained records; older-page responses
+// are held until the latest turn is visible. Relative timings are diagnostic. Then: scrolling up
 // brings the earlier history, in order and once; switching to another
 // conversation and back is instant (no read of what the window holds); and a
 // Runner restart while the earlier history loads loses and repeats nothing.
 //
-// LOAD_BUDGET_MS and LOAD_RATIO tune the bounds; LOAD_TURNS the length.
+// LOAD_BUDGET_MS tunes the absolute bound; LOAD_TURNS the length.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {longConversation} from './fixtures/long-conversation.mjs';
 
-const turns=Number(process.env.LOAD_TURNS||135),budget=Number(process.env.LOAD_BUDGET_MS||1500),ratio=Number(process.env.LOAD_RATIO||0.5);
+const turns=Number(process.env.LOAD_TURNS||135),budget=Number(process.env.LOAD_BUDGET_MS||1500);
 const f=await startRunnerFixture();
 const [alpha,beta]=f.sessions;
 for(const session of [alpha,beta])Object.assign(session,{provider:'claude',busy:false,status:'ready',agents:[{id:'root',status:'done'}]});
@@ -51,8 +52,26 @@ try{
   const page=await browser.newPage({viewport:{width:1400,height:900}});page.setDefaultTimeout(20000);
   const errors=[];page.on('pageerror',e=>errors.push(String(e)));
   await page.addInitScript(timing);await page.addInitScript(want=>{window.__load.want.push(want);},last);
+  const callsBefore=f.calls.length;
+  let releaseHistory;
+  const historyReady=new Promise(resolve=>{releaseHistory=resolve;});
+  if(session===alpha.id)await page.route('**/ReadSessionTail',async route=>{
+   const request=route.request().postDataJSON();
+   if(BigInt(request.before||0)>0)await historyReady;
+   await route.continue();
+  });
   await page.goto(url(collection,session));
-  await expect.poll(()=>page.evaluate(want=>window.__load.seen[want],last),{timeout:60000,intervals:[20]}).not.toBeUndefined();
+  try {
+   await expect.poll(()=>page.evaluate(want=>window.__load.seen[want],last),{timeout:60000,intervals:[20]}).not.toBeUndefined();
+   if(session===alpha.id){
+    await expect.poll(()=>f.calls.slice(callsBefore).filter(call=>call.body.sessionId===session&&call.method==='WatchEvents').length).toBeGreaterThan(0);
+    const reads=f.calls.slice(callsBefore).filter(call=>call.body.sessionId===session);
+    assert.ok(reads.some(call=>call.method==='ReadSessionTail'&&!Number(call.body.before||0)),'opening requests the latest tail');
+    const watches=reads.filter(call=>call.method==='WatchEvents');
+    assert.ok(watches.length>0,'opening follows live events');
+    assert.ok(watches.every(call=>BigInt(call.body.after||0)===BigInt(fast.events.length)),'opening must not replay retained history');
+   }
+  } finally { releaseHistory(); }
   const ms=await page.evaluate(want=>Math.round(window.__load.seen[want]-window.__load.read),last);
   return {page,errors,ms};
  };
@@ -68,7 +87,6 @@ try{
  const replayMs=median(measured.replay),tailMs=median(measured.tail);
  console.log(JSON.stringify({records:fast.events.length,replay:measured.replay,tail:measured.tail,median:{replay:replayMs,tail:tailMs}}));
  assert.ok(tailMs<=budget,`the last turn took ${tailMs} ms to show (budget ${budget} ms)`);
- assert.ok(tailMs<=replayMs*ratio,`the last turn took ${tailMs} ms to show, ${(tailMs/replayMs).toFixed(2)}x the full replay's ${replayMs} ms (budget ${ratio}x): opening fell back to the replay`);
 
  const {page,errors}=await open('alpha',alpha.id);
  const chat=page.locator('.embedded-chat:visible').first(),pane=chat.locator('.messages:visible');
@@ -121,5 +139,5 @@ try{
  assert.equal(text.split('LIVE_AFTER_RESTART').length-1,1,'the live record once');
  await restart.screenshot({path:'.cache/conversation-load.png'});
  assert.deepEqual(restartErrors,[]);
- console.log(`PASS conversation load: the last turn of a ${fast.events.length}-record conversation shows ${tailMs} ms after the window first reads it (the full replay: ${replayMs} ms; budgets ${budget} ms and ${ratio}x); scrolling up brings every earlier turn in order, once; switching back to it reads nothing it holds (${back} ms); a Runner restart while its earlier history loads loses and repeats nothing. Fixture only.`);
+ console.log(`PASS conversation load: the last turn of a ${fast.events.length}-record conversation shows ${tailMs} ms after the window first reads it (the full replay: ${replayMs} ms; budget ${budget} ms; tail cursors and independent history loading asserted); scrolling up brings every earlier turn in order, once; switching back to it reads nothing it holds (${back} ms); a Runner restart while its earlier history loads loses and repeats nothing. Fixture only.`);
 }finally{await browser?.close();await server.close();await f.close();}

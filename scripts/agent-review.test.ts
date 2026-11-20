@@ -196,3 +196,5 @@ test('the agents asking each other, and a loop asking you, are labelled lines', 
   add('review_escalated', 'The blocker is still open after two fixes: decide how to proceed.');
   assert.deepEqual(state.messages.map(m => [m.type, m.text, m.review?.review]), [['exchange', 'Codex asked Claude: Should Handle log?', 'rv-1'], ['review-alert', 'The blocker is still open after two fixes: decide how to proceed.', 'rv-1']]);
 });
+
+test('unverified review never displays a clean completion badge', () => { assert.equal(reviewTabBadge(create(ReviewRunSchema, {stopReason:'unverified',state:'done'})).text, 'unverified'); });

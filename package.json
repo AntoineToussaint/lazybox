@@ -59,6 +59,7 @@
     "test:chat-scroll": "node scripts/test-chat-scroll.mjs",
     "test:sidebar-polish": "node scripts/test-sidebar-polish.mjs",
     "test:workspace-hover": "node scripts/test-workspace-hover.mjs",
+    "test:page-errors": "node scripts/test-page-errors.mjs",
     "test:workspace-reorder": "node scripts/test-workspace-reorder.mjs",
     "test:resume-continuity": "node scripts/test-resume-continuity.mjs",
     "test:unified-repositories": "node scripts/test-unified-repositories.mjs",

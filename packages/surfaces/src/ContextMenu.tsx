@@ -258,6 +258,7 @@ function selectionAt(point: { x: number; y: number } | null): { text: string; ra
 }
 
 const keyboardEvents = new WeakSet<Event>();
+const movedPointerEvents = new WeakSet<Event>();
 let selectionAtPress: ReturnType<typeof selectionAt> | null = null;
 
 /** The whole menu for a contextmenu event that reached the window: its items now, its label, and items still on their way. */
@@ -414,7 +415,15 @@ function installListeners() {
     if (event.button !== 0 || event.detail === 0) return; // a keyboard click is its own gesture
     event.preventDefault(); event.stopImmediatePropagation();
   };
+  let pointerPosition: { x: number; y: number } | undefined;
+  const pointerMove = (event: PointerEvent) => {
+    // Some WebKit builds report movementX/Y as zero even for real movement.
+    if (!pointerPosition || pointerPosition.x !== event.clientX || pointerPosition.y !== event.clientY) movedPointerEvents.add(event);
+    pointerPosition = { x: event.clientX, y: event.clientY };
+    press.move(event);
+  };
   const pointerDown = (event: PointerEvent) => {
+    pointerPosition = { x: event.clientX, y: event.clientY };
     menuPress = false;
     selectionAtPress = event.pointerType === 'mouse' && (event.button === 2 || (event.button === 0 && event.ctrlKey))
       ? selectionAt({ x: event.clientX, y: event.clientY }) : null;
@@ -433,7 +442,7 @@ function installListeners() {
   window.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('pointerdown', pointerDown, true);
-  window.addEventListener('pointermove', press.move, true);
+  window.addEventListener('pointermove', pointerMove, true);
   window.addEventListener('pointerup', press.cancel, true);
   window.addEventListener('pointercancel', press.cancel, true);
   window.addEventListener('click', press.click, true);
@@ -449,7 +458,7 @@ function installListeners() {
     window.removeEventListener('contextmenu', onContextMenu);
     window.removeEventListener('keydown', onKeyDown, true);
     window.removeEventListener('pointerdown', pointerDown, true);
-    window.removeEventListener('pointermove', press.move, true);
+    window.removeEventListener('pointermove', pointerMove, true);
     window.removeEventListener('pointerup', press.cancel, true);
     window.removeEventListener('pointercancel', press.cancel, true);
     window.removeEventListener('click', press.click, true);
@@ -501,7 +510,6 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
   const [active, setActive] = useState(() => keyboard ? firstEnabled(entries) : -1);
   const [open, setOpen] = useState<{ index: number; keyboard: boolean; rect: DOMRect }>();
   const [placed, setPlaced] = useState(false);
-  const navigatingByKey = useRef(keyboard);
   const typed = useRef({ text: '', at: 0 });
   const pressed = useRef(-1), released = useRef(0);
   const hover = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -540,7 +548,6 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
   };
   const keydown = (event: ReactKeyboardEvent) => {
     if (event.target !== element.current && !(event.target instanceof Element && event.target.parentElement === element.current)) return;
-    navigatingByKey.current = true;
     const move = (to: number) => { event.preventDefault(); event.stopPropagation(); if (to >= 0) { setActive(to); setOpen(undefined); } };
     switch (event.key) {
       case 'ArrowDown': move(stepFocus(entries, active, 1)); return;
@@ -578,10 +585,9 @@ function Menu({ entries, at, anchor, origin, keyboard, depth, label, onRun, onCl
           aria-label={action.label} title={reason} aria-description={reason || (action.shortcut ? shortcutLabel(action.shortcut) : undefined)}
           className={'context-menu-item' + (action.danger ? ' danger' : '') + (active === index ? ' is-active' : '')}
           onPointerMove={event => {
-            // WebKit hit-tests a stationary mouse again when the layout changes.
-            // That event must not move the highlight away from the keyboard.
-            if (navigatingByKey.current && event.pointerType === 'mouse' && !event.movementX && !event.movementY) return;
-            navigatingByKey.current = false;
+            // Layout can put an item under a stationary pointer and emit a
+            // zero-motion event. It must not replace keyboard focus.
+            if (!movedPointerEvents.has(event.nativeEvent)) return;
             if (active !== index) setActive(action.disabled ? -1 : index);
             clearTimeout(hover.current);
             if (entry.submenu && open?.index !== index) hover.current = setTimeout(() => openSubmenu(index, false), 120);

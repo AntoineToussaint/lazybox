@@ -48,10 +48,11 @@ type ReviewInput struct {
 
 // Run is one agent review.
 type Run struct {
-	ContractDigest  string            `json:"contractDigest,omitempty"`
-	ReviewAttempt   string            `json:"reviewAttempt,omitempty"`
-	ReviewWorkspace string            `json:"reviewWorkspace,omitempty"`
-	MemberHeads     map[string]string `json:"memberHeads,omitempty"`
+	Verification    []VerificationCheck `json:"verification,omitempty"`
+	ContractDigest  string              `json:"contractDigest,omitempty"`
+	ReviewAttempt   string              `json:"reviewAttempt,omitempty"`
+	ReviewWorkspace string              `json:"reviewWorkspace,omitempty"`
+	MemberHeads     map[string]string   `json:"memberHeads,omitempty"`
 
 	ID             string        `json:"id"`
 	TemplateID     string        `json:"templateId,omitempty"`
@@ -256,7 +257,7 @@ func (s *Store) CreateRun(workspace string, run Run) (Run, error) {
 	_, err := s.update(workspace, func(r *Review) error {
 		// The oldest finished reviews make room; their findings stay.
 		for len(r.Runs) >= runsLimit {
-			i := slices.IndexFunc(r.Runs, func(x Run) bool { return x.State != RunRunning })
+			i := slices.IndexFunc(r.Runs, func(x Run) bool { return x.State != RunRunning && !x.Active() })
 			if i < 0 {
 				return fmt.Errorf("at most %d agent reviews per workspace", runsLimit)
 			}

@@ -194,6 +194,8 @@ const (
 // (run:<execution>/<command>), a commit (commit:<member>@<sha>) or a pull
 // request with its checks (pr:<owner/name>#<n>@<sha>).
 type Evidence struct {
+	// Corrects retracts a prior review pass without changing its ordering or attempt.
+	Corrects       uint64 `json:"corrects,omitempty"`
 	ContractDigest string `json:"contract_digest,omitempty"`
 	Kind           string `json:"kind"`
 	Ref            string `json:"ref"`

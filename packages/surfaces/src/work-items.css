@@ -33,10 +33,7 @@
 .new-task-item{position:relative;display:flex;flex-direction:column;min-width:0}
 /* Keep the actions visible while the fields and expanded preview scroll together. */
 .new-task-sheet.draggable-dialog[open]:has(.item-source){max-height:calc(100dvh - 16px)}
-.new-task-sheet form{flex:1 1 auto}
-.new-task-fields{display:flex;flex-direction:column;gap:inherit;min-height:0}
-.new-task-sheet:has(.item-source) .new-task-fields{overflow-y:auto;overscroll-behavior:contain}
-.new-task-fields>*,.new-task-sheet footer{flex-shrink:0}
+.new-task-sheet:has(.item-source) .new-task-fields{overscroll-behavior:contain}
 /* With an issue the message is optional: the box gives the issue its room. */
 .new-task-sheet .new-task-prompt[data-item]{min-height:calc(56px * var(--text-scale))}
 /* The conversation shows what was sent at its own height. */

@@ -6,7 +6,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 )
 
-const commandSchema = `{"type":"object","properties":{"action":{"type":"string","enum":["start","read","wait","cancel","actions","start_action","interactive"]},"argv":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string","description":"interactive: optional absolute directory inside the conversation workspace."},"id":{"type":"string"},"offset":{"type":"integer","minimum":0},"name":{"type":"string","description":"start_action: the workspace action to start, as actions lists it; omit for the default action."},"restart":{"type":"boolean","description":"start_action: restart it if it is running."}},"required":["action"],"additionalProperties":false}`
+const commandSchema = `{"type":"object","properties":{"action":{"type":"string","enum":["start","read","wait","cancel","actions","start_action","interactive","verify"]},"member":{"type":"string"},"expected":{"type":"string"},"regression":{"type":"string"},"argv":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string","description":"interactive: optional absolute directory inside the conversation workspace."},"id":{"type":"string"},"offset":{"type":"integer","minimum":0},"name":{"type":"string","description":"start_action: the workspace action to start, as actions lists it; omit for the default action."},"restart":{"type":"boolean","description":"start_action: restart it if it is running."}},"required":["action"],"additionalProperties":false}`
 
 const reviewFindingSchema = `{"type":"object","properties":{"file":{"type":"string","description":"Workspace-relative repository/path."},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1},"severity":{"type":"string","enum":["blocker","major","minor","nit"]},"title":{"type":"string"},"body":{"type":"string"},"key":{"type":"string","description":"Optional stable key for retrying the same finding."}},"required":["file","startLine","severity","title","body"],"additionalProperties":false}`
 
@@ -51,8 +51,11 @@ func toolOffered(purpose, name string) bool {
 }
 
 // toolApproval is the approval card title of a dynamic tool call; empty when
-// the call runs without asking. Review findings use the Runner’s reviewer authorization.
-func toolApproval(name string) string {
+// the call runs without asking, which reading settings, documentation and managed command state does.
+func toolApproval(name string, args json.RawMessage) string {
+	if name == agent.CommandTool && agent.ToolReplaySafe(name, args) {
+		return ""
+	}
 	switch name {
 	case agent.SettingsReadTool, agent.DocsSearchTool, agent.DocsReadTool, agent.ReviewFindingTool:
 		return ""

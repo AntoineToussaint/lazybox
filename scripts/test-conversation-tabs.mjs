@@ -161,6 +161,7 @@ async function tabsOn(){
  const source=page.locator('article.message').filter({hasText:'A cache entry expires after ten minutes.'});
  const words=source.getByText('A cache entry expires after ten minutes.',{exact:true});
  await words.scrollIntoViewIfNeeded();
+ await composer.evaluate(node=>node.blur());
  const selectedPoint=await words.evaluate(node=>{
   const range=document.createRange();
   range.setStart(node.firstChild,2);range.setEnd(node.firstChild,13);
@@ -218,7 +219,10 @@ async function tabsOn(){
  const dialog=page.getByRole('dialog',{name:'Delete conversation'});
  const stop=dialog.getByRole('checkbox');
  await expect(dialog.getByRole('button',{name:/Delete conversation|Stop and delete/})).toBeVisible();
- if(await stop.count())await stop.check();
+ // This fixture has an open session. Its required checkbox arrives after
+ // the resource lookup; button visibility does not mean that lookup finished.
+ await expect(stop).toBeVisible();
+ await stop.check();
  await dialog.getByRole('button',{name:/Delete conversation|Stop and delete/}).click();
  await expect(dialog).toHaveCount(0);
  await expect(tab('Review of the main conversation')).toHaveCount(0);

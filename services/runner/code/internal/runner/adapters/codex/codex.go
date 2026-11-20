@@ -787,7 +787,7 @@ func (s *session) read() {
 						go s.runTool(m.ID, "", call.Tool, call.Arguments)
 						return
 					}
-					title := toolApproval(call.Tool)
+					title := toolApproval(call.Tool, call.Arguments)
 					s.mu.Lock()
 					autoRun := call.Tool == agent.CommandTool && s.permission == "yolo" && s.workflow != "plan" && !agent.IsAssistant(s.purpose)
 					s.mu.Unlock()

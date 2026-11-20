@@ -305,14 +305,28 @@ export async function superviseRunner({ start, restartRequest, stopping, onReady
 }
 // A stop request is addressed to one generation of this exact launch lock.
 export async function listenForDevStop(lock, receipt, stop) {
-  const nonce = randomUUID();
-  const watcher = watch(lock, (_event, name) => {
-    if (name === 'stop-' + nonce) stop();
-  });
-  try {
-    await saveJSON(join(lock, 'control.json'), { ...receipt, nonce });
-    return watcher;
-  } catch (error) { watcher.close(); throw error; }
+  const nonce = randomUUID(), request = join(lock, 'stop-' + nonce);
+  let closed = false, checking = false, lastError = '', timer;
+  const close = () => { closed = true; clearInterval(timer); };
+  // The request is durable; filesystem notifications may be coalesced or lost.
+  // Check the exact generation's file, never another launcher's request.
+  const check = async () => {
+    if (closed || checking) return;
+    checking = true;
+    try {
+      await lstat(request);
+      if (!closed) { close(); stop(); }
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.message !== lastError) {
+        lastError = error.message;
+        console.error(`Could not check Dev stop request: ${error.message}`);
+      }
+    } finally { checking = false; }
+  };
+  await saveJSON(join(lock, 'control.json'), { ...receipt, nonce });
+  timer = setInterval(check, 100);
+  timer.unref();
+  return { close };
 }
 
 export async function waitForDesktop(receipt, desktop, stopping) {

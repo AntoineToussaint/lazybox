@@ -21,6 +21,7 @@ import (
 
 const reviewUsage = `Usage:
   lazybox review add --file <repository>/<path> --line N[-M] --severity blocker|major|minor|nit --title "one line" [--body "details" | --body -] [--key KEY]
+  lazybox review verify --name NAME --member REPOSITORY --expected TEXT [--regression TEXT] -- COMMAND [ARGS...]
   lazybox review list
   lazybox review resolve <finding-id> --note "how it was fixed"
   lazybox review reopen <finding-id> --note "what is still wrong"
@@ -31,6 +32,8 @@ func (c *cli) review(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "verify":
+		return c.reviewVerify(args[1:])
 	case "add":
 		return c.reviewAdd(args[1:])
 	case "list", "ls":
@@ -162,6 +165,15 @@ func (c *cli) reviewList(args []string) error {
 	}
 	run := r.Run
 	c.out("%s · %s reviewing %s · %s\n", run.ReviewerTitle, run.ReviewerLabel, run.SourceTitle, run.State)
+	for _, check := range run.Verification {
+		c.out("  Check %s: %s\n", check.Name, check.Expected)
+		for _, receipt := range check.Runs {
+			c.out("    Round %d: %s · base %s · candidate %s\n", receipt.Round, receipt.State, receipt.BaseCommandId, receipt.CandidateCommandId)
+		}
+		if check.Regression != "" {
+			c.out("    Regression proposal: %s\n", check.Regression)
+		}
+	}
 	if len(r.Findings) == 0 {
 		c.out("  No findings filed yet.\n")
 		return nil
@@ -297,4 +309,29 @@ func (c *cli) reviewCancel(args []string) error {
 	}
 	c.out("Review cancelled.\n")
 	return nil
+}
+
+func (c *cli) reviewVerify(args []string) error {
+	f := c.flags("review verify")
+	name := f.String("name", "", "stable acceptance criterion name")
+	member := f.String("member", "", "workspace repository")
+	expected := f.String("expected", "", "observable expected behavior")
+	regression := f.String("regression", "", "proposed durable regression test")
+	argv, err := c.parse(f, args)
+	if err != nil {
+		return err
+	}
+	session, err := c.reviewerSession()
+	if err != nil {
+		return err
+	}
+	cl, err := c.dial()
+	if err != nil {
+		return err
+	}
+	check, err := got(cl.RunReviewVerification(c.ctx, connect.NewRequest(&pb.RunReviewVerificationRequest{SessionId: session, Name: *name, Member: *member, Expected: *expected, Regression: *regression, Argv: argv})))
+	if err != nil {
+		return err
+	}
+	return c.printProtoJSON(check)
 }

@@ -6,7 +6,11 @@
 .new-task-sheet h2{margin:0;font-size:calc(18px * var(--text-scale));line-height:calc(24px * var(--text-scale));font-weight:600;letter-spacing:-.3px}
 .new-task-sheet>[data-dialog-drag-handle] p{margin:4px 0 0;font-size:calc(12px * var(--text-scale));color:var(--text-subtle)}
 .new-task-sheet>[data-dialog-drag-handle]>button{width:28px;height:28px;padding:0;border:0;background:transparent;color:var(--text-muted);font-size:calc(18px * var(--text-scale))}
-.new-task-sheet form{display:flex;flex-direction:column;gap:12px;min-height:0}
+.new-task-sheet form{display:flex;flex-direction:column;gap:12px;min-height:0;flex:1 1 auto}
+/* Keep the action row reachable when controls wrap or the window is short. */
+.new-task-fields{display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto;padding:2px;margin:-2px}
+.new-task-fields>*{flex-shrink:0}
+.new-task-sheet footer{flex-shrink:0}
 
 .new-task-prompt{min-height:calc(104px * var(--text-scale));max-height:40dvh;resize:vertical;padding:12px 14px;border-radius:10px;border-color:var(--line-strong);background:var(--bg);font-size:calc(14px * var(--text-scale));line-height:1.5;color:var(--text)}
 .new-task-prompt:focus{outline:2px solid var(--focus);outline-offset:0;border-color:transparent}

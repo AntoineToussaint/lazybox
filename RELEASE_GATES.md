@@ -252,3 +252,52 @@ The real browser gate still requires live CSS replacement, nested atomic saves,
 private-path rejection and complete server shutdown. A passing configured-backend
 gate does not mean the upstream FSEvents problem was fixed. The raw diagnostic
 deliberately continues to fail while its default-backend probe fails.
+
+### Conversation regression fixtures
+
+The conversation-load gate holds older-page responses until the newest turn
+is visible and checks that live following starts at the retained cursor. Its
+absolute display budget remains enforced; relative replay timings are reported
+for diagnosis, not used to infer which protocol path ran. The conversation-tabs
+selection fixture scrolls the source into view and blurs the previous composer
+before selecting text, so a right-click tests the intended selection.
+
+In Go link fixtures, cleanup closes and joins every in-process server before
+temporary state is removed, including the server's final audit write.
+
+The reorder gate schedules a focus restoration and moves focus in the same
+JavaScript task, proving the old row cannot steal focus on the next frame.
+The latest-turn reload fixture waits for an explicit final event before
+expanding commands; a count of two can appear before their final updates.
+
+Hover-delay assertions use a paused browser clock: absence before the delay
+and presence afterward cannot depend on how long CI stalls between commands.
+Docking resize assertions wait for the final movement to reach the layout
+before releasing the pointer, then verify the width remains persisted.
+
+The workspace-reorder fixture collects browser runtime errors and unhandled
+rejections through DOM events. WebKit's protocol can label a caught fetch
+failure during navigation as `pageerror`; that diagnostic is not an uncaught
+application error. The page-errors gate tests both browsers, retains genuine
+throws and rejected promises, and exercises caught fetches across navigation.
+
+The issue-start gate checks the action row at 1024×680 and 390×680. The new-task form scrolls its fields independently of the footer, including when agent controls wrap; repository selection and branch pickers remain covered by their existing gates.
+
+The context-menu gate holds file loading while keyboard focus enters a menu and
+injects a zero-motion pointer event: layout under a stationary pointer must not
+replace keyboard focus. Mermaid's reader-position gate holds the actual near-view
+observer notification until wheel movement is measured, then checks anchoring
+during rendering. The chat-scroll gate gives native scrollbars explicit track and
+thumb geometry before dragging; platform-dependent arrow buttons and minimum
+thumb sizes must not turn a drag into a click on a scroll arrow.
+
+
+End in a streaming chat immediately resumes following the latest output; its
+regression checks this before native scrolling runs. Context-menu pointer
+ownership compares client coordinates because some WebKit builds report zero
+movementX/Y for real pointer motion. Subscription-switch uses the same runtime
+error collector as workspace reorder, including its refresh page.
+
+The chat-scroll gate also applies a small downward compositor correction during an upward key gesture: this must not resume following near the bottom. Near-bottom tolerance belongs to downward input; an unclassified scrollbar movement must reach the actual bottom. Link revocation tests join the serving side before checking its final audit record.
+
+The chat-scroll gate keeps native Chromium scrollbars visible and verifies that prompt markers stay inside the content edge, then drags the thumb while output streams. The prompt-navigation gate checks that those markers still navigate the transcript.

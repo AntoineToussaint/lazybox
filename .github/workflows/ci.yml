@@ -131,6 +131,16 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
+      - name: Install verification isolation
+        if: needs.plan.outputs.profile == 'full'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap apparmor-profiles
+          # Ubuntu restricts capabilities in unprivileged namespaces unless
+          # the sandbox runtime has its distribution-provided profile.
+          sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev -- true
       - name: Install tmux
         if: needs.plan.outputs.profile == 'full'
         run: command -v tmux || { sudo apt-get update && sudo apt-get install -y tmux; }

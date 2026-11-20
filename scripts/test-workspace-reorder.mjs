@@ -14,6 +14,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {collectPageErrors} from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 // Eight workspaces: more than a short window shows, so the list scrolls.
@@ -28,7 +29,7 @@ try {
   const context = await browser.newContext({viewport: {width: 1400, height: 900}, colorScheme: 'dark'});
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = await collectPageErrors(page);
   const url = `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=beta#token=${f.token}`;
   await page.goto(url);
   const nav = page.getByRole('navigation', {name: 'Workspaces'});
@@ -91,6 +92,19 @@ try {
   await expect(link('Epsilon API')).toBeFocused();
   await expect(nav.getByRole('status').filter({hasText: 'moved to'})).toHaveText('Epsilon API moved to 4 of 8');
   await expect.poll(() => arranged().at(-1)).toEqual(['beta', 'gamma', 'alpha', 'epsilon', 'delta', 'zeta', 'eta', 'theta']);
+  // A pending focus-restoration frame must not steal a subsequent focus move.
+  // Dispatch and move focus in one task, before that frame can run.
+  await link('Epsilon API').evaluate(node=>{
+    node.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',altKey:true,shiftKey:true,bubbles:true,cancelable:true}));
+    document.querySelector('.workspace-link[aria-current="page"]').focus();
+  });
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await expect(link('Beta release')).toBeFocused();
+  await link('Epsilon API').focus();
+  await page.keyboard.press('Alt+Shift+ArrowDown');
+  await expect(names).toHaveText(afterKeys);
+  // Move the pointer away so a delayed hover is not part of the keyboard test.
+  await page.mouse.move(1300,850);
   // At the top, ⌥⇧↑ changes nothing and keeps nothing.
   await link('Beta release').focus();
   const kept = arranged().length;

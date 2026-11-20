@@ -333,8 +333,8 @@ func TestRedeliveredUnansweredApprovalStaysPending(t *testing.T) {
 }
 
 // Waiting for a command has no effect and the command outlived the Runner, so
-// an approved wait in flight at the restart just runs again.
-func TestRedeliveredApprovedWaitRunsAgain(t *testing.T) {
+// a wait in flight at the restart runs again without an approval.
+func TestRedeliveredWaitRunsAgainWithoutApproval(t *testing.T) {
 	t.Setenv("FIXTURE_TOOL_ACTION", "wait")
 	root := fixtureRoot(t)
 	self, _ := os.Executable()
@@ -356,15 +356,15 @@ func TestRedeliveredApprovedWaitRunsAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = first.Apply(context.Background(), agent.Operation{ID: "go", Kind: agent.Message, Text: "wait"})
-	approval := receive(t, first, "approval")
-	if _, err = first.Apply(context.Background(), agent.Operation{ID: "yes", Kind: agent.Approve, RequestID: "n:41", Decision: "accept"}); err != nil {
-		t.Fatal(err)
+	select {
+	case <-runs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("read-only wait did not start without approval")
 	}
-	<-runs
 	state := first.(agent.Durable).DurableState()
 	_ = first.(agent.Detacher).Detach()
 
-	again, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Tools: tools, Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: state, Reference: "thread-1", Cursor: approval.Cursor, Responded: map[string]agent.Operation{"n:41": {Kind: agent.Approve, RequestID: "n:41", Decision: "accept"}}}}})
+	again, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Tools: tools, Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: state, Reference: "thread-1", Cursor: 0}}})
 	if err != nil {
 		t.Fatal(err)
 	}

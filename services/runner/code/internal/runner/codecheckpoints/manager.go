@@ -802,5 +802,5 @@ func (m *Manager) Delete(ctx context.Context, conversation string) error {
 	if err = os.Remove(m.file(conversation)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return nil
+	return os.RemoveAll(filepath.Join(m.root, "verification", conversation))
 }

@@ -41,11 +41,11 @@ func TestDynamicToolsFollowThePurpose(t *testing.T) {
 	if toolOffered("help", agent.CommandTool) {
 		t.Fatal("help assistant is offered managed commands")
 	}
-	if toolApproval(agent.SettingsUpdateTool) == "" || toolApproval(agent.CommandTool) == "" {
+	if toolApproval(agent.SettingsUpdateTool, nil) == "" || toolApproval(agent.CommandTool, nil) == "" {
 		t.Fatal("a tool with effects runs without approval")
 	}
 	// Reading the documentation has nothing to approve, and is offered only to help.
-	if toolApproval(agent.DocsSearchTool) != "" || toolApproval(agent.DocsReadTool) != "" || toolOffered("", agent.DocsReadTool) || toolOffered("planning", agent.DocsSearchTool) {
+	if toolApproval(agent.DocsSearchTool, nil) != "" || toolApproval(agent.DocsReadTool, nil) != "" || toolOffered("", agent.DocsReadTool) || toolOffered("planning", agent.DocsSearchTool) {
 		t.Fatal("documentation tools")
 	}
 	for _, tool := range dynamicTools("help", false)[:2] {

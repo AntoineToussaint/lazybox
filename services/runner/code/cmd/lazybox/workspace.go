@@ -255,5 +255,5 @@ func (c *cli) requestOutcome(r *pb.RepositoryRequest) error {
 	case "expired":
 		return fail(exitTimeout, "the request for %s expired without an answer; ask again if you still need it", requestedName(r))
 	}
-	return fail(exitTimeout, "no answer yet. The request stays open in Lazybox; when the person answers you will be told in this conversation. Continue with what you can do without it, or end your turn and say what you are waiting for")
+	return fail(exitTimeout, "wait ended with no answer yet for request %s. The repository request remains pending; when the person answers you will be told in this conversation. This output describes the state when the wait ended. Check current status with lazybox workspace repos; do not submit a duplicate request.", r.Id)
 }

@@ -58,6 +58,11 @@ func (a *reviewAsks) broadcast() {
 
 // reviewAct does what a step of the loop decided.
 func (b *Bench) reviewAct(workspace string, run reviews.Run, action reviews.Action) {
+	if run.TemplateID == reviews.VerificationTemplate {
+		lock, _ := b.verificationFlow.LoadOrStore(run.ID, &sync.Mutex{})
+		lock.(*sync.Mutex).Lock()
+		defer lock.(*sync.Mutex).Unlock()
+	}
 	if len(action.SendFindings) > 0 {
 		if err := b.sendFindings(workspace, run, action.SendFindings); err != nil {
 			b.stopLoop(workspace, run.ID, "Could not send the findings to "+firstOf(run.SourceLabel, "the author")+": "+err.Error())
@@ -173,6 +178,21 @@ func joinDetail(parts ...string) string {
 // sendFindings delivers findings to the author's conversation as one
 // message, exactly as the tray would put them in its box, and marks them sent.
 func (b *Bench) sendFindings(workspace string, run reviews.Run, ids []string) error {
+	if run.TemplateID == reviews.VerificationTemplate {
+		current, err := b.Reviews.Load(workspace)
+		if err != nil {
+			return err
+		}
+		for _, saved := range current.Runs {
+			if saved.ID == run.ID {
+				if saved.Round != run.Round || saved.Phase != reviews.PhaseTriage || !saved.Active() || saved.Paused {
+					return nil
+				}
+				run = saved
+				break
+			}
+		}
+	}
 	source, err := b.Get(run.SourceSession)
 	if err != nil {
 		return err
@@ -189,8 +209,29 @@ func (b *Bench) sendFindings(workspace string, run reviews.Run, ids []string) er
 	}
 	operation := fmt.Sprintf("review-%s-findings-%d", strings.TrimPrefix(run.ID, "rv-"), run.Round)
 	origin := &agent.Origin{Kind: agent.OriginReviewFindings, Summary: fmt.Sprintf("%s review · %s sent", firstOf(run.ReviewerLabel, "Agent"), plural(len(findings), "finding", "findings")), Detail: roundLabel(run), From: run.ReviewerLabel}
-	if err = b.sendLazyboxMessage(b.ctx, source, operation, reviews.FindingsMessage(findings), origin); err != nil {
+	message := reviews.FindingsMessage(findings)
+	if run.TemplateID == reviews.VerificationTemplate {
+		recipes, err := json.MarshalIndent(run.Verification, "", "  ")
+		if err != nil {
+			return err
+		}
+		message += "\n\nRecorded acceptance checks and execution receipts follow. Reproduce the failure, repair the behavior, and retain confirmed reproductions as regression tests in the repository's existing test suite. Explain the test path and invocation to the reviewer.\n\n" + string(recipes)
+	}
+	// The checkpoint starts during delivery, before the provider acknowledges it.
+	sentAt := time.Now().Unix()
+	if err = b.sendLazyboxMessage(b.ctx, source, operation, message, origin); err != nil {
 		return err
+	}
+	// A retried delivery can already have a checkpoint from before restart.
+	if b.Checkpoints != nil {
+		if record, err := b.Checkpoints.List(conversationOf(source)); err == nil {
+			for _, turn := range record.Turns {
+				if turn.OperationID == operation {
+					sentAt = turn.Before.At.Unix()
+					break
+				}
+			}
+		}
 	}
 	heads := map[string]string{}
 	for _, f := range findings {
@@ -203,9 +244,14 @@ func (b *Bench) sendFindings(workspace string, run reviews.Run, ids []string) er
 		return err
 	}
 	_, err = b.Reviews.Update(workspace, func(rv *reviews.Review) error {
-		reviews.FindingsSent(rv, run.ID, ids, "Lazybox", run.SourceLabel, time.Now().Unix())
+		reviews.FindingsSent(rv, run.ID, ids, "Lazybox", run.SourceLabel, sentAt)
 		return nil
 	})
+	if err == nil {
+		// A fast author can finish before the sent state is saved. Reconcile that
+		// exact operation; AuthorTurnEnded's phase guard makes this idempotent.
+		b.authorTurnEnded(source, operation, []reviews.Match{{Workspace: workspace, Run: run, Role: reviews.RoleAuthor}})
+	}
 	return err
 }
 
@@ -270,6 +316,21 @@ func (b *Bench) turnDiff(conversation string, seq int, members []collections.Mem
 
 // sendRereview asks the reviewer for the current round, once.
 func (b *Bench) sendRereview(workspace string, run reviews.Run) error {
+	if run.TemplateID == reviews.VerificationTemplate {
+		current, err := b.Reviews.Load(workspace)
+		if err != nil {
+			return err
+		}
+		for _, saved := range current.Runs {
+			if saved.ID == run.ID {
+				run = saved
+				break
+			}
+		}
+		if !run.Active() || run.Paused || run.Phase != reviews.PhaseReviewing || run.Rounds[len(run.Rounds)-1].Sent {
+			return nil
+		}
+	}
 	reviewer, err := b.Get(run.ReviewerSession)
 	if err != nil {
 		return err
@@ -293,6 +354,61 @@ func (b *Bench) sendRereview(workspace string, run reviews.Run) error {
 	var diff []string
 	if c, err := b.Collections.Get(workspace); err == nil && len(run.Rounds) > 0 {
 		diff = b.turnDiff(run.SourceConversation, run.Rounds[len(run.Rounds)-1].AuthorTurn, c.Members)
+	}
+	if run.TemplateID == reviews.VerificationTemplate {
+		collection, captureErr := b.Collections.Get(workspace)
+		if captureErr != nil {
+			return captureErr
+		}
+		if len(run.Rounds[len(run.Rounds)-1].Input) == 0 {
+			var heads map[string]string
+			if run.ContractDigest != "" {
+				members, err := b.planBaseline(b.ctx, workspace)
+				if err != nil {
+					return fmt.Errorf("commit the repaired Mission candidate before rechecking: %w", err)
+				}
+				if len(members) != len(run.MemberHeads) {
+					return errors.New("Mission workspace membership changed during repair")
+				}
+				heads = map[string]string{}
+				for _, member := range members {
+					if _, ok := run.MemberHeads[member.Name]; !ok {
+						return errors.New("Mission workspace membership changed during repair")
+					}
+					heads[member.Name] = member.Commit
+				}
+			}
+			scope, captureErr := b.captureReviewInput(b.ctx, conversationOf(reviewer), collection, run.Compare, heads)
+			if captureErr != nil {
+				return captureErr
+			}
+			run, err = b.Reviews.UpdateRun(workspace, run.ID, func(r *reviews.Run) error {
+				if heads != nil {
+					r.MemberHeads = heads
+				}
+				r.Input = scope.input
+				r.Rounds[len(r.Rounds)-1].Input = scope.input
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+		diff = nil
+		for _, input := range run.Input {
+			for _, member := range collection.Members {
+				if member.Name == input.Member {
+					diff = append(diff, fmt.Sprintf("git -C %s diff %s %s --", shellQuote(member.Path), input.Base, input.Commit))
+				}
+			}
+		}
+
+		for _, check := range run.Verification {
+			if _, err := b.startVerification(b.ctx, reviewer, check); err != nil {
+				return err
+			}
+		}
+		diff = append(diff, "Recheck every recorded acceptance criterion. Wait for the new verification commands, inspect their output, and resolve findings only after the relevant checks pass. Propose durable regression tests to the author for confirmed failures.", reviewCompletionInstructions(run.TemplateID))
 	}
 	operation := fmt.Sprintf("review-%s-round-%d", strings.TrimPrefix(run.ID, "rv-"), run.Round)
 	origin := &agent.Origin{Kind: agent.OriginReviewRound, Summary: fmt.Sprintf("Re-review asked · %s changed files", firstOf(run.SourceLabel, "the author")), Detail: joinDetail(roundLabel(run), plural(len(open), "finding", "findings")+" open"), From: run.SourceLabel}
@@ -518,6 +634,7 @@ func (b *Bench) ReviewerEndedByHand(matches []reviews.Match, how string) {
 // reviewEndedByHand tells the author's conversation, and the mission task
 // the review is evidence on, that the person ended the review.
 func (b *Bench) reviewEndedByHand(workspace string, run reviews.Run) {
+	b.cancelVerification(run)
 	review, err := b.Reviews.Load(workspace)
 	if err != nil {
 		return

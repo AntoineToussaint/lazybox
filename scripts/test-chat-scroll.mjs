@@ -46,6 +46,17 @@ async function run(name,engine){
   await expect.poll(gap,{message:'Sending should return to the latest turn'}).toBeLessThan(3);
   channel.push({type:'operation_accepted',text:'Continue from here'});channel.push({type:'message_delta',text:'LATEST_SENT_TURN'});await expect(pane).toContainText('LATEST_SENT_TURN');await expect.poll(gap).toBeLessThan(3);
 
+  // A compositor correction during an upward key scroll is not a new
+  // downward input, even when both positions are within the follow threshold.
+  await pane.evaluate(node=>{
+   node.scrollTop=node.scrollHeight;node.dispatchEvent(new Event('scroll'));
+   node.dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true,cancelable:true}));
+   node.scrollTop-=10;node.dispatchEvent(new Event('scroll'));
+   node.scrollTop+=2;node.dispatchEvent(new Event('scroll'));
+  });
+  await expect(latest,'A correction during upward scrolling must not resume following').toBeVisible();
+  await latest.click();await expect.poll(gap).toBeLessThan(3);
+
   // A reply streams in a delta every 30 ms. Whatever way the reader scrolls
   // up, following stops at once and nothing pulls them back down.
   channel.push({type:'operation_accepted',text:'Stream a long reply'});
@@ -83,6 +94,10 @@ async function run(name,engine){
    }
   },`${name}: ${how}`);
   const holds=async(how,nudge=false)=>{
+   // Wheel delivery is asynchronous. A quiet pane before the gesture lands
+   // is not evidence that the gesture has finished.
+   await expect(latest,`${how}: the Latest pill offers the way back`).toBeVisible();
+   await expect.poll(gap,{message:`${name}: ${how} moves away from the bottom`}).toBeGreaterThan(nudge?1:200);
    const held=await settle(how),grown=await pane.evaluate(node=>node.scrollHeight);
    if(!nudge)assert.ok(held<grown-(await pane.evaluate(node=>node.clientHeight))-200,`${how}: the reader is clearly away from the bottom`);
    await expect(latest,`${how}: the Latest pill offers the way back`).toBeVisible();
@@ -107,25 +122,27 @@ async function run(name,engine){
   await wheel((await gap())+20000);await follows('Wheeling back to the bottom');
   // Keyboard.
   await pane.focus();await page.keyboard.press('PageUp');await holds('PageUp mid-stream');
+  const endGap=await pane.evaluate(node=>{node.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true,cancelable:true}));return node.scrollHeight-node.clientHeight-node.scrollTop;});
+  assert.ok(endGap<3,'End resumes following immediately, before native scrolling or another streamed delta');
   await page.keyboard.press('End');await follows('End');
   await page.keyboard.press('ArrowUp');await page.keyboard.press('ArrowUp');await page.keyboard.press('ArrowUp');await page.keyboard.press('ArrowUp');
   await expect(latest,'ArrowUp stops following').toBeVisible();await settle('ArrowUp');
   await page.keyboard.press('Home');await holds('Home mid-stream');
   await latest.click();await follows('The Latest pill after Home');
-  // Dragging the scrollbar thumb.
-  // Give Chromium a classic track with no arrow buttons. With an OS-themed
-  // scrollbar the bottom of the track can be a down arrow instead of the thumb.
-  if(name==='chromium')await page.addStyleTag({content:`
-   .messages::-webkit-scrollbar{width:14px}
-   .messages::-webkit-scrollbar-button{display:none}
-   .messages::-webkit-scrollbar-thumb{background:#777;min-height:24px}
-  `});
+  // Fix the browser-owned thumb geometry for the drag. Native themes have
+  // different minimum thumb sizes and arrow buttons; guessing 20px can hit
+  // the bottom arrow instead of the thumb on Linux.
+  await page.addStyleTag({content:'.messages::-webkit-scrollbar{width:16px}.messages::-webkit-scrollbar-track{background:#eee}.messages::-webkit-scrollbar-thumb{background:#777;min-height:40px;border:0}.messages::-webkit-scrollbar-button{display:none;width:0;height:0}'});
   await expect.poll(gap).toBeLessThan(3);
-  const bar=await pane.evaluate(node=>{const r=node.getBoundingClientRect(),thumb=Math.max(20,node.clientHeight*node.clientHeight/node.scrollHeight);return{x:r.right-Math.max(3,(node.offsetWidth-node.clientWidth)/2),y:Math.min(r.top+node.clientHeight-thumb/2,r.top+node.scrollTop/node.scrollHeight*node.clientHeight+thumb/2),native:node.offsetWidth>node.clientWidth};});
+  // Dragging the scrollbar thumb.
+  const bar=await pane.evaluate(node=>{const r=node.getBoundingClientRect(),thumb=Math.max(40,node.clientHeight*node.clientHeight/node.scrollHeight);return{x:r.right-Math.max(3,(node.offsetWidth-node.clientWidth)/2),y:Math.min(r.top+node.clientHeight-thumb/2,r.top+node.scrollTop/node.scrollHeight*node.clientHeight+thumb/2),native:node.offsetWidth>node.clientWidth};});
   if(name==='chromium')assert.ok(bar.native,'Chromium must exercise a real scrollbar drag');
+  if(bar.native)assert.ok(await pane.evaluate(node=>{const edge=node.getBoundingClientRect().left+node.clientLeft+node.clientWidth;return [...node.parentElement.querySelectorAll('.prompt-rail button')].every(marker=>marker.getBoundingClientRect().right<=edge);}), 'prompt markers must not intercept the native scrollbar');
   await page.mouse.move(bar.x,bar.y);await page.mouse.down();
   for(let step=1;step<=8;step++){await page.mouse.move(bar.x,bar.y-step*12);await pause(30);}
-  if(!bar.native)await pane.evaluate(node=>{node.scrollTop-=600;return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});// An overlay scrollbar a headless engine does not draw: the held pointer is the drag.
+  // Headless macOS WebKit has no painted scrollbar, even with custom CSS.
+  // Keep its held-pointer simulation; Linux exercises the actual native drag.
+  if(!bar.native)await pane.evaluate(node=>{node.scrollTop-=600;return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
   await page.mouse.up();await holds('A scrollbar drag mid-stream');
   // A layout shift above the viewport, such as an image or diagram rendering
   // in an earlier message, leaves what the reader looks at where it is.

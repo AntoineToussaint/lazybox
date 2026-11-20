@@ -429,6 +429,9 @@ const (
 	// RunnerServiceListReviewFindingsProcedure is the fully-qualified name of the RunnerService's
 	// ListReviewFindings RPC.
 	RunnerServiceListReviewFindingsProcedure = "/lazybox.bench.v1.RunnerService/ListReviewFindings"
+	// RunnerServiceRunReviewVerificationProcedure is the fully-qualified name of the RunnerService's
+	// RunReviewVerification RPC.
+	RunnerServiceRunReviewVerificationProcedure = "/lazybox.bench.v1.RunnerService/RunReviewVerification"
 	// RunnerServiceSetReviewFindingStateProcedure is the fully-qualified name of the RunnerService's
 	// SetReviewFindingState RPC.
 	RunnerServiceSetReviewFindingStateProcedure = "/lazybox.bench.v1.RunnerService/SetReviewFindingState"
@@ -966,6 +969,8 @@ type RunnerServiceClient interface {
 	// The findings of the review an execution is the reviewer (or the author)
 	// of, from `lazybox review list`. The same agent rule as AddReviewFinding.
 	ListReviewFindings(context.Context, *connect.Request[gen.ListReviewFindingsRequest]) (*connect.Response[gen.ReviewFindings], error)
+	// Execute a frozen acceptance recipe for the caller’s active verification review.
+	RunReviewVerification(context.Context, *connect.Request[gen.RunReviewVerificationRequest]) (*connect.Response[gen.ReviewVerificationCheck], error)
 	// The reviewer's verdict on one of its own findings in a later round
 	// (`lazybox review resolve|reopen <id> --note`): resolved, or still open.
 	// The same agent rule as AddReviewFinding; only findings of its own review.
@@ -2041,6 +2046,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("ListReviewFindings")),
 			connect.WithClientOptions(opts...),
 		),
+		runReviewVerification: connect.NewClient[gen.RunReviewVerificationRequest, gen.ReviewVerificationCheck](
+			httpClient,
+			baseURL+RunnerServiceRunReviewVerificationProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("RunReviewVerification")),
+			connect.WithClientOptions(opts...),
+		),
 		setReviewFindingState: connect.NewClient[gen.SetReviewFindingStateRequest, gen.ReviewFinding](
 			httpClient,
 			baseURL+RunnerServiceSetReviewFindingStateProcedure,
@@ -2720,6 +2731,7 @@ type runnerServiceClient struct {
 	startReview                  *connect.Client[gen.StartReviewRequest, gen.StartReviewResponse]
 	addReviewFinding             *connect.Client[gen.AddReviewFindingRequest, gen.ReviewFinding]
 	listReviewFindings           *connect.Client[gen.ListReviewFindingsRequest, gen.ReviewFindings]
+	runReviewVerification        *connect.Client[gen.RunReviewVerificationRequest, gen.ReviewVerificationCheck]
 	setReviewFindingState        *connect.Client[gen.SetReviewFindingStateRequest, gen.ReviewFinding]
 	updateReviewRun              *connect.Client[gen.UpdateReviewRunRequest, gen.WorkspaceReview]
 	cancelReview                 *connect.Client[gen.CancelReviewRequest, gen.WorkspaceReview]
@@ -3482,6 +3494,11 @@ func (c *runnerServiceClient) ListReviewFindings(ctx context.Context, req *conne
 	return c.listReviewFindings.CallUnary(ctx, req)
 }
 
+// RunReviewVerification calls lazybox.bench.v1.RunnerService.RunReviewVerification.
+func (c *runnerServiceClient) RunReviewVerification(ctx context.Context, req *connect.Request[gen.RunReviewVerificationRequest]) (*connect.Response[gen.ReviewVerificationCheck], error) {
+	return c.runReviewVerification.CallUnary(ctx, req)
+}
+
 // SetReviewFindingState calls lazybox.bench.v1.RunnerService.SetReviewFindingState.
 func (c *runnerServiceClient) SetReviewFindingState(ctx context.Context, req *connect.Request[gen.SetReviewFindingStateRequest]) (*connect.Response[gen.ReviewFinding], error) {
 	return c.setReviewFindingState.CallUnary(ctx, req)
@@ -4199,6 +4216,8 @@ type RunnerServiceHandler interface {
 	// The findings of the review an execution is the reviewer (or the author)
 	// of, from `lazybox review list`. The same agent rule as AddReviewFinding.
 	ListReviewFindings(context.Context, *connect.Request[gen.ListReviewFindingsRequest]) (*connect.Response[gen.ReviewFindings], error)
+	// Execute a frozen acceptance recipe for the caller’s active verification review.
+	RunReviewVerification(context.Context, *connect.Request[gen.RunReviewVerificationRequest]) (*connect.Response[gen.ReviewVerificationCheck], error)
 	// The reviewer's verdict on one of its own findings in a later round
 	// (`lazybox review resolve|reopen <id> --note`): resolved, or still open.
 	// The same agent rule as AddReviewFinding; only findings of its own review.
@@ -5270,6 +5289,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(runnerServiceMethods.ByName("ListReviewFindings")),
 		connect.WithHandlerOptions(opts...),
 	)
+	runnerServiceRunReviewVerificationHandler := connect.NewUnaryHandler(
+		RunnerServiceRunReviewVerificationProcedure,
+		svc.RunReviewVerification,
+		connect.WithSchema(runnerServiceMethods.ByName("RunReviewVerification")),
+		connect.WithHandlerOptions(opts...),
+	)
 	runnerServiceSetReviewFindingStateHandler := connect.NewUnaryHandler(
 		RunnerServiceSetReviewFindingStateProcedure,
 		svc.SetReviewFindingState,
@@ -6080,6 +6105,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceAddReviewFindingHandler.ServeHTTP(w, r)
 		case RunnerServiceListReviewFindingsProcedure:
 			runnerServiceListReviewFindingsHandler.ServeHTTP(w, r)
+		case RunnerServiceRunReviewVerificationProcedure:
+			runnerServiceRunReviewVerificationHandler.ServeHTTP(w, r)
 		case RunnerServiceSetReviewFindingStateProcedure:
 			runnerServiceSetReviewFindingStateHandler.ServeHTTP(w, r)
 		case RunnerServiceUpdateReviewRunProcedure:
@@ -6803,6 +6830,10 @@ func (UnimplementedRunnerServiceHandler) AddReviewFinding(context.Context, *conn
 
 func (UnimplementedRunnerServiceHandler) ListReviewFindings(context.Context, *connect.Request[gen.ListReviewFindingsRequest]) (*connect.Response[gen.ReviewFindings], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ListReviewFindings is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) RunReviewVerification(context.Context, *connect.Request[gen.RunReviewVerificationRequest]) (*connect.Response[gen.ReviewVerificationCheck], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.RunReviewVerification is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) SetReviewFindingState(context.Context, *connect.Request[gen.SetReviewFindingStateRequest]) (*connect.Response[gen.ReviewFinding], error) {

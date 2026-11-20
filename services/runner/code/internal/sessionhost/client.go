@@ -36,6 +36,7 @@ type Exit struct {
 // owners: the newest attached client supersedes any earlier one.
 type Client struct {
 	id, dir string
+	token   string
 	// protocol is the host's wire version, which this client speaks to it.
 	protocol int
 	conn     net.Conn
@@ -267,7 +268,7 @@ func dial(ctx context.Context, dir string, record Record, ack uint64) (*Client, 
 	if err != nil {
 		return nil, fmt.Errorf("session host %s unreachable: %w", record.ID, err)
 	}
-	c := &Client{id: record.ID, dir: dir, conn: raw, enc: json.NewEncoder(raw), frames: make(chan frame, 64), done: make(chan struct{})}
+	c := &Client{id: record.ID, dir: dir, token: record.Token, conn: raw, enc: json.NewEncoder(raw), frames: make(chan frame, 64), done: make(chan struct{})}
 	// Speak the host's version, not the newest: a host knows only its own.
 	c.protocol = record.Protocol
 	if err = c.write(frame{Op: "hello", Token: record.Token, Ack: ack, Protocol: record.Protocol}); err != nil {
@@ -385,9 +386,32 @@ func (c *Client) Ack(seq uint64) error { return c.write(frame{Op: "ack", Seq: se
 // Resolve tells the host the agent no longer waits on its request id (the raw
 // JSON-RPC id of the request line) although no reply was written: the agent
 // resolved it itself, or the turn it belonged to ended. The host then never
-// redelivers it. A host older than this op ignores it.
+// redelivers it. New hosts acknowledge the mutation before this returns;
+// older hosts retain their asynchronous resolve behavior.
 func (c *Client) Resolve(id json.RawMessage) error {
-	return c.write(frame{Op: "resolve", Line: id})
+	if c.welcome.Owner == "" {
+		return c.write(frame{Op: "resolve", Line: id}) // older hosts have no acknowledgement
+	}
+	raw, err := net.DialTimeout("tcp", c.conn.RemoteAddr().String(), 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := json.NewEncoder(raw).Encode(frame{Op: "resolve", Token: c.token, Owner: c.welcome.Owner, Line: id}); err != nil {
+		return err
+	}
+	var reply frame
+	if err := json.NewDecoder(raw).Decode(&reply); err != nil {
+		return err
+	}
+	if reply.Op != "resolved" {
+		if reply.Text == ErrSuperseded.Error() {
+			return ErrSuperseded
+		}
+		return fmt.Errorf("session host did not confirm request resolution: %s", reply.Text)
+	}
+	return nil
 }
 
 // SetUpstream points the host's provider proxy at this Runner's gateway.

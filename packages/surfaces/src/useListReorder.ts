@@ -63,7 +63,15 @@ export function useListReorder<T extends { id: string }>({ items, name, arrange,
     queue.current = done.catch(() => {});
     done.then(() => setSettled(Date.now()), error => { setPending(undefined); fail?.(`The workspaces could not be reordered: ${error instanceof Error ? error.message : String(error)}`); });
   };
-  const focusGrip = (id: string) => requestAnimationFrame(() => list.current?.querySelector<HTMLElement>(`[data-reorder-id="${CSS.escape(id)}"] ${grip}`)?.focus({ preventScroll: false }));
+  const focusGrip = (id: string) => {
+    const previous = document.activeElement;
+    requestAnimationFrame(() => {
+      // Reordering may move the focused node, but must not steal focus after
+      // the person has already moved to another row or control.
+      if (document.activeElement !== previous && (previous?.isConnected || document.activeElement !== document.body)) return;
+      list.current?.querySelector<HTMLElement>(`[data-reorder-id="${CSS.escape(id)}"] ${grip}`)?.focus({ preventScroll: false });
+    });
+  };
 
   const begin = (id: string, start: PointerEvent | ReactPointerEvent) => {
     const startY = start.clientY;

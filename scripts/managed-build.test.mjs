@@ -1,4 +1,6 @@
 import test from 'node:test';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -54,14 +56,24 @@ test('running Dev must acknowledge its launcher-specific request and release its
   await mkdir(lock);
   await writeFile(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid }));
   await assert.rejects(stopDev(lock), /no ready control receipt/);
-  const { listenForDevStop } = await import('./environments.mjs');
-  const watcher = await listenForDevStop(lock, {}, () => {
-    watcher.close();
-    void rm(lock, { recursive: true });
-  });
-  await writeFile(join(lock, 'stop-' + randomUUID()), '');
-  assert.ok(await readFile(join(lock, 'owner.json')));
-  await stopDev(lock);
+  // Watch notifications are hints, not delivery: suppress them entirely.
+  const mockedWatch = t.mock.method(fs, 'watch', () => ({ close() {} }));
+  syncBuiltinESMExports();
+  let watcher;
+  try {
+    const { listenForDevStop } = await import('./environments.mjs');
+    watcher = await listenForDevStop(lock, {}, () => {
+      watcher.close();
+      void rm(lock, { recursive: true });
+    });
+    await writeFile(join(lock, 'stop-' + randomUUID()), '');
+    assert.ok(await readFile(join(lock, 'owner.json')));
+    await stopDev(lock);
+  } finally {
+    watcher?.close();
+    mockedWatch.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test('managed entry point starts Dev twice and stages the selected tree without changing the Working pin', async t => {

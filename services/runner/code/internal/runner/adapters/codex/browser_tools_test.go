@@ -26,7 +26,7 @@ func TestBrowserToolsAreOfferedRunWithoutApprovalAndReturnImages(t *testing.T) {
 		if !json.Valid(tool.Schema) {
 			t.Errorf("%s: invalid schema", tool.Name)
 		}
-		if toolApproval(tool.Name) != "" {
+		if toolApproval(tool.Name, nil) != "" {
 			t.Errorf("%s asks for a per-call approval", tool.Name)
 		}
 		// A resumed thread may hold them whatever this Runner offers now.

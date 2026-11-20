@@ -201,7 +201,8 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const lifetime = useRef<AbortController | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const canResumeOnSend = !!session?.closed && !session.resumeBlocked && !session.recoveryRequired && !!session.providerReference && !!session.capabilities?.resume;
-  const canCompose = !!session && (!session.closed || canResumeOnSend);
+  const [permissionRestarting, setPermissionRestarting] = useState(false);
+  const canCompose = !permissionRestarting && !!session && (!session.closed || canResumeOnSend);
   const canAttach = !!session?.capabilities?.files && !!info?.attachmentLimits && canCompose && !sending;
   const boxes = useComposerAttachments({ draft: { message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft }, limits: info?.attachmentLimits, canAttach, textarea: composer, sessionID, onError: setError });
   // At a subscription limit a message waits and is sent once the conversation continues.
@@ -324,12 +325,14 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // An agent whose worker predates live permission changes restarts in the new
   // mode between turns; the same provider conversation continues.
   const restartWithPermission = async (mode: string) => {
-    setRestartTo('');
+    if (permissionRestarting) return;
+    setPermissionRestarting(true);
     try {
       const result = await api.restartWithPermission({ sessionId: sessionID, mode });
       if (!result.session) throw new Error('Runner did not return the restarted conversation');
       adopt(result.session);
     } catch (e) { setError(humanError(e)); }
+    finally { setRestartTo(''); setPermissionRestarting(false); }
   };
   /** The conversation continues in a new agent (a restart in another mode or model). */
   // The message box has the keyboard again once the new agent can take a message (confirm-card.ts).
@@ -713,7 +716,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           <Composer textarea={composer} fileInput={fileInput} agentName={agentName} embedded={embedded} session={session} sessionID={sessionID} viewState={viewState} keymap={keymap}
             limited={limited} message={message} files={files} attachments={boxes} missingFiles={missingFiles} uncertainSend={uncertainSend} handedOver={handedOver}
             sending={sending} canCompose={canCompose} canAttach={canAttach} canSend={canSend}
-            permissionPrompt={<>{restartTo && <PermissionRestartPrompt mode={restartTo} busy={!!session?.busy} returnTo={composer} onRestart={() => void restartWithPermission(restartTo)} onCancel={() => setRestartTo('')}/>}{slash.prompt}</>}
+            permissionPrompt={<>{restartTo && <PermissionRestartPrompt mode={restartTo} restarting={permissionRestarting} busy={!!session?.busy} returnTo={composer} onRestart={() => void restartWithPermission(restartTo)} onCancel={() => setRestartTo('')}/>}{slash.prompt}</>}
             slash={slash}
             info={session ? <ComposerInfo agentName={agentName} modelLabel={modelLabel} modelRequested={!!session.model && !session.modelReported && !transcript.reportedModel} sessionID={sessionID} onPickModel={session.closed ? undefined : slash.models.pick}/> : undefined}
             onSubmit={send}

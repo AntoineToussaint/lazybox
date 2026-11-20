@@ -57,6 +57,7 @@ try {
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  await page.clock.install({time:new Date(now - 3_600_000)});
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=beta#token=${f.token}`);
   const nav = page.getByRole('navigation', {name: 'Workspaces'});
   const row = nav.locator('.workspace-row').filter({hasText: 'Alpha feature'});
@@ -70,10 +71,13 @@ try {
   let release; const held = new Promise(resolve => { release = resolve; });
   await page.route('**/lazybox.bench.v1.RunnerService/ListWorkspaceGitSummaries', async route => { if ((route.request().postData() || '').includes('"changes":true')) await held; await route.continue(); });
   const box = await link.boundingBox();
+  await page.clock.pauseAt(new Date(now));
   await page.mouse.move(box.x + 40, box.y + 12);
-  await page.waitForTimeout(150);
+  await page.clock.runFor(150);
   await expect(card).toHaveCount(0);
+  await page.clock.runFor(300);
   await expect(card).toBeVisible();
+  await page.clock.resume();
   await expect(card.getByRole('region', {name: 'Repositories'}).locator('.workspace-hover-skeleton')).toHaveCount(2);
   await expect(card).toContainText('feature/uploads-retry');
   await card.screenshot({path: '.cache/workspace-hover-card-reading.png'});

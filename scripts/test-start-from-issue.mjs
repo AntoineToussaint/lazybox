@@ -228,6 +228,10 @@ try {
   assert.ok(await fields.evaluate(el => el.scrollHeight > el.clientHeight), 'overflowing controls have a scroll owner');
   await sheet.getByRole('combobox', { name: 'Mode', exact: true }).scrollIntoViewIfNeeded();
   await expect(sheet.getByRole('combobox', { name: 'Mode', exact: true })).toBeInViewport();
+  await page.setViewportSize({ width: 800, height: 480 });
+  await expect.poll(() => fields.evaluate(node => node.scrollHeight - node.clientHeight)).toBeGreaterThan(0);
+  await fields.evaluate(node => { node.scrollTop = node.scrollHeight; });
+  await expect(sheet.locator('footer button.primary')).toBeInViewport({ ratio: 1 });
   await page.keyboard.press('Escape');
 
   assert.deepEqual(errors, [], 'no page errors');

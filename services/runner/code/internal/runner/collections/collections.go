@@ -93,7 +93,11 @@ var component = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 // Manager serializes provisioning and attachment. The filesystem lock excludes
 // other Runners even when they have different session-state directories.
 type Manager struct {
+	// mu serializes mutations, including Git work. recordsMu protects items
+	// and order for readers that do not need to wait for those operations.
+	// Writers hold mu and take recordsMu only to publish in-memory changes.
 	mu                sync.Mutex
+	recordsMu         sync.RWMutex
 	root              string
 	lock              *os.File
 	repos             map[string]Repository
@@ -332,8 +336,8 @@ func (c *Collection) syncOwners() {
 	}
 }
 func (m *Manager) List() []Collection {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.recordsMu.RLock()
+	defer m.recordsMu.RUnlock()
 	out := make([]Collection, 0, len(m.items))
 	for _, c := range m.items {
 		if c.State != "deleted" {
@@ -344,8 +348,8 @@ func (m *Manager) List() []Collection {
 	return out
 }
 func (m *Manager) Get(id string) (Collection, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.recordsMu.RLock()
+	defer m.recordsMu.RUnlock()
 	c, ok := m.items[id]
 	if !ok {
 		return Collection{}, os.ErrNotExist
@@ -407,7 +411,7 @@ func (m *Manager) create(ctx context.Context, key string, spec Spec, id string) 
 			if c.State == "ready" || c.State == "archived" {
 				return clone(c), nil
 			}
-			return m.provision(ctx, c)
+			return m.provision(ctx, clone(c))
 		}
 		if spec.WorkID != "" && c.WorkID == spec.WorkID {
 			return Collection{}, errors.New("work record already has a collection")
@@ -945,7 +949,9 @@ func (m *Manager) save(c Collection) error {
 	if err = os.Rename(f.Name(), filepath.Join(dir, c.ID+".json")); err != nil {
 		return err
 	}
+	m.recordsMu.Lock()
 	m.items[c.ID] = clone(c)
+	m.recordsMu.Unlock()
 	d, err := os.Open(dir)
 	if err != nil {
 		return err

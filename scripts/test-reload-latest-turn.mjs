@@ -75,13 +75,16 @@ try{
  await expect(strip).toBeVisible({timeout:5000});
  // ── The delivered message's turn: the agent working.
  pushAll(latest.slice(workingAt));
- ch.push({type:'message_delta',text:'LATEST_FIXTURE_CAUGHT_UP'});
- await expect(pane).toContainText('LATEST_FIXTURE_CAUGHT_UP');
- await expect(pane.getByRole('list',{name:'Tool calls'}).last()).toContainText(/2 commands/,{timeout:10000});
- // A turn's commands are one line until opened; the last line is the turn in progress.
- // The marker follows every fixture tool event; a two-command count alone
- // can appear while the second command is still streaming and regrouping.
- const latestCommands=async()=>{const run=pane.getByRole('list',{name:'Tool calls'}).last();await expect(pane).toContainText('LATEST_FIXTURE_CAUGHT_UP');await expect(run).toContainText(/2 commands/,{timeout:10000});await run.getByRole('button').first().click();await expect(run).toContainText(/lazybox artifact put plan\.md/i);await expect(run).toContainText(/go test \.\/libraries\/authority-core/i);};
+ // Earlier turns can already display “2 commands” while the latest events
+ // are still arriving. Open the completed run after this delivered prompt.
+ const latestCommands=async()=>{
+  const run=said('QUEUED_DELIVERED').locator('xpath=following-sibling::*[@aria-label="Tool calls"][1]');
+  const summary=run.locator('.tool-run[data-state="completed"]').getByRole('button',{name:/2 commands/});
+  await expect(summary).toBeVisible({timeout:10000});
+  await summary.click();
+  await expect(run).toContainText(/lazybox artifact put plan\.md/i);
+  await expect(run).toContainText(/go test \.\/libraries\/authority-core/i);
+ };
  await latestCommands();
  /** Every message once, where it reached the agent; the queued one nowhere in the conversation. */
  const inPlace=async()=>{

@@ -219,7 +219,9 @@ pull, switch branches or start servers there), to use it rather than a
 temporary clone to run a repository's own tools at the latest main, that
 commands needing a terminal (logins, browser sign-in) cannot run from its
 shell, and to hand them back explicitly, whole (`env -u VAR …`), as "run in the
-home checkout of <repo>: `<cmd>`" or "run in your home folder: `<cmd>`". A new conversation's workspace context names
+home checkout of <repo>: `<cmd>`" or "run in your home folder: `<cmd>`".
+Repeat the destination in its own paragraph for each command. Put prerequisites
+and ordering separately so each command gets a terminal button. A new conversation's workspace context names
 each member's home; `ListWorkspaceRepositories` (so `lazybox workspace repos`,
 `lazybox repos`, `lazybox repo home`) returns it to an agent's credential.
 `ListRepositoryHomes`, `SetRepositoryHome` and `OpenRepositoryHome` are the
@@ -272,6 +274,8 @@ The Runner merges this with existing local discovery and repository registration
 `PrepareWorkspace` owns source preparation and collection provisioning. The shared
 React catalog reader/picker owns filtering and selection only. Existing low-level
 RPCs remain available for compatibility, but the UI no longer chains imports.
+Workspace list and session metadata reads use the last published records
+while Git is preparing worktrees, so an existing workspace stays browsable.
 
 Runner JSON configuration may contain:
 

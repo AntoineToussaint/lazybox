@@ -218,7 +218,9 @@
 .workspace-create-details input {
   font-size: calc(13px * var(--text-scale));
 }
-.workspace-create-details .empty-workspace-choice {
+.unified-workspace-dialog > .empty-workspace-choice {
+  flex: none;
+  padding-block: 6px;
   display: flex;
   flex-direction: row;
   align-items: center;

@@ -62,7 +62,9 @@ func (m *Manager) Arrange(ids []string) ([]Collection, error) {
 	order := cleanOrder(ids, func(id string) bool { c, ok := m.items[id]; return ok && c.State != "deleted" })
 	err := m.saveArrangement(order)
 	if err == nil {
+		m.recordsMu.Lock()
 		m.order = order
+		m.recordsMu.Unlock()
 	}
 	m.mu.Unlock()
 	if err != nil {

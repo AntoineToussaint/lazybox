@@ -299,3 +299,5 @@ movementX/Y for real pointer motion. Subscription-switch uses the same runtime
 error collector as workspace reorder, including its refresh page.
 
 The chat-scroll gate also applies a small downward compositor correction during an upward key gesture: this must not resume following near the bottom. Near-bottom tolerance belongs to downward input; an unclassified scrollbar movement must reach the actual bottom. Link revocation tests join the serving side before checking its final audit record.
+
+The chat-scroll gate keeps native Chromium scrollbars visible and verifies that prompt markers stay inside the content edge, then drags the thumb while output streams. The prompt-navigation gate checks that those markers still navigate the transcript.

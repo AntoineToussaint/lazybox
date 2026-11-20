@@ -75,9 +75,15 @@ try {
     f.calls.filter((c) => c.method === "ScanRepositoryRoot").length,
     1,
   );
-  await d
-    .getByRole("checkbox", { name: "Start without repositories", exact: true })
-    .check();
+  const emptyChoice = d.getByRole("checkbox", { name: "Start without a repository", exact: true });
+  const repository = d.getByRole("checkbox", { name: "team/api", exact: true });
+  assert.ok((await emptyChoice.boundingBox()).y < (await repository.boundingBox()).y);
+  await repository.check();
+  await emptyChoice.check();
+  await expect(repository).toBeHidden();
+  await emptyChoice.uncheck();
+  await expect(repository).toBeChecked();
+  await emptyChoice.check();
   await d.getByLabel("Workspace name", { exact: true }).fill("Planning");
   await d
     .getByRole("button", { name: "Create workspace", exact: true })

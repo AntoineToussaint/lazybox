@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { fetch as nativeFetch } from '@tauri-apps/plugin-http';
-import { AgentWindow, ArtifactWindow, PREFERENCE_EVENT, WebWindow, WindowControls, WindowErrorBoundary, Workspace, configureContextMenus, configureExternalTerminal, configureSystemSounds, configureTitleBar, configureVoice, installLinkRouting, openInViewer, runMenuAction, useNativeActionMenu, useRunnerLocator, type NativeMenuItem } from '@lazybox/surfaces';
+import { AgentWindow, ArtifactWindow, PREFERENCE_EVENT, WebWindow, WindowControls, WindowErrorBoundary, Workspace, configureContextMenus, configureExternalTerminal, configureSystemSounds, configureTitleBar, configureVoice, installLinkRouting, openInViewer, runMenuAction, useActionRevision, useNativeActionMenu, useRunnerLocator, type NativeMenuItem } from '@lazybox/surfaces';
 import type { AddComputerStep, RunnerDirectoryHost, RunnerListing, SshHost } from '@lazybox/platform';
 import type { AppHost, AppInfo, ChatReturn, AttentionDestination, AttentionHost, AvailableUpdate, FeedbackDiagnostics, NativeWebViews, RecognitionEvent, RecognizerLanguage, RecognizerStatus, SpeechVoice, SurfaceHost, SurfaceTarget, TitleBarInset, ViewStateStore, UpdateError, UpdateErrorKind, UpdateProgress, VoiceHost, WebViewEvent, WorkspaceHost, ZoomHost } from '@lazybox/platform';
 import { FirstRun } from './FirstRun';
@@ -253,11 +253,14 @@ function DesktopWindow({ bootstrap, followRestart, renew }: { bootstrap: Bootstr
     return () => { disposed = true; stop?.(); };
   }, []);
   // The menu bar's action items run here when this window is in front; the main window keeps the menu current.
+  useEffect(() => listenHere<string>('menu-action', id => { runMenuAction(id); }), []);
+  const actionRevision = useActionRevision();
   useEffect(() => {
-    let disposed = false; let stop: (() => void) | undefined;
-    void listen<string>('menu-action', event => { runMenuAction(event.payload); }).then(unlisten => { if (disposed) unlisten(); else stop = unlisten; });
-    return () => { disposed = true; stop?.(); };
-  }, []);
+    const launch = window as Window & { lazyboxCheckUpdatesOnOpen?: boolean };
+    if (notifies && launch.lazyboxCheckUpdatesOnOpen && runMenuAction('help.updates')) {
+      delete launch.lazyboxCheckUpdatesOnOpen;
+    }
+  }, [notifies, actionRevision]);
   useNativeActionMenu(viewState, notifies ? publishMenu : undefined);
   const focusMain = useCallback(() => void host.reopenAgent().catch(() => {}), [host]);
   // A web window moved back to the workspace: its page opens in a Web panel here.

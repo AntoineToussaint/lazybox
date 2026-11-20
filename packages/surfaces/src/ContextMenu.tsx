@@ -259,10 +259,10 @@ function selectionAt(point: { x: number; y: number } | null): { text: string; ra
 
 const keyboardEvents = new WeakSet<Event>();
 const movedPointerEvents = new WeakSet<Event>();
-let selectionAtPress: string | null = null;
+let selectionAtPress: ReturnType<typeof selectionAt> | null = null;
 
 /** The whole menu for a contextmenu event that reached the window: its items now, its label, and items still on their way. */
-export function menuForEvent(event: MouseEvent, keyboard: boolean): { items: MenuItem[]; label: string; later: Promise<MenuItem[]> | undefined } {
+export function menuForEvent(event: MouseEvent, keyboard: boolean, selection = selectionAt(keyboard ? null : { x: event.clientX, y: event.clientY })): { items: MenuItem[]; label: string; later: Promise<MenuItem[]> | undefined } {
   const target = elementOf(event.target)!;
   const found = [...(pendingSections.get(event) || [])];
   const ancestors: Element[] = [];
@@ -273,7 +273,7 @@ export function menuForEvent(event: MouseEvent, keyboard: boolean): { items: Men
   }
   const rank = (section: Section) => { const index = ancestors.indexOf(section.element); return index < 0 ? ancestors.length : index; };
   const sections = found.map((section, order) => ({ section, order })).sort((a, b) => rank(a.section) - rank(b.section) || a.order - b.order).map(value => value.section);
-  const { text, range } = selectionAt(keyboard ? null : { x: event.clientX, y: event.clientY });
+  const { text, range } = selection;
   // Each contribution is its items, or a slot its promise fills.
   const waiting: Promise<void>[] = [];
   const bodies = sections.map(section => {
@@ -314,8 +314,8 @@ function onContextMenu(event: MouseEvent) {
   if (target.closest('.context-menu')) return;
   // WebKit selects the word under a right-click before the event: a menu is
   // about what you selected, not what the click selected for you.
-  if (press === '' && !keyboard) document.getSelection()?.removeAllRanges();
-  const { items, label, later } = menuForEvent(event, keyboard);
+  if (press && !press.text && !keyboard) document.getSelection()?.removeAllRanges();
+  const { items, label, later } = menuForEvent(event, keyboard, keyboard ? undefined : press ?? undefined);
   const opened = openContextMenu({ x: event.clientX, y: event.clientY }, items, { keyboard, target, label });
   // Items that arrive later join the same menu, if it is still open.
   void later?.then(all => { if (state.menu?.openedAt === opened) emit({ menu: { ...state.menu, entries: normalizeMenu(all) } }); });
@@ -425,7 +425,8 @@ function installListeners() {
   const pointerDown = (event: PointerEvent) => {
     pointerPosition = { x: event.clientX, y: event.clientY };
     menuPress = false;
-    if (event.button === 2 && event.pointerType === 'mouse') selectionAtPress = document.getSelection()?.toString() || '';
+    selectionAtPress = event.pointerType === 'mouse' && (event.button === 2 || (event.button === 0 && event.ctrlKey))
+      ? selectionAt({ x: event.clientX, y: event.clientY }) : null;
     // Outside a menu, a press closes it and goes on to what it hit, but closes
     // nothing else: a dialog or popover under the menu stays open.
     if (state.menu && !(event.target instanceof Element && event.target.closest('.context-menu'))) { claimPress(event); closeContextMenu(false); }

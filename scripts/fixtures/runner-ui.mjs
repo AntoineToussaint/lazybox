@@ -732,6 +732,13 @@ actions:
         pins.push({method,body});return json({session});
       }
       case 'ListHistory': return json({sessions:visibleSessions().filter(s=>(body.collectionId===undefined||s.collectionId===body.collectionId)&&(!body.search||(s.title||`Conversation ${s.id}`).toLowerCase().includes(body.search.toLowerCase()))).map(s=>({...s,title:s.title||`Conversation ${s.id}`,conversationId:s.workId||s.id})),hasMore:false});
+      case 'RenameSubscription': {
+        const profile = profiles.find(p => p.id === body.profileId && p.managed);
+        if (!profile) return error('not_found', 'Subscription not found');
+        mutations.push({method, body});
+        profile.label = body.label;
+        return json(profile);
+      }
       case 'RefreshSubscription': { const profile = profiles.find(p => p.id === body.profileId); if (!profile) return error('not_found', 'Unknown profile'); if (profile.provider === 'claude') profile.availability = {state:'available',plan:'max',windows:[{name:'five_hour',usedPercent:37,durationMinutes:'300',resetAt:String(Math.floor(Date.now()/1000)+3600)}]}; profile.availability ??= { state: 'unknown', windows: [] }; profile.availability.observedAtUnixMillis = String(Date.now()); if (profile.availability.windows?.length) profile.availability.windows[0].usedPercent += 5; return json(profile); }
       case 'ListCollections': { if (runner.listDelayMs) await new Promise(resolve => setTimeout(resolve, runner.listDelayMs)); return json({ collections: visibleCollections() }); }
       // The person's order, as the Runner keeps it (collections/arrangement.go): new ones first, then the kept order.

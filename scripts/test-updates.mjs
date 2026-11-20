@@ -203,6 +203,13 @@ try {
     await expect(page.getByRole('tabpanel', { name: 'About & updates' }).locator('.update-status')).toContainText('Lazybox 0.2.0 is available');
     assert.equal(state.requests, before + 1);
 
+    await page.goto(`${url()}&fixedWorkspace=fixture`);
+    await page.locator('summary[aria-label="Help"]').click();
+    const beforeWorkspaceCheck = state.requests;
+    await page.getByRole('button', { name: 'Check for updates…', exact: true }).click();
+    await expect(page.getByRole('tabpanel', { name: 'About & updates' }).locator('.update-status')).toContainText('Lazybox 0.2.0 is available');
+    assert.equal(state.requests, beforeWorkspaceCheck + 1);
+
     // (k) A build from source (make install): no updater, so nothing is
     // checked or offered, even with a newer version on the feed.
     state.feed = feed();

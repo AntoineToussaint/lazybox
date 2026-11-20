@@ -53,6 +53,7 @@ service RunnerService {
   rpc AddSubscription(AddSubscriptionRequest) returns (SubscriptionEnrollment);
   rpc GetSubscriptionEnrollment(SubscriptionEnrollmentRequest) returns (SubscriptionEnrollment);
   rpc CancelSubscriptionEnrollment(SubscriptionEnrollmentRequest) returns (SubscriptionEnrollment);
+  rpc RenameSubscription(RenameSubscriptionRequest) returns (Profile);
   rpc RefreshSubscription(RefreshSubscriptionRequest) returns (Profile);
   // Owner only. Forgets a subscription saved in Lazybox: its registry entry and
   // its private folder (an imported token among them). Refused while a running
@@ -703,6 +704,10 @@ message SubscriptionEnrollmentRequest {
   string enrollment_id = 1;
   string request_key = 2;
   string provider = 3;
+}
+message RenameSubscriptionRequest {
+  string profile_id = 1;
+  string label = 2;
 }
 message RefreshSubscriptionRequest { string profile_id = 1; }
 message SubscriptionEnrollment {

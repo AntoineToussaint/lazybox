@@ -58,7 +58,7 @@ try {
  await expect(updateSettings.getByRole('button',{name:'Check Lazybox updates'})).toBeVisible();
  await page.getByRole('tab',{name:'Subscriptions',exact:true}).click();
 
- const codex=page.getByRole('article',{name:'Saved Codex subscription',exact:true});
+ let codex=page.getByRole('article',{name:'Saved Codex subscription',exact:true});
  await expect(codex.locator('.subscription-email')).toHaveText('codex-fixture@example.invalid');
  await expect(codex).toContainText('45% used');await expect(codex).toContainText('60% used');
  await expect(codex.getByRole('progressbar',{name:'5-hour limit used'})).toHaveAttribute('value','45');
@@ -80,6 +80,18 @@ try {
  await expect(switching).toBeEnabled();await expect(switching).toBeChecked();
  const saves=fixture.mutations.filter(m=>m.method==='SaveRunnerSettings');assert.equal(saves.length,2);assert.ok(saves.every(m=>m.body.naming==='repositories'&&m.body.context),'a switch must not reset other Runner settings');
  assert.equal(fixture.mutations.length,2,'switching an account must not touch execution');
+ await codex.getByRole('button',{name:'Rename subscription',exact:true}).click();
+ const rename=page.getByRole('dialog',{name:'Rename subscription'});
+ const accountName=rename.getByRole('textbox',{name:'Account name'});
+ await expect(accountName).toBeFocused();
+ await expect(accountName).toHaveValue('Saved Codex');
+ await expect(rename.getByRole('button',{name:'Save name'})).toBeDisabled();
+ await accountName.fill('  Team Codex  ');
+ await accountName.press('Enter');
+ await expect(rename).toBeHidden();
+ codex=page.getByRole('article',{name:'Team Codex subscription',exact:true});
+ await expect(codex).toContainText('55% used');
+ assert.deepEqual(fixture.mutations.find(m=>m.method==='RenameSubscription')?.body,{profileId:'codex-saved',label:'Team Codex'});
  await mkdir('.cache',{recursive:true});await page.screenshot({path:'.cache/settings-subscriptions.png',fullPage:true});
  await page.getByRole('button',{name:'Add subscription',exact:true}).click();
  // Codex signs in with the browser on this computer: no code, Codex receives the callback itself.
@@ -168,7 +180,7 @@ try {
  await expect(groups).toHaveCount(2);
  await expect(groups.locator('.provider-group-heading')).toHaveText(['Claude','Codex']);
  await expect(groups.nth(0).locator('.subscription-card h3')).toHaveText(['Personal']);
- await expect(groups.nth(1).locator('.subscription-card h3')).toHaveText(['Saved Codex','Work']);
+ await expect(groups.nth(1).locator('.subscription-card h3')).toHaveText(['Team Codex','Work']);
  await expect(groups.nth(0)).toHaveAttribute('aria-label','Claude');
  await page.screenshot({path:'.cache/settings-subscriptions-grouped.png',fullPage:true});
  await page.emulateMedia({colorScheme:'dark'});await page.waitForTimeout(400);await page.screenshot({path:'.cache/settings-subscriptions-grouped-dark.png',fullPage:true});await page.emulateMedia({colorScheme:'light'});
@@ -190,7 +202,7 @@ try {
  await claude.getByRole('button',{name:'Refresh usage',exact:true}).click();
  await expect(claude.getByRole('button',{name:'Refreshing…',exact:true})).toBeDisabled();
  await expect.poll(()=>held.size).toBe(2);
- held.get(fixture.profiles.find(p=>p.label==='Saved Codex').id)();
+ held.get('codex-saved')();
  await expect(codex.getByRole('progressbar',{name:'5-hour limit used'})).toHaveAttribute('value',String(beforeManualUsage+5));
  await expect(codex.getByRole('button',{name:'Refresh usage',exact:true})).toBeEnabled();
  await expect(claude.getByRole('button',{name:'Refreshing…',exact:true})).toBeDisabled();

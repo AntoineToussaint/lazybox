@@ -42,6 +42,7 @@ const (
 	RunnerService_AddSubscription_FullMethodName              = "/lazybox.bench.v1.RunnerService/AddSubscription"
 	RunnerService_GetSubscriptionEnrollment_FullMethodName    = "/lazybox.bench.v1.RunnerService/GetSubscriptionEnrollment"
 	RunnerService_CancelSubscriptionEnrollment_FullMethodName = "/lazybox.bench.v1.RunnerService/CancelSubscriptionEnrollment"
+	RunnerService_RenameSubscription_FullMethodName           = "/lazybox.bench.v1.RunnerService/RenameSubscription"
 	RunnerService_RefreshSubscription_FullMethodName          = "/lazybox.bench.v1.RunnerService/RefreshSubscription"
 	RunnerService_RemoveSubscription_FullMethodName           = "/lazybox.bench.v1.RunnerService/RemoveSubscription"
 	RunnerService_GetGitHubConnection_FullMethodName          = "/lazybox.bench.v1.RunnerService/GetGitHubConnection"
@@ -299,6 +300,7 @@ type RunnerServiceClient interface {
 	AddSubscription(ctx context.Context, in *AddSubscriptionRequest, opts ...grpc.CallOption) (*SubscriptionEnrollment, error)
 	GetSubscriptionEnrollment(ctx context.Context, in *SubscriptionEnrollmentRequest, opts ...grpc.CallOption) (*SubscriptionEnrollment, error)
 	CancelSubscriptionEnrollment(ctx context.Context, in *SubscriptionEnrollmentRequest, opts ...grpc.CallOption) (*SubscriptionEnrollment, error)
+	RenameSubscription(ctx context.Context, in *RenameSubscriptionRequest, opts ...grpc.CallOption) (*Profile, error)
 	RefreshSubscription(ctx context.Context, in *RefreshSubscriptionRequest, opts ...grpc.CallOption) (*Profile, error)
 	// Owner only. Forgets a subscription saved in Lazybox: its registry entry and
 	// its private folder (an imported token among them). Refused while a running
@@ -1007,6 +1009,16 @@ func (c *runnerServiceClient) CancelSubscriptionEnrollment(ctx context.Context, 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SubscriptionEnrollment)
 	err := c.cc.Invoke(ctx, RunnerService_CancelSubscriptionEnrollment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) RenameSubscription(ctx context.Context, in *RenameSubscriptionRequest, opts ...grpc.CallOption) (*Profile, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Profile)
+	err := c.cc.Invoke(ctx, RunnerService_RenameSubscription_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3131,6 +3143,7 @@ type RunnerServiceServer interface {
 	AddSubscription(context.Context, *AddSubscriptionRequest) (*SubscriptionEnrollment, error)
 	GetSubscriptionEnrollment(context.Context, *SubscriptionEnrollmentRequest) (*SubscriptionEnrollment, error)
 	CancelSubscriptionEnrollment(context.Context, *SubscriptionEnrollmentRequest) (*SubscriptionEnrollment, error)
+	RenameSubscription(context.Context, *RenameSubscriptionRequest) (*Profile, error)
 	RefreshSubscription(context.Context, *RefreshSubscriptionRequest) (*Profile, error)
 	// Owner only. Forgets a subscription saved in Lazybox: its registry entry and
 	// its private folder (an imported token among them). Refused while a running
@@ -3681,6 +3694,9 @@ func (UnimplementedRunnerServiceServer) GetSubscriptionEnrollment(context.Contex
 }
 func (UnimplementedRunnerServiceServer) CancelSubscriptionEnrollment(context.Context, *SubscriptionEnrollmentRequest) (*SubscriptionEnrollment, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelSubscriptionEnrollment not implemented")
+}
+func (UnimplementedRunnerServiceServer) RenameSubscription(context.Context, *RenameSubscriptionRequest) (*Profile, error) {
+	return nil, status.Error(codes.Unimplemented, "method RenameSubscription not implemented")
 }
 func (UnimplementedRunnerServiceServer) RefreshSubscription(context.Context, *RefreshSubscriptionRequest) (*Profile, error) {
 	return nil, status.Error(codes.Unimplemented, "method RefreshSubscription not implemented")
@@ -4694,6 +4710,24 @@ func _RunnerService_CancelSubscriptionEnrollment_Handler(srv interface{}, ctx co
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).CancelSubscriptionEnrollment(ctx, req.(*SubscriptionEnrollmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_RenameSubscription_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenameSubscriptionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).RenameSubscription(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_RenameSubscription_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).RenameSubscription(ctx, req.(*RenameSubscriptionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -8389,6 +8423,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelSubscriptionEnrollment",
 			Handler:    _RunnerService_CancelSubscriptionEnrollment_Handler,
+		},
+		{
+			MethodName: "RenameSubscription",
+			Handler:    _RunnerService_RenameSubscription_Handler,
 		},
 		{
 			MethodName: "RefreshSubscription",

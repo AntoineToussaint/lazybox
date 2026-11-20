@@ -19,6 +19,17 @@ export function PromptNavigator({ messages, paneRef, onReveal }: { messages: Tra
  // whatever scrolled under it. A window without that header keeps it in the transcript's corner.
  const [slot, setSlot] = useState<Element | null>(null);
  useLayoutEffect(() => { setSlot(paneRef.current?.closest('.agent-window')?.querySelector('[data-prompt-jump-slot]') || null); });
+ // Keep markers inside the content edge: classic scrollbars own their gutter.
+ // ResizeObserver also notices a scrollbar appearing as the transcript grows.
+ const [gutter, setGutter] = useState(0);
+ // The pane is a later sibling; wait until its ref has attached.
+ useEffect(() => {
+  const pane = paneRef.current; if (!pane) return;
+  const measure = () => setGutter(Math.max(0, pane.offsetWidth - pane.clientWidth));
+  measure();
+  const resize = new ResizeObserver(measure); resize.observe(pane);
+  return () => resize.disconnect();
+ }, [paneRef]);
  const latest = useRef({ prompts, onReveal }); latest.current = { prompts, onReveal };
 
  // The prompt at or above the top of the view. Unmounted earlier history is above it.
@@ -74,7 +85,7 @@ export function PromptNavigator({ messages, paneRef, onReveal }: { messages: Tra
  const choose = (id: string) => { setOpen(false); setQuery(''); onReveal(id); };
  const last = Math.max(1, messages.length - 1);
  return <>
-  <nav className="prompt-rail" aria-label="Your prompts">
+  <nav className="prompt-rail" aria-label="Your prompts" style={{ right: gutter + 3 }}>
    {prompts.map(({ message, index }, k) => <button key={message.id} type="button" style={{ top: `${(index / last) * 100}%` }} title={`#${k + 1} · ${firstLine(message.text)}`} aria-label={`Prompt ${k + 1}: ${firstLine(message.text)}`} onClick={() => onReveal(message.id)}/>)}
   </nav>
   {(() => { const jump = <div className={`prompt-jump${slot ? ' in-header' : ''}`}>

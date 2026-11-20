@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func gitTest(t *testing.T, path string, args ...string) string {
@@ -185,6 +186,44 @@ func TestPreflightRejectsUnsafeAndConflictingRequestsWithoutWorktrees(t *testing
 	}
 	if _, err := m.Get("../unknown"); !os.IsNotExist(err) {
 		t.Fatal("unknown record did not return not found")
+	}
+}
+
+func TestWorkspaceReadsDuringProvisioning(t *testing.T) {
+	m := newTest(t, t.TempDir())
+	existing, err := m.Create(context.Background(), "existing", Spec{Name: "Existing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Provisioning holds this lock until all Git operations finish.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pending := Collection{ID: "pending", Name: "Pending", State: "creating"}
+	if err := m.save(pending); err != nil {
+		t.Fatal(err)
+	}
+
+	type view struct {
+		list []Collection
+		item Collection
+		err  error
+	}
+	read := make(chan view, 1)
+	go func() {
+		item, err := m.Get(existing.ID)
+		read <- view{m.List(), item, err}
+	}()
+	select {
+	case got := <-read:
+		if got.err != nil || got.item.ID != existing.ID || got.item.State != "ready" {
+			t.Fatalf("existing workspace unavailable during provisioning: %+v, %v", got.item, got.err)
+		}
+		if len(got.list) != 2 || got.list[1].ID != pending.ID || got.list[1].State != "creating" {
+			t.Fatalf("list did not include the saved provisioning state: %+v", got.list)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("workspace reads waited for provisioning to release its lock")
 	}
 }
 

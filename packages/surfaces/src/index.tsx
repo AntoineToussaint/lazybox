@@ -14,6 +14,7 @@ export { RemoteApp } from './remote/RemoteApp';
 export { DevicesSettings } from './DevicesSettings';
 export { ArtifactWindow } from './ArtifactWindow';
 export { ContextMenuHost, configureContextMenus, contextMenu, useContextMenu, registerContextMenu, useContextMenuContribution, openContextMenu, closeContextMenu, copyText, showMenuNotice, type ContextMenuContext, type ContextMenuContributor, type ContextMenuPlatform, type MenuAction, type MenuItem } from './ContextMenu';
+export { useActionRevision } from './actions';
 export { useNativeActionMenu, runMenuAction, type NativeMenuItem } from './native-menu';
 export { actionsFor, actionMenuItems, runAction, useAction, useActions, actionDefinitions, type ActionId, type ResolvedAction } from './actions';
 export { WebWindow } from './WebWindow';

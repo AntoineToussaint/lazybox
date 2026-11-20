@@ -96,5 +96,5 @@ const host: WorkspaceHost = {
 };
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode>
-  <Workspace connection={{ baseUrl: location.origin, token }} viewState={viewState} host={host} initialTarget={{ collectionId: params.get('collection') || '', sessionId: params.get('session') || '', commandId: '' }}/>
+  <Workspace fixedWorkspaceId={params.get('fixedWorkspace') || undefined} connection={{ baseUrl: location.origin, token }} viewState={viewState} host={host} initialTarget={{ collectionId: params.get('collection') || '', sessionId: params.get('session') || '', commandId: '' }}/>
 </React.StrictMode>);

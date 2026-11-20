@@ -88,7 +88,16 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   const pane=paneRef.current,content=contentRef.current;if(!pane||!content)return;
   place(pane,reader.view.following?pane.scrollHeight:reader.view.scrollTop);measure(pane);
   if(!reader.view.following)capture(pane);
-  const resize=new ResizeObserver(()=>{if(following.current)follow(pane);else{restore(pane);measure(pane);}});
+  const resize=new ResizeObserver(()=>{
+   // A compositor scroll can land before its scroll event. Keep the new
+   // reading position when a streamed delta resizes the content in between.
+   if(following.current)follow(pane);
+   else{
+    if(readerScrolling() && Math.abs(pane.scrollTop-lastTop.current)>=1)capture(pane);
+    else restore(pane);
+    measure(pane);
+   }
+  });
   resize.observe(pane);resize.observe(content);
   // The reader's intent arrives before the scroll it causes. Stopping on it
   // means a delta rendered in between cannot pin the pane back down.

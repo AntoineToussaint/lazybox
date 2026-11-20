@@ -408,8 +408,9 @@ func TestStreamsFlowThroughTheLinkAsTheyAreWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = agent.Run(ctx) }()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = agent.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
 	waitFor(t, func() bool { return agent.Status().State == "connected" })
 	req, _ := http.NewRequest(http.MethodPost, base+RPCPath+"WatchEvents", strings.NewReader("{}"))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -465,6 +466,7 @@ func TestTheAgentServesLoopbackWithItsTokenAndReconnects(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = agent.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
 	waitFor(t, func() bool { return agent.Status().State == "connected" })
 	if agent.Status().RTTMillis == 0 || agent.Status().Machine != "build-box" {
 		t.Fatalf("status %+v", agent.Status())

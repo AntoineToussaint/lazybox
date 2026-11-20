@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/installation"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen/genconnect"
 )
 
@@ -164,6 +165,13 @@ func resolveTarget(getenv func(string) string, endpointFlag, runnerFlag string) 
 	}
 	switch len(locators) {
 	case 0:
+		// A foreground Runner, including the container, can use the standard
+		// state directory without being registered as a user service.
+		if paths, err := installation.UserPaths(getenv); err == nil {
+			if _, err := os.Stat(paths.Endpoint()); !errors.Is(err, os.ErrNotExist) {
+				return loadTarget("", paths.Endpoint(), false)
+			}
+		}
 		return target{}, fail(exitUnavailable, "no Lazybox Runner found: open the Lazybox app (or run `lazybox service install`), start one with make dev or working, or pass --endpoint <state>/endpoint.json")
 	case 1:
 		return loadTarget(locators[0].Name, locators[0].Endpoint, false)

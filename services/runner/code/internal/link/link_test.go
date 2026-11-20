@@ -366,6 +366,14 @@ func TestRevokingAnOwnerEndsItsLiveSession(t *testing.T) {
 		t.Fatal("the session outlived its key by more than a second")
 	}
 	t.Logf("session ended %s after the revoke", time.Since(revoked).Round(time.Millisecond))
+	select {
+	case err := <-route.served:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the server did not finish closing the revoked session")
+	}
 	data, _ := os.ReadFile(filepath.Join(state, "audit.jsonl"))
 	if !strings.Contains(string(data), "key revoked") {
 		t.Fatalf("audit: %s", data)

@@ -474,3 +474,67 @@ func TestLinkServeIsStdioOnlyAndNotForAgents(t *testing.T) {
 		t.Fatalf("probe: %+v", out)
 	}
 }
+
+func TestRemoteRunnerOverKubernetesExec(t *testing.T) {
+	w := newRemoteWorld(t)
+	out, err := w.lazybox("remote", "add", "build-box", "--bundle", w.bundle, "--service", "none")
+	if err != nil {
+		t.Fatalf("start fixture Runner: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(filepath.Join(w.hostState(), "runner.pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.hostRunner, err = strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := installation.UserPaths(func(key string) string {
+		if key == "HOME" {
+			return w.host
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(paths.Locator()); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Dir(w.ssh)
+	const fakeKubectl = `#!/bin/sh
+set -eu
+[ "$1" = "--context=pilot" ]
+[ "$2" = "--namespace=fixture" ]
+[ "$3" = "exec" ]
+[ "$4" = "-i" ]
+[ "$5" = "--container=runner" ]
+[ "$6" = "statefulset/runner" ]
+[ "$7" = "--" ]
+shift 7
+export HOME="$FAKE_SSH_HOME"
+unset XDG_CONFIG_HOME
+export PATH="$HOME/.local/share/lazybox/runner/current/bin:/usr/bin:/bin"
+exec "$@"
+`
+	if err := os.WriteFile(filepath.Join(bin, "kubectl"), []byte(fakeKubectl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.extraEnv = []string{"PATH=" + bin + ":/usr/bin:/bin"}
+	out, err = w.lazybox("remote", "add-kubernetes", "--name", "pilot", "--context", "pilot", "--namespace", "fixture", "--workload", "statefulset/runner", "--container", "runner")
+	if err != nil {
+		t.Fatalf("enroll Kubernetes remote: %v\n%s", err, out)
+	}
+	// A desktop-launched link may have a different PATH from the terminal.
+	w.extraEnv = nil
+	w.startConnect("pilot")
+	w.waitState("pilot", "connected", 10*time.Second)
+	w.stopConnect()
+	w.startConnect("pilot")
+	w.waitState("pilot", "connected", 10*time.Second)
+	out, err = w.lazybox("remote", "rm", "pilot", "--json")
+	var removed struct{ Revoked bool }
+	if err != nil || json.Unmarshal([]byte(out), &removed) != nil || !removed.Revoked {
+		t.Fatalf("remove Kubernetes remote: %v\n%s", err, out)
+	}
+}

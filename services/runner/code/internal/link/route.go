@@ -179,18 +179,25 @@ func (r SSHRoute) Dial(ctx context.Context) (io.ReadWriteCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+	return startStream(cmd, r.Host)
+}
+
+func startStream(cmd *exec.Cmd, host string) (io.ReadWriteCloser, error) {
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		_ = stdin.Close()
 		return nil, err
 	}
-	s := &cmdStream{cmd: cmd, in: stdin, out: stdout, host: r.Host, done: make(chan struct{})}
+	s := &cmdStream{cmd: cmd, in: stdin, out: stdout, host: host, done: make(chan struct{})}
 	cmd.Stderr = &s.stderr
 	if err = cmd.Start(); err != nil {
-		return nil, fmt.Errorf("could not run %s: %w", r.binary(), err)
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return nil, fmt.Errorf("could not run %s: %w", cmd.Args[0], err)
 	}
 	go func() { s.waitErr = cmd.Wait(); close(s.done) }()
 	return s, nil

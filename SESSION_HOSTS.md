@@ -152,7 +152,9 @@ notices in the conversation.
   fails again; one whose host is gone cannot be re-attached at all. Provider
   faults (limits, sign-in, billing, a turn's error) are never cleared this way.
 - Resume on a live conversation with such a fault re-attaches it in place, as
-  a restart would (`Bench.reconnect`: Detach, then adopt): no second agent is
+  a restart would (`Bench.reconnect`: Detach, then adopt). A receive loop
+  that has not returned can already have lost its supervisor; Resume never
+  clears a transport fault on that evidence alone. No second agent is
   started. If the host is gone, or cannot be adopted (it is stopped), the
   conversation ends as interrupted and resumes natively.
 - The Runner's own writes (the journal, the saved snapshot, metering, account

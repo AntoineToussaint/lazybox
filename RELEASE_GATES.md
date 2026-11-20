@@ -250,3 +250,15 @@ The real browser gate still requires live CSS replacement, nested atomic saves,
 private-path rejection and complete server shutdown. A passing configured-backend
 gate does not mean the upstream FSEvents problem was fixed. The raw diagnostic
 deliberately continues to fail while its default-backend probe fails.
+
+### Conversation regression fixtures
+
+The conversation-load gate holds older-page responses until the newest turn
+is visible and checks that live following starts at the retained cursor. Its
+absolute display budget remains enforced; relative replay timings are reported
+for diagnosis, not used to infer which protocol path ran. The conversation-tabs
+selection fixture scrolls the source into view and blurs the previous composer
+before selecting text, so a right-click tests the intended selection.
+
+In Go link fixtures, cleanup closes and joins every in-process server before
+temporary state is removed, including the server's final audit write.

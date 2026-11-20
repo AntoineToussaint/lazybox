@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"log"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
@@ -180,26 +179,4 @@ func (e *Engine) Streaming() bool {
 	default:
 		return true
 	}
-}
-
-// SettleTransportFault clears a fault that says only that the stream from the
-// agent was lost (agent.TransportFault) while this engine reads it again,
-// reporting whether it did. It is what Resume does for a conversation whose
-// agent is live and adopted: no second agent is started.
-func (e *Engine) SettleTransportFault() bool {
-	if !e.Streaming() {
-		return false
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// A journal that failed is not mended by a live stream: that takes a
-	// re-attachment, which opens the journal again.
-	if e.state.Closed || e.detaching || strings.HasPrefix(e.state.Fault, "event capture failed") || !e.settleTransportFaultLocked() {
-		return false
-	}
-	if err := e.persistLocked(); err != nil {
-		e.storageFailedLocked(err, false)
-		e.retryPersistLocked()
-	}
-	return true
 }

@@ -319,16 +319,13 @@ func (b *Bench) adopt(r sessionstore.Record) error {
 
 // reconnect is Resume for a live conversation whose only fault is that this
 // Runner lost its stream from the agent (agent.TransportFault): the agent may
-// well still run in its session host. It never starts a second agent. If
-// this engine reads the agent again, the fault is simply cleared. Otherwise
-// the conversation is re-attached in place exactly as a Runner restart would
+// well still run in its session host. It never starts a second agent. A receive loop that has not returned yet
+// can already have lost its supervisor; it is not evidence of a live stream.
+// The conversation is re-attached in place exactly as a Runner restart would
 // (Detach, then adopt): a live agent goes on where it was, one that exited
 // reports its exit again, and one whose host is gone is lost as after a
 // reboot (agentLost) and resumes natively.
 func (b *Bench) reconnect(ctx context.Context, e *Execution, live *engine.Engine, processesStopped bool) (*Execution, error) {
-	if live.SettleTransportFault() {
-		return e, nil
-	}
 	if err := live.Detach(); err != nil {
 		return nil, fmt.Errorf("could not reconnect to the agent: %w", err)
 	}

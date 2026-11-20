@@ -160,6 +160,8 @@ async function tabsOn(){
  await row('Main alpha conversation').click();
  const source=page.locator('article.message').filter({hasText:'A cache entry expires after ten minutes.'});
  const words=source.getByText('A cache entry expires after ten minutes.',{exact:true});
+ await words.scrollIntoViewIfNeeded();
+ await composer.evaluate(node=>node.blur());
  const selectedPoint=await words.evaluate(node=>{
   const range=document.createRange();
   range.setStart(node.firstChild,2);range.setEnd(node.firstChild,13);

@@ -149,8 +149,23 @@ type pipeRoute struct {
 	fail    atomic.Bool
 }
 
-func newPipeRoute(opts ServeOptions) *pipeRoute {
-	return &pipeRoute{opts: opts, served: make(chan error, 64)}
+func newPipeRoute(t *testing.T, opts ServeOptions) *pipeRoute {
+	t.Helper()
+	p := &pipeRoute{opts: opts, served: make(chan error, 64)}
+	t.Cleanup(func() {
+		p.cut()
+		p.mu.Lock()
+		streams := append([]*recorder(nil), p.streams...)
+		p.mu.Unlock()
+		for _, stream := range streams {
+			select {
+			case <-stream.done:
+			case <-time.After(5 * time.Second):
+				t.Error("link server did not finish before fixture cleanup")
+			}
+		}
+	})
+	return p
 }
 
 func (p *pipeRoute) Kind() string { return "test" }
@@ -225,7 +240,7 @@ func TestAnEnrolledOwnerReachesTheRunnerWithTheBearerAddedOnTheHost(t *testing.T
 	up := newUpstream(t, state)
 	keys := newClient(t)
 	enrol(t, state, keys)
-	route := newPipeRoute(serveOptions(state))
+	route := newPipeRoute(t, serveOptions(state))
 	session, err := Dial(context.Background(), route, keys, runnerPublic(t, state), "Test laptop")
 	if err != nil {
 		t.Fatal(err)
@@ -279,7 +294,7 @@ func TestAWrongPinnedKeyIsRefusedBeforeAnyRequest(t *testing.T) {
 	enrol(t, state, keys)
 	// The client pinned another Runner's key (an SSH alias now pointing elsewhere).
 	other := runnerPublic(t, t.TempDir())
-	route := newPipeRoute(serveOptions(state))
+	route := newPipeRoute(t, serveOptions(state))
 	_, err := Dial(context.Background(), route, keys, other, "Test laptop")
 	if !errors.Is(err, ErrHandshake) {
 		t.Fatalf("dial with a wrong pin: %v", err)
@@ -298,7 +313,7 @@ func TestAKeyThatIsNotEnrolledOrWasRevokedIsRefused(t *testing.T) {
 	up := newUpstream(t, state)
 	pin := runnerPublic(t, state)
 	stranger := newClient(t)
-	route := newPipeRoute(serveOptions(state))
+	route := newPipeRoute(t, serveOptions(state))
 	if _, err := Dial(context.Background(), route, stranger, pin, "Stranger"); !errors.Is(err, ErrHandshake) {
 		t.Fatalf("a stranger: %v", err)
 	}
@@ -334,7 +349,7 @@ func TestTheChannelKeyAloneIsNotEnough(t *testing.T) {
 	if thief.Identity, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
 		t.Fatal(err)
 	}
-	route := newPipeRoute(serveOptions(state))
+	route := newPipeRoute(t, serveOptions(state))
 	_, err = Dial(context.Background(), route, thief, runnerPublic(t, state), "Thief")
 	var refusal *Refusal
 	if !errors.As(err, &refusal) || refusal.Code != "proof" {
@@ -347,7 +362,7 @@ func TestRevokingAnOwnerEndsItsLiveSession(t *testing.T) {
 	newUpstream(t, state)
 	keys := newClient(t)
 	owner := enrol(t, state, keys)
-	route := newPipeRoute(serveOptions(state))
+	route := newPipeRoute(t, serveOptions(state))
 	session, err := Dial(context.Background(), route, keys, runnerPublic(t, state), "Test laptop")
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +392,7 @@ func TestStreamsFlowThroughTheLinkAsTheyAreWritten(t *testing.T) {
 	newUpstream(t, state)
 	keys := newClient(t)
 	enrol(t, state, keys)
-	agent := &Agent{Route: newPipeRoute(serveOptions(state)), Keys: keys, RunnerKey: runnerPublic(t, state), ClientName: "Test laptop", Label: "build-box"}
+	agent := &Agent{Route: newPipeRoute(t, serveOptions(state)), Keys: keys, RunnerKey: runnerPublic(t, state), ClientName: "Test laptop", Label: "build-box"}
 	base, token, err := agent.Listen()
 	if err != nil {
 		t.Fatal(err)
@@ -419,7 +434,7 @@ func TestTheAgentServesLoopbackWithItsTokenAndReconnects(t *testing.T) {
 	up := newUpstream(t, state)
 	keys := newClient(t)
 	owner := enrol(t, state, keys)
-	route := newPipeRoute(serveOptions(state))
+	route := newPipeRoute(t, serveOptions(state))
 	var mu sync.Mutex
 	var states []string
 	agent := &Agent{Route: route, Keys: keys, RunnerKey: runnerPublic(t, state), ClientName: "Test laptop", Label: "build-box", Ping: 50 * time.Millisecond,

@@ -229,7 +229,22 @@ func (s *session) catalogEvent() (agent.Event, bool) {
 	return agent.Event{Type: "command_catalog", AgentID: "root", Data: data}, true
 }
 
+func (s *session) reportedMode() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if o, ok := s.selectOption("mode"); ok && o.current() != "" {
+		return o.current()
+	}
+	if s.state.Modes != nil {
+		return s.state.Modes.Current
+	}
+	return ""
+}
+
 func (s *session) emitCatalog() {
+	if mode := s.reportedMode(); mode != "" {
+		s.emit(agent.Event{Type: "agent_permission", Text: mode})
+	}
 	if ev, ok := s.catalogEvent(); ok {
 		s.emit(ev)
 	}

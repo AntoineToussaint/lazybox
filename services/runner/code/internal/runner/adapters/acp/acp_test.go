@@ -191,6 +191,9 @@ func TestTourMapsUpdatesApprovalsFilesAndTerminals(t *testing.T) {
 		if ev.Type == "turn_started" {
 			break
 		}
+		if ev.Type == "agent_permission" && ev.Text == "default" {
+			continue
+		}
 		if ev.Type != "command_catalog" {
 			t.Fatalf("the turn must start before anything of it: %s", summary(before))
 		}

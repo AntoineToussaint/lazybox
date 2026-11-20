@@ -5,6 +5,7 @@ import { Icon } from './Icons';
 import { useRunner } from './RunnerContext';
 import { conversationName } from './conversation-model';
 import { feedbackReport, issueUrl, LOG_LINES, type FeedbackConversation } from './feedback-model';
+import { WorkflowReview } from './WorkflowReview';
 import './feedback.css';
 
 /** What the window looked like when the person chose Send feedback: taken before the dialog opens. */
@@ -17,7 +18,7 @@ export type FeedbackShot = { png?: Uint8Array; error?: string };
  * folder, Copy puts it on the clipboard, and Open a GitHub issue opens a
  * pre-filled issue the person reads and posts themselves.
  */
-export function FeedbackDialog({ host, shot, sessionId, onClose }: { host?: WorkspaceHost; shot?: FeedbackShot; sessionId?: string; onClose(): void }) {
+export function FeedbackDialog({ host, shot, sessionId, workspaceId, onClose }: { workspaceId?: string; host?: WorkspaceHost; shot?: FeedbackShot; sessionId?: string; onClose(): void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const { api, info } = useRunner();
   const app = host?.app;
@@ -46,6 +47,7 @@ export function FeedbackDialog({ host, shot, sessionId, onClose }: { host?: Work
   const shotUrl = useMemo(() => shot?.png ? URL.createObjectURL(new Blob([shot.png as BlobPart], { type: 'image/png' })) : '', [shot]);
   useEffect(() => () => { if (shotUrl) URL.revokeObjectURL(shotUrl); }, [shotUrl]);
   const session = sessionId ? info?.sessions.find(s => s.id === sessionId) : undefined;
+  const reviewWorkspace = workspaceId || session?.collectionId;
   const conversation: FeedbackConversation | undefined = session && {
     title: conversationName(session, ''), agent: session.provider || session.profileId, model: session.model,
     state: session.closed ? 'ended' : session.busy ? 'working' : session.fault ? 'failed' : 'waiting for you', error: session.fault,
@@ -100,6 +102,7 @@ export function FeedbackDialog({ host, shot, sessionId, onClose }: { host?: Work
       <button className="onboarding-close" aria-label="Close" title="Close (Esc)" onClick={onClose}><Icon name="close" size={16}/></button>
     </DialogHeader>
     <p className="feedback-lede">Tell us what happened. Lazybox sends nothing by itself: you get a file, the clipboard, or a GitHub issue you read before posting.</p>
+    {reviewWorkspace && <WorkflowReview key={reviewWorkspace} workspace={reviewWorkspace}/>}
     <div className="feedback-layout">
       <div className="feedback-form">
         <label className="feedback-what">

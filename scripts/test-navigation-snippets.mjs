@@ -121,6 +121,19 @@ try {
   await expect(dialog.locator(".snippet-preview")).toContainText(
     "Review the current change carefully.",
   );
+  await dialog.getByText('Give feedback on this snippet', { exact: true }).click();
+  const suggestion = dialog.getByRole('textbox', { name: 'Suggested improvement' });
+  await suggestion.fill('Also check test coverage.');
+  await suggestion.press('Enter');
+  await expect(dialog).toBeVisible();
+  await page.route('**/ReviewWorkflow', async route => {
+    const request = route.request().postDataJSON();
+    assert.equal(request.snippetKey, 'review');
+    assert.equal(request.feedback.trim(), 'Also check test coverage.');
+    await route.fulfill({ json: { proposalTitles: ['Feedback on snippet review'] } });
+  });
+  await dialog.getByRole('button', { name: 'Save feedback' }).click();
+  await expect(dialog.getByRole('status')).toContainText('Feedback on snippet review');
   await search.press("Shift+Enter");
   await expect(dialog).toHaveCount(0);
   await expect(message).toHaveValue("Review the current change carefully.");

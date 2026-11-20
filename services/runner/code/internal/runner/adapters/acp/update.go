@@ -78,6 +78,9 @@ func (s *session) update(raw json.RawMessage, emit func(agent.Event), activity f
 			s.state.Modes.Current = u.Mode
 		}
 		s.mu.Unlock()
+		if u.Mode != "" {
+			emit(agent.Event{Type: "agent_permission", Text: u.Mode})
+		}
 	case "config_option_update":
 		var u struct {
 			Config json.RawMessage `json:"configOptions"`
@@ -87,6 +90,9 @@ func (s *session) update(raw json.RawMessage, emit func(agent.Event), activity f
 			s.mu.Lock()
 			s.state.Config = u.Config
 			s.mu.Unlock()
+			if mode := s.reportedMode(); mode != "" {
+				emit(agent.Event{Type: "agent_permission", Text: mode})
+			}
 			if ev, ok := s.catalogEvent(); ok {
 				emit(ev)
 			}

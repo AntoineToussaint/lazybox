@@ -192,6 +192,8 @@ const (
 	RunnerService_GetMission_FullMethodName                   = "/lazybox.bench.v1.RunnerService/GetMission"
 	RunnerService_CreateMission_FullMethodName                = "/lazybox.bench.v1.RunnerService/CreateMission"
 	RunnerService_UpdateMission_FullMethodName                = "/lazybox.bench.v1.RunnerService/UpdateMission"
+	RunnerService_SetWorkflowReviewSchedule_FullMethodName    = "/lazybox.bench.v1.RunnerService/SetWorkflowReviewSchedule"
+	RunnerService_ReviewWorkflow_FullMethodName               = "/lazybox.bench.v1.RunnerService/ReviewWorkflow"
 	RunnerService_ListPromptHistory_FullMethodName            = "/lazybox.bench.v1.RunnerService/ListPromptHistory"
 	RunnerService_SpawnAgent_FullMethodName                   = "/lazybox.bench.v1.RunnerService/SpawnAgent"
 	RunnerService_ListAgentLineage_FullMethodName             = "/lazybox.bench.v1.RunnerService/ListAgentLineage"
@@ -611,6 +613,9 @@ type RunnerServiceClient interface {
 	UpdateMission(ctx context.Context, in *UpdateMissionRequest, opts ...grpc.CallOption) (*Mission, error)
 	// Owner only. Sent prompts, newest first, from the Runner's prompt log, with
 	// the snippet chain a conversation offers next.
+	// Review human inputs within one workspace and publish editable proposals.
+	SetWorkflowReviewSchedule(ctx context.Context, in *SetWorkflowReviewScheduleRequest, opts ...grpc.CallOption) (*CollectionResponse, error)
+	ReviewWorkflow(ctx context.Context, in *ReviewWorkflowRequest, opts ...grpc.CallOption) (*ReviewWorkflowResult, error)
 	ListPromptHistory(ctx context.Context, in *ListPromptHistoryRequest, opts ...grpc.CallOption) (*PromptHistory, error)
 	// The Orchestrator verbs (`lazybox agents …`; audits/2026-11-16/sota-agents.md
 	// §6.3). An agent credential calls them only for its own execution. Starting
@@ -2542,6 +2547,26 @@ func (c *runnerServiceClient) UpdateMission(ctx context.Context, in *UpdateMissi
 	return out, nil
 }
 
+func (c *runnerServiceClient) SetWorkflowReviewSchedule(ctx context.Context, in *SetWorkflowReviewScheduleRequest, opts ...grpc.CallOption) (*CollectionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CollectionResponse)
+	err := c.cc.Invoke(ctx, RunnerService_SetWorkflowReviewSchedule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) ReviewWorkflow(ctx context.Context, in *ReviewWorkflowRequest, opts ...grpc.CallOption) (*ReviewWorkflowResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReviewWorkflowResult)
+	err := c.cc.Invoke(ctx, RunnerService_ReviewWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *runnerServiceClient) ListPromptHistory(ctx context.Context, in *ListPromptHistoryRequest, opts ...grpc.CallOption) (*PromptHistory, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PromptHistory)
@@ -3454,6 +3479,9 @@ type RunnerServiceServer interface {
 	UpdateMission(context.Context, *UpdateMissionRequest) (*Mission, error)
 	// Owner only. Sent prompts, newest first, from the Runner's prompt log, with
 	// the snippet chain a conversation offers next.
+	// Review human inputs within one workspace and publish editable proposals.
+	SetWorkflowReviewSchedule(context.Context, *SetWorkflowReviewScheduleRequest) (*CollectionResponse, error)
+	ReviewWorkflow(context.Context, *ReviewWorkflowRequest) (*ReviewWorkflowResult, error)
 	ListPromptHistory(context.Context, *ListPromptHistoryRequest) (*PromptHistory, error)
 	// The Orchestrator verbs (`lazybox agents …`; audits/2026-11-16/sota-agents.md
 	// §6.3). An agent credential calls them only for its own execution. Starting
@@ -4144,6 +4172,12 @@ func (UnimplementedRunnerServiceServer) CreateMission(context.Context, *CreateMi
 }
 func (UnimplementedRunnerServiceServer) UpdateMission(context.Context, *UpdateMissionRequest) (*Mission, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateMission not implemented")
+}
+func (UnimplementedRunnerServiceServer) SetWorkflowReviewSchedule(context.Context, *SetWorkflowReviewScheduleRequest) (*CollectionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetWorkflowReviewSchedule not implemented")
+}
+func (UnimplementedRunnerServiceServer) ReviewWorkflow(context.Context, *ReviewWorkflowRequest) (*ReviewWorkflowResult, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReviewWorkflow not implemented")
 }
 func (UnimplementedRunnerServiceServer) ListPromptHistory(context.Context, *ListPromptHistoryRequest) (*PromptHistory, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPromptHistory not implemented")
@@ -7393,6 +7427,42 @@ func _RunnerService_UpdateMission_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_SetWorkflowReviewSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetWorkflowReviewScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).SetWorkflowReviewSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_SetWorkflowReviewSchedule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).SetWorkflowReviewSchedule(ctx, req.(*SetWorkflowReviewScheduleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_ReviewWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReviewWorkflowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ReviewWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ReviewWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ReviewWorkflow(ctx, req.(*ReviewWorkflowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RunnerService_ListPromptHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListPromptHistoryRequest)
 	if err := dec(in); err != nil {
@@ -9011,6 +9081,14 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateMission",
 			Handler:    _RunnerService_UpdateMission_Handler,
+		},
+		{
+			MethodName: "SetWorkflowReviewSchedule",
+			Handler:    _RunnerService_SetWorkflowReviewSchedule_Handler,
+		},
+		{
+			MethodName: "ReviewWorkflow",
+			Handler:    _RunnerService_ReviewWorkflow_Handler,
 		},
 		{
 			MethodName: "ListPromptHistory",

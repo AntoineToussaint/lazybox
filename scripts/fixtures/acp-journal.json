@@ -49,6 +49,10 @@
       "type": "operation_accepted"
     },
     {
+      "text": "default",
+      "type": "agent_permission"
+    },
+    {
       "agentId": "root",
       "sessionId": "fake-session-1",
       "turnId": "turn-1",

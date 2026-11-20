@@ -52,6 +52,7 @@ type Config struct {
 	// Zero selects bounded defaults (32 agents, 128 commands), never unlimited.
 	MaxLiveAgents     int                       `json:"maxLiveAgents,omitempty"`
 	MaxLiveCommands   int                       `json:"maxLiveCommands,omitempty"`
+	SnippetPacks      []string                  `json:"snippetPacks,omitempty"`
 	SnippetCommand    string                    `json:"snippetCommand,omitempty"`
 	SnippetDirectory  string                    `json:"snippetDirectory,omitempty"`
 	RepositoryCatalog repositorycatalog.Options `json:"repositoryCatalog,omitempty"`
@@ -524,6 +525,7 @@ func New(cfg Config) (*Bench, error) {
 		return nil, err
 	}
 	b.watchArtifacts()
+	b.watchWorkflowReviews()
 	b.openPower()
 	if err = b.migrateAccounts(); err != nil {
 		_ = b.Detach()

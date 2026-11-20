@@ -49,7 +49,7 @@ const write = (store: ViewStateStore | undefined, name: string, value: string) =
  * (Send feedback among them). Mounted once per main window; `automatic` is
  * false in a workspace window, which only answers Help.
  */
-export function Onboarding({ viewState, collections, collectionsLoaded, automatic, settingsOpen, onOpenSettings, onWorkspace, host, sessionId }: { viewState?: ViewStateStore; collections: readonly Collection[]; collectionsLoaded: boolean; automatic: boolean; settingsOpen?: boolean; onOpenSettings(tab: SettingsTab): void; onWorkspace?(id: string): void; /** The window's host: the app (updates, diagnostics) and its screenshot. */ host?: WorkspaceHost; /** The conversation in front, which a feedback report may name. */ sessionId?: string }) {
+export function Onboarding({ viewState, collections, collectionsLoaded, automatic, settingsOpen, onOpenSettings, onWorkspace, host, sessionId, workspaceId }: { workspaceId?: string; viewState?: ViewStateStore; collections: readonly Collection[]; collectionsLoaded: boolean; automatic: boolean; settingsOpen?: boolean; onOpenSettings(tab: SettingsTab): void; onWorkspace?(id: string): void; /** The window's host: the app (updates, diagnostics) and its screenshot. */ host?: WorkspaceHost; /** The conversation in front, which a feedback report may name. */ sessionId?: string }) {
   const [welcome, setWelcome] = useState(false);
   const [setupInSettings, setSetupInSettings] = useState(false);
   useEffect(() => {
@@ -130,7 +130,7 @@ export function Onboarding({ viewState, collections, collectionsLoaded, automati
       onWorkspace={onWorkspace ? id => { closeWelcome(); onWorkspace(id); } : undefined}/>}
     {whatsNew && <WhatsNew releases={whatsNew.releases} focus={whatsNew.asked} updated={whatsNew.updated} failed={whatsNew.failed} onDismiss={dismissWhatsNew} onUpdates={() => { setWhatsNew(undefined); openUpdates(); }}/>}
     {docs && <Suspense fallback={null}><DocsViewer key={docs} initial={docs} onClose={() => setDocs('')}/></Suspense>}
-    {feedback && <Suspense fallback={null}><FeedbackDialog host={host} shot={feedback} sessionId={sessionId} onClose={() => setFeedback(undefined)}/></Suspense>}
+    {feedback && <Suspense fallback={null}><FeedbackDialog workspaceId={workspaceId} host={host} shot={feedback} sessionId={sessionId} onClose={() => setFeedback(undefined)}/></Suspense>}
   </>;
 }
 

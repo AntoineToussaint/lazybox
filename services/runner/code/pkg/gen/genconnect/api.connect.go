@@ -542,6 +542,12 @@ const (
 	// RunnerServiceUpdateMissionProcedure is the fully-qualified name of the RunnerService's
 	// UpdateMission RPC.
 	RunnerServiceUpdateMissionProcedure = "/lazybox.bench.v1.RunnerService/UpdateMission"
+	// RunnerServiceSetWorkflowReviewScheduleProcedure is the fully-qualified name of the
+	// RunnerService's SetWorkflowReviewSchedule RPC.
+	RunnerServiceSetWorkflowReviewScheduleProcedure = "/lazybox.bench.v1.RunnerService/SetWorkflowReviewSchedule"
+	// RunnerServiceReviewWorkflowProcedure is the fully-qualified name of the RunnerService's
+	// ReviewWorkflow RPC.
+	RunnerServiceReviewWorkflowProcedure = "/lazybox.bench.v1.RunnerService/ReviewWorkflow"
 	// RunnerServiceListPromptHistoryProcedure is the fully-qualified name of the RunnerService's
 	// ListPromptHistory RPC.
 	RunnerServiceListPromptHistoryProcedure = "/lazybox.bench.v1.RunnerService/ListPromptHistory"
@@ -1064,6 +1070,9 @@ type RunnerServiceClient interface {
 	UpdateMission(context.Context, *connect.Request[gen.UpdateMissionRequest]) (*connect.Response[gen.Mission], error)
 	// Owner only. Sent prompts, newest first, from the Runner's prompt log, with
 	// the snippet chain a conversation offers next.
+	// Review human inputs within one workspace and publish editable proposals.
+	SetWorkflowReviewSchedule(context.Context, *connect.Request[gen.SetWorkflowReviewScheduleRequest]) (*connect.Response[gen.CollectionResponse], error)
+	ReviewWorkflow(context.Context, *connect.Request[gen.ReviewWorkflowRequest]) (*connect.Response[gen.ReviewWorkflowResult], error)
 	ListPromptHistory(context.Context, *connect.Request[gen.ListPromptHistoryRequest]) (*connect.Response[gen.PromptHistory], error)
 	// The Orchestrator verbs (`lazybox agents …`; audits/2026-11-16/sota-agents.md
 	// §6.3). An agent credential calls them only for its own execution. Starting
@@ -2274,6 +2283,18 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("UpdateMission")),
 			connect.WithClientOptions(opts...),
 		),
+		setWorkflowReviewSchedule: connect.NewClient[gen.SetWorkflowReviewScheduleRequest, gen.CollectionResponse](
+			httpClient,
+			baseURL+RunnerServiceSetWorkflowReviewScheduleProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("SetWorkflowReviewSchedule")),
+			connect.WithClientOptions(opts...),
+		),
+		reviewWorkflow: connect.NewClient[gen.ReviewWorkflowRequest, gen.ReviewWorkflowResult](
+			httpClient,
+			baseURL+RunnerServiceReviewWorkflowProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("ReviewWorkflow")),
+			connect.WithClientOptions(opts...),
+		),
 		listPromptHistory: connect.NewClient[gen.ListPromptHistoryRequest, gen.PromptHistory](
 			httpClient,
 			baseURL+RunnerServiceListPromptHistoryProcedure,
@@ -2769,6 +2790,8 @@ type runnerServiceClient struct {
 	getMission                   *connect.Client[gen.GetMissionRequest, gen.Mission]
 	createMission                *connect.Client[gen.CreateMissionRequest, gen.Mission]
 	updateMission                *connect.Client[gen.UpdateMissionRequest, gen.Mission]
+	setWorkflowReviewSchedule    *connect.Client[gen.SetWorkflowReviewScheduleRequest, gen.CollectionResponse]
+	reviewWorkflow               *connect.Client[gen.ReviewWorkflowRequest, gen.ReviewWorkflowResult]
 	listPromptHistory            *connect.Client[gen.ListPromptHistoryRequest, gen.PromptHistory]
 	spawnAgent                   *connect.Client[gen.SpawnAgentRequest, gen.AgentLineage]
 	listAgentLineage             *connect.Client[gen.AgentLineageRequest, gen.AgentLineage]
@@ -3684,6 +3707,16 @@ func (c *runnerServiceClient) UpdateMission(ctx context.Context, req *connect.Re
 	return c.updateMission.CallUnary(ctx, req)
 }
 
+// SetWorkflowReviewSchedule calls lazybox.bench.v1.RunnerService.SetWorkflowReviewSchedule.
+func (c *runnerServiceClient) SetWorkflowReviewSchedule(ctx context.Context, req *connect.Request[gen.SetWorkflowReviewScheduleRequest]) (*connect.Response[gen.CollectionResponse], error) {
+	return c.setWorkflowReviewSchedule.CallUnary(ctx, req)
+}
+
+// ReviewWorkflow calls lazybox.bench.v1.RunnerService.ReviewWorkflow.
+func (c *runnerServiceClient) ReviewWorkflow(ctx context.Context, req *connect.Request[gen.ReviewWorkflowRequest]) (*connect.Response[gen.ReviewWorkflowResult], error) {
+	return c.reviewWorkflow.CallUnary(ctx, req)
+}
+
 // ListPromptHistory calls lazybox.bench.v1.RunnerService.ListPromptHistory.
 func (c *runnerServiceClient) ListPromptHistory(ctx context.Context, req *connect.Request[gen.ListPromptHistoryRequest]) (*connect.Response[gen.PromptHistory], error) {
 	return c.listPromptHistory.CallUnary(ctx, req)
@@ -4311,6 +4344,9 @@ type RunnerServiceHandler interface {
 	UpdateMission(context.Context, *connect.Request[gen.UpdateMissionRequest]) (*connect.Response[gen.Mission], error)
 	// Owner only. Sent prompts, newest first, from the Runner's prompt log, with
 	// the snippet chain a conversation offers next.
+	// Review human inputs within one workspace and publish editable proposals.
+	SetWorkflowReviewSchedule(context.Context, *connect.Request[gen.SetWorkflowReviewScheduleRequest]) (*connect.Response[gen.CollectionResponse], error)
+	ReviewWorkflow(context.Context, *connect.Request[gen.ReviewWorkflowRequest]) (*connect.Response[gen.ReviewWorkflowResult], error)
 	ListPromptHistory(context.Context, *connect.Request[gen.ListPromptHistoryRequest]) (*connect.Response[gen.PromptHistory], error)
 	// The Orchestrator verbs (`lazybox agents …`; audits/2026-11-16/sota-agents.md
 	// §6.3). An agent credential calls them only for its own execution. Starting
@@ -5517,6 +5553,18 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(runnerServiceMethods.ByName("UpdateMission")),
 		connect.WithHandlerOptions(opts...),
 	)
+	runnerServiceSetWorkflowReviewScheduleHandler := connect.NewUnaryHandler(
+		RunnerServiceSetWorkflowReviewScheduleProcedure,
+		svc.SetWorkflowReviewSchedule,
+		connect.WithSchema(runnerServiceMethods.ByName("SetWorkflowReviewSchedule")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceReviewWorkflowHandler := connect.NewUnaryHandler(
+		RunnerServiceReviewWorkflowProcedure,
+		svc.ReviewWorkflow,
+		connect.WithSchema(runnerServiceMethods.ByName("ReviewWorkflow")),
+		connect.WithHandlerOptions(opts...),
+	)
 	runnerServiceListPromptHistoryHandler := connect.NewUnaryHandler(
 		RunnerServiceListPromptHistoryProcedure,
 		svc.ListPromptHistory,
@@ -6181,6 +6229,10 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceCreateMissionHandler.ServeHTTP(w, r)
 		case RunnerServiceUpdateMissionProcedure:
 			runnerServiceUpdateMissionHandler.ServeHTTP(w, r)
+		case RunnerServiceSetWorkflowReviewScheduleProcedure:
+			runnerServiceSetWorkflowReviewScheduleHandler.ServeHTTP(w, r)
+		case RunnerServiceReviewWorkflowProcedure:
+			runnerServiceReviewWorkflowHandler.ServeHTTP(w, r)
 		case RunnerServiceListPromptHistoryProcedure:
 			runnerServiceListPromptHistoryHandler.ServeHTTP(w, r)
 		case RunnerServiceSpawnAgentProcedure:
@@ -6982,6 +7034,14 @@ func (UnimplementedRunnerServiceHandler) CreateMission(context.Context, *connect
 
 func (UnimplementedRunnerServiceHandler) UpdateMission(context.Context, *connect.Request[gen.UpdateMissionRequest]) (*connect.Response[gen.Mission], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.UpdateMission is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) SetWorkflowReviewSchedule(context.Context, *connect.Request[gen.SetWorkflowReviewScheduleRequest]) (*connect.Response[gen.CollectionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.SetWorkflowReviewSchedule is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) ReviewWorkflow(context.Context, *connect.Request[gen.ReviewWorkflowRequest]) (*connect.Response[gen.ReviewWorkflowResult], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ReviewWorkflow is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) ListPromptHistory(context.Context, *connect.Request[gen.ListPromptHistoryRequest]) (*connect.Response[gen.PromptHistory], error) {

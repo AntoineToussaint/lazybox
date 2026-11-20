@@ -463,3 +463,32 @@ and whether the read-only workspace changed. Set
 `LAZYBOX_V2_REAL_CODEX_MODEL=gpt-6-astra` to test Astra explicitly or
 `LAZYBOX_V2_REAL_CLAUDE_MODEL` to select a Claude model. The test uses live
 subscriptions and temporary Runner state.
+
+### Review recent work
+
+Open **Send feedback → Review recent work** from a workspace conversation. The
+Runner examines retained human prompts across that workspace's conversations.
+Repeated requests become editable proposals in Artifacts. Repeated repository
+conventions suggest AGENTS.md additions. Repeated corrections immediately after
+a snippet can suggest a revision. Use **Give feedback on this snippet** in the picker or select a snippet in Feedback to give explicit feedback
+after a single use. Retire a proposal to dismiss it. Edit a proposal in Artifacts, then use **Send to agent** to apply the reviewed
+change to its destination. A revision identifies the snippet version it used.
+
+To run the same review hourly with the clients closed, enable **Review this workspace hourly**
+in the same dialog. The review runs
+locally on startup and hourly, uses the retained prompt log, and recognizes
+repeated wording across two or more conversations.
+
+A Runner can load declarative snippet packs through its `snippetPacks` array
+of absolute YAML file paths. Each pack contains a list, for example:
+
+```yaml
+- key: release-check
+  category: Release
+  description: Review release readiness
+  body: Check the release diff and summarize outstanding verification.
+```
+
+Pack keys must be unique across the combined catalog. Each entry shows its
+pack filename as its origin. When the agent reports its native permissions,
+the composer shows its last report alongside the Lazybox permission setting.

@@ -649,7 +649,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
 
   return <main className={'agent-window' + (embedded ? ' embedded-chat' : '') + (drop.dragging ? ' file-drag-active' : '')} {...drop.handlers} onFocusCapture={activity.mark} onPointerDownCapture={activity.mark}>
     {!embedded && <LeaderMenu hint={keyboardHint}/>}
-    {snippetsOpen && <SnippetPicker store={viewState} canSend={canCompose && !sending && !message.trim() && !files.length && !missingFiles.length}
+    {snippetsOpen && <SnippetPicker workspace={session?.collectionId || collectionId} store={viewState} canSend={canCompose && !sending && !message.trim() && !files.length && !missingFiles.length}
       onClose={() => { setSnippetsOpen(false); composer.current?.focus(); }}
       onInsert={insertSnippet}
       onSend={text => send(undefined, text)}/>}
@@ -730,7 +730,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             sending={sending} canCompose={canCompose} canAttach={canAttach} canSend={canSend}
             permissionPrompt={<>{restartTo && <PermissionRestartPrompt mode={restartTo} restarting={permissionRestarting} busy={!!session?.busy} returnTo={composer} onRestart={() => void restartWithPermission(restartTo)} onCancel={() => setRestartTo('')}/>}{slash.prompt}</>}
             slash={slash}
-            info={session ? <ComposerInfo agentName={agentName} modelLabel={modelLabel} modelRequested={!!session.model && !session.modelReported && !transcript.reportedModel} sessionID={sessionID} onPickModel={session.closed ? undefined : slash.models.pick}/> : undefined}
+            info={session ? <ComposerInfo permission={session.permission} reportedPermission={transcript.reportedPermission} agentName={agentName} modelLabel={modelLabel} modelRequested={!!session.model && !session.modelReported && !transcript.reportedModel} sessionID={sessionID} onPickModel={session.closed ? undefined : slash.models.pick}/> : undefined}
             onSubmit={send}
             onChange={text => { if (sendingRef.current) return; recall.reset(); setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); }}
             onDictate={setMessage}

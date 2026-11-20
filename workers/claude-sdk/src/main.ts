@@ -182,7 +182,9 @@ async function handle(request: Request) {
         const native = mode === 'read-only' ? 'plan' : mode === 'yolo' ? 'bypassPermissions' : 'default';
         // Bypass mode needs a flag set at launch; without it, 'default' plus the
         // approvals granted above gives the same result.
-        try { await session.setPermissionMode(native); } catch (error) { if (mode !== 'yolo') throw error; await session.setPermissionMode('default'); }
+        let applied = native;
+        try { await session.setPermissionMode(native); } catch (error) { if (mode !== 'yolo') throw error; await session.setPermissionMode('default'); applied = 'default'; }
+        event({ type: 'agent_permission', sessionId: reference, text: applied });
         permission = mode;
         reply(request.id, { delivery: 'acknowledged' }); break;
       }

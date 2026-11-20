@@ -208,6 +208,14 @@ func TestMissionRPCsAreOwnerOnly(t *testing.T) {
 				_, err := f.client.CreateMission(caller, &pb.CreateMissionRequest{Title: "Mine"})
 				return err
 			},
+			"ReviewWorkflow": func() error {
+				_, err := f.client.ReviewWorkflow(caller, &pb.ReviewWorkflowRequest{CollectionId: f.mine.Id})
+				return err
+			},
+			"SetWorkflowReviewSchedule": func() error {
+				_, err := f.client.SetWorkflowReviewSchedule(caller, &pb.SetWorkflowReviewScheduleRequest{CollectionId: f.mine.Id, Hourly: true})
+				return err
+			},
 			"ListPromptHistory": func() error { _, err := f.client.ListPromptHistory(caller, &pb.ListPromptHistoryRequest{}); return err },
 			"Accept": func() error {
 				_, err := f.client.UpdateMission(caller, &pb.UpdateMissionRequest{MissionId: missionID, Change: &pb.UpdateMissionRequest_Accept{Accept: &pb.GateDecision{TaskId: taskID}}})
@@ -364,5 +372,43 @@ func TestMissionsSurviveARunnerRestart(t *testing.T) {
 	next, err := s.UpdateMission(ctx, &pb.UpdateMissionRequest{MissionId: m.Id, Change: &pb.UpdateMissionRequest_AddTask{AddTask: &pb.TaskCreate{Title: "Continue"}}})
 	if err != nil || next.Seq != added.Seq+1 {
 		t.Fatal("the log did not resume its sequence", err)
+	}
+}
+
+func TestWorkflowFeedbackPublishesOnceAndRespectsDismissal(t *testing.T) {
+	f := newTerminalFixture(t)
+	owner := bearer(timeout(t), ownerToken)
+	for _, hourly := range []bool{true, false} {
+		_, err := f.client.SetWorkflowReviewSchedule(owner, &pb.SetWorkflowReviewScheduleRequest{CollectionId: f.mine.Id, Hourly: hourly})
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved, err := f.client.GetCollection(owner, &pb.CollectionRequest{CollectionId: f.mine.Id})
+		if err != nil || saved.Collection.HourlyWorkflowReview != hourly {
+			t.Fatal(saved, err)
+		}
+	}
+	f.bench.RememberSnippets([]snippets.Entry{{Key: "verify", Body: "Check the build."}})
+	request := &pb.ReviewWorkflowRequest{CollectionId: f.mine.Id, SnippetKey: "verify", Feedback: "Also check coverage."}
+	for i := 0; i < 2; i++ {
+		got, err := f.client.ReviewWorkflow(owner, request)
+		if err != nil || len(got.ProposalTitles) != 1 {
+			t.Fatal(got, err)
+		}
+	}
+	docs, err := f.bench.Artifacts.List(f.mine.Id)
+	if err != nil || len(docs) != 1 || len(docs[0].Versions) != 1 {
+		t.Fatal(docs, err)
+	}
+	doc, err := f.bench.Artifacts.Get(f.mine.Id, docs[0].ID, 0)
+	if err != nil || !strings.Contains(doc.Content, "Also check coverage.") || !strings.Contains(doc.Content, "Check the build.") {
+		t.Fatal(doc, err)
+	}
+	if _, err := f.client.RetireArtifact(owner, &pb.RetireArtifactRequest{CollectionId: f.mine.Id, ArtifactId: doc.ID}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.client.ReviewWorkflow(owner, request)
+	if err != nil || len(got.ProposalTitles) != 0 {
+		t.Fatal(got, err)
 	}
 }

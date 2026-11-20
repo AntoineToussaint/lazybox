@@ -408,3 +408,11 @@ test('queued messages land in the same place however the journal is split',()=>{
  assert.deepEqual(lines(whole).slice(7),['You: X','Agent: on X','stopped: Stopped to send your message','You: Y','Agent: on Y','You (steered): Z','Agent:  and Z','You: W','Agent: on W']);
  assert.deepEqual(Object.values(whole.pending!).map(m=>m.text),['still waiting']);
 });
+
+test('the composer can distinguish a reported native permission from the selected mode', () => {
+  const state = appendTranscript(emptyTranscript(), create(JournalEventSchema, {
+    cursor: 1n, event: { type: 'agent_permission', text: 'bypassPermissions' },
+  }));
+  assert.equal(state.reportedPermission, 'YOLO');
+  assert.equal(state.messages.length, 0);
+});

@@ -65,6 +65,7 @@ type Member struct {
 var ErrBranchExists = errors.New("branch already exists; choose a new collection branch")
 
 type Collection struct {
+	HourlyWorkflowReview    bool              `json:"hourlyWorkflowReview,omitempty"`
 	Slug                    string            `json:"slug,omitempty"`
 	LegacyRoot              bool              `json:"legacyRoot,omitempty"`
 	Version                 int               `json:"version"`
@@ -1051,4 +1052,23 @@ func (m *Manager) Rename(id, name string) (Collection, error) {
 		return Collection{}, err
 	}
 	return clone(c), nil
+}
+
+// SetWorkflowReviewSchedule persists the workspace owner's recurring review choice.
+func (m *Manager) SetWorkflowReviewSchedule(id string, hourly bool) (Collection, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.items[id]
+	if !ok {
+		return Collection{}, os.ErrNotExist
+	}
+	if m.closed {
+		return Collection{}, errors.New("workspace manager closed")
+	}
+	c = clone(c)
+	c.HourlyWorkflowReview = hourly
+	if err := m.save(c); err != nil {
+		return Collection{}, err
+	}
+	return c, nil
 }

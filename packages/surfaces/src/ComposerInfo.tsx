@@ -11,7 +11,9 @@ import './composer-info.css';
  * the agent opens the model picker as the header's chip does, the meter the
  * header's context popover. Narrow panes keep compact labels.
  */
-export function ComposerInfo({ agentName, modelLabel, modelRequested, sessionID, onPickModel }: {
+export function ComposerInfo({ agentName, modelLabel, modelRequested, sessionID, onPickModel, permission, reportedPermission }: {
+  permission?: string;
+  reportedPermission?: string;
   agentName: string;
   /** The model as the header has it ("claude-opus-5-5", or "… (requested)"). */
   modelLabel: string;
@@ -33,6 +35,9 @@ export function ComposerInfo({ agentName, modelLabel, modelRequested, sessionID,
       // tabIndex: WebKit (the desktop app) leaves buttons out of Tab unless they ask; this one is /model from the keyboard.
       ? <button type="button" tabIndex={0} className="composer-info-model" data-requested={modelRequested || undefined} title={`${tooltip}\nSwitch model (/model)`} aria-label={`${text}: change model`} onClick={onPickModel}>{words}<Icon name="chevron" size={11}/></button>
       : <span className="composer-info-model" data-requested={modelRequested || undefined} title={tooltip}>{words}</span>}
+    {reportedPermission && <span className="composer-info-context" title="Last permission mode reported by the agent">
+      {permission && permission !== 'inherit' ? permission : 'CLI settings'} · Agent: {reportedPermission}
+    </span>}
     {label && context && <button type="button" className="composer-info-context" data-level={percent === undefined ? undefined : contextLevel(percent)} popoverTarget={context.popover}
       title={`Context ${label} used · show context and cost`} aria-label={`Context ${label} used: show context and cost`}
       onClick={event => { const popover = document.getElementById(context.popover); if (popover) placeUsagePopover(popover, event.currentTarget.getBoundingClientRect(), 'below'); }}>

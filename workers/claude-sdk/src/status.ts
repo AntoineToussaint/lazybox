@@ -63,6 +63,9 @@ export class NativeStatus {
     // command has its own tool result and console, never a forked agent.
     if (parentCall && this.calls.get(parentCall)?.name === 'mcp__lazybox__command') return out;
     const child = parentCall ? (this.tools.get(parentCall) || `claude-tool:${parentCall}`) : undefined;
+    if (!child && m.type === 'system' && (m.subtype === 'init' || m.subtype === 'status') && m.permissionMode) {
+      emit({ type: 'agent_permission', text: m.permissionMode });
+    }
     if (m.type === 'system' && m.subtype === 'init') {
       if (!this.reference && !child) this.reference = m.session_id;
       if (!this.active) emit({ type: 'session_ready', sessionId: this.reference, data: { version: m.claude_code_version, model: m.model } });

@@ -133,3 +133,15 @@ func TestInstructionUpdateIsItsOwnInputAheadOfTheMessage(t *testing.T) {
 		t.Fatalf("%s", data)
 	}
 }
+
+func TestReportedPermissionNeedsBothNativePoliciesForYOLO(t *testing.T) {
+	for _, test := range []struct{ approval, box, want string }{
+		{`"never"`, `{"type":"dangerFullAccess"}`, "YOLO"},
+		{`"never"`, `{"type":"readOnly"}`, "readOnly · never"},
+		{"", `{"type":"dangerFullAccess"}`, ""},
+	} {
+		if got := reportedPermission([]byte(test.approval), []byte(test.box)); got != test.want {
+			t.Errorf("got %q, want %q", got, test.want)
+		}
+	}
+}

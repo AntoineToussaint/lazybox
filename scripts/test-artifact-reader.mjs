@@ -406,6 +406,14 @@ try {
   await panelPage.screenshot({ path: '.cache/artifact-reader-panel-list-1440-light.png' });
   await row.click();
   await expect(panelPage.getByRole('article', { name: 'Datasource migration' }).getByRole('heading', { level: 1 })).toBeVisible();
+  const panelDiagram = panelPage.getByRole('img', { name: 'Mermaid diagram' });
+  await expect.poll(() => panelDiagram.evaluate(img => img.complete && img.naturalWidth > 0).catch(() => false)).toBe(true);
+  const originalDiagram = await panelDiagram.elementHandle();
+  await panelPage.waitForResponse(response => response.url().endsWith('/ListCollections') && response.ok());
+  await panelPage.waitForResponse(response => response.url().endsWith('/ListCollections') && response.ok());
+  assert.ok(await originalDiagram.evaluate(img => img.isConnected && img.complete && img.naturalWidth > 0),
+    'workspace catalog refresh must keep the existing diagram mounted');
+  await originalDiagram.dispose();
   const back = panelPage.getByRole('button', { name: 'Back to artifacts' });
   if (await back.isVisible()) await back.click();
   await expect(row.getByRole('img', { name: 'Updated since you last looked' })).toHaveCount(0);

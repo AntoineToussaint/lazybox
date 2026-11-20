@@ -1,4 +1,4 @@
-import { Children, isValidElement, memo, useCallback, useEffect, useMemo, useState, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import { Children, isValidElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from 'react';
 import Markdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { isShellLanguage, shellScript } from './code-run';
@@ -77,6 +77,11 @@ type BodyProps = {
  */
 export const DocumentBody = memo(function DocumentBody({ markdown, headings, scroller, idPrefix = 'doc-', marked, onReviewShell }: BodyProps) {
   const byLine = useMemo(() => new Map((headings || []).map(entry => [entry.line, entry])), [headings]);
+  // Markdown renderers are component types. Recreating them on a workspace
+  // refresh remounts every diagram and resets its pan, zoom and source view.
+  const reviewShell = useRef(onReviewShell);
+  useLayoutEffect(() => { reviewShell.current = onReviewShell; }, [onReviewShell]);
+  const canReviewShell = !!onReviewShell;
   const components = useMemo<Components>(() => {
     // A row, item or paragraph that starts on a changed line is marked; its own children are not.
     const isMarked = (node?: HastNodeProp) => !!marked && !!node?.position && marked.has(node.position.start.line);
@@ -91,8 +96,8 @@ export const DocumentBody = memo(function DocumentBody({ markdown, headings, scr
         <a className="doc-anchor" href={`#${entry.id}`} aria-hidden="true" tabIndex={-1} onClick={event => { event.preventDefault(); scrollToId(scroller?.current || null, entry.id); }}>#</a>{children}
       </Tag>;
     };
-    const explicitHomes = new Map(onReviewShell ? homeOffers(markdown, Infinity, true).filter(offer => offer.explicit).map(offer => [offer.command, offer.target]) : []);
-    const review = (command: string) => command && onReviewShell && <button type="button" className="artifact-shell-review" onClick={() => onReviewShell(command, explicitHomes.get(command))}>Review in terminal</button>;
+    const explicitHomes = new Map(canReviewShell ? homeOffers(markdown, Infinity, true).filter(offer => offer.explicit).map(offer => [offer.command, offer.target]) : []);
+    const review = (command: string) => command && canReviewShell && <button type="button" className="artifact-shell-review" onClick={() => reviewShell.current?.(command, explicitHomes.get(command))}>Review in terminal</button>;
     return {
       code: ({ children, className, node }) => {
         const command = flatText(children);
@@ -134,7 +139,7 @@ export const DocumentBody = memo(function DocumentBody({ markdown, headings, scr
       img: ({ alt }) => <span className="content-reference">{alt || 'Image reference'}</span>,
       section: ({ node, children, className }) => (className || '').includes('footnotes') || node?.properties?.dataFootnotes !== undefined ? <section className="doc-footnotes" aria-label="Footnotes">{children}</section> : <section className={className}>{children}</section>,
     };
-  }, [byLine, scroller, marked, markdown, onReviewShell]);
+  }, [byLine, scroller, marked, markdown, canReviewShell]);
   return <div className="doc-body">
     <Markdown remarkPlugins={[remarkGfm]} remarkRehypeOptions={{ clobberPrefix: idPrefix }} rehypePlugins={[rehypeCallouts]} components={components}>{markdown}</Markdown>
   </div>;

@@ -49,9 +49,39 @@ async function run(name,engine){
   // A reply streams in a delta every 30 ms. Whatever way the reader scrolls
   // up, following stops at once and nothing pulls them back down.
   channel.push({type:'operation_accepted',text:'Stream a long reply'});
-  let line=0;streaming=setInterval(()=>{line++;channel.push({type:'message_delta',text:`Streamed line ${line}. ${'More streamed words. '.repeat(line%5?3:12)}\n\n`});},30);
+  // Pace the producer from the rendered stream. A slow CI browser otherwise
+  // accumulates deltas while Playwright itself waits to sample the scrollTop.
+  // Each gesture still has to hold while new content is visibly arriving.
+  let line=0,stopped=false;
+  const stream=async()=>{
+   while(!stopped){
+    line++;
+    const marker=`Streamed line ${line}.`;
+    channel.push({type:'message_delta',text:`${marker} ${'More streamed words. '.repeat(line%5?3:12)}\n\n`});
+    await page.waitForFunction(text=>document.querySelector('.messages-content')?.textContent.includes(text),marker);
+    await pause(30);
+   }
+  };
+  streaming=()=>{stopped=true;};
+  const streamDone=stream();
+  // Test failures close the browser while the producer may be waiting for a paint.
+  streamDone.catch(()=>{});
   await expect(pane).toContainText('Streamed line 20');await expect.poll(gap,{message:'A followed stream stays at the bottom'}).toBeLessThan(3);
-  const settle=async how=>{let last=await top();for(let still=0,end=Date.now()+3000;still<3;){assert.ok(Date.now()<end,`${name}: ${how}: the pane never came to rest (it keeps moving with the stream)`);await pause(80);const now=await top();still=Math.abs(now-last)<1?still+1:0;last=now;}return last;};
+  const settle=how=>pane.evaluate(async(node,label)=>{
+   // Sample in the browser. Under load three Playwright round trips can
+   // exceed the entire deadline even when scrollTop never moves.
+   let last=node.scrollTop,stableSince=performance.now(),frames=0;
+   const start=stableSince;
+   for(;;){
+    await new Promise(requestAnimationFrame);
+    const now=performance.now(),top=node.scrollTop;
+    if(Math.abs(top-last)>=1){stableSince=now;frames=0;}
+    else frames++;
+    if(frames>=3&&now-stableSince>=240)return top;
+    if(now-start>3000&&now-stableSince<240)throw new Error(`${label}: scrollTop still moving (${last} → ${top})`);
+    last=top;
+   }
+  },`${name}: ${how}`);
   const holds=async(how,nudge=false)=>{
    const held=await settle(how),grown=await pane.evaluate(node=>node.scrollHeight);
    if(!nudge)assert.ok(held<grown-(await pane.evaluate(node=>node.clientHeight))-200,`${how}: the reader is clearly away from the bottom`);
@@ -114,10 +144,10 @@ async function run(name,engine){
   // Sending mid-stream, while reading, returns to the bottom and follows.
   await page.getByRole('textbox',{name:'Message',exact:true}).fill('One more thing');await page.getByRole('button',{name:'Send message',exact:true}).click();
   await follows('Sending a message');
-  clearInterval(streaming);streaming=undefined;
+  streaming();await streamDone;streaming=undefined;
   await page.screenshot({path:`/tmp/lazybox-chat-scroll-${name}.png`});
   assert.deepEqual(errors,[]);
   console.log(`PASS ${name}: true bottom after late header, resize and Mermaid; reading held mid-stream against wheel, PageUp, Home, ArrowUp and a scrollbar drag; Latest pill, End, wheel to bottom and send resume following; layout shifts above the viewport keep the reading position.`);
- }finally{clearInterval(streaming);await browser?.close();await server.close();await fixture.close();}
+ }finally{streaming?.();await browser?.close();await server.close();await fixture.close();}
 }
 for(const [name,engine] of Object.entries(engines))await run(name,engine);

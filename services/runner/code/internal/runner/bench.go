@@ -175,14 +175,15 @@ type Execution struct {
 	browserTools bool
 }
 type Bench struct {
-	verificationFlow  sync.Mutex
-	forkMu            sync.Mutex
-	pendingDeletions  *pendingDeletions
-	RepositoryCatalog *repositorycatalog.Cache
-	Telemetry         telemetry.Store
-	Meter             *telemetry.Gateway
-	Prices            telemetry.Pricer
-	Preferences       *preferences.Store
+	verificationFlow   sync.Map
+	verificationLaunch sync.Map
+	forkMu             sync.Mutex
+	pendingDeletions   *pendingDeletions
+	RepositoryCatalog  *repositorycatalog.Cache
+	Telemetry          telemetry.Store
+	Meter              *telemetry.Gateway
+	Prices             telemetry.Pricer
+	Preferences        *preferences.Store
 	// Reviews holds each workspace's inline review comments.
 	Reviews     *reviews.Store
 	GitHub      *githubconnection.Manager

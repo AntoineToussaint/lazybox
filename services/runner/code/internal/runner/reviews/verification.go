@@ -2,6 +2,7 @@ package reviews
 
 import (
 	"errors"
+	"slices"
 	"strings"
 )
 
@@ -18,6 +19,7 @@ type VerificationCheck struct {
 
 // VerificationExecution binds managed command output to captured revisions.
 type VerificationExecution struct {
+	IsolationVersion int    `json:"isolationVersion,omitempty"`
 	Round            int    `json:"round"`
 	Base             string `json:"base"`
 	Candidate        string `json:"candidate"`
@@ -56,6 +58,9 @@ func (c VerificationCheck) Validate() error {
 // VerificationComplete is true only with executed acceptance checks for this
 // round. Missing, interrupted and older receipts cannot establish acceptance.
 func VerificationComplete(run Run) bool {
+	if len(run.Input) == 0 {
+		return false
+	}
 	for _, input := range run.Input {
 		if input.Skipped > 0 {
 			return false
@@ -69,7 +74,8 @@ func VerificationComplete(run Run) bool {
 			return false
 		}
 		result := check.Runs[len(check.Runs)-1]
-		if result.Round != run.Round || result.State != "passed" {
+		input := slices.IndexFunc(run.Input, func(i ReviewInput) bool { return i.Member == check.Member })
+		if input < 0 || result.IsolationVersion != 1 || result.Base == "" || result.Candidate == "" || result.Base != run.Input[input].Base || result.Candidate != run.Input[input].Commit || result.Round != run.Round || result.State != "passed" {
 			return false
 		}
 	}

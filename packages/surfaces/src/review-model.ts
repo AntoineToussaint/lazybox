@@ -248,8 +248,9 @@ export type TabBadge = { text: string; tone: 'busy' | 'done' | 'warn' | 'failed'
  * A review conversation's tab badge: a live dot while it reviews, then "3
  * findings" (red when a blocker is open) or "done", or "failed".
  */
-export function reviewTabBadge(run: Pick<ReviewRun, 'state' | 'reviewerLabel' | 'blockers' | 'majors' | 'minors' | 'nits' | 'detail'>): TabBadge {
+export function reviewTabBadge(run: Pick<ReviewRun, 'state' | 'reviewerLabel' | 'blockers' | 'majors' | 'minors' | 'nits' | 'detail' | 'stopReason'>): TabBadge {
   const findings = run.blockers + run.majors + run.minors + run.nits;
+  if (run.stopReason === 'unverified') return { text: 'unverified', tone: 'warn', label: run.detail || 'Acceptance checks have not verified this revision' };
   if (run.state === 'running') return { text: findings ? String(findings) : '', tone: 'busy', label: `${run.reviewerLabel} is reviewing${findings ? ` · ${countsSummary(run)} so far` : ''}` };
   if (run.state === 'failed') return { text: 'failed', tone: 'failed', label: run.detail || `${run.reviewerLabel} could not review` };
   if (run.state === 'cancelled' || run.state === 'stopped') return { text: run.state, tone: 'done', label: `${run.reviewerLabel}'s review ${run.state === 'cancelled' ? 'was cancelled' : 'stopped'} · ${findingsKept(run)}` };

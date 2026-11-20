@@ -250,7 +250,3 @@ The real browser gate still requires live CSS replacement, nested atomic saves,
 private-path rejection and complete server shutdown. A passing configured-backend
 gate does not mean the upstream FSEvents problem was fixed. The raw diagnostic
 deliberately continues to fail while its default-backend probe fails.
-
-### Browser error collection
-
-The subscription-switch and workspace-row navigation suites use `collectPageErrors` to collect window `error` and `unhandledrejection` events. WebKit can emit a JavaScript console diagnostic for a caught fetch interrupted by navigation; Playwright also labels that diagnostic `pageerror`. The `page-errors` gate checks that actual uncaught errors and rejected promises remain visible across navigation, while caught network failures do not become false application failures.

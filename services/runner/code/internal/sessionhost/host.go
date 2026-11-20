@@ -706,7 +706,14 @@ func (h *host) spawn(spec *Spec) error {
 		h.mu.Unlock()
 	}()
 	go func() {
+		var timer *time.Timer
+		if spec.MaxDurationMs > 0 {
+			timer = time.AfterFunc(time.Duration(spec.MaxDurationMs)*time.Millisecond, func() { _ = guard.Stop() })
+		}
 		outcome, err := guard.Wait()
+		if timer != nil {
+			timer.Stop()
+		}
 		// Escaped descendants can keep output open; do not wait for them forever.
 		select {
 		case <-readDone:

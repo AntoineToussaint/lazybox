@@ -27,7 +27,6 @@ fixture.profiles.push(
   limited('claude-past', 'Limit already over', now - 120),
   { id: 'claude-unknown', provider: 'claude', label: 'Limit without a time', managed: true, isolation: 'environment', availability: { state: 'exhausted', observedAtUnixMillis: String(Date.now()) } },
 );
-fixture.subscriptionRefreshes.set('claude-past', {state:'available',plan:'max',windows:[{name:'five_hour',usedPercent:37,durationMinutes:'300',resetAt:String(now+3600)}]});
 const server = await createServer({ configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
 const refreshes = id => fixture.calls.filter(c => c.method === 'RefreshSubscription' && c.body.profileId === id).length;
 let browser, page;
@@ -56,7 +55,7 @@ try {
   await expect(past).toContainText('42% used');
   await page.waitForTimeout(1500);
   assert.equal(refreshes('claude-past'), 1, 'a passed reset is checked once, by itself');
-  assert.equal(refreshes('claude-future'), 1, 'opening subscriptions refreshes each account once; a future reset does not trigger another refresh');
+  assert.equal(refreshes('claude-future'), 0, 'a limit still running is not refreshed');
   await expect(page.getByRole('article', { name: 'Limit without a time subscription', exact: true }).locator('.subscription-back')).toContainText('reset time not reported');
   await expect(page.getByRole('article', { name: 'Saved Codex subscription', exact: true }).locator('.subscription-next-reset')).toHaveText(/^Weekly limit resets .+ \(in 2d\)$/);
   await expect(page.locator('.settings-page')).not.toContainText('Reported window has ended');

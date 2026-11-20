@@ -1000,3 +1000,32 @@ func TestIncompatibleHelloDoesNotSupersede(t *testing.T) {
 		t.Fatalf("the attached Runner was displaced: got %q", name)
 	}
 }
+
+func TestCommandDeadlineSurvivesRunnerDetach(t *testing.T) {
+	dir := root(t)
+	ctx := deadline(t)
+	c, err := Launch(ctx, dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := streamSpec("echo ready; sleep 30")
+	spec.MaxDurationMs = 250
+	if err = c.Spawn(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	collect(t, c, 1)
+	id := c.ID()
+	if err = c.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	// The Runner is absent through the deadline; the host must enforce it.
+	time.Sleep(400 * time.Millisecond)
+	c, err = Attach(ctx, dir, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, exit := collect(t, c, 0)
+	if exit == nil || !exit.Outcome.Cancelled {
+		t.Fatalf("deadline lost on detach: %+v", exit)
+	}
+}

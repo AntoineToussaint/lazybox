@@ -95,10 +95,12 @@ type TmuxWindow struct {
 // Spec is the program the host runs. It travels over the control connection,
 // never argv, because Env carries resolved credentials.
 type Spec struct {
-	Path string   `json:"path"`
-	Args []string `json:"args"`
-	Env  []string `json:"env"`
-	Cwd  string   `json:"cwd"`
+	// MaxDurationMs is enforced by this host, even while no Runner is attached.
+	MaxDurationMs int64    `json:"maxDurationMs,omitempty"`
+	Path          string   `json:"path"`
+	Args          []string `json:"args"`
+	Env           []string `json:"env"`
+	Cwd           string   `json:"cwd"`
 	// Stream runs a program whose output is bytes, not JSONL: a managed command.
 	// It gets no stdin; every read from its stdout or stderr becomes one Chunk
 	// line, sequenced and acknowledged exactly like an agent line.

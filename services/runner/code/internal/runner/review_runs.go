@@ -746,6 +746,9 @@ func (b *Bench) recordReviewEvidence(run reviews.Run, counts reviews.Counts, fin
 			// No completed verdict, unless a blocker was filed.
 			ev.Detail, ev.Outcome = run.State+" · "+counts.Summary(), work.OutcomeUnknown
 		}
+		if run.TemplateID == reviews.VerificationTemplate && (run.StopReason != reviews.StopClean || !reviews.VerificationComplete(run)) {
+			ev.Detail, ev.Outcome = "unverified · "+counts.Summary(), work.OutcomeUnknown
+		}
 		if counts.Blockers > 0 {
 			ev.Outcome = work.OutcomeFail
 		}
@@ -880,6 +883,9 @@ func (b *Bench) maybeAutoReview(e *Execution, operation string, matches []review
 func (b *Bench) ReviewRunView(run reviews.Run) reviews.Run {
 	if run.TemplateID == reviews.VerificationTemplate {
 		b.refreshVerification(&run)
+		if run.StopReason == reviews.StopClean && !reviews.VerificationComplete(run) {
+			run.StopReason, run.Detail = reviews.StopUnverified, "Previous evidence does not verify this revision. Start a new review."
+		}
 	}
 	if run.State != reviews.RunRunning {
 		return run

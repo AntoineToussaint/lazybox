@@ -70,16 +70,10 @@ try {
   let release; const held = new Promise(resolve => { release = resolve; });
   await page.route('**/lazybox.bench.v1.RunnerService/ListWorkspaceGitSummaries', async route => { if ((route.request().postData() || '').includes('"changes":true')) await held; await route.continue(); });
   const box = await link.boundingBox();
-  // Advance the app's clock explicitly: a loaded CI worker may spend more
-  // than the opening delay between a real-time sleep and the assertion.
-  await page.clock.install();
-  await page.clock.pauseAt(new Date());
   await page.mouse.move(box.x + 40, box.y + 12);
-  await page.clock.runFor(150);
+  await page.waitForTimeout(150);
   await expect(card).toHaveCount(0);
-  await page.clock.runFor(250);
   await expect(card).toBeVisible();
-  await page.clock.resume();
   await expect(card.getByRole('region', {name: 'Repositories'}).locator('.workspace-hover-skeleton')).toHaveCount(2);
   await expect(card).toContainText('feature/uploads-retry');
   await card.screenshot({path: '.cache/workspace-hover-card-reading.png'});

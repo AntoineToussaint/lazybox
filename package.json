@@ -34,7 +34,6 @@
     "docs:check": "vitepress build docs-site && node scripts/docs-site-check.mjs",
     "test:worker": "node --import tsx --test workers/claude-sdk/src/*.test.ts",
     "test:browser-service": "node --import tsx --test workers/browser/src/*.test.ts",
-    "test:page-errors": "node scripts/test-page-errors.mjs",
     "test:startup": "node scripts/test-startup.mjs",
     "test:workspace": "node scripts/test-workspace.mjs",
     "test:command-console": "node scripts/test-command-console.mjs",

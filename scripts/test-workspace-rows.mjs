@@ -1,4 +1,3 @@
-import {collectPageErrors} from './fixtures/page-errors.mjs';
 // Workspace rows carry git state and the conversation's task: the branch,
 // uncommitted files, commits not pushed, commits behind the default branch,
 // the pull request with its checks, and the title of the conversation at work
@@ -33,7 +32,7 @@ let browser;
 try{
  browser=await (process.env.TEST_CHROMIUM?chromium:webkit).launch({headless:true});
  const page=await browser.newPage({viewport:{width:1400,height:900}});page.setDefaultTimeout(15000);
- const errors=await collectPageErrors(page);
+ const errors=[];page.on('pageerror',e=>errors.push(String(e)));
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha#token=${fixture.token}`);
  const nav=page.getByRole('navigation',{name:'Workspaces'});
  const alpha=nav.locator('.workspace-row').filter({hasText:'Alpha feature'}),beta=nav.locator('.workspace-row').filter({hasText:'Beta release'});

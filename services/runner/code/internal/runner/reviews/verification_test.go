@@ -4,7 +4,7 @@ import "testing"
 
 func TestVerificationRequiresCurrentExecutedChecks(t *testing.T) {
 	for _, state := range []string{"", "preparing", "running", "failed", "unverified", "passed"} {
-		run := Run{Round: 2, Verification: []VerificationCheck{{Runs: []VerificationExecution{{Round: 2, State: state}}}}}
+		run := Run{Round: 2, Input: []ReviewInput{{Member: "api", Base: "base", Commit: "candidate"}}, Verification: []VerificationCheck{{Member: "api", Runs: []VerificationExecution{{IsolationVersion: 1, Round: 2, Base: "base", Candidate: "candidate", State: state}}}}}
 		if VerificationComplete(run) != (state == "passed") {
 			t.Errorf("state %q", state)
 		}
@@ -64,5 +64,26 @@ func TestVerificationRepairWithoutChangesEscalates(t *testing.T) {
 	action, err := AuthorTurnEnded(&rv, run.ID, 2, 11, 0, 12)
 	if err != nil || action.Escalate == "" || rv.Runs[0].StopReason != StopStuck {
 		t.Fatalf("empty repair stalls: %+v %v", action, err)
+	}
+}
+
+func TestVerificationRejectsWrongRevisionAndLegacyReceipt(t *testing.T) {
+	for _, change := range []string{"base", "candidate", "member", "legacy"} {
+		t.Run(change, func(t *testing.T) {
+			run := Run{Round: 1, Input: []ReviewInput{{Member: "api", Base: "base", Commit: "current"}}, Verification: []VerificationCheck{{Member: "api", Runs: []VerificationExecution{{Round: 1, IsolationVersion: 1, Base: "base", Candidate: "current", State: "passed"}}}}}
+			switch change {
+			case "base":
+				run.Verification[0].Runs[0].Base = "old"
+			case "candidate":
+				run.Verification[0].Runs[0].Candidate = "old"
+			case "member":
+				run.Verification[0].Member = "other"
+			case "legacy":
+				run.Verification[0].Runs[0].IsolationVersion = 0
+			}
+			if VerificationComplete(run) {
+				t.Fatal("accepted stale evidence")
+			}
+		})
 	}
 }

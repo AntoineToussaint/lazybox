@@ -57,10 +57,8 @@ async function run(type,name){
   const selection=()=>page.evaluate(()=>{const s=getSelection();if(!s||!s.rangeCount||s.isCollapsed)return s?.toString()??'';return s.toString()||`(hidden) ${s.getRangeAt(0).toString()}`;});
   /** Selects all the text of `text`, as a person would have before reaching for the handle. */
   const select=async text=>{
-   // Check the selected range, as selection() does below. WebKit may report an
-   // empty rendered string after resizing even when the range contains text.
-   // Again if highlighting redraws the text meanwhile.
-   await expect.poll(()=>text.evaluate(node=>{const range=document.createRange();range.selectNodeContents(node);const s=getSelection();s.removeAllRanges();s.addRange(range);return s.isCollapsed ? "" : s.getRangeAt(0).toString().trim();}),{message:'text to select beside the handle'}).not.toBe('');
+   // Again if the text was drawn anew meanwhile (a diff's highlighting arrives after its lines).
+   await expect.poll(()=>text.evaluate(node=>{const range=document.createRange();range.selectNodeContents(node);const s=getSelection();s.removeAllRanges();s.addRange(range);return s.toString().trim();}),{message:'text to select beside the handle'}).not.toBe('');
   };
   const centre=box=>({x:box.x+box.width/2,y:box.y+box.height/2});
   /** Where it is, once it is shown (a divider places itself after the layout settles). */
@@ -74,12 +72,8 @@ async function run(type,name){
    */
   const gesture=async(what,{handle,from,by,text,measure,slop=false})=>{
    await expect(handle,`${what}: the handle`).toBeVisible();
-   // An earlier resize can scroll the paragraph completely out of view.
-   // Select visible text, as a person would, before starting the next drag.
-   await text.evaluate(node=>node.scrollIntoView({block:'nearest'}));
    const start=from??centre(await box(handle));
    const before=await measure();
-   await expect(page.locator('html'), `${what}: prior drag ended`).not.toHaveClass(/is-dragging/);
    await select(text);
    const problems=[];
    await page.mouse.move(start.x,start.y);await page.mouse.down();

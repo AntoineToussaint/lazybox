@@ -142,7 +142,6 @@ try {
  await expect(dialog).toBeHidden();
  const claude=page.getByRole('article',{name:'Personal subscription',exact:true});
  await expect(claude).toContainText('Usage not reported yet');await expect(claude.getByRole('progressbar')).toHaveCount(0);
- fixture.subscriptionRefreshes.set(fixture.profiles.find(profile=>profile.label==='Personal').id,{state:'available',plan:'max',windows:[{name:'five_hour',usedPercent:37,durationMinutes:'300',resetAt:String(Math.floor(Date.now()/1000)+3600)}]});
  await claude.getByRole('button',{name:'Refresh usage',exact:true}).click();await expect(claude).toContainText('42% used');
  // Subscriptions group by provider, Claude first, each under a small header; available ones lead, then by name.
  const groups=page.locator('#subscriptions-panel .provider-group');

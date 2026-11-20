@@ -267,3 +267,38 @@ func (s *Store) EndAttempts(conversation, outcome string) error {
 	}
 	return errors.Join(errs...)
 }
+
+// InvalidateReview retracts historical passes on their original tasks and
+// attempts. Corrections are journaled but never become a newer review verdict.
+func (s *Store) InvalidateReview(ref, detail string) error {
+	if ref == "" {
+		return refuse("review correction needs a reference")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var errs []error
+	for id, m := range s.missions {
+		if m.err != nil {
+			errs = append(errs, m.err)
+			continue
+		}
+		var drafts []Draft
+		for _, task := range m.state.Tasks {
+			for _, recorded := range task.Evidence {
+				if recorded.Kind != EvidenceReview || recorded.Ref != ref || recorded.Outcome != OutcomePass {
+					continue
+				}
+				evidence := recorded.Evidence
+				evidence.Corrects, evidence.Outcome, evidence.Detail = recorded.Seq, OutcomeUnknown, detail
+				drafts = append(drafts, Draft{Subject: TaskSubject(task.ID), Type: EvidenceRecorded, Actor: Actor{Kind: ActorLazybox}, Payload: evidence})
+			}
+		}
+		if len(drafts) > 0 {
+			_, err := s.appendLocked(m, id, drafts)
+			if err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}

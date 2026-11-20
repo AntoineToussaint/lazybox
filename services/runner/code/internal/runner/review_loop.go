@@ -59,8 +59,9 @@ func (a *reviewAsks) broadcast() {
 // reviewAct does what a step of the loop decided.
 func (b *Bench) reviewAct(workspace string, run reviews.Run, action reviews.Action) {
 	if run.TemplateID == reviews.VerificationTemplate {
-		b.verificationFlow.Lock()
-		defer b.verificationFlow.Unlock()
+		lock, _ := b.verificationFlow.LoadOrStore(run.ID, &sync.Mutex{})
+		lock.(*sync.Mutex).Lock()
+		defer lock.(*sync.Mutex).Unlock()
 	}
 	if len(action.SendFindings) > 0 {
 		if err := b.sendFindings(workspace, run, action.SendFindings); err != nil {

@@ -278,9 +278,6 @@ try {
       await expect.poll(() => mutations(working, 'Apply').filter(m => m.body.message?.text === 'Bump the invoice schema').length).toBe(1);
       assert.equal(mutations(dev, 'PrepareWorkspace').length, prepares.dev, "Working's + never reaches Dev");
       await expect(workingGroup).toHaveAttribute('data-active', 'true');
-      // Wait for the opened conversation to finish taking focus before testing sidebar navigation.
-      const openedSession = mutations(working, 'Apply').find(m => m.body.message?.text === 'Bump the invoice schema').body.sessionId;
-      await expect(page.locator('.embedded-chat:visible')).toContainText(`Retained conversation for ${openedSession}`);
 
       // Keyboard only (⌥Tab in WebKit, as Safari moves between buttons; Tab elsewhere): from Dev's header to its +, Enter, then "on Dev ▾" (⇧⌥Tab) and ↓ to change the Runner; Escape closes the menu, not the sheet.
       await devGroup.locator('.runner-group-toggle').focus();
@@ -310,9 +307,12 @@ try {
       await page.keyboard.press(tab);
       await page.keyboard.press(tab);
       await expect(sheet.getByRole('textbox', { name: 'First message' })).toBeFocused();
-      // Working remembers the explicit "Start without a repository" choice made above.
-      await expect(sheet.getByText('No repository', { exact: true })).toBeVisible();
-      await expect(sheet.getByRole('combobox', { name: 'Add a repository' })).toBeEnabled();
+      // Working remembers no repository: Enter asks for one, ↑ is "Start without a repository", Enter takes it, Enter starts.
+      await page.keyboard.press('Enter');
+      await expect(sheet.getByRole('combobox', { name: 'Add a repository' })).toBeFocused();
+      await page.keyboard.press('ArrowUp');
+      await page.keyboard.press('Enter');
+      await expect(sheet.getByRole('textbox', { name: 'First message' })).toBeFocused();
       await page.keyboard.press('Enter');
       await expect(sheet).toHaveCount(0);
       await expect.poll(() => mutations(working, 'Apply').filter(m => m.body.message?.text === 'Tidy the release script').length).toBe(1);

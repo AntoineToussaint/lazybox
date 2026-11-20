@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
@@ -26,6 +27,14 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 	if !ok || match.Workspace != e.CollectionID || match.Run.TemplateID != reviews.VerificationTemplate {
 		return check, ErrNotReviewer
 	}
+	lock, _ := b.verificationLaunch.LoadOrStore(match.Run.ID, &sync.Mutex{})
+	lock.(*sync.Mutex).Lock()
+	defer lock.(*sync.Mutex).Unlock()
+	// Re-read after waiting for another launch.
+	match, ok = b.Reviews.ReviewerRun(e.ID, conversationOf(e))
+	if !ok {
+		return check, ErrNotReviewer
+	}
 	workspace, err := b.Collections.Get(match.Workspace)
 	if err != nil {
 		return check, err
@@ -36,9 +45,9 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 		return check, errors.New("verification repository is outside the captured input")
 	}
 	captured := match.Run.Input[input]
-	fresh := false
+
 	run, err := b.Reviews.UpdateRun(match.Workspace, match.Run.ID, func(r *reviews.Run) error {
-		if !r.Active() || r.Phase != reviews.PhaseReviewing || r.Round != match.Run.Round {
+		if !r.Active() || r.Paused || r.Phase != reviews.PhaseReviewing || r.Round != match.Run.Round || !slices.Equal(r.Input, match.Run.Input) || len(r.Rounds) == 0 || !slices.Equal(r.Rounds[len(r.Rounds)-1].Input, r.Input) || len(r.Rounds[len(r.Rounds)-1].Input) == 0 {
 			return errors.New("verification review is not running")
 		}
 		index := slices.IndexFunc(r.Verification, func(c reviews.VerificationCheck) bool { return c.Name == check.Name })
@@ -48,6 +57,10 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 				return errors.New("an existing acceptance check cannot be changed; add a new criterion")
 			}
 			if len(saved.Runs) > 0 && saved.Runs[len(saved.Runs)-1].Round == r.Round {
+				result := saved.Runs[len(saved.Runs)-1]
+				if result.Base != captured.Base || result.Candidate != captured.Commit || result.IsolationVersion != 1 {
+					return errors.New("stale verification receipt; start a new review")
+				}
 				return nil
 			}
 		} else {
@@ -57,20 +70,19 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 			r.Verification = append(r.Verification, check)
 			index = len(r.Verification) - 1
 		}
-		r.Verification[index].Runs = append(r.Verification[index].Runs, reviews.VerificationExecution{Round: r.Round, Base: captured.Base, Candidate: captured.Commit, State: "preparing"})
-		fresh = true
+		r.Verification[index].Runs = append(r.Verification[index].Runs, reviews.VerificationExecution{IsolationVersion: 1, Round: r.Round, Base: captured.Base, Candidate: captured.Commit, State: "preparing"})
 		return nil
 	})
 	if err != nil {
 		return check, err
 	}
 	index := slices.IndexFunc(run.Verification, func(c reviews.VerificationCheck) bool { return c.Name == check.Name })
-	if !fresh {
-		b.refreshVerification(&run)
-		return run.Verification[index], nil
-	}
+	b.refreshVerification(&run)
 	result := run.Verification[index].Runs[len(run.Verification[index].Runs)-1]
 	for _, side := range []string{"base", "candidate"} {
+		if (side == "base" && result.BaseCommand != "") || (side == "candidate" && result.CandidateCommand != "") {
+			continue
+		}
 		revision := result.Base
 		if side == "candidate" {
 			revision = result.Candidate
@@ -78,7 +90,16 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 		dir, startErr := b.Checkpoints.VerificationCheckout(ctx, conversationOf(e), workspace.Members[member].Path, revision)
 		if startErr == nil {
 			var command *commands.Command
-			command, startErr = b.Commands.Start(commands.Spec{SessionID: e.ID, Kind: "verification", Action: fmt.Sprintf("%s/%d/%s/%s", run.ID, run.Round, check.Name, side), Title: "Verify " + check.Name + " (" + side + ")", Cwd: dir, Argv: check.Argv, Env: e.Env})
+			e.activity.Lock()
+			if e.Engine != nil {
+				state := e.Engine.Snapshot()
+				if state.Closed || state.Fault != "" || state.Status == "switching" {
+					e.activity.Unlock()
+					return check, errors.New("reviewer execution is unavailable")
+				}
+			}
+			command, startErr = b.Commands.Start(commands.Spec{SessionID: e.ID, Kind: "verification", Action: fmt.Sprintf("%s/%d/%s/%s", run.ID, run.Round, check.Name, side), Title: "Verify " + check.Name + " (" + side + ")", Cwd: dir, Argv: check.Argv})
+			e.activity.Unlock()
 			if startErr == nil {
 				if side == "base" {
 					result.BaseCommand = command.Status().ID
@@ -93,7 +114,7 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 			result.State = "running"
 		}
 		_, err = b.Reviews.UpdateRun(match.Workspace, run.ID, func(r *reviews.Run) error {
-			if !r.Active() || r.Round != run.Round || r.Phase != reviews.PhaseReviewing {
+			if !r.Active() || r.Paused || r.Round != run.Round || r.Phase != reviews.PhaseReviewing {
 				return errors.New("verification round ended while starting the check")
 			}
 			r.Verification[index].Runs[len(r.Verification[index].Runs)-1] = result
@@ -121,13 +142,19 @@ func (b *Bench) refreshVerification(run *reviews.Run) {
 			continue
 		}
 		result := &check.Runs[len(check.Runs)-1]
-		if result.Round != run.Round {
+		if result.Round != run.Round || result.IsolationVersion != 1 {
+			result.State, result.Detail = "unverified", "Receipt predates isolated, revision-bound verification"
+			continue
+		}
+		input := slices.IndexFunc(run.Input, func(i reviews.ReviewInput) bool { return i.Member == check.Member })
+		if input < 0 || result.Base != run.Input[input].Base || result.Candidate != run.Input[input].Commit {
+			result.State, result.Detail = "unverified", "Receipt does not match captured revisions"
 			continue
 		}
 		if result.BaseCommand == "" || result.CandidateCommand == "" {
 			prefix := fmt.Sprintf("%s/%d/%s/", run.ID, result.Round, check.Name)
 			for _, status := range b.Commands.List("") {
-				if status.Spec.Kind != "verification" {
+				if status.Spec.Kind != "verification" || !status.Spec.Isolated {
 					continue
 				}
 				if status.Spec.Action == prefix+"base" {
@@ -153,6 +180,10 @@ func (b *Bench) refreshVerification(run *reviews.Run) {
 			continue
 		}
 		bs, cs := base.Status(), candidate.Status()
+		if !bs.Spec.Isolated || !cs.Spec.Isolated {
+			result.State = "unverified"
+			continue
+		}
 		if !bs.Done || !cs.Done {
 			result.State = "running"
 			continue
@@ -218,6 +249,7 @@ func (b *Bench) watchVerification() {
 						continue
 					}
 					if !run.Active() {
+						b.reconcileVerificationEvidence(workspace, run, review.Comments)
 						b.cancelVerification(run)
 						continue
 					}
@@ -240,13 +272,32 @@ func (b *Bench) watchVerification() {
 					}
 				}
 			}
-			for _, status := range b.Commands.List("") {
-				if status.Spec.Kind == "verification" && !status.Done && status.StartedAt > 0 && time.Since(time.UnixMilli(status.StartedAt)) > 15*time.Minute {
-					if command, err := b.Commands.Get(status.ID); err == nil {
-						_ = command.Cancel()
-					}
-				}
-			}
 		}
 	}()
+}
+
+// Reconcile terminal evidence from older Runners; artifact history remains
+// available, while its latest version and mission evidence retract false passes.
+func (b *Bench) reconcileVerificationEvidence(workspace string, run reviews.Run, comments []reviews.Comment) {
+	b.refreshVerification(&run)
+	if b.Work != nil && (run.StopReason != reviews.StopClean || !reviews.VerificationComplete(run)) {
+		_ = b.Work.InvalidateReview("review:"+run.ID, "Acceptance verification is incomplete; previous passing evidence was invalidated.")
+	}
+
+	if run.StopReason == reviews.StopClean && !reviews.VerificationComplete(run) {
+		_, err := b.Reviews.UpdateRun(workspace, run.ID, func(saved *reviews.Run) error {
+			if saved.Active() {
+				return reviews.Unchanged
+			}
+			b.refreshVerification(saved)
+			if reviews.VerificationComplete(*saved) {
+				return reviews.Unchanged
+			}
+			saved.StopReason, saved.Detail = reviews.StopUnverified, "Previous evidence did not verify these revisions in isolation. Start a new review."
+			return b.publishReviewVersion(workspace, *saved, comments, "Previous verification invalidated; original report retained in artifact history.", saved.Detail, fmt.Sprintf("review-round-%d-invalidated-v1", saved.Round))
+		})
+		if err != nil {
+			return
+		}
+	}
 }

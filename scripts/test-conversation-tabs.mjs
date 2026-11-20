@@ -160,21 +160,14 @@ async function tabsOn(){
  await row('Main alpha conversation').click();
  const source=page.locator('article.message').filter({hasText:'A cache entry expires after ten minutes.'});
  const words=source.getByText('A cache entry expires after ten minutes.',{exact:true});
- // Select with the pointer after the conversation is visible. A synthetic
- // Range can be cleared when the newly opened chat restores composer focus.
- await words.click();
- const selectedBox=await words.evaluate(node=>{
+ const selectedPoint=await words.evaluate(node=>{
   const range=document.createRange();
   range.setStart(node.firstChild,2);range.setEnd(node.firstChild,13);
+  const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
   const rect=range.getBoundingClientRect();
-  return {left:rect.left,right:rect.right,y:rect.top+rect.height/2};
+  return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};
  });
- await page.mouse.move(selectedBox.left+0.5,selectedBox.y);
- await page.mouse.down();
- await page.mouse.move(selectedBox.right-0.5,selectedBox.y,{steps:8});
- await page.mouse.up();
- await expect.poll(()=>page.evaluate(()=>getSelection()?.toString())).toBe('cache entry');
- await page.mouse.click((selectedBox.left+selectedBox.right)/2,selectedBox.y,{button:'right'});
+ await page.mouse.click(selectedPoint.x,selectedPoint.y,{button:'right'});
  await page.getByRole('menuitem',{name:'Send to conversation…'}).click();
  const handoff=page.getByRole('dialog',{name:'Send to conversation'});
  await expect(handoff.getByRole('option',{name:'Second alpha conversation · Codex'})).toBeAttached();

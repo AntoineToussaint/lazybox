@@ -185,12 +185,14 @@ const (
 // (run:<execution>/<command>), a commit (commit:<member>@<sha>) or a pull
 // request with its checks (pr:<owner/name>#<n>@<sha>).
 type Evidence struct {
-	Kind    string `json:"kind"`
-	Ref     string `json:"ref"`
-	Task    string `json:"task"`
-	Attempt string `json:"attempt,omitempty"`
-	Title   string `json:"title,omitempty"`
-	Outcome string `json:"outcome"`
+	// Corrects retracts a prior review pass without changing its ordering or attempt.
+	Corrects uint64 `json:"corrects,omitempty"`
+	Kind     string `json:"kind"`
+	Ref      string `json:"ref"`
+	Task     string `json:"task"`
+	Attempt  string `json:"attempt,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Outcome  string `json:"outcome"`
 	// ExitCode is the command's own status; absent for a pipe (`lazybox log`).
 	ExitCode *int `json:"exit_code,omitempty"`
 	Piped    bool `json:"piped,omitempty"`

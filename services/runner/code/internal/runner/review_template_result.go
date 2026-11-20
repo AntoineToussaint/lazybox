@@ -12,6 +12,7 @@ import (
 )
 
 type reviewResult struct {
+	Acceptance   string                      `json:"acceptance,omitempty"`
 	Checks       []reviews.VerificationCheck `json:"checks,omitempty"`
 	Schema       string                      `json:"schema"`
 	Run          string                      `json:"run"`
@@ -53,6 +54,10 @@ func reviewCoverage(reply string) string {
 }
 
 func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments []reviews.Comment, coverage, reply string) error {
+	return b.publishReviewVersion(workspace, run, comments, coverage, reply, fmt.Sprintf("review-round-%d", run.Round))
+}
+
+func (b *Bench) publishReviewVersion(workspace string, run reviews.Run, comments []reviews.Comment, coverage, reply, version string) error {
 	if coverage == "" {
 		return errors.New("the reviewer did not report coverage")
 	}
@@ -61,6 +66,10 @@ func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments 
 	}
 	result := reviewResult{Schema: "lazybox.review-findings/v1", Run: run.ID, Template: run.TemplateID, Input: run.Input, Coverage: coverage, Findings: []reviewResultFinding{}}
 	if run.TemplateID == reviews.VerificationTemplate {
+		result.Acceptance = "unverified"
+		if run.StopReason == reviews.StopClean && reviews.VerificationComplete(run) {
+			result.Acceptance = "passed"
+		}
 		result.Verification = strings.TrimSpace(reply)
 		result.Checks = run.Verification
 	}
@@ -76,6 +85,9 @@ func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments 
 	}
 	var body strings.Builder
 	fmt.Fprintf(&body, "# %s\n\n%d findings filed against the captured changes. \n\n**Coverage** %s\n\n", run.ReviewerTitle, len(result.Findings), coverage)
+	if result.Acceptance != "" {
+		fmt.Fprintf(&body, "**Acceptance:** %s\n\n", result.Acceptance)
+	}
 	if len(result.Checks) > 0 {
 		body.WriteString("## Recorded acceptance checks\n\n| Criterion | Expected behavior | Round | State | Base exit | Candidate exit | Command output IDs |\n| --- | --- | --- | --- | --- | --- | --- |\n")
 		for _, check := range result.Checks {
@@ -92,7 +104,7 @@ func (b *Bench) publishReviewResult(workspace string, run reviews.Run, comments 
 	}
 	fmt.Fprintf(&body, "\n```json\n%s\n```\n", data)
 	_, err = b.Artifacts.PublishReview(workspace, run.ID, run.ReviewerTitle, body.String(), result.Schema,
-		artifacts.Source{Kind: "agent", SessionID: run.ReviewerSession, ConversationID: run.ReviewerConversation, TurnID: fmt.Sprintf("review-round-%d", run.Round)})
+		artifacts.Source{Kind: "agent", SessionID: run.ReviewerSession, ConversationID: run.ReviewerConversation, TurnID: version})
 	return err
 }
 

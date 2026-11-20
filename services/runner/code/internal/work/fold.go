@@ -500,7 +500,25 @@ func (s *State) foldTask(e Event) error {
 		if p.Ref == "" || (p.Kind != EvidenceRun && p.Kind != EvidenceCommit && p.Kind != EvidencePR && p.Kind != EvidenceReview) {
 			return refuse("evidence needs a kind and a reference")
 		}
-		t.Evidence = append(t.Evidence, Recorded{Seq: e.Seq, At: e.At, Actor: e.Actor, Evidence: p})
+		if p.Corrects != 0 {
+			if e.Actor.Kind != ActorLazybox || p.Kind != EvidenceReview || p.Outcome != OutcomeUnknown {
+				return refuse("only Lazybox retracts invalid review evidence")
+			}
+			found := false
+			for i := range t.Evidence {
+				previous := &t.Evidence[i]
+				if previous.Seq == p.Corrects && previous.Kind == EvidenceReview && previous.Ref == p.Ref && previous.Attempt == p.Attempt {
+					previous.Outcome, previous.Detail = p.Outcome, p.Detail
+					found = true
+					break
+				}
+			}
+			if !found {
+				return refuse("review correction does not identify existing evidence")
+			}
+		} else {
+			t.Evidence = append(t.Evidence, Recorded{Seq: e.Seq, At: e.At, Actor: e.Actor, Evidence: p})
+		}
 	case GateRequested:
 		p, _ := decode[GatePayload](e)
 		if p.Gate == "" {

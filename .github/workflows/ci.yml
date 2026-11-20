@@ -131,6 +131,12 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
+      - name: Install verification isolation
+        if: needs.plan.outputs.profile == 'full'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev -- true
       - name: Install tmux
         if: needs.plan.outputs.profile == 'full'
         run: command -v tmux || { sudo apt-get update && sudo apt-get install -y tmux; }

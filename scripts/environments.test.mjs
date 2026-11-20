@@ -54,7 +54,7 @@ test('release identities cannot escape the immutable release directory', () => {
   for (const id of ['', '..', '/tmp/overwrite', '../working', 'a/b']) assert.throws(() => releasePath('/fixture', id));
 });
 test('source snapshots exclude credentials, runtime state, and mutable build output', () => {
-  for (const file of ['.cache/subscriptions/accounts/secret', 'runner.config.json', '.env', '.env.local', 'services/runner/.cache/env', 'apps/desktop/src-tauri/target/debug/app', 'node_modules/lib/index.js', 'workers/claude-sdk/dist/main.js']) assert.equal(includeSource(file), false, file);
+  for (const file of ['.git', '.git/index', '.git/config', '.cache/subscriptions/accounts/secret', 'runner.config.json', '.env', '.env.local', 'services/runner/.cache/env', 'apps/desktop/src-tauri/target/debug/app', 'node_modules/lib/index.js', 'workers/claude-sdk/dist/main.js']) assert.equal(includeSource(file), false, file);
   for (const file of ['services/runner/code/work.go', 'services/runner/code/go.sum', 'package-lock.json', 'workers/claude-sdk/src/main.ts', 'apps/desktop/src-tauri/Cargo.lock', '.env.example']) assert.equal(includeSource(file), true, file);
 });
 

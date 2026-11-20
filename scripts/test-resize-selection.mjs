@@ -119,9 +119,10 @@ async function run(type,name){
 
   // The dock's divider between the chat and the command output, dragged up across the conversation.
   await page.getByRole('tab',{name:'Command output',exact:true}).click();
+  // Keep transcript text visible for the following tab-drag selection check.
   const inner=page.getByRole('separator',{name:/^Resize .* and Command output$/});
   const chatPanel=page.locator('[data-dock-panel]:has(> .panel-host > .panel-chat)');
-  await gesture('the divider between the chat and the command output (dock divider)',{handle:inner,by:{x:0,y:-220},text:prose,measure:height(chatPanel)});
+  await gesture('the divider between the chat and the command output (dock divider)',{handle:inner,by:{x:0,y:-80},text:prose,measure:height(chatPanel)});
 
   // A dock tab dragged over the conversation to the chat's right edge: it splits there.
   {const tab=page.getByRole('tab',{name:'Command output',exact:true}),chatBox=await box(chatPanel),tabBox=await box(tab);

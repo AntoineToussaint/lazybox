@@ -47,7 +47,7 @@ try{
  const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
  // The app's policy; Vite's dev server adds an inline preamble (Tauri hashes the shipped app's) and its HMR socket.
  const csp=appCsp.replace("default-src 'self'","default-src 'self'; script-src 'self' 'unsafe-inline'").replace('connect-src ',`connect-src 'self' ws://127.0.0.1:* `);
- assert.match(csp,/img-src 'self' data:(;|$)/,'the app policy still allows data: images, which the diagram image is');
+ assert.match(csp,/img-src[^;]*\sdata:(?:\s|;|$)/,'the app policy still allows data: images, which the diagram image is');
  browser=await (process.env.TEST_CHROMIUM?chromium:webkit).launch({headless:true});
  const open=async({preferences,blockRenderer}={})=>{
   const context=await browser.newContext({viewport:{width:1280,height:900}});

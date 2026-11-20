@@ -53,12 +53,27 @@ type (
 		EstimateUSD float64  `json:"estimate_usd,omitempty"`
 		After       []string `json:"after,omitempty"`
 	}
+	// BaselineMember identifies a named checkout at the time a plan was proposed.
+	BaselineMember struct {
+		Name       string `json:"name"`
+		Repository string `json:"repository"`
+		Commit     string `json:"commit"`
+	}
+	PlanContract struct {
+		Artifact  string   `json:"artifact"`
+		Version   uint32   `json:"version"`
+		Workspace string   `json:"workspace"`
+		Digest    string   `json:"digest"`
+		Criteria  []string `json:"criteria"`
+	}
 	// PlanPayload is plan.proposed.
 	PlanPayload struct {
-		Plan    string     `json:"plan"`
-		Grant   string     `json:"grant"`
-		Summary string     `json:"summary,omitempty"`
-		Tasks   []PlanTask `json:"tasks"`
+		Plan     string           `json:"plan"`
+		Grant    string           `json:"grant"`
+		Summary  string           `json:"summary,omitempty"`
+		Tasks    []PlanTask       `json:"tasks"`
+		Contract *PlanContract    `json:"contract,omitempty"`
+		Baseline []BaselineMember `json:"baseline,omitempty"`
 	}
 	// PlanDecisionPayload is plan.approved or plan.rejected. On approval,
 	// Tasks maps each plan key to the mission task it became, and the cap
@@ -182,6 +197,12 @@ func (s *State) PendingPlan(grant string) *Plan {
 // ApprovedTask reports whether a task came from an approved plan of a grant,
 // and that plan's entry for it.
 func (s *State) ApprovedTask(grant, task string) (PlanTask, bool) {
+	entry, plan := s.ApprovedTaskPlan(grant, task)
+	return entry, plan != nil
+}
+
+// ApprovedTaskPlan returns the approved entry and the plan that fixed its inputs.
+func (s *State) ApprovedTaskPlan(grant, task string) (PlanTask, *Plan) {
 	for _, p := range s.Plans {
 		if p.Grant != grant || p.State != PlanStateApproved {
 			continue
@@ -192,12 +213,12 @@ func (s *State) ApprovedTask(grant, task string) (PlanTask, bool) {
 			}
 			for _, t := range p.Tasks {
 				if t.Key == key {
-					return t, true
+					return t, p
 				}
 			}
 		}
 	}
-	return PlanTask{}, false
+	return PlanTask{}, nil
 }
 
 // BudgetState is the latest budget event of a grant: "" (nothing to say),
@@ -250,8 +271,8 @@ func (t PlanTask) validate(g *Grant) error {
 	if t.Profile != "" && !slices.Contains(g.Ceiling.Profiles, t.Profile) {
 		return refuse("planned task %q names subscription %q, which the grant does not allow", t.Key, t.Profile)
 	}
-	if t.Workspace != "" && t.Workspace != "same" && t.Workspace != "new" {
-		return refuse("planned task %q: workspace is same or new", t.Key)
+	if t.Workspace != "" && t.Workspace != "same" && t.Workspace != "new" && t.Workspace != "pinned" {
+		return refuse("planned task %q: workspace is same, new or pinned", t.Key)
 	}
 	if t.EstimateUSD < 0 || t.EstimateUSD > 10000 {
 		return refuse("planned task %q: an estimate between $0 and $10,000", t.Key)
@@ -290,6 +311,9 @@ func (s *State) foldPlan(e Event) error {
 		}
 		keys := map[string]bool{}
 		for _, t := range p.Tasks {
+			if t.Workspace == "pinned" && len(p.Baseline) == 0 {
+				return refuse("pinned workspace needs a captured baseline")
+			}
 			if err := t.validate(g); err != nil {
 				return err
 			}
@@ -419,7 +443,12 @@ func (s *Store) ProposePlan(mission string, actor Actor, key string, p PlanPaylo
 	}
 	state, events, err := s.Append(mission, Draft{Subject: "plan:" + p.Plan, Type: PlanProposed, Actor: actor, Idempotency: key, Payload: p})
 	if err == nil && len(events) == 0 {
-		p.Plan = existingSubject(state, key, "plan:")
+		event, _ := state.Event(key)
+		previous := state.PlanOf(strings.TrimPrefix(event.Subject, "plan:"))
+		if event.Type != PlanProposed || previous == nil || previous.Grant != p.Grant || previous.ProposedBy.Conversation != actor.Conversation {
+			return nil, "", refuse("operation key already used for a different operation")
+		}
+		p.Plan = previous.Plan
 	}
 	return state, p.Plan, err
 }

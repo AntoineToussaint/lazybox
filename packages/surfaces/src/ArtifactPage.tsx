@@ -11,6 +11,10 @@ import { DocumentBody, RenderedDiff, TableOfContents, useScrollSpy } from './Art
 import { openArtifact, revealMessage } from './artifact-events';
 import { OTHER_ARTIFACTS_POLL_MS, retiredStamp, useArtifacts } from './useArtifacts';
 import { composeInConversation } from './compose';
+import { useLibrary } from './home-checkouts';
+import { placeFor, type HomeTarget } from './home-run';
+import { openHomeShell, type ShellPlace } from './home-shell';
+import { TerminalPanel } from './TerminalPanel';
 import { Icon } from './Icons';
 import { useRunner } from './RunnerContext';
 import { useWorkbench } from './workbench';
@@ -50,6 +54,8 @@ const remember = (key: string, value: string) => { try { sessionStorage.setItem(
 const editable = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
 
 const authorIcon = (version?: ArtifactVersion) => version?.author?.kind === 'agent' ? 'sparkle' : version?.author?.kind === 'file' || version?.source?.kind === 'file' ? 'file' : version?.source?.kind === 'message' ? 'chat' : 'pencil';
+let dismissPrintSheet: (() => void) | undefined;
+
 const capital = (text: string) => text ? text[0].toUpperCase() + text.slice(1) : text;
 const fullDate = (unixMillis: bigint | number) => new Date(Number(unixMillis)).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
@@ -63,6 +69,36 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   const host = useContext(ArtifactHostContext);
   const workbench = useWorkbench();
   const [artifact, setArtifact] = useState<Artifact>(), [error, setError] = useState(''), [missing, setMissing] = useState(false);
+  const library = useLibrary(api);
+  const [terminal, setTerminal] = useState<{ id: string; command: string }>();
+  const openingShell = useRef(false);
+  const reviewShell = useCallback(async (command: string, target?: HomeTarget) => {
+    if (openingShell.current) return;
+    let place: ShellPlace = { directory: '', label: 'workspace root' };
+    if (target) {
+      const repositories = (collection?.members || []).flatMap(({ spec }) => spec?.repositoryId
+        ? [{ repositoryId: spec.repositoryId, name: spec.name, identity: library.find(repo => repo.id === spec.repositoryId)?.gitIdentity || '', home: '' }] : []);
+      const home = placeFor(target, repositories);
+      if (home.kind === 'unknown') { setError(`No workspace repository matches “${home.name}”.`); return; }
+      place = home.kind === 'user' ? { userHome: true, label: 'your home folder' }
+        : { repositoryId: home.repository.repositoryId, label: `${home.repository.name} home` };
+    }
+    // PTY input is executable input. Allow source lines and tabs, but reject
+    // raw control sequences that could submit or manipulate the prompt.
+    if (Array.from(command).some(char => {
+      const value = char.charCodeAt(0);
+      return (value < 32 && char !== '\n' && char !== '\t') || (value >= 127 && value < 160);
+    })) { setError('This command contains terminal control characters.'); return; }
+    if (!command.trim()) return;
+    openingShell.current = true;
+    setError('');
+    try {
+      const result = await openHomeShell(api, collectionId, place, '', {
+        showTerminal: id => setTerminal({ id, command }),
+      });
+      if (result.error) setError(result.error);
+    } finally { openingShell.current = false; }
+  }, [api, collection, collectionId, library]);
   const [selected, setSelected] = useState(0); // 0 follows the latest version
   const [view, setView] = useState<'document' | 'source' | 'changes'>('document');
   const [diffMode, setDiffModeState] = useState<'rendered' | 'text'>(() => remembered(DIFF_KEY) === 'text' ? 'text' : 'rendered');
@@ -260,6 +296,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   };
   const shownAt = version?.createdAtUnixMillis || artifact.updatedAtUnixMillis;
   const print = () => {
+    setError('');
     if (view !== 'document') { setView('document'); setPrintPending(true); return; }
     printNow.current();
   };
@@ -270,7 +307,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
     const ready = () => {
       const node = documentRef.current;
       if (node && (node.querySelector('.diagram-pending, .module-empty') && Date.now() - started < 4000)) { say('Preparing the diagrams for print…'); setTimeout(ready, 120); return; }
-      printDocument(sheet, node);
+      void printDocument(sheet, node).catch(error => setError(`Could not open the print dialog: ${errorText(error)}`));
     };
     ready();
   };
@@ -322,7 +359,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
           <button type="button" disabled={exportContent === undefined} onClick={() => void copy(exportContent ?? '', `Copied ${formatLabel}.`)}><Icon name="copy"/><span>{Preview ? 'Copy HTML source' : 'Copy as Markdown'}</span></button>
           <button type="button" disabled={exportContent === undefined} onClick={() => download()}><Icon name="download"/><span>Download .{extension}</span></button>
           {structured && <button type="button" disabled={content === undefined} onClick={() => download(true)}><Icon name="download"/><span>Download .json</span></button>}
-          {!Preview && <><button type="button" onClick={print}><Icon name="print"/><span>Print or save as PDF…</span></button>
+          {!Preview && <><button type="button" disabled={reading === undefined} onClick={print}><Icon name="print"/><span>Print or save as PDF…</span></button>
           <button type="button" disabled={!collection?.members.length} onClick={() => setDialog('save')}><Icon name="repository"/><span>Save to repository…</span></button>
           <button type="button" disabled={!collection?.members.length} onClick={() => setDialog('issue')}><Icon name="external"/><span>Create GitHub issue…</span></button></>}
         </ActionMenu>
@@ -381,7 +418,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
                 </div>
               </header>
               {shown !== latestNumber && <div className="artifact-old-version" role="note"><Icon name="history" size={14}/><span>You are viewing v{shown} of {latestNumber}.</span><button type="button" className="link-button" onClick={() => { setSelected(0); setBase(shown); setView('changes'); }}>What changed since</button><button type="button" className="link-button" onClick={() => { setSelected(0); setBase(0); }}>Back to latest</button>{!artifact.trackedPath && !artifact.retired && <button type="button" className="link-button" disabled={content === undefined || republishing} onClick={() => content !== undefined && void saveRevision(content, `Republished v${shown}.`)}>Republish v{shown}</button>}</div>}
-              <div ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <pre className="artifact-html-source">{content}</pre> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : <DocumentBody markdown={reading} headings={headings} scroller={scroller}/>}</div>
+              <div ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <pre className="artifact-html-source">{content}</pre> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : <DocumentBody markdown={reading} headings={headings} scroller={scroller} onReviewShell={reviewShell}/>}</div>
             </div>
             {outline.length > 0 && <aside className="doc-toc-rail"><TableOfContents entries={outline} active={active} scroller={scroller}/></aside>}
           </div>
@@ -427,6 +464,13 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
         </ol>
       </aside>}
     </div>
+    {terminal && <section className="artifact-terminal" aria-label="Artifact terminal">
+      <header><strong>Terminal</strong><span>Review the command at the prompt, then press Return.</span>
+        <button type="button" className="icon-button" aria-label="Hide artifact terminal" onClick={() => setTerminal(undefined)}><Icon name="close" size={14}/></button>
+      </header>
+      <TerminalPanel key={terminal.id} workspaceId={collectionId} collections={collection ? [collection] : []} initialTerminalId={terminal.id} initialInput={terminal.command}
+        sessionId={conversationId} onShowSession={onShowSession} onClosePanel={() => setTerminal(undefined)}/>
+    </section>}
     {dialog === 'delete' && <DeleteArtifactDialog artifact={artifact} onClose={() => setDialog(undefined)} onDeleted={() => { setDialog(undefined); onDeleted?.(); }}/>}
     {dialog === 'save' && <SaveToRepositoryDialog artifact={artifact} collection={collection} onClose={() => setDialog(undefined)} onSaved={(path, next) => { setDialog(undefined); if (next) setArtifact(next); artifactsChanged(collectionId); say(`Saved to ${path}. It is not committed.`); }}/>}
     {dialog === 'issue' && <CreateIssueDialog artifact={artifact} collection={collection} onClose={() => setDialog(undefined)} onCreated={(url, number) => { setDialog(undefined); say(`Created issue #${number}.`); if (/^https:\/\//.test(url)) window.open(url, '_blank', 'noopener,noreferrer'); }}/>}
@@ -454,9 +498,9 @@ function RenameField({ value, onDone }: { value: string; onDone(title: string): 
  * shown by the print stylesheet alone, and is removed after the print dialog
  * closes. "Save as PDF" is the system print dialog's own choice.
  */
-export function printDocument({ title, eyebrow, meta }: { title: string; eyebrow: string; meta: string[] }, rendered: HTMLElement | null) {
+export async function printDocument({ title, eyebrow, meta }: { title: string; eyebrow: string; meta: string[] }, rendered: HTMLElement | null) {
   if (!rendered) return;
-  document.querySelector('.artifact-print-sheet')?.remove();
+  dismissPrintSheet?.();
   const sheet = document.createElement('div');
   sheet.className = 'artifact-print-sheet';
   const heading = document.createElement('header');
@@ -472,10 +516,25 @@ export function printDocument({ title, eyebrow, meta }: { title: string; eyebrow
   document.documentElement.classList.add('printing-artifact');
   const previous = document.title;
   document.title = title;
-  let done = false;
-  const cleanup = () => { if (done) return; done = true; sheet.remove(); document.documentElement.classList.remove('printing-artifact'); document.title = previous; window.removeEventListener('afterprint', cleanup); };
+  const cleanup = () => {
+    if (dismissPrintSheet !== cleanup) return;
+    dismissPrintSheet = undefined;
+    clearTimeout(fallback);
+    sheet.remove();
+    document.documentElement.classList.remove('printing-artifact');
+    document.title = previous;
+    window.removeEventListener('afterprint', cleanup);
+  };
+  // Native print returns before its dialog closes. Allow another attempt if
+  // the platform never reports afterprint.
+  const fallback = setTimeout(cleanup, 60_000);
+  dismissPrintSheet = cleanup;
   window.addEventListener('afterprint', cleanup);
-  window.print();
-  // Engines whose print() returns before the dialog closes still fire afterprint; the timer is the fallback.
-  setTimeout(cleanup, 60_000);
+  try {
+    // Tauri's macOS implementation returns a Promise despite the DOM type.
+    await window.print();
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 }

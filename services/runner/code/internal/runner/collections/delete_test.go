@@ -185,3 +185,38 @@ func TestDeletionCleanupDoesNotBlockWorkspaceReads(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDeleteRepairsMissingGitLinkOnlyAfterDiscardConsent(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	m := newTest(t, t.TempDir(), repo)
+	workspace, err := m.Create(ctx, "missing-link", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := workspace.Members[0]
+	link := filepath.Join(member.Path, ".git")
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	inactive := func(string) bool { return false }
+	preview, err := m.PreviewDeletion(ctx, workspace.ID, inactive)
+	if err != nil || len(preview.Dirty) != 1 || preview.Dirty[0] != member.Name {
+		t.Fatalf("preview: %+v, %v", preview, err)
+	}
+	if _, err := m.BeginDeletion(ctx, workspace.ID, workspace.Name, false, false, inactive); err == nil {
+		t.Fatal("missing link accepted without discard consent")
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("preview repaired metadata: %v", err)
+	}
+	if _, err := m.BeginDeletion(ctx, workspace.ID, workspace.Name, true, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.FinishDeletion(ctx, workspace.ID, true, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitTest(t, repo.Path, "rev-parse", "refs/heads/"+member.Branch); got != member.BaseCommit {
+		t.Fatal("branch lost")
+	}
+}

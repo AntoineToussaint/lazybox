@@ -25,6 +25,9 @@ import { designDocV2, seedDesignDoc } from './fixtures/artifact-sample.mjs';
 const fixture = await startRunnerFixture();
 const session = fixture.sessions[0];
 const doc = seedDesignDoc(fixture, { sessionId: session.id });
+const shellDoc = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Shell instructions',
+  content: ['```sh', 'printf workspace', '```', '', 'For browser sign-in, run this in your home folder:', '',
+    '`example-tool login --profile dev`', '', 'Use `/mcp` in the agent.', '', '```sh', 'printf first', 'printf second', '```', '', '```json', '{}', '```'].join('\n') });
 const todo = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Tasks', kind: 'todo-list',
   content: JSON.stringify({ schema: 'todo-list.v1', items: [{ id: 'verify', text: 'Verify phone', status: 'todo' }] }) });
 const structuredDocs = [];
@@ -101,6 +104,29 @@ try {
   await expect(page.getByLabel('Version', { exact: true })).toHaveValue('3');
   await page.getByRole('tab', { name: 'Source' }).click();
   await expect(page.locator('.artifact-html-source')).toHaveText(htmlSource);
+
+  await page.goto(standalone.replace(doc.id, shellDoc.id));
+  const shellReviews = page.getByRole('button', { name: 'Review in terminal' });
+  await expect(shellReviews).toHaveCount(3);
+  assert.equal(fixture.terminals.size, 0, 'reading an artifact does not start a shell');
+  await shellReviews.first().click();
+  const shellDock = page.getByRole('region', { name: 'Artifact terminal' });
+  await expect(shellDock).toBeVisible();
+  await expect.poll(() => [...fixture.terminals.values()][0]?.input).toEqual(['printf workspace']);
+  const workspaceShell = [...fixture.terminals.values()][0];
+  assert.equal(workspaceShell.collectionId, 'alpha');
+  await shellDock.locator('.xterm-helper-textarea').press('Enter');
+  await expect.poll(() => workspaceShell.input).toEqual(['printf workspace', '\r']);
+  assert.match(workspaceShell.output.toString(), /ran: printf workspace/);
+  await page.getByRole('button', { name: 'Hide artifact terminal' }).click();
+  await expect(shellDock).toHaveCount(0);
+  await shellReviews.nth(1).click();
+  await expect.poll(() => [...fixture.terminals.values()].find(t => t.place === 'user-home')?.input)
+    .toEqual(['example-tool login --profile dev']);
+  await shellReviews.last().click();
+  await expect(page.getByRole('alert').filter({ hasText: 'cannot hold a multi-line paste' })).toBeVisible();
+  assert.deepEqual([...fixture.terminals.values()].at(-1)?.input, [], 'a shell without bracketed paste receives no script');
+
 
   await page.goto(standalone);
   const article = page.getByRole('article', { name: 'Datasource migration' });
@@ -211,12 +237,33 @@ try {
   await versions.getByRole('button', { name: 'Compare with v1' }).click();
   await expect(rendered).toBeVisible();
   await page.keyboard.press('h');
-  await article.getByRole('tab', { name: 'Document' }).click();
 
-  // Print: the document alone, as a document.
+  // Print from Changes: switches back to the selected document for print.
+  await page.evaluate(() => {
+    window.__printFailure = true;
+    window.print = async () => {
+      window.__printed++;
+      if (window.__printFailure) throw new Error('Native print unavailable');
+    };
+  });
+  const previousTitle = await page.title();
   await article.getByLabel('Export', { exact: true }).click();
   await page.getByRole('button', { name: 'Print or save as PDF…' }).click();
-  await expect.poll(() => page.evaluate(() => window.__printed)).toBe(1);
+  await expect(article.getByRole('alert')).toContainText('Could not open the print dialog: Native print unavailable');
+  await expect(article.getByRole('tab', { name: 'Document' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.artifact-print-sheet')).toHaveCount(0);
+  assert.equal(await page.title(), previousTitle);
+  await page.evaluate(() => { window.__printFailure = false; });
+
+  // Retry: the document alone, as a document.
+  await article.getByLabel('Export', { exact: true }).click();
+  await page.getByRole('button', { name: 'Print or save as PDF…' }).click();
+  await expect.poll(() => page.evaluate(() => window.__printed)).toBe(2);
+  // A native dialog can close without delivering a browser afterprint event.
+  await article.getByLabel('Export', { exact: true }).click();
+  await page.getByRole('button', { name: 'Print or save as PDF…' }).click();
+  await expect.poll(() => page.evaluate(() => window.__printed)).toBe(3);
+  await expect(page.locator('.artifact-print-sheet')).toHaveCount(1);
   await page.emulateMedia({ media: 'print' });
   const print = await page.evaluate(() => {
     const sheet = document.querySelector('.artifact-print-sheet');
@@ -245,6 +292,7 @@ try {
   await page.emulateMedia({ media: null });
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   await expect(page.locator('.artifact-print-sheet')).toHaveCount(0);
+  assert.equal(await page.title(), previousTitle);
   await context.close();
 
   // The Artifacts panel: kind icons, author and time, and the "updated since you looked" dot.
@@ -255,6 +303,12 @@ try {
   await panelPage.locator('summary[aria-label="Panels"]').click();
   await panelPage.getByRole('button', { name: 'Show Artifacts', exact: true }).click();
   const list = panelPage.getByRole('listbox', { name: 'Artifacts' });
+  await list.getByRole('option', { name: /Shell instructions/ }).click();
+  await panelPage.getByRole('button', { name: 'Review in terminal' }).first().click();
+  await expect(panelPage.getByRole('region', { name: 'Artifact terminal' })).toBeVisible();
+  await expect.poll(() => [...fixture.terminals.values()].at(-1)?.input).toEqual(['printf workspace']);
+  await panelPage.getByRole('button', { name: 'Hide artifact terminal' }).click();
+  await panelPage.getByRole('button', { name: 'Back to artifacts' }).click();
   const row = list.getByRole('option', { name: /Datasource migration/ });
   await expect(row).toContainText('Spec · v2 · by an agent');
   await expect(row.locator('.artifact-kind-icon')).toBeVisible();

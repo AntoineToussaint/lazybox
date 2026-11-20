@@ -383,6 +383,18 @@ async function previewTabs(){
  assert.equal(await fontStyle('Main alpha conversation'),'normal','the preview parent was kept open');
  await expect(page.getByTestId('dock-announcer')).toContainText('next to');
  await shot('related');
+ // Clearing the session picker is selection only. It must not replace a
+ // preview or create an empty Chat tab behind one being closed.
+ const sessionPicker=page.getByRole('combobox',{name:'Session',exact:true});
+ await sessionPicker.selectOption('');
+ await expect.poll(titles).toEqual([...before.titles,'Index the corpus']);
+ while(await chatTabs.count()) {
+   const count=await chatTabs.count();
+   await chatTabs.first().locator('.dock-tab-close').click();
+   await expect(chatTabs).toHaveCount(count-1);
+ }
+ await expect(sessionPicker).toHaveValue('');
+
 
  assert.deepEqual(watched.errors,[]);
  await context.close();

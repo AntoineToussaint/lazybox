@@ -1112,7 +1112,10 @@ existing files, messages and running processes stay in place during that
 window. At expiry the Runner checks the existing cleanup safeguards and
 permanently deletes the item. For a workspace, this removes the entire folder,
 including all worktrees and any approved ignored or outside-repository files.
-If cleanup fails, Recently deleted shows the failure.
+If an expected worktree is still registered at its verified path and its
+`.git` link is missing, deletion requires discard consent. The Runner asks Git
+to restore the link before validating and removing the worktree. If cleanup
+fails, Recently deleted shows the failure.
 
 **Workspace actions → Delete workspace** uses a confirmation button without name
 typing. It previews active executions and local

@@ -126,7 +126,7 @@ const FENCE = /^([ \t]*)(`{3,}|~{3,})[ \t]*([\w-]*)[^\n]*\n([\s\S]*?)\n[ \t]*\2[
  * inline command with the phrase before it in its line or sentence, and a
  * fenced shell block with the paragraph before it.
  */
-export function homeOffers(markdown: string, limit = 3): HomeOffer[] {
+export function homeOffers(markdown: string, limit = 3, standaloneInline = false): HomeOffer[] {
   const out: HomeOffer[] = [];
   const seen = new Set<string>();
   const add = (command: string, found: { target: HomeTarget; explicit: boolean } | undefined) => {
@@ -156,7 +156,9 @@ export function homeOffers(markdown: string, limit = 3): HomeOffer[] {
     // The text before it on its line, from the sentence it is in.
     const line = markdown.slice(markdown.lastIndexOf('\n', at - 1) + 1, at);
     const sentence = line.split(/(?<=[.!?])\s+(?=[A-Z])/).pop() || line;
-    items.push({ at, run: () => add(command, targetOf(sentence, command)) });
+    const previous = standaloneInline && !line.trim() && /^\s*$/.test(markdown.slice(at + match[0].length).split('\n')[0])
+      ? markdown.slice(0, at).trimEnd().split('\n').at(-1) || '' : '';
+    items.push({ at, run: () => add(command, targetOf(sentence || previous, command)) });
   }
   for (const item of items.sort((a, b) => a.at - b.at)) item.run();
   return out;

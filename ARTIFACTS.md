@@ -15,7 +15,7 @@ Each artifact has:
 | Field | What it holds |
 | --- | --- |
 | `id`, `title`, `kind` | `kind` is plan, report, spec, notes or other. The title and kind can change at any time. |
-| `format` | Always Markdown. Mermaid code blocks render as diagrams, as they do in chat. |
+| `format` | Markdown by default. HTML has a sandboxed preview and structured artifacts use JSON. |
 | `versions` | Append-only, oldest first. Each version has a number, a time, a sha256 digest, a size, an **author** and a **source**. The author is `person`, `agent` (with its execution) or `file` (the tracked file changed on disk). The source is `message` (execution, conversation, message cursor, turn), `file` (workspace path), `agent` or `edit`. |
 | `origin_session_id`, `origin_conversation_id` | The conversation the artifact was first taken from. Later messages of that conversation offer "Update from this message". |
 | `tracked_path`, `tracking_problem` | The workspace file the Runner follows, and why it could not follow it lately (removed, not text, larger than 1 MiB). |
@@ -369,7 +369,7 @@ The page follows new versions by itself.
 
 The **Export** menu has:
 
-- **Copy as Markdown**: the latest version.
+- **Copy as Markdown**: the selected version.
 - **Download .md**: named after the title, for example
   `datasource-migration-plan.md`.
 - **Print or save as PDF…**: prints the rendered document alone, as a
@@ -378,7 +378,7 @@ The **Export** menu has:
   not split, code that wraps, and no app chrome, buttons or outline. It waits
   briefly for a diagram still being drawn; a diagram drawn in a dark theme
   prints as its light negative. "Save as PDF" is the system print dialog's own
-  option.
+  option. The desktop app opens the native print dialog.
 - **Save to repository…**: pick a workspace repository and a path (by
   default `docs/<title>.md`). The file is written but never staged or
   committed, so review it in Changes. Replacing an existing file is a
@@ -420,10 +420,11 @@ on the artifact side:
   agent's credential is limited to its own workspace).
 - **A workspace window fixed to one workspace** opens another workspace in its
   own window from ⌘K; that window does not open the artifact chosen.
-- **Not verified in the native desktop window:** "Download .md" (an
-  `<a download>`) and "Print" (`window.print()`) are tested in the browser
-  only. If the webview ignores them, the next step is host actions
-  (`save_file`, `print`) on the Tauri side.
+- **HTML artifacts** export their original HTML. The print action is
+  available for rendered documents, including structured documents.
+- **Desktop download** uses the webview’s download handling for
+  `<a download>`. The artifact-reader browser test exercises this path in
+  Chromium.
 - **Page numbers** use CSS page margin boxes (`@bottom-center`). They are
   tested in Chromium (`npm run test:artifact-reader` prints the sample design
   doc to `.cache/artifact-reader-print.pdf`); WebKit, the macOS desktop
@@ -454,3 +455,18 @@ when the reviewer reports its coverage. The version carries the
 `lazybox.review-findings/v1` schema identifier. Its Markdown includes a JSON
 block with the captured Git revisions, coverage, and findings with stable IDs
 and source locations. The review card opens the original result version.
+
+### Reviewing shell commands
+
+In a Markdown artifact, label executable examples with a shell fence such as
+`sh`, `bash`, or `zsh`. **Review in terminal** opens a terminal below the
+document and puts the command at the prompt. Press Return there to run it.
+The artifact can be in the workspace or in a detached window. For a
+multi-line block, the shell needs bracketed paste so every line stays at
+the prompt until you submit it. Copy remains available for other shells.
+
+By default, the terminal starts at the workspace root. To target a home
+folder or checkout, put **Run in your home folder** or **Run in the home
+checkout of REPO** directly before the block. The same destination
+instructions work with a standalone inline-code command. HTML previews and
+version comparisons remain display-only.

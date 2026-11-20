@@ -61,11 +61,11 @@ let configured: Configured | undefined;
 /** Popped-out windows' documents whose presses are already followed. */
 const listening = new WeakSet<Document>();
 
-function apply(root: HTMLElement, inset: TitleBarInset, zoom: number, fullScreen: boolean) {
+function apply(root: HTMLElement, inset: TitleBarInset, zoom: number | undefined, fullScreen: boolean) {
   root.dataset.titleBar = 'overlay';
   root.toggleAttribute('data-full-screen', fullScreen);
-  root.style.setProperty('--title-bar-inset', `${Math.ceil(inset.inset / zoom)}px`);
-  root.style.setProperty('--title-bar-height', `${inset.height / zoom}px`);
+  root.style.setProperty('--title-bar-inset', zoom === undefined ? `calc(${inset.inset}px / var(--popout-page-zoom, 1))` : `${Math.ceil(inset.inset / zoom)}px`);
+  root.style.setProperty('--title-bar-height', zoom === undefined ? `calc(${inset.height}px / var(--popout-page-zoom, 1))` : `${inset.height / zoom}px`);
 }
 
 /** Presses on a document's headers move the window that shows it. */
@@ -104,7 +104,7 @@ export function configureTitleBar(host: TitleBarHost): () => void {
     apply(root, host.window, state.zoom, state.fullScreen);
     for (const popout of state.popouts) {
       if (popout.closed) state.popouts.delete(popout);
-      else apply(popout.document.documentElement, host.popout, state.zoom, !!popout.document.documentElement.hasAttribute('data-full-screen'));
+      else apply(popout.document.documentElement, host.popout, undefined, !!popout.document.documentElement.hasAttribute('data-full-screen'));
     }
   };
   refresh();
@@ -115,7 +115,7 @@ export function configureTitleBar(host: TitleBarHost): () => void {
       // Full screen is entered and left by the window in front.
       for (const popout of state.popouts) {
         if (popout.closed) { state.popouts.delete(popout); continue; }
-        if (popout.document.hasFocus()) apply(popout.document.documentElement, host.popout, state.zoom, fullScreen);
+        if (popout.document.hasFocus()) apply(popout.document.documentElement, host.popout, undefined, fullScreen);
       }
     }),
     host.zoom?.subscribe(level => { state.zoom = level; refresh(); }),
@@ -142,7 +142,7 @@ export function attachPopoutTitleBar(popout: Window | undefined, tabBar: Element
   state.popouts.add(popout);
   const root = popout.document.documentElement;
   root.toggleAttribute('data-popout', true);
-  apply(root, state.host.popout, state.zoom, false);
+  apply(root, state.host.popout, undefined, false);
   if (tabBar) {
     tabBar.setAttribute(DRAG_REGION, 'deep');
     // dockview drags the group by the tab bar's empty part; in its own window

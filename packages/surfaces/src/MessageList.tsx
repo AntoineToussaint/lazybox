@@ -66,15 +66,18 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
   if (m.type === 'review-alert') return <ReviewAlert text={m.text} id={m.id} note={m.review}/>;
   if (m.type === 'reattached') return <RestartMark message={m}/>;
   // The person's own message needs no name over it: it is theirs (screen readers still hear "You").
-  // What came from someone or something else is labelled: the agent, or an event (SystemEvent).
+  // The conversation header identifies the main agent. Sub-agents and system events have their own cards.
   const own = m.type === 'operation_accepted';
+  const reply = m.type === 'message_delta';
+  const at = validActivityTime(m.at) ? m.at : undefined;
   return <article className={'message ' + m.type} data-message-id={m.id} data-time-visible={alwaysShowTime || undefined} aria-label={own ? `You${m.steered ? ', steered' : ''}: ${ownSummary(m.text)}` : undefined}
     onContextMenu={menu && contextMenu<MessageMenuDetail>('message', menu, { message: m, role: messageRole(m), sessionId }, 'Message actions')}>
     {/* A message steered into a running turn says so, where it reached the agent. */}
     {own
       ? m.steered && <span className="message-tag" title={`Given to ${agentName} inside its running turn`}>steered</span>
-      : <div className="message-byline"><span className="eyebrow">{m.type === 'failure' ? 'Stopped' : agentName}</span>
-        {m.type === 'message_delta' && validActivityTime(m.at) && <ActivityTime at={m.at} className="message-time"/>}
+      : (!reply || at !== undefined) && <div className="message-byline">
+        {!reply && <span className="eyebrow">{m.type === 'failure' ? 'Stopped' : agentName}</span>}
+        {reply && at !== undefined && <ActivityTime at={at} className="message-time"/>}
       </div>}
     {/* Only an agent's own words offer to run their commands. */}
     {m.type === 'message_delta' ? <RunMessageContext.Provider value={m}><RichContent text={m.text} onOpenFile={onOpenFile}/><InlineRuns messageId={m.id}/></RunMessageContext.Provider> : <PersonText text={m.text} quoted={m.type === 'operation_accepted'} onOpenFile={onOpenFile}/>}

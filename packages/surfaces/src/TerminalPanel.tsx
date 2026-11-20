@@ -83,7 +83,7 @@ function exitText(status: TerminalStatus) {
   return status.error || (status.signal ? `${program} ended by ${status.signal}` : status.exitCode === undefined ? `${program} ended` : `${program} exited with code ${status.exitCode}`);
 }
 
-export function TerminalPanel({ workspaceId, collections, viewState, onClosePanel, sessionId = '', onShowSession }: { workspaceId: string; collections: Collection[]; viewState?: ViewStateStore; onClosePanel?(): void; /** The page's conversation: where Send selection to agent goes. */ sessionId?: string; onShowSession?(target: ViewTarget): void }) {
+export function TerminalPanel({ workspaceId, collections, viewState, onClosePanel, initialTerminalId, initialInput, sessionId = '', onShowSession }: { workspaceId: string; collections: Collection[]; viewState?: ViewStateStore; initialTerminalId?: string; initialInput?: string; onClosePanel?(): void; /** The page's conversation: where Send selection to agent goes. */ sessionId?: string; onShowSession?(target: ViewTarget): void }) {
   const conversation = useWorkConversation(workspaceId, sessionId);
   // A terminal's selection goes to the work conversation's message box, as a block to review and send.
   const sendToAgent = (text: string) => {
@@ -96,7 +96,8 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
   const collection = collections.find(value => value.id === workspaceId);
   const key = viewState ? `${viewState.key}:terminal` : '';
   const [terminals, setTerminals] = useState<TerminalStatus[]>([]);
-  const [selected, setSelected] = useState(() => (key && viewState?.getItem(key)) || '');
+  const [selected, setSelected] = useState(() => initialTerminalId || (key && viewState?.getItem(key)) || '');
+  const initialCommand = useRef(initialInput);
   const [directory, setDirectory] = useState('');
   const homes = useHomeChoices(api, collection);
   const [error, setError] = useState(''), [listError, setListError] = useState(''), [opening, setOpening] = useState(false);
@@ -198,13 +199,13 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
           <button aria-label="New terminal" title="New terminal" disabled={!ready || opening} onClick={() => void open()}><Icon name="plus" size={14}/><span>New terminal</span></button>
         </span>
       </div>
-      {current ? <TerminalView key={current.id} api={api} terminal={current} focusRef={focusView} workspaceId={workspaceId} canSend={!!conversation} onSendToAgent={sendToAgent} onNewTerminal={ready ? () => void open() : undefined} onCloseTerminal={() => void close(current.id)} onCleanExit={current.place === 'interactive-command' ? undefined : () => void exitedCleanly(current.id)} onSize={value => { size.current = value; }} onError={setError}/>
+      {current ? <TerminalView key={current.id} api={api} terminal={current} initialCommand={current.id === initialTerminalId ? initialCommand : undefined} focusRef={focusView} workspaceId={workspaceId} canSend={!!conversation} onSendToAgent={sendToAgent} onNewTerminal={ready ? () => void open() : undefined} onCloseTerminal={() => void close(current.id)} onCleanExit={current.place === 'interactive-command' ? undefined : () => void exitedCleanly(current.id)} onSize={value => { size.current = value; }} onError={setError}/>
         : <p className="module-empty">{ready ? 'No terminal is open in this workspace. A terminal runs your login shell on the Runner, in the directory you choose, and keeps running when the Runner restarts.' : 'The workspace is not ready for a terminal.'}{ready && <><br/><button className="primary" disabled={opening} onClick={() => void open()}>Start terminal</button></>}</p>}
     </>}
   </section>;
 }
 
-function TerminalView({ api, terminal, focusRef, onSize, onError, onCleanExit, workspaceId, canSend, onSendToAgent, onNewTerminal, onCloseTerminal }: { api: RunnerClient; terminal: TerminalStatus; focusRef: { current: (() => void) | null }; onSize(size: { cols: number; rows: number }): void; onError(error: string): void; onCleanExit?(): void; workspaceId: string; canSend: boolean; onSendToAgent(text: string): void; onNewTerminal?(): void; onCloseTerminal(): void }) {
+function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError, onCleanExit, workspaceId, canSend, onSendToAgent, onNewTerminal, onCloseTerminal }: { api: RunnerClient; terminal: TerminalStatus; initialCommand?: { current: string | undefined }; focusRef: { current: (() => void) | null }; onSize(size: { cols: number; rows: number }): void; onError(error: string): void; onCleanExit?(): void; workspaceId: string; canSend: boolean; onSendToAgent(text: string): void; onNewTerminal?(): void; onCloseTerminal(): void }) {
   const xterm = useRef<Terminal | null>(null);
   /** The web link under the pointer, for the right-click menu. */
   const hovered = useRef('');
@@ -268,7 +269,11 @@ function TerminalView({ api, terminal, focusRef, onSize, onError, onCleanExit, w
       finally { sending = false; }
     };
     const send = (data: Uint8Array) => { if (done) return; pending.push(data); void flush(); };
-    const input = view.onData(data => send(encoder.encode(data)));
+    const input = view.onData(data => {
+      // A person who started typing owns this prompt.
+      if (initialCommand) initialCommand.current = undefined;
+      send(encoder.encode(data));
+    });
     const binary = view.onBinary(data => send(Uint8Array.from(data, character => character.charCodeAt(0) & 255)));
     let sized = '';
     const resize = () => {
@@ -279,13 +284,33 @@ function TerminalView({ api, terminal, focusRef, onSize, onError, onCleanExit, w
     };
     const observer = new ResizeObserver(() => resize()); observer.observe(element);
     requestAnimationFrame(() => { resize(); view.focus(); });
+    const stageAtPrompt = (status: TerminalStatus | undefined) => {
+      if (!initialCommand) return;
+      const text = initialCommand.current;
+      if (!text || !status || signal.aborted || status.done) return;
+      const bracketed = view.modes.bracketedPasteMode;
+      if (!status.idle && (status.promptMarks || !bracketed)) return;
+      initialCommand.current = undefined;
+      if (/[\n\t]/.test(text) && !bracketed) {
+        onError('This shell cannot hold a multi-line paste for review. Use Copy code to review the command.');
+        return;
+      }
+      view.paste(text);
+    };
+    const stageTimeout = initialCommand ? setTimeout(() => {
+      if (initialCommand.current) {
+        initialCommand.current = undefined;
+        onError('The shell prompt was not ready for a paste. Use Copy code to review the command.');
+      }
+    }, 8000) : undefined;
     void (async () => {
       let offset = 0n;
       while (!signal.aborted) {
         try {
           setConnection(offset ? 'Reconnecting' : 'Connecting');
           for await (const event of api.watchTerminal({ terminalId: id, after: offset }, { signal })) {
-            if (event.data.length) view.write(event.data);
+            if (event.data.length) view.write(event.data, () => stageAtPrompt(event.status));
+            else stageAtPrompt(event.status);
             offset = event.offset + BigInt(event.data.length);
             if (event.status) setStatus(event.status);
             setConnection('Live');
@@ -306,7 +331,7 @@ function TerminalView({ api, terminal, focusRef, onSize, onError, onCleanExit, w
         await new Promise<void>(resolve => { const timer = setTimeout(resolve, 1000); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
       }
     })();
-    return () => { unfollow(); if (focusRef.current === focus) focusRef.current = null; control.abort(); observer.disconnect(); input.dispose(); binary.dispose(); links.dispose(); element.removeEventListener('mousedown', press, true); hovered.current = ''; view.dispose(); };
+    return () => { unfollow(); if (focusRef.current === focus) focusRef.current = null; control.abort(); clearTimeout(stageTimeout); observer.disconnect(); input.dispose(); binary.dispose(); links.dispose(); element.removeEventListener('mousedown', press, true); hovered.current = ''; view.dispose(); };
   }, [api, id]);
   return <div className="terminal-view">
     <div ref={host} className="terminal-host" data-testid="terminal" data-terminal-id={id} onContextMenu={contextMenu('terminal', (): MenuItem[] => {

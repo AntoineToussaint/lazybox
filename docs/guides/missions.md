@@ -81,3 +81,9 @@ A [hook](automate.md#hooks-run-something-when-an-agent-needs-you) on
 - **Assigning from the board does not create a workspace**: you pick one. An
   orchestrator can give an agent a workspace of its own
   (`lazybox agents spawn --workspace new`).
+
+### Starting workers from a fixed base
+
+In a Mission plan, set a task's `workspace` to `pinned` to start it in separate worktrees at the base workspace's committed revisions when the plan was proposed. All pinned tasks in that plan share the same member list and commits. Commit or set aside pending changes before proposing. Approve the plan and spawn each task by ID. A pinned task refuses a workspace override. If a dependency changes a shared interface, propose a new plan from the updated base before dispatching work that needs that interface.
+
+To pin a structured acceptance contract, add `contract: {artifact: ARTIFACT_ID, version: 1}` to the plan YAML. The Runner reads that exact spec.v1 from the planner's workspace. The approval sheet shows its criteria and the captured member commits. Each child spawned from the approved task receives the accepted criteria in its brief, even when the artifact has since been revised. This grants no additional artifact browsing permission.

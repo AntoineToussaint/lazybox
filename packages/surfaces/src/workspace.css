@@ -101,7 +101,6 @@
 .embedded-chat .messages{padding:30px 30px 24px;min-height:80px}
 .embedded-chat .message{max-width:none;margin:0;padding:14px 0 20px}
 .embedded-chat .message p{font-size:var(--chat-font-size,14px);line-height:var(--chat-line-height,1.5);color:var(--text-secondary);margin:0}
-.embedded-chat .message.message_delta>.eyebrow{display:none}
 .embedded-chat .message.notice{padding:6px 14px;margin:0 0 14px;border-left:2px solid var(--info-line)}
 .embedded-chat .message.notice p{font-size:calc(12px * var(--text-scale));line-height:1.6;color:var(--text-subtle)}
 .embedded-chat .message.operation_accepted{padding:14px 18px;background:var(--surface-active);border:1px solid var(--accent-line-subtle);border-radius:10px;margin-bottom:16px}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -171,5 +172,28 @@ func TestRequestRepoMakesPathsAbsolute(t *testing.T) {
 		if got, err := c.repositoryQuery(in); err != nil || got != want {
 			t.Errorf("%q: %q %v, want %q", in, got, err, want)
 		}
+	}
+}
+
+func TestWorkspaceDefinitionRoundTrip(t *testing.T) {
+	r := newTestRunner(t)
+	out := r.cli(r.owner(), "", "workspace", "export-definition", r.collection.Id)
+	if out.code != 0 {
+		t.Fatal(out.err)
+	}
+	path := filepath.Join(t.TempDir(), "collection.json")
+	if err := os.WriteFile(path, []byte(out.stdout), 0600); err != nil {
+		t.Fatal(err)
+	}
+	realize := func(key string) string {
+		out := r.cli(r.owner(), "", "workspace", "realize", path, "--key", key, "--name", "From definition")
+		if out.code != 0 {
+			t.Fatal(out.err)
+		}
+		return strings.TrimSpace(out.stdout)
+	}
+	a := realize("first")
+	if a == "" || a == r.collection.Id || realize("first") != a || realize("second") == a {
+		t.Fatal("incorrect realization identity", a)
 	}
 }

@@ -29,6 +29,7 @@ type session struct {
 	p               *jsonl.Process
 	ref, turn       string
 	model, workflow string
+	turnModel       string
 	permission      string
 	settings        json.RawMessage
 	overrides       map[string]json.RawMessage
@@ -257,6 +258,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 type durable struct {
 	Host      string                     `json:"host"`
 	Turn      string                     `json:"turn,omitempty"`
+	TurnModel string                     `json:"turnModel,omitempty"`
 	Model     string                     `json:"model,omitempty"`
 	Settings  json.RawMessage            `json:"settings,omitempty"`
 	Overrides map[string]json.RawMessage `json:"overrides,omitempty"`
@@ -315,7 +317,7 @@ func attach(ctx context.Context, o agent.Open, binary string) (agent.Session, er
 			return nil, err
 		}
 	}
-	s := &session{p: p, cwd: o.Cwd, ref: o.Host.Attach.Reference, turn: state.Turn, model: state.Model, workflow: o.Workflow, permission: o.Permission, settings: state.Settings, overrides: state.Overrides, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose, responded: o.Host.Attach.Responded}
+	s := &session{p: p, cwd: o.Cwd, ref: o.Host.Attach.Reference, turn: state.Turn, turnModel: state.TurnModel, model: state.Model, workflow: o.Workflow, permission: o.Permission, settings: state.Settings, overrides: state.Overrides, ctx: life, cancel: cancel, requests: map[string]pending{}, events: make(chan agent.Event, 256), ended: make(chan struct{}), tools: o.Tools, purpose: o.Purpose, responded: o.Host.Attach.Responded}
 	s.titler = newTitler(binary, o, s.currentModel)
 	go s.read()
 	return s, nil
@@ -327,7 +329,7 @@ func (s *session) DurableState() json.RawMessage {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, _ := json.Marshal(durable{Host: s.p.HostID(), Turn: s.turn, Model: s.model, Settings: s.settings, Overrides: s.overrides})
+	data, _ := json.Marshal(durable{Host: s.p.HostID(), Turn: s.turn, TurnModel: s.turnModel, Model: s.model, Settings: s.settings, Overrides: s.overrides})
 	return data
 }
 
@@ -498,6 +500,9 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 				return r, errors.New("Codex omitted native turn id")
 			}
 			s.mu.Lock()
+			if s.turn != response.Turn.ID {
+				s.turnModel = s.model
+			}
 			s.turn = response.Turn.ID
 			s.mu.Unlock()
 			r.ProviderID = response.Turn.ID
@@ -851,6 +856,9 @@ func (s *session) read() {
 				ev.TurnID = turn.Turn.ID
 				s.mu.Lock()
 				if ev.AgentID == "root" {
+					if s.turn != turn.Turn.ID {
+						s.turnModel = s.model
+					}
 					s.turn = turn.Turn.ID
 				}
 				s.mu.Unlock()
@@ -939,7 +947,13 @@ func (s *session) read() {
 					compactions.usage(m.Params)
 					// Codex's usage names no model: the one in force does, so the
 					// session reports what it runs on (metering's LatestModel).
-					ev.Data = withModel(m.Params, s.currentModel())
+					s.mu.Lock()
+					model := s.turnModel
+					if ev.TurnID == "" || ev.TurnID != s.turn {
+						model = ""
+					}
+					s.mu.Unlock()
+					ev.Data = withModel(m.Params, model)
 				}
 			case "thread/compacted":
 				// Deprecated for the contextCompaction item; said once either way.

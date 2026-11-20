@@ -3,7 +3,7 @@
 How Lazybox V2 looks, and how a person changes it: light and dark following
 the system, built-in and user themes, an accent colour, colour overrides,
 fonts, text sizes, chat text, density, zoom, minimum contrast and reduced
-motion. Everything applies at once, in every window, and is kept.
+motion. Appearance settings apply across windows and are kept.
 
 ## For people
 
@@ -18,7 +18,7 @@ motion. Everything applies at once, in every window, and is kept.
 | Colour overrides | Any token, on top of every theme. | This device |
 | Interface font and text size | Any installed font; 11–16 px. Every UI text size scales with it. | settings.yaml |
 | Code font, size, ligatures | The editor, code blocks, diffs, command output and the terminal. Empty: the system monospace, and for command output the bundled JetBrains Mono. | settings.yaml |
-| Zoom | Desktop app: everything, every window, 50–200 %. **View → Zoom In / Zoom Out / Actual Size** (`⌘=` `⌘−` `⌘0`) from anywhere; kept across launches. In a browser, use the browser's zoom. | settings.yaml (`zoom`), and the desktop app data folder |
+| Zoom | Desktop app, 50–200%. **View → Zoom In / Zoom Out / Actual Size** (`⌘=` `⌘−` `⌘0`) adjusts the focused window until it closes. Settings sets the app-wide default and saves it across launches. In a browser, use the browser's zoom. | settings.yaml (`zoom`), and the desktop app data folder |
 | Chat text (Settings → Chat) | Size, line spacing (Compact 1.35, Comfortable 1.5, Relaxed 1.7 or any value), paragraph spacing, and a line width cap (70–120 characters, centred) for wide windows. A sample message shows the result. | settings.yaml |
 | Density | Compact, comfortable or relaxed rows in lists and the sidebar; also sets chat line and paragraph spacing. | settings.yaml |
 | Motion | *System* follows the computer's reduced-motion setting; *Reduce* turns off animations and smooth scrolling. | settings.yaml |
@@ -39,10 +39,10 @@ just before a window closed, which had not reached the file yet, wins over the
 file at the next start and is written to it (`appearance:unsynced:v1`). What
 you set before the file existed moves into it once.
 
-Zoom belongs to the desktop app: it is applied from the file's `zoom` and
-written there when you zoom (the View menu, `⌘=` `⌘−` `⌘0`, Settings). A
-browser tab neither reads nor changes it: use the browser's own zoom, and the
-file's `zoom` stays as the desktop app left it.
+Settings → Appearance saves the default desktop zoom in `settings.yaml`.
+Changing that setting applies the new default to all open windows. View menu
+shortcuts hold a separate zoom for the focused window while it is open.
+In a browser, use the browser's own zoom.
 
 ### Information detail
 

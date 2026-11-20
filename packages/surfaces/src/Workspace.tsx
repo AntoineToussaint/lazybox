@@ -292,7 +292,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     }
     // Another conversation (or the workspace's start) shows in its tab or the preview tab; the same one keeps its tab.
     const live = livePage();
-    if (!sameConversation(target, live.selection)) { tabs.open(target, 'preview'); return; }
+    if (target.sessionId && !sameConversation(target, live.selection)) { tabs.open(target, 'preview'); return; }
     changePage(dedupeChats({ ...live, selection: target }));
   };
   useEffect(() => {

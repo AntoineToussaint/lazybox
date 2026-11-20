@@ -19,6 +19,8 @@ import (
 // ask but never add.
 
 const workspaceUsage = `Usage:
+  lazybox workspace export-definition [WORKSPACE] > collection.json
+  lazybox workspace realize FILE --key REQUEST [--name NAME]
   lazybox workspace repos [WORKSPACE]
   lazybox workspace request-repo <name|owner/repo|path> --reason "why you need it" [--no-wait] [--timeout 90s]`
 
@@ -31,6 +33,10 @@ func (c *cli) workspace(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "export-definition":
+		return c.exportDefinition(args[1:])
+	case "realize":
+		return c.realizeDefinition(args[1:])
 	case "repos":
 		return c.workspaceRepos(args[1:])
 	case "request-repo":

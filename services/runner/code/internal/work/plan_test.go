@@ -16,7 +16,7 @@ func TestPlansAreProposedByTheOrchestratorAndDecidedByThePerson(t *testing.T) {
 	m := mustOK[*State](t)(s.Create(Human, "", "Ship search", ""))
 	c := ceiling()
 	c.PlanRequired = true
-	_, grant, err := s.IssueGrant(m.ID, Human, "", GrantPayload{Holder: "orch", Ceiling: c})
+	_, grant, err := s.IssueGrant(m.ID, Human, "grant-op", GrantPayload{Holder: "orch", Ceiling: c})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,6 +24,8 @@ func TestPlansAreProposedByTheOrchestratorAndDecidedByThePerson(t *testing.T) {
 	rank := PlanTask{Key: "rank", Title: "Rank results", Paths: []string{"search/rank.go"}, EstimateUSD: 3, After: []string{"index"}, Permission: PermissionReadOnly}
 	docs := PlanTask{Key: "docs", Title: "Document it", Paths: []string{"docs/"}, EstimateUSD: 1}
 
+	_, _, err = s.ProposePlan(m.ID, orchestrator("orch"), "grant-op", PlanPayload{Grant: grant, Tasks: []PlanTask{index}})
+	refused(t, err, "operation key already used")
 	// Who may propose, and what a plan may hold.
 	_, _, err = s.ProposePlan(m.ID, orchestrator("stranger"), "", PlanPayload{Grant: grant, Tasks: []PlanTask{index}})
 	refused(t, err, "only an orchestrator with a grant")

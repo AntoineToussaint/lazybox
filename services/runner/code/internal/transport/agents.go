@@ -82,7 +82,7 @@ func (s *Service) ProposePlan(ctx context.Context, r *pb.ProposePlanRequest) (*p
 	for _, t := range r.Tasks {
 		tasks = append(tasks, work.PlanTask{Key: t.Key, Title: t.Title, Brief: t.Brief, Role: t.Role, Profile: t.ProfileId, Permission: t.Permission, Workspace: t.Workspace, Paths: t.Paths, EstimateUSD: t.EstimateUsd, After: t.After})
 	}
-	_, plan, err := s.Bench.ProposePlan(ctx, r.SessionId, r.OperationId, r.Summary, tasks)
+	_, plan, err := s.Bench.ProposePlan(ctx, r.SessionId, r.OperationId, r.Summary, tasks, r.Contract.GetArtifactId(), r.Contract.GetVersion())
 	if err != nil {
 		return nil, agentError(err)
 	}
@@ -135,6 +135,12 @@ func wireLease(state *work.State, l *work.Lease) *pb.MissionLease {
 
 func wirePlan(p *work.Plan) *pb.MissionPlan {
 	out := &pb.MissionPlan{Id: p.Plan, GrantId: p.Grant, Summary: p.Summary, TotalUsd: p.TotalUSD(), State: p.State, CapUsd: p.CapUSD, Note: p.Note, ProposedAtUnixMillis: millis(p.Proposed), DecidedAtUnixMillis: millis(p.Decided), ConversationId: p.ProposedBy.Conversation, ProposedBy: p.ProposedBy.Kind}
+	for _, m := range p.Baseline {
+		out.Baseline = append(out.Baseline, &pb.PlanBaselineMember{Name: m.Name, RepositoryId: m.Repository, Commit: m.Commit})
+	}
+	if c := p.Contract; c != nil {
+		out.Contract = &pb.PlanContract{ArtifactId: c.Artifact, Version: c.Version, CollectionId: c.Workspace, Digest: c.Digest, AcceptanceCriteria: c.Criteria}
+	}
 	for _, t := range p.Tasks {
 		out.Tasks = append(out.Tasks, &pb.PlanTask{Key: t.Key, Title: t.Title, Brief: t.Brief, Role: t.Role, ProfileId: t.Profile, Permission: t.Permission, Workspace: t.Workspace, Paths: t.Paths, EstimateUsd: t.EstimateUSD, After: t.After, TaskId: p.Created[t.Key]})
 	}

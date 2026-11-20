@@ -124,10 +124,18 @@ func (s *Store) Spawn(mission string, actor Actor, key, task, title, brief strin
 	if err != nil {
 		return nil, "", "", err
 	}
+	requestedTask := task
+	replay := func(state *State) (*State, string, string, error) {
+		e, _ := state.Event(key)
+		p, ok := decode[AttemptPayload](e)
+		if !ok || e.Type != TaskAssigned || p.Grant != attempt.Grant || p.Parent != actor.Conversation || (requestedTask != "" && requestedTask != p.Task) {
+			return nil, "", "", refuse("operation key already used for a different assignment")
+		}
+		return state, p.Task, p.Attempt, nil
+	}
 	if key != "" {
-		if e, ok := current.Event(key); ok {
-			p, _ := decode[AttemptPayload](e)
-			return current, p.Task, p.Attempt, nil
+		if _, ok := current.Event(key); ok {
+			return replay(current)
 		}
 	}
 	var drafts []Draft
@@ -149,11 +157,14 @@ func (s *Store) Spawn(mission string, actor Actor, key, task, title, brief strin
 		return nil, "", "", refuse("“%s” already has a live conversation", t.Title)
 	}
 	attempt.Task, attempt.Attempt, attempt.New = task, shortID("a"), true
-	drafts = append(drafts,
-		Draft{Subject: TaskSubject(task), Type: TaskAssigned, Actor: actor, Idempotency: key, Payload: attempt},
-		Draft{Subject: TaskSubject(task), Type: AttemptStarted, Actor: Actor{Kind: ActorLazybox, Conversation: attempt.Conversation, Execution: attempt.Execution}, Payload: AttemptPayload{Task: task, Attempt: attempt.Attempt, Conversation: attempt.Conversation, Workspace: attempt.Workspace, Execution: attempt.Execution}},
-	)
-	state, _, err := s.Append(mission, drafts...)
+	drafts = append(drafts, Draft{Subject: TaskSubject(task), Type: TaskAssigned, Actor: actor, Idempotency: key, Payload: attempt})
+	if attempt.Dispatch == nil {
+		drafts = append(drafts, Draft{Subject: TaskSubject(task), Type: AttemptStarted, Actor: Actor{Kind: ActorLazybox, Conversation: attempt.Conversation, Execution: attempt.Execution}, Payload: AttemptPayload{Task: task, Attempt: attempt.Attempt, Conversation: attempt.Conversation, Workspace: attempt.Workspace, Execution: attempt.Execution}})
+	}
+	state, events, err := s.Append(mission, drafts...)
+	if err == nil && len(events) == 0 {
+		return replay(state)
+	}
 	return state, task, attempt.Attempt, err
 }
 

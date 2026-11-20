@@ -213,6 +213,9 @@ func (b *Bench) Adopt(ctx context.Context) error {
 			}
 		}
 	}
+	if errors.Join(errs...) == nil {
+		b.resumePinnedDispatches()
+	}
 	return errors.Join(errs...)
 }
 

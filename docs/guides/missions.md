@@ -87,3 +87,15 @@ A [hook](automate.md#hooks-run-something-when-an-agent-needs-you) on
 In a Mission plan, set a task's `workspace` to `pinned` to start it in separate worktrees at the base workspace's committed revisions when the plan was proposed. All pinned tasks in that plan share the same member list and commits. Commit or set aside pending changes before proposing. Approve the plan and spawn each task by ID. A pinned task refuses a workspace override. If a dependency changes a shared interface, propose a new plan from the updated base before dispatching work that needs that interface.
 
 To pin a structured acceptance contract, add `contract: {artifact: ARTIFACT_ID, version: 1}` to the plan YAML. The Runner reads that exact spec.v1 from the planner's workspace. The approval sheet shows its criteria and the captured member commits. Each child spawned from the approved task receives the accepted criteria in its brief, even when the artifact has since been revised. This grants no additional artifact browsing permission.
+
+When you start a review of an active Mission worker from Changes, its reviewer receives the criteria, artifact version and digest from the approved plan. The reviewer can compare the worker’s changes with that contract even if someone has since revised the base spec or published a scratch plan in the child workspace.
+
+### Recovering a pinned worker
+
+Dispatch reserves the task’s budget slot, workspace ID and conversation ID in the Mission log before creating the worktrees. A card marked **Reserved** is waiting for the Runner to finish preparing the worker and handing its brief to the conversation. Reissuing `lazybox agents spawn --task TASK_ID` resumes that reservation. Keep the same `--key` when retrying after a lost response. Once the Runner has adopted surviving sessions after a restart, it also checks unfinished reservations. If preparation fails, restore the missing prerequisite and retry the task.
+
+### Reviewing a candidate
+
+For a worker with an approved spec contract, commit the candidate in each changed member and choose **Changes → Review with…**. A changes review captures the diff and records its member revisions and contract digest. Keep the worker’s workspace clean during review. If a member moves, is dirty or becomes unreadable when the review finishes, the outcome is unknown. Repeat the review on the current candidate. A later recorded commit or run on a different revision can also invalidate the earlier verdict. The Mission evidence returned by `lazybox missions show MISSION_ID --json` includes the member-to-commit map and contract digest. The person still accepts the task.
+
+A fresh pinned worker starts with its own evidence. The board keeps earlier attempts in the task history and evaluates the current attempt’s checks and reviews. A passing turn review cannot clear blockers from a review of the pinned candidate.

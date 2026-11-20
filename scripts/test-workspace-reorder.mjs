@@ -91,6 +91,19 @@ try {
   await expect(link('Epsilon API')).toBeFocused();
   await expect(nav.getByRole('status').filter({hasText: 'moved to'})).toHaveText('Epsilon API moved to 4 of 8');
   await expect.poll(() => arranged().at(-1)).toEqual(['beta', 'gamma', 'alpha', 'epsilon', 'delta', 'zeta', 'eta', 'theta']);
+  // A pending focus-restoration frame must not steal a subsequent focus move.
+  // Dispatch and move focus in one task, before that frame can run.
+  await link('Epsilon API').evaluate(node=>{
+    node.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',altKey:true,shiftKey:true,bubbles:true,cancelable:true}));
+    document.querySelector('.workspace-link[aria-current="page"]').focus();
+  });
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await expect(link('Beta release')).toBeFocused();
+  await link('Epsilon API').focus();
+  await page.keyboard.press('Alt+Shift+ArrowDown');
+  await expect(names).toHaveText(afterKeys);
+  // Move the pointer away so a delayed hover is not part of the keyboard test.
+  await page.mouse.move(1300,850);
   // At the top, ⌥⇧↑ changes nothing and keeps nothing.
   await link('Beta release').focus();
   const kept = arranged().length;

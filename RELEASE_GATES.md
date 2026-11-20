@@ -262,3 +262,8 @@ before selecting text, so a right-click tests the intended selection.
 
 In Go link fixtures, cleanup closes and joins every in-process server before
 temporary state is removed, including the server's final audit write.
+
+The reorder gate schedules a focus restoration and moves focus in the same
+JavaScript task, proving the old row cannot steal focus on the next frame.
+The latest-turn reload fixture waits for an explicit final event before
+expanding commands; a count of two can appear before their final updates.

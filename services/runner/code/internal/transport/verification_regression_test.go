@@ -82,9 +82,11 @@ func TestVerificationRejectsPausedUncapturedRound(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-f.codex.Session.Applied
+	previousCandidate := ""
 	// This is the state AuthorTurnEnded creates while a verification loop is paused:
 	// round 2 is reviewing, its Input has not been captured, and Run.Input is still round 1.
 	_, err = f.bench.Reviews.UpdateRun(f.mine.Id, started.Run.Id, func(r *reviews.Run) error {
+		previousCandidate = r.Input[0].Commit
 		r.Phase = reviews.PhaseFixing
 		r.Paused = true
 		r.FixingSince = 1
@@ -107,10 +109,11 @@ func TestVerificationRejectsPausedUncapturedRound(t *testing.T) {
 	if _, err = f.bench.ControlReview(f.mine.Id, started.Run.Id, reviews.ControlResume, "", 0); err != nil {
 		t.Fatal(err)
 	}
-	// Until the watcher captures the new input, the unpaused round is also refused.
-	_, err = f.client.RunReviewVerification(reviewer, &pb.RunReviewVerificationRequest{SessionId: started.Session.Id, Name: "no regression", Member: "api", Expected: "no broken.txt", Argv: []string{"true"}})
-	if err == nil {
-		t.Fatal("accepted an uncaptured round")
+	// Either preparation is still refused, or the watcher has captured the new
+	// revision. Never allow the previous capture to acquire a round-2 receipt.
+	check, err := f.client.RunReviewVerification(reviewer, &pb.RunReviewVerificationRequest{SessionId: started.Session.Id, Name: "no regression", Member: "api", Expected: "no broken.txt", Argv: []string{"true"}})
+	if err == nil && check.Runs[0].Candidate == previousCandidate {
+		t.Fatal("accepted previous capture for new round")
 	}
 }
 

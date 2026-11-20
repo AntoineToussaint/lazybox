@@ -380,3 +380,30 @@ func TestCommandAdoptedElsewhereEndsHereWithoutStopping(t *testing.T) {
 		t.Fatalf("the superseded Runner stopped a command it no longer owns: %+v", final)
 	}
 }
+
+func TestUpgradeStopsUnisolatedVerification(t *testing.T) {
+	f := newHosted(t)
+	m := f.open(t)
+	// Seed exactly the old launch path, which did not apply isolation.
+	c, err := m.startHosted(Spec{SessionID: "reviewer", Kind: "verification", Action: "review/1/check/base", Cwd: t.TempDir(), Argv: []string{"sh", "-c", "echo ready; sleep 30"}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "legacy command started", func() bool { return c.Status().Offset > 0 })
+	id := c.Status().ID
+	if err = m.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded := f.open(t)
+	defer upgraded.Close()
+	adopted, err := upgraded.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	state, err := adopted.Wait(ctx)
+	if err != nil || !state.Done || (state.ExitCode != nil && *state.ExitCode == 0) {
+		t.Fatalf("unisolated command survived upgrade: %+v %v", state, err)
+	}
+}

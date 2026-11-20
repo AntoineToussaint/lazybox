@@ -19,12 +19,13 @@ func isolateVerification(spec Spec) (Spec, error) {
 	if err != nil {
 		return spec, err
 	}
-	home := filepath.Join(root, ".verification-home")
-	tmp := filepath.Join(home, "tmp")
-	// A repository must not redirect HOME/TMPDIR through a committed symlink.
-	if err := os.Mkdir(home, 0700); err != nil {
+	// Allocate a fresh directory: a repository cannot pre-create a symlink
+	// at HOME or reserve its name to prevent verification.
+	home, err := os.MkdirTemp(root, ".verification-home-")
+	if err != nil {
 		return spec, fmt.Errorf("create private verification home: %w", err)
 	}
+	tmp := filepath.Join(home, "tmp")
 	if err := os.Mkdir(tmp, 0700); err != nil {
 		return spec, err
 	}
@@ -36,7 +37,7 @@ func isolateVerification(spec Spec) (Spec, error) {
 		if err != nil {
 			return spec, errors.New("verification requires sandbox-exec")
 		}
-		profile := `(version 1)(deny default)(import "dyld-support.sb")(allow syscall* mach-bootstrap process-exec process-fork sysctl-read)(allow file-read-metadata)`
+		profile := `(version 1)(deny default)(import "dyld-support.sb")(allow syscall* mach-bootstrap process-exec process-fork)(allow sysctl-read (sysctl-name "hw.ncpu" "hw.activecpu" "hw.physicalcpu" "hw.logicalcpu" "hw.memsize" "hw.pagesize" "hw.optional.arm64" "kern.ostype" "kern.osrelease" "kern.osversion" "kern.version" "kern.argmax"))(allow file-read-metadata)`
 		for _, path := range []string{"/System/Library", "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/libexec", "/usr/share", "/bin", "/sbin", "/Library/Developer", "/usr/local/bin", "/usr/local/lib", "/opt/homebrew/Cellar", "/opt/homebrew/opt", "/opt/homebrew/bin"} {
 			profile += "(allow file-read* file-map-executable (subpath " + strconv.Quote(path) + "))"
 		}

@@ -5,7 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,5 +69,27 @@ func TestCommandDeadlineIndependentOfReviewPreparation(t *testing.T) {
 	state, err := c.Wait(ctx)
 	if err != nil || !state.Done || (state.ExitCode != nil && *state.ExitCode == 0) {
 		t.Fatalf("deadline did not cancel: %+v %v", state, err)
+	}
+}
+
+func TestVerificationCannotReadOtherProcessCredentials(t *testing.T) {
+	victim := exec.Command("/bin/sleep", "30")
+	victim.Env = []string{"VERIFICATION_PRIVATE_TOKEN=never-readable-by-reviewer"}
+	if err := victim.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = victim.Process.Kill(); _ = victim.Wait() }()
+	m := manager(t, 1<<20)
+	c, err := m.Start(Spec{SessionID: "test", Kind: "verification", Action: "review/1/process/base", Cwd: t.TempDir(), Argv: []string{"sh", "-c", `ps eww -p "$1"; cat /proc/"$1"/environ`, "sh", strconv.Itoa(victim.Process.Pid)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err = c.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(c.Tail(ctx, 10000)), "never-readable-by-reviewer") {
+		t.Fatal("sandbox exposed another process credential")
 	}
 }

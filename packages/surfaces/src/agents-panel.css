@@ -104,3 +104,6 @@
 .agents-list .inbox-missions .inbox-task{padding:6px 6px}
 .agents-list .inbox-missions .inbox-task-head strong{font-size:calc(12px * var(--text-scale))}
 .agent-title .agent-role{flex:none;padding:0 5px;border:1px solid var(--line);border-radius:7px;font-size:calc(9.5px * var(--text-scale));line-height:calc(14px * var(--text-scale));color:var(--text-subtle)}
+
+.agents-toolbar{flex-wrap:wrap}
+.agent-recent-line{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);font-size:calc(10.5px * var(--text-scale))}

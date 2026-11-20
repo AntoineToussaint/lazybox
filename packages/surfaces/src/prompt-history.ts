@@ -8,6 +8,9 @@ import { readPreference, writePreference } from './view-state';
  * every window of the app shares one history, like a shell's.
  */
 export type PromptEntry = { text: string; conversation: string };
+
+/** Generated review briefs and agent messages are not prompts the person sent. */
+export const isSentPrompt = (kind?: string) => !kind || ['typed', 'snippet', 'console', 'inbox'].includes(kind);
 const key = 'prompt-history:v1', limit = 200, textLimit = 16 << 10;
 
 export function parsePromptHistory(raw: string | null): PromptEntry[] {
@@ -67,7 +70,7 @@ function refreshRunnerHistory(api: RunnerClient) {
   if (cached?.loading) return;
   runnerHistory.set(api, { at: cached?.at || 0, entries: cached?.entries || [], loading: true });
   api.listPromptHistory({ limit }, { timeoutMs: 5000 })
-    .then(history => runnerHistory.set(api, { at: Date.now(), entries: history.prompts.map(p => ({ text: p.text, conversation: p.conversationId })) }))
+    .then(history => runnerHistory.set(api, { at: Date.now(), entries: history.prompts.filter(p => isSentPrompt(p.source?.kind)).map(p => ({ text: p.text, conversation: p.conversationId })) }))
     .catch(() => runnerHistory.set(api, { at: Date.now(), entries: cached?.entries || [] }));
 }
 /** Pure: this window's entries first, then the Runner's that it does not already have. */

@@ -39,7 +39,7 @@ export function AgentsPanel({ collections, target, viewState, onShowSession }: {
   const inbox = useMergedInbox();
   const directory = useRunnerDirectory();
   const { api, info, refresh } = useRunner();
-  const [savedGrouping, setGrouping] = useState<Grouping>(() => { const value = read<string>(viewState, 'agents.grouping', 'priority'); return value === 'workspace' || value === 'runner' ? value : 'priority'; });
+  const [savedGrouping, setGrouping] = useState<Grouping>(() => { const value = read<string>(viewState, 'agents.grouping', 'priority'); return value === 'workspace' || value === 'runner' || value === 'recent' ? value : 'priority'; });
   const grouping: Grouping = savedGrouping === 'runner' && !inbox.multi ? 'priority' : savedGrouping;
   const [folded, setFolded] = useState<string[]>(() => strings(read<unknown>(viewState, 'agents.folded', ['idle'])));
   const [expanded, setExpanded] = useState<string[]>([]);
@@ -84,7 +84,7 @@ export function AgentsPanel({ collections, target, viewState, onShowSession }: {
   const markAll = () => inbox.mark(unread.map(row => ({ key: row.key, at: seenMark(row) })));
   const rowOf = (key?: string) => inbox.rows.find(row => row.key === key);
   const rowsByKey = useMemo(() => new Map(inbox.rows.map(row => [row.key, row])), [inbox.rows]);
-  const runnerRow = (row: Attention) => rowsByKey.get(row.key) || { ...row, runner: inbox.here };
+  const runnerRow = (row: Attention) => ({ ...row, runner: rowsByKey.get(row.key)?.runner || inbox.here });
   const focusable = () => [...panel.current?.querySelectorAll<HTMLElement>('.agent-row, .agent-subagent') || []];
   // A plan to approve or a task to accept comes first: it is what waits on the person.
   const focusFirst = () => { const first = panel.current?.querySelector<HTMLElement>('.inbox-missions .inbox-task-actions button, .agent-row'); (first || filterInput.current)?.focus({ preventScroll: false }); first?.scrollIntoView({ block: 'nearest' }); };
@@ -133,6 +133,7 @@ export function AgentsPanel({ collections, target, viewState, onShowSession }: {
     <div className="agents-toolbar">
       <div className="agents-grouping" role="group" aria-label="Group agents">
         <button aria-pressed={grouping === 'priority'} onClick={() => choose('priority')}>Priority</button>
+        <button aria-pressed={grouping === 'recent'} onClick={() => choose('recent')}>Recent</button>
         <button aria-pressed={grouping === 'workspace'} onClick={() => choose('workspace')}>{inbox.multi ? 'Workspace' : 'By workspace'}</button>
         {inbox.multi && <button aria-pressed={grouping === 'runner'} onClick={() => choose('runner')}>Runner</button>}
       </div>
@@ -153,7 +154,7 @@ export function AgentsPanel({ collections, target, viewState, onShowSession }: {
           {section.state ? <AttentionIcon state={section.state} size={12}/> : section.id === 'pinned' ? <span className="agents-group-pin" aria-hidden="true"><Icon name="pin" size={11}/></span> : null}
           <span className="agents-group-name">{section.title}</span><b>{section.rows.length}</b>
         </button>
-        {!shut && <ul>{nestByLineage(section.rows).map(({ row: listed, depth }) => {
+        {!shut && <ul>{(grouping === 'recent' ? section.rows.map(row => ({ row, depth: 0 })) : nestByLineage(section.rows)).map(({ row: listed, depth }) => {
           const row = runnerRow(listed), acts = actionsFor(row), elsewhere = row.runner !== inbox.here;
           const title = conversationName(row.session), pinned = isPinned(row.session), dot = row.unread && row.state !== 'needs-input';
           const subagents = liveSubagents(row.session), open_ = expanded.includes(row.key);
@@ -174,8 +175,9 @@ export function AgentsPanel({ collections, target, viewState, onShowSession }: {
                       {lineage?.grantId && <span className="agent-orchestrator" title={`Orchestrator of “${lineage.missionTitle}”: ${lineage.liveChildren} of ${lineage.maxChildren} agents running`}><Icon name="subagent" size={10}/>{lineage.liveChildren}/{lineage.maxChildren}</span>}</span>
                     {from && <span className="agent-lineage" title={lineageLabel(row.session)}><Icon name="subagent" size={10}/>{from}</span>}
                     <span className="agent-meta">{inbox.multi && grouping !== 'runner' && <RunnerBadge runner={row.runner}/>}{row.state === 'working' ? <>{grouping !== 'workspace' && <span className="agent-workspace">{workspace(row)}</span>}<LiveText session={row.session} subagentsShown={subagents.length > 0}/></> : <span>{metaLine(row, workspace(row), grouping !== 'workspace' || section.id === 'pinned')}</span>}</span>
+                    {grouping === 'recent' && row.state !== 'needs-input' && row.state !== 'failed' && row.line && <span className="agent-recent-line">{row.line}</span>}
                   </span>
-                  <time className="agent-age" dateTime={row.at ? new Date(row.at).toISOString() : undefined}>{ageLabel(row.at, now)}</time>
+                  <time className="agent-age" title={row.at ? new Date(row.at).toLocaleString() : undefined} dateTime={row.at ? new Date(row.at).toISOString() : undefined}>{ageLabel(row.at, now)}</time>
                 </button>}
             {renaming !== row.key && <span className="agent-tools">
               {dot && <button className="icon-button agent-seen" tabIndex={-1} aria-label={`Mark ${title} as read`} title="Mark as read (m)" onClick={() => acts?.markRead(row.session)}><Icon name="check" size={12}/></button>}

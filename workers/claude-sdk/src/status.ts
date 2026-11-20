@@ -58,7 +58,11 @@ export class NativeStatus {
     const out: Event[] = [];
     const emit = (e: Event) => out.push({ sessionId: this.reference, ...e });
     const m = message;
-    const child = 'parent_tool_use_id' in m && m.parent_tool_use_id ? (this.tools.get(m.parent_tool_use_id) || `claude-tool:${m.parent_tool_use_id}`) : undefined;
+    const parentCall = 'parent_tool_use_id' in m ? m.parent_tool_use_id : undefined;
+    // The SDK can attach lifecycle events to an MCP invocation. The managed
+    // command has its own tool result and console, never a forked agent.
+    if (parentCall && this.calls.get(parentCall)?.name === 'mcp__lazybox__command') return out;
+    const child = parentCall ? (this.tools.get(parentCall) || `claude-tool:${parentCall}`) : undefined;
     if (m.type === 'system' && m.subtype === 'init') {
       if (!this.reference && !child) this.reference = m.session_id;
       if (!this.active) emit({ type: 'session_ready', sessionId: this.reference, data: { version: m.claude_code_version, model: m.model } });
@@ -73,7 +77,13 @@ export class NativeStatus {
         const block=e.content_block;
         if(block.type==='thinking'||block.type==='redacted_thinking')emit({type:'activity',agentId:child,status:'thinking'});
         else if(block.type==='text')emit({type:'activity',agentId:child,status:'responding'});
-        else if(block.type==='tool_use')emit({type:'activity',agentId:child,status:'tool',name:block.name});
+        else if(block.type==='tool_use') {
+          if (block.name === 'mcp__lazybox__command') {
+            if (this.calls.size >= CALL_LIMIT) this.calls.delete(this.calls.keys().next().value!);
+            this.calls.set(block.id, { name: block.name, input: undefined, agent: child || 'root' });
+          }
+          emit({type:'activity',agentId:child,status:'tool',name:block.name});
+        }
       }
       if (e.type === 'content_block_delta' && e.delta.type === 'text_delta' && child) this.streamed.add(child);
       if (e.type === 'content_block_delta' && e.delta.type === 'text_delta') emit({ type: 'message_delta', agentId: child, parentAgentId: child ? 'root' : undefined, text: e.delta.text });

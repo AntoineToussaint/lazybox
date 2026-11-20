@@ -22,7 +22,7 @@ export function usePromptRecall({ viewState, sessionID, conversationKey, convers
   // The Runner's prompt log adds what other windows and devices sent.
   const { api } = useRunner();
   const recall = useRef<Recall | null>(null);
-  useEffect(() => { recall.current = null; }, [sessionID]);
+  useEffect(() => { recall.current = null; if (sessionID) readPromptHistory(viewState, api); }, [api, viewState, sessionID]);
 
   /** Handles an arrow key that browses the history; false leaves the key to the textarea. */
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>, vimMode?: VimMode) => {
@@ -34,14 +34,14 @@ export function usePromptRecall({ viewState, sessionID, conversationKey, convers
     if (event.key === 'ArrowUp') {
       if (!state) {
         if (value && !(start === 0 && end === 0)) return false;
-        const list = recallOrder(readPromptHistory(viewState, api), conversationKey, conversation.filter(m => m.type === 'operation_accepted' && !m.origin).map(m => m.text));
+        const list = recallOrder(readPromptHistory(viewState, api), conversationKey, conversation.filter(m => m.type === 'operation_accepted' && !m.origin && !m.command).map(m => m.text));
         if (!list.length) return false;
         state = { list, index: -1, draft: value };
-      } else if (!caretOnFirstLine(value, start, end)) return false;
+      } else if (!(start === value.length && end === start) && !caretOnFirstLine(value, start, end)) return false;
       if (state.index + 1 >= state.list.length) { event.preventDefault(); return true; }
       state = { ...state, index: state.index + 1 };
     } else {
-      if (!state || !caretOnLastLine(value, start, end)) return false;
+      if (!state || (!(start === 0 && end === 0) && !caretOnLastLine(value, start, end))) return false;
       state = { ...state, index: state.index - 1 };
     }
     event.preventDefault();
@@ -50,7 +50,10 @@ export function usePromptRecall({ viewState, sessionID, conversationKey, convers
     // The text and caret are placed now, not a frame later: a late placement
     // would move the caret, or collapse the selection, of whatever was typed
     // or selected in between. The render that follows finds the box current.
-    el.value = text; el.setSelectionRange(text.length, text.length); el.scrollTop = el.scrollHeight;
+    el.value = text;
+    const at = state.index >= 0 && event.key === 'ArrowUp' && text.includes('\n') ? 0 : text.length;
+    el.setSelectionRange(at, at);
+    el.scrollTop = at === 0 ? 0 : el.scrollHeight;
     onRecall(text);
     return true;
   };

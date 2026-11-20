@@ -62,3 +62,13 @@ The default is in Settings → Chat, with a live preview; a conversation can hav
 ## Colours, text sizes and themes
 
 Stylesheets use design tokens only: `var(--surface)`, `var(--text-muted)`, `var(--danger-bg)`… for colours and `calc(12px * var(--text-scale))` (code: `--code-scale`) for text sizes, so themes, light mode and the text size settings reach everything. `scripts/appearance.test.ts` fails on a literal; `npm run tokenize-css -- file.css` converts one. Components that draw their own colours (Monaco, xterm, Mermaid, ANSI output, charts) take them from `appearance/`. See [Appearance](../../../APPEARANCE.md).
+
+**Prompt history** in the composer searches this conversation's sent
+prompts, including earlier prompts retained by the Runner. Each entry shows
+its relative age and can switch to the exact time. Picking an entry puts it in
+the composer for editing. Up and Down recall prompts from an empty composer,
+and the transcript shows the send time on each prompt.
+
+The **Recent** view in the Agents sidebar orders conversations by their
+latest observed activity with timestamps and the latest status or message.
+The **Priority** view groups conversations by what needs attention.

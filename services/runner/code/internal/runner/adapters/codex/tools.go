@@ -8,6 +8,8 @@ import (
 
 const commandSchema = `{"type":"object","properties":{"action":{"type":"string","enum":["start","read","wait","cancel","actions","start_action","interactive"]},"argv":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string","description":"interactive: optional absolute directory inside the conversation workspace."},"id":{"type":"string"},"offset":{"type":"integer","minimum":0},"name":{"type":"string","description":"start_action: the workspace action to start, as actions lists it; omit for the default action."},"restart":{"type":"boolean","description":"start_action: restart it if it is running."}},"required":["action"],"additionalProperties":false}`
 
+const reviewFindingSchema = `{"type":"object","properties":{"file":{"type":"string","description":"Workspace-relative repository/path."},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1},"severity":{"type":"string","enum":["blocker","major","minor","nit"]},"title":{"type":"string"},"body":{"type":"string"},"key":{"type":"string","description":"Optional stable key for retrying the same finding."}},"required":["file","startLine","severity","title","body"],"additionalProperties":false}`
+
 const settingsChangeSchema = `{"type":"object","properties":{"revision":{"type":"integer","minimum":1,"description":"The revision lazybox_get_settings returned. A stale revision is refused."},"reason":{"type":"string","description":"One or two plain sentences for the user: what changes and why."},"changes":{"type":"object","description":"Only the settings that change; each value replaces the current one whole.","properties":{"naming":{"type":"string","enum":["repositories","generated"]},"permission":{"type":"string","enum":["","ask","read-only","yolo"]},"context":{"type":"string","maxLength":32768},"claudeContext":{"type":"string","maxLength":16384},"codexContext":{"type":"string","maxLength":16384}},"additionalProperties":false}},"required":["revision","reason","changes"],"additionalProperties":false}`
 
 // dynamicTools are the Runner tools an execution may call, by its purpose: the
@@ -27,6 +29,7 @@ func dynamicTools(purpose string, browser bool) []map[string]any {
 		return nil
 	}
 	tools := []map[string]any{{"type": "function", "name": agent.CommandTool, "description": "Start, read, wait for or cancel a runner-owned command. Output remains available to independent human consoles. Start requires human approval. Never repeat a start after receiving its command id. interactive proposes argv for the person to review and run in a real terminal for prompts or sign-in. It waits for their decision and the exit status. The person handles all input. actions lists the workspace's actions (dev servers and the like, with their state and URL); start_action starts one by name (restart: true restarts it); read its output with its commandId.", "inputSchema": json.RawMessage(commandSchema)}}
+	tools = append(tools, map[string]any{"type": "function", "name": agent.ReviewFindingTool, "description": "File one proposed finding in the current agent review. Only the assigned reviewer can call this; returns the saved finding ID.", "inputSchema": json.RawMessage(reviewFindingSchema)})
 	if browser {
 		for _, t := range agent.BrowserTools {
 			tools = append(tools, map[string]any{"type": "function", "name": t.Name, "description": t.Description, "inputSchema": t.Schema})
@@ -48,10 +51,10 @@ func toolOffered(purpose, name string) bool {
 }
 
 // toolApproval is the approval card title of a dynamic tool call; empty when
-// the call runs without asking, which only reading (settings, documentation) does.
+// the call runs without asking. Review findings use the Runner’s reviewer authorization.
 func toolApproval(name string) string {
 	switch name {
-	case agent.SettingsReadTool, agent.DocsSearchTool, agent.DocsReadTool:
+	case agent.SettingsReadTool, agent.DocsSearchTool, agent.DocsReadTool, agent.ReviewFindingTool:
 		return ""
 	case agent.SettingsUpdateTool:
 		return "Change Lazybox settings"

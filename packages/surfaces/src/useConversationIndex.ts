@@ -3,10 +3,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@lazybox/protocol";
 import { useRunner } from "./RunnerContext";
 import { mergeConversations } from "./conversation-model";
+import { humanError } from "./human-error";
+
+const pageSize = 50;
+const transientHistoryError = (error: unknown) => [Code.Unavailable, Code.DeadlineExceeded, Code.ResourceExhausted].includes(ConnectError.from(error).code);
 
 /** One durable navigation index per sidebar, independent of workspace selection. */
 export function useConversationIndex() {
-  const { api, info, revision } = useRunner();
+  const { api, info, revision, slow, error: connectionError } = useRunner();
+  const paused = slow || !!connectionError;
+  const pauseHistory = useRef(paused);
+  pauseHistory.current = paused;
   const [saved, setSaved] = useState<Session[]>([]);
   const [complete, setComplete] = useState(false);
   const [error, setError] = useState("");
@@ -22,26 +29,34 @@ export function useConversationIndex() {
     const control = new AbortController();
     let pending = false;
     let refreshRequested = false;
-    let timeouts = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const readPage = async (offset: number) => {
+      const read = () => api.listHistory({ limit: pageSize, offset }, { signal: control.signal, timeoutMs: 15000 });
+      try { return await read(); }
+      catch (error) {
+        if (control.signal.aborted || pauseHistory.current || !transientHistoryError(error)) throw error;
+        await new Promise(resolve => setTimeout(resolve, 650));
+        if (pauseHistory.current) throw error;
+        return read();
+      }
+    };
     const load = async () => {
-      if (control.signal.aborted) return;
+      if (control.signal.aborted || pauseHistory.current) return;
       if (pending) {
         refreshRequested = true;
         return;
       }
+      clearTimeout(timer);
       pending = true;
       try {
         const rows: Session[] = [];
-        for (let offset = 0; ; offset += 100) {
-          const page = await api.listHistory(
-            { limit: 100, offset },
-            { signal: control.signal, timeoutMs: 15000 },
-          );
+        for (let offset = 0; ; offset += pageSize) {
+          const page = await readPage(offset);
           rows.push(...page.sessions);
           if (!page.hasMore) break;
+          if (pauseHistory.current) return;
         }
         if (!control.signal.aborted) {
-          timeouts = 0;
           setSaved(rows);
           setComplete(true);setUnsupported(false);
           setError("");
@@ -49,26 +64,25 @@ export function useConversationIndex() {
       } catch (error) {
         if (!control.signal.aborted) {
           const code = ConnectError.from(error).code;
-          timeouts = code === Code.DeadlineExceeded ? timeouts + 1 : 0;
-          if (code === Code.Unimplemented) setUnsupported(true);
-          else if (code !== Code.DeadlineExceeded || timeouts >= 2) setError(String(error));
+          if (code === Code.Unimplemented) { setUnsupported(true); setError(''); }
+          else setError(humanError(error));
         }
       } finally {
         pending = false;
+        if (control.signal.aborted) return;
         if (refreshRequested) {
           refreshRequested = false;
           void load();
-        }
+        } else timer = setTimeout(() => void load(), 15000);
       }
     };
     refresh.current = () => void load();
-    const timer = setInterval(() => void load(), 15000);
     return () => {
       control.abort();
-      clearInterval(timer);
+      clearTimeout(timer);
     };
   }, [api]);
-  useEffect(() => refresh.current(), [api, revision]);
+  useEffect(() => { if (!paused) refresh.current(); }, [api, revision, paused]);
   return {
     sessions: useMemo(
       () => mergeConversations(saved, info?.sessions || []),

@@ -182,6 +182,6 @@ func RereviewMessage(run Run, open []Comment, diff []string) string {
 		}
 		lines = append(lines, "Your findings still open:\n\n"+strings.Join(items, "\n"))
 	}
-	lines = append(lines, "For each one, run `lazybox review resolve <id> --note \"how it was fixed\"` or `lazybox review reopen <id> --note \"what is still wrong\"`; a finding you leave alone counts as still open. File anything new the change introduced with `lazybox review add`; do not file an open finding again. To ask "+firstNonEmpty(run.SourceLabel, "the author")+" something, run `lazybox ask author \"<question>\"`. End your turn with one line: resolved, still open, new.")
+	lines = append(lines, "For each one, run `lazybox review resolve <id> --note \"how it was fixed\"` or `lazybox review reopen <id> --note \"what is still wrong\"`; a finding you leave alone counts as still open. File anything new the change introduced with the review finding tool (or `lazybox review add` if unavailable); do not file an open finding again. To ask "+firstNonEmpty(run.SourceLabel, "the author")+" something, run `lazybox ask author \"<question>\"`. End your turn with one line: resolved, still open, new.")
 	return strings.Join(lines, "\n\n")
 }

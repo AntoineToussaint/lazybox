@@ -418,6 +418,12 @@ findings land in the same Review tray as your comments. It is the first,
 person-triggered step of the reviewer loop ([ORCHESTRATION.md](ORCHESTRATION.md),
 slice 2).
 
+Review conversations are read-only. Use **Open author conversation** on
+the review banner to ask for implementation or merging. Reviewers file
+findings through the Runner's dedicated tool, which returns a saved finding
+ID without needing the review shell to reach the Runner over the network.
+The CLI remains available for older review sessions.
+
 **Where to start one.** Each starts a review of the *author* conversation's
 work (the page's conversation; when the page shows a review conversation, the
 one it reviews — a review is never itself reviewed):

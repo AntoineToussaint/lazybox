@@ -128,6 +128,8 @@ func TestClaudeHelpAssistantChangesSettingsOnlyWithApproval(t *testing.T) {
 		t.Skip("build-worker required")
 	}
 	proposal := `{"revision":2,"reason":"You asked new coding sessions to ask before running tools.","changes":{"permission":"ask"}}`
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	results := make(chan string, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(io.LimitReader(r.Body, 4<<20))
@@ -152,7 +154,13 @@ func TestClaudeHelpAssistantChangesSettingsOnlyWithApproval(t *testing.T) {
 		}
 		for _, block := range last {
 			if block.Type == "tool_result" {
-				results <- string(block.Content)
+				select {
+				case results <- string(block.Content):
+				case <-ctx.Done():
+					return
+				case <-r.Context().Done():
+					return
+				}
 			}
 		}
 		switch strings.Count(string(raw), `"tool_use_id"`) {
@@ -166,7 +174,7 @@ func TestClaudeHelpAssistantChangesSettingsOnlyWithApproval(t *testing.T) {
 			_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"script complete"}}`)
 		}
 	}))
-	defer server.Close()
+	defer func() { cancel(); server.Close() }()
 	t.Setenv("ASSISTANT_FIXTURE_KEY", "fixture-only-key")
 	root := t.TempDir()
 	home := filepath.Join(root, "claude")
@@ -187,8 +195,6 @@ func TestClaudeHelpAssistantChangesSettingsOnlyWithApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	if _, err = e.Engine.Apply(ctx, agent.Operation{ID: "ask", Kind: agent.Message, Text: "Make new sessions ask before running tools."}); err != nil {
 		t.Fatal(err)
 	}
@@ -231,4 +237,27 @@ func TestClaudeHelpAssistantChangesSettingsOnlyWithApproval(t *testing.T) {
 	if got := b.Preferences.Snapshot(); got.Permission != "ask" || got.Revision != 3 {
 		t.Fatalf("approved update not applied: %+v", got)
 	}
+	cancel()
+	// A provider may repeat a result after our assertions finish. A full
+	// observation queue must not keep an HTTP handler (and Close) alive.
+fill:
+	for {
+		select {
+		case results <- "already observed":
+		default:
+			break fill
+		}
+	}
+	replayCtx, replayCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer replayCancel()
+	replay, err := http.NewRequestWithContext(replayCtx, http.MethodPost, server.URL+"/messages", strings.NewReader(`{"system":"Use only supplied context","messages":[{"content":[{"type":"tool_result","tool_use_id":"toolu_read","content":"replayed"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := server.Client().Do(replay)
+	if err != nil {
+		t.Fatalf("completed fixture blocked a repeated result: %v", err)
+	}
+	response.Body.Close()
+
 }

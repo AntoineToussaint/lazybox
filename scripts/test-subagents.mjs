@@ -1,3 +1,4 @@
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 // Fixture only: sub-agents in a conversation. Realistic Claude worker journals
 // (two parallel sub-agents, one nested, one failed, one long finished run):
 // inline cards with live current action, their own timelines, the tray beside
@@ -74,7 +75,7 @@ many.complete();
 const server=await createServer({configFile:false,logLevel:'error',root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:f.url}}}});let browser;
 try{
  await server.listen();await mkdir('.cache',{recursive:true});browser=await webkit.launch();const page=await browser.newPage({viewport:{width:1440,height:960}});page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=await collectPageErrors(page);
  const base=`http://127.0.0.1:${server.httpServer.address().port}`;
  await page.goto(`${base}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
  const chat=page.locator('.embedded-chat:visible').first(),messages=chat.locator('.messages:visible');

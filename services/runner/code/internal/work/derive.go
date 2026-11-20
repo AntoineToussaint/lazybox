@@ -279,25 +279,7 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 		if boundReview.Outcome == OutcomeFail {
 			review = boundReview
 		}
-		moved := boundReview.State == "stale"
-		for _, later := range t.Evidence {
-			if later.Seq <= boundReview.Seq || later.Attempt != boundReview.Attempt {
-				continue
-			}
-			if later.Kind == EvidenceCommit || later.Kind == EvidencePR {
-				if h, ok := boundReview.Revisions[later.Member]; ok && later.Head != "" && later.Head != h {
-					moved = true
-				}
-			}
-			if later.Kind == EvidenceRun {
-				for member, h := range later.Revisions {
-					if before, ok := boundReview.Revisions[member]; ok && before != h {
-						moved = true
-					}
-				}
-			}
-		}
-		if moved {
+		if reviewStale(t, boundReview) {
 			return TrustObserved, appendOnce(flags, FlagStale), "workspace revisions changed or could not be verified; review the current candidate"
 		}
 		if boundReview.Outcome == OutcomeUnknown || boundReview.Outcome == OutcomePending {
@@ -331,6 +313,30 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 		return TrustClaimed, flags, "checks passed on an older head of " + prName(stale)
 	}
 	return TrustClaimed, append(flags, FlagNoEvidence), "no passing run or check recorded"
+}
+
+func reviewStale(t *Task, review *Recorded) bool {
+	if review.State == "stale" {
+		return true
+	}
+	for _, later := range t.Evidence {
+		if later.Seq <= review.Seq || later.Attempt != review.Attempt {
+			continue
+		}
+		if later.Kind == EvidenceCommit || later.Kind == EvidencePR {
+			if h, ok := review.Revisions[later.Member]; ok && later.Head != "" && later.Head != h {
+				return true
+			}
+		}
+		if later.Kind == EvidenceRun {
+			for member, h := range later.Revisions {
+				if before, ok := review.Revisions[member]; ok && before != h {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func reviewName(r *Recorded) string {

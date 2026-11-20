@@ -20,6 +20,8 @@ const missionUsage = `Usage:
   lazybox mission approve <mission> [--plan ID] [--cap 20] [--wip 3] [--note …]
   lazybox mission reject <mission> [--plan ID] --note "why"
   lazybox mission budget <mission> --cap 40
+  lazybox mission integrate <mission> --plan ID --key KEY --check "combined check"
+  lazybox mission promote <mission> --candidate ID
 
 A plan:
   summary: index first, then rank; docs alongside
@@ -64,6 +66,8 @@ func (c *cli) mission(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "integrate", "promote":
+		return c.missionIntegration(args[0], args[1:])
 	case "plan":
 		return c.missionPlan(args[1:])
 	case "approve", "reject":
@@ -235,4 +239,59 @@ func (c *cli) missionBudget(args []string) error {
 	}
 	c.out("The tree of “%s” may spend $%.2f; it spent $%.2f.\n", m.Title, *capUSD, grant.SpentUsd)
 	return nil
+}
+
+func (c *cli) missionIntegration(verb string, args []string) error {
+	f := c.flags("mission " + verb)
+	plan := f.String("plan", "", "approved pinned plan")
+	key := f.String("key", "", "unique candidate request key")
+	check := f.String("check", "", "combined check from the candidate workspace root")
+	candidate := f.String("candidate", "", "tested candidate to accept")
+	pos, err := c.parse(f, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return fail(exitUsage, "give the mission ID")
+	}
+	req := &pb.UpdateMissionRequest{MissionId: pos[0], OperationId: *key}
+	if verb == "integrate" {
+		if *plan == "" || *key == "" || *check == "" || *candidate != "" {
+			return fail(exitUsage, "integrate requires --plan, --key and --check")
+		}
+		req.Change = &pb.UpdateMissionRequest_PrepareCandidate{PrepareCandidate: &pb.IntegrationPrepare{PlanId: *plan, CheckArgv: []string{"sh", "-c", *check}}}
+	} else {
+		if *candidate == "" || *plan != "" || *check != "" || *key != "" {
+			return fail(exitUsage, "promote requires --candidate")
+		}
+		req.Change = &pb.UpdateMissionRequest_PromoteCandidate{PromoteCandidate: &pb.IntegrationPromote{CandidateId: *candidate}}
+	}
+	cl, err := c.dial()
+	if err != nil {
+		return err
+	}
+	out, err := got(cl.UpdateMission(c.ctx, connect.NewRequest(req)))
+	if err != nil {
+		return err
+	}
+	id := *candidate
+	if verb == "integrate" {
+		id = out.CreatedId
+	}
+	for _, result := range out.Candidates {
+		if result.Id == id {
+			if c.json {
+				if err = c.printProtoJSON(result); err != nil {
+					return err
+				}
+			} else {
+				c.out("Candidate %s: %s (base generation %d, check %s) %s\n", id, result.State, result.BaseGeneration, result.CommandId, result.Detail)
+			}
+			if result.State == "failed" {
+				return fmt.Errorf("integration candidate failed: %s", result.Detail)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("Runner returned no integration candidate %s", id)
 }

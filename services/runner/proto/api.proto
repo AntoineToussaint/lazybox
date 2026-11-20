@@ -3201,7 +3201,26 @@ message UpdateMissionRequest {
     PlanDecision approve_plan = 15;
     PlanDecision reject_plan = 16;
     BudgetRaise raise_budget = 17;
+    IntegrationPrepare prepare_candidate = 18;
+    IntegrationPromote promote_candidate = 19;
   }
+}
+message IntegrationPrepare {
+  string plan_id = 1;
+  repeated string check_argv = 2;
+}
+message IntegrationPromote { string candidate_id = 1; }
+message IntegrationCandidate {
+  string id = 1;
+  string plan_id = 2;
+  uint64 base_generation = 3;
+  string state = 4;
+  string command_id = 5;
+  string detail = 6;
+  map<string, string> revisions = 7;
+  repeated string check_argv = 8;
+  map<string, string> task_reviews = 9;
+  string repair_task_id = 10;
 }
 message PlanDecision {
   string plan_id = 1;
@@ -3394,6 +3413,9 @@ message Mission {
   repeated MissionOverlap overlaps = 22;
   // Tasks waiting for the person's review (at a gate).
   uint32 awaiting_review = 23;
+  repeated IntegrationCandidate candidates = 24;
+  uint64 accepted_generation = 25;
+  string accepted_candidate_id = 26;
 }
 message MissionGoal { string id = 1; string title = 2; }
 message MissionTask {

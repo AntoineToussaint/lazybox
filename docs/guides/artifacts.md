@@ -68,7 +68,8 @@ The page follows new versions by itself. Rename by double-clicking the title.
 - In a chat you moved to its own window, an artifact opens **beside the chat,
   in that window**. Drag its edge to resize it; × or Esc closes it, and **Open
   in main window** shows it in the workspace.
-- **Export:** Copy as Markdown, Download .md, Print or save as PDF, **Save to
+- **Export:** Copy as Markdown, Download .md, Download .html for a standalone
+  copy of the selected version, Print or save as PDF, **Save to
   repository…** (written but never committed — review it in Changes), or
   **Create GitHub issue…** in a workspace repository.
 

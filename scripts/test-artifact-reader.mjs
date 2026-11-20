@@ -214,6 +214,25 @@ try {
   await article.getByLabel('Version', { exact: true }).selectOption('1');
   await expect(article.locator('.artifact-old-version')).toContainText('You are viewing v1 of 2.');
   await expect(article.locator('.task-list-item input:checked')).toHaveCount(2);
+  await article.getByLabel('Export', { exact: true }).click();
+  const [documentDownload] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Download .html', exact: true }).click(),
+  ]);
+  assert.equal(documentDownload.suggestedFilename(), 'datasource-migration.html');
+  const exportedFile = new URL('../.cache/artifact-reader-export.html', import.meta.url);
+  await documentDownload.saveAs(fileURLToPath(exportedFile));
+  const exported = await context.newPage();
+  await exported.goto(exportedFile.href);
+  await expect(exported.getByRole('heading', { name: 'Datasource migration', exact: true })).toBeVisible();
+  await expect(exported.locator('.print-meta')).toContainText('Version 1 of 2');
+  await expect(exported.getByRole('table')).not.toHaveCount(0);
+  await expect(exported.locator('pre')).not.toHaveCount(0);
+  await expect(exported.locator('.task-list-item input:checked:disabled')).toHaveCount(2);
+  await expect(exported.locator('script, iframe, button, [role=toolbar]')).toHaveCount(0);
+  await expect(exported.locator('.mermaid-block img')).toHaveAttribute('src', /^data:image\/svg\+xml/);
+  await expect.poll(() => exported.locator('.mermaid-block img').evaluate(img => img.complete && img.naturalWidth > 0)).toBe(true);
+  await exported.close();
   await article.getByRole('button', { name: 'Back to latest' }).click();
   await expect(article.locator('.task-list-item input:checked')).toHaveCount(3);
 

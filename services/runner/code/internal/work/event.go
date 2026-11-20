@@ -38,6 +38,7 @@ const (
 
 // Versions is the version of each type this Runner writes and folds.
 var Versions = map[string]int{
+	CandidateReserved: 1, CandidateReady: 1, CandidateChecked: 1, CandidateAccepted: 1,
 	MissionCreated: 1, MissionProcessPinned: 1, MissionBriefChanged: 1, MissionCanceled: 1,
 	GoalCreated: 1, TaskCreated: 1, TaskBriefChanged: 1, TaskEdgeAdded: 1, TaskCanceled: 1,
 	TaskAssigned: 1, AttemptStarted: 1, AttemptEnded: 1, TaskReported: 1, EvidenceRecorded: 1,

@@ -422,7 +422,7 @@ func (m *Manager) register(spec Spec, host *sessionhost.Client) (*Command, error
 	if spec.CollectionID != "" && spec.Kind != KindHook && (len(spec.Argv) > 0) != (spec.Kind != "") {
 		return nil, errors.New("a workspace run is a pipe, a workspace command has a kind")
 	}
-	if spec.Kind != "" && (spec.Kind != "setup" && spec.Kind != "archive" && spec.Kind != "action" && spec.Kind != KindHook && spec.Kind != KindRunner && spec.Kind != "verification" || spec.TerminalID != "" || spec.ShareWith != "") {
+	if spec.Kind != "" && (spec.Kind != "setup" && spec.Kind != "archive" && spec.Kind != "action" && spec.Kind != KindHook && spec.Kind != KindRunner && spec.Kind != "verification" && spec.Kind != "integration" || spec.TerminalID != "" || spec.ShareWith != "") {
 		return nil, errors.New("invalid workspace command")
 	}
 	if spec.StopGraceMs < 0 || spec.StopGraceMs > 60_000 {

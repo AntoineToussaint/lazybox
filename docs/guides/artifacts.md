@@ -64,14 +64,19 @@ The page follows new versions by itself. Rename by double-clicking the title.
 - **Send to agent** puts a reference in the message box of the conversation
   beside the page — title, version, an outline, and the command that prints the
   whole text. You decide when to send.
-- **Open in its own window** for a second screen.
+- **Open in its own window** for a second screen. Use the same button again
+  to bring that window forward. In that window, **Discuss in chat** opens a
+  resizable chat with the selected version or excerpt ready in the draft.
+  Choose the source conversation, another workspace conversation, or start a
+  new one. You decide when to send.
 - In a chat you moved to its own window, an artifact opens **beside the chat,
   in that window**. Drag its edge to resize it; × or Esc closes it, and **Open
   in main window** shows it in the workspace.
 - **Export:** Copy as Markdown, Download .md, Download .html for a standalone
   copy of the selected version, Print or save as PDF, **Save to
   repository…** (written but never committed — review it in Changes), or
-  **Create GitHub issue…** in a workspace repository.
+  **Create GitHub issue…** in a workspace repository. The desktop app opens
+  the system Save dialog for Markdown, HTML, and JSON exports.
 
 Deleting a workspace deletes its artifacts; deleting a conversation does not.
 

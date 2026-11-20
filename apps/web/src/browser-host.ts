@@ -1,5 +1,17 @@
 import type { AddComputerStep, AttentionDestination, AttentionHost, ChatReturn, ChatTarget, NotificationPermission, RunnerDirectoryHost, RunnerListing, SshHost, WorkspaceHost } from '@lazybox/platform';
 
+function detachedKey(kind: 'artifact' | 'web' | 'workspace', collectionId: string, id = '') {
+  return JSON.stringify([kind, collectionId, id]);
+}
+
+function currentDetachedKey(search: URLSearchParams) {
+  const collection = search.get('collection') || '';
+  const view = search.get('view');
+  if (view === 'workspace' && search.get('workspaceWindow')) return detachedKey(view, collection);
+  if (view === 'artifact') return detachedKey(view, collection, search.get('artifact') || '');
+  if (view === 'web') return detachedKey(view, collection, search.get('web') || '');
+}
+
 /**
  * Browser test host. Reconnect to existing views across an opener reload/close.
  * A chat's window (`chat`) answers its owner on a broadcast channel: focus,
@@ -11,10 +23,18 @@ export function browserWorkspaceHost(scope: string, token: string, chat?: ChatTa
   const channel = new BroadcastChannel(`lazybox-views:${scope}`);
   const waiting = new Map<string, (value: { ok: boolean; error?: string }) => void>();
   const windows = new Map<string, Window>();
+  const detached = new Map<string, Window>();
+  const opening = new Map<string, Promise<void>>();
+  const current = currentDetachedKey(new URLSearchParams(location.search));
   channel.onmessage = event => {
     const value = event.data;
     if (!value || typeof value.requestId !== 'string') return;
     if (value.reply) { waiting.get(value.requestId)?.(value); return; }
+    if (value.action === 'focus-detached' && current && value.detachedKey === current) {
+      window.focus();
+      channel.postMessage({ requestId: value.requestId, reply: true, ok: true });
+      return;
+    }
     if (value.action === 'return' || value.action === 'leaving') { if (!chat) returned(value); return; }
     if (!chat || value.panelId !== chat.panelId) return;
     if (value.action === 'ping') { channel.postMessage({ requestId: value.requestId, reply: true, ok: true }); return; }
@@ -42,20 +62,51 @@ export function browserWorkspaceHost(scope: string, token: string, chat?: ChatTa
     setTimeout(() => void request('ping', { panelId }, 1500).then(open => { if (!open && !((reopened.get(panelId) ?? 0) >= left)) emit({ panelId, collectionId, reason: 'closed' }); }), 300);
   }
   // A chat window this page opened, closed by the person.
-  const watch = setInterval(() => { for (const [panelId, child] of windows) if (child.closed) { windows.delete(panelId); emit({ panelId, collectionId: '', reason: 'closed' }); } }, 500);
+  const watch = setInterval(() => {
+    for (const [panelId, child] of windows) if (child.closed) { windows.delete(panelId); emit({ panelId, collectionId: '', reason: 'closed' }); }
+    for (const [key, child] of detached) if (child.closed) detached.delete(key);
+  }, 500);
   window.addEventListener('pagehide', () => clearInterval(watch), { once: true });
-  const request = (action: string, target: Partial<ChatTarget> & { panelId: string }, wait = 250): Promise<boolean> => new Promise((resolve, reject) => {
+  const request = (action: string, target: (Partial<ChatTarget> & { panelId: string }) | { detachedKey: string }, wait = 250): Promise<boolean> => new Promise((resolve, reject) => {
     const requestId = crypto.randomUUID();
     const timer = setTimeout(() => { waiting.delete(requestId); resolve(false); }, wait);
     waiting.set(requestId, value => { clearTimeout(timer); waiting.delete(requestId); if (value.ok) resolve(true); else reject(new Error(value.error)); });
     channel.postMessage({ requestId, action, ...target });
   });
+  const openDetached = (key: string, search: Record<string, string>, blocked: string): Promise<void> => {
+    if (key === current) {
+      window.focus();
+      return Promise.resolve();
+    }
+    const existing = detached.get(key);
+    if (existing && !existing.closed) {
+      existing.focus();
+      return Promise.resolve();
+    }
+    const pending = opening.get(key);
+    if (pending) return pending;
+    const open = async () => {
+      // A window can belong to another tab or predate this opener's reload.
+      if (await request('focus-detached', { detachedKey: key })) return;
+      const url = new URL(location.href);
+      url.search = new URLSearchParams(search).toString();
+      url.hash = new URLSearchParams({ token }).toString();
+      const child = window.open(url, `lazybox-${scope}-${encodeURIComponent(key)}`);
+      if (!child) throw new Error(blocked);
+      detached.set(key, child);
+      child.focus();
+    };
+    const result = open().finally(() => opening.delete(key));
+    opening.set(key, result);
+    return result;
+  };
   return {
     ...attention,
     ...(notifies ? { runners: browserRunners() } : {}),
-    async openWorkspace(collectionId) {
-      const url=new URL(location.href);url.search=new URLSearchParams({view:'workspace',collection:collectionId,workspaceWindow:'1'}).toString();url.hash=new URLSearchParams({token}).toString();
-      const opened=window.open(url,`workspace-${collectionId}`);if(!opened)throw new Error('Workspace window was blocked');opened.focus();
+    openWorkspace(collectionId) {
+      return openDetached(detachedKey('workspace', collectionId),
+        { view: 'workspace', collection: collectionId, workspaceWindow: '1' },
+        'The workspace window was blocked by the browser');
     },
     async openSignIn(value) {
       const url=new URL(value);
@@ -75,22 +126,15 @@ export function browserWorkspaceHost(scope: string, token: string, chat?: ChatTa
       if (!child) throw new Error('The chat window was blocked by the browser');
       windows.set(target.panelId, child); child.focus();
     },
-    async openArtifact(target) {
-      const url = new URL(location.href);
-      url.search = new URLSearchParams({ view: 'artifact', collection: target.collectionId, artifact: target.artifactId }).toString();
-      url.hash = new URLSearchParams({ token }).toString();
-      // Named per artifact: opening it again focuses the window it already has.
-      const opened = window.open(url, `artifact-${target.artifactId}`);
-      if (!opened) throw new Error('The artifact window was blocked by the browser');
-      opened.focus();
+    openArtifact(target) {
+      return openDetached(detachedKey('artifact', target.collectionId, target.artifactId),
+        { view: 'artifact', collection: target.collectionId, artifact: target.artifactId },
+        'The artifact window was blocked by the browser');
     },
-    async openWebWindow(target) {
-      const url = new URL(location.href);
-      url.search = new URLSearchParams({ view: 'web', web: target.webId, url: target.url, collection: target.collectionId }).toString();
-      url.hash = new URLSearchParams({ token }).toString();
-      const opened = window.open(url, `web-${target.webId}`);
-      if (!opened) throw new Error('The web window was blocked by the browser');
-      opened.focus();
+    openWebWindow(target) {
+      return openDetached(detachedKey('web', target.collectionId, target.webId),
+        { view: 'web', web: target.webId, url: target.url, collection: target.collectionId },
+        'The web window was blocked by the browser');
     },
     async dockChat(panelId) {
       windows.delete(panelId);

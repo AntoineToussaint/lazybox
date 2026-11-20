@@ -4,12 +4,14 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { fetch as nativeFetch } from '@tauri-apps/plugin-http';
-import { AgentWindow, ArtifactWindow, PREFERENCE_EVENT, WebWindow, WindowControls, WindowErrorBoundary, Workspace, configureContextMenus, configureExternalTerminal, configureSystemSounds, configureTitleBar, configureVoice, installLinkRouting, openInViewer, runMenuAction, useActionRevision, useNativeActionMenu, useRunnerLocator, type NativeMenuItem } from '@lazybox/surfaces';
+import { AgentWindow, ArtifactExportContext, ArtifactWindow, OpenHtmlInBrowserContext, PREFERENCE_EVENT, WebWindow, WindowControls, WindowErrorBoundary, Workspace, configureContextMenus, configureExternalTerminal, configureSystemSounds, configureTitleBar, configureVoice, installLinkRouting, openInViewer, runMenuAction, useActionRevision, useNativeActionMenu, useRunnerLocator, type NativeMenuItem } from '@lazybox/surfaces';
 import type { AddComputerStep, RunnerDirectoryHost, RunnerListing, SshHost } from '@lazybox/platform';
 import type { AppHost, AppInfo, ChatReturn, AttentionDestination, AttentionHost, AvailableUpdate, FeedbackDiagnostics, NativeWebViews, RecognitionEvent, RecognizerLanguage, RecognizerStatus, SpeechVoice, SurfaceHost, SurfaceTarget, TitleBarInset, ViewStateStore, UpdateError, UpdateErrorKind, UpdateProgress, VoiceHost, WebViewEvent, WorkspaceHost, ZoomHost } from '@lazybox/platform';
 import { FirstRun } from './FirstRun';
 
 type Bootstrap = { url: string; token: string; workingDirectory: string; target: SurfaceTarget; viewKey: string; viewScope: string; viewRoot: string; applicationName: string; fixedWorkspaceId: string; kind: 'workspace' | 'chat' | 'console' | 'artifact' | 'web'; notice: string; viewState: Record<string,string> };
+const openHtmlInBrowser = (html: string) => invoke<void>('open_html_preview_in_browser', { html });
+const saveArtifactExport = (filename: string, content: string) => invoke<boolean>('save_artifact_export', { filename, content });
 const publishMenu = (items: NativeMenuItem[]) => invoke<void>('set_action_menu', { items });
 const fetchRunner: typeof globalThis.fetch = (input, init) => nativeFetch(input, { ...init, maxRedirections: 0 });
 
@@ -271,11 +273,11 @@ function DesktopWindow({ bootstrap, followRestart, renew }: { bootstrap: Bootstr
     return () => { disposed = true; stop?.(); };
   }, [bootstrap.kind]);
   const action = async (callback: () => Promise<void>) => { try { await callback(); setError(''); } catch (error) { setError(String(error)); } };
-  return <div className="desktop-root">
+  return <ArtifactExportContext.Provider value={saveArtifactExport}><OpenHtmlInBrowserContext.Provider value={openHtmlInBrowser}><div className="desktop-root">
     {bootstrap.kind === 'web' ? <WebWindow id={bootstrap.target.webId || 'web'} url={bootstrap.target.webUrl || ''} viewState={viewState} webViews={desktopWebViews} applicationName={bootstrap.applicationName} onDock={url => invoke<void>('dock_web', { url })}/> : <>
     {bootstrap.kind !== 'workspace' && <WindowControls applicationName={bootstrap.applicationName} viewState={viewState} onPutBack={bootstrap.kind === 'chat' ? () => void action(host.putBack!) : undefined} onWorkspace={() => void action(host.reopenAgent)} onReopenClosed={() => void action(host.reopenClosed)} onReconnect={() => void action(host.reconnect)}/>}
     {error && <div className="error" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
-    {bootstrap.kind === 'artifact' ? <ArtifactWindow connection={{ baseUrl: bootstrap.url, token: bootstrap.token, fetch: fetchRunner, renew }} collectionId={bootstrap.target.collectionId || ''} artifactId={bootstrap.target.artifactId || ''}/> : bootstrap.kind === 'workspace' ? <Workspace
+    {bootstrap.kind === 'artifact' ? <ArtifactWindow connection={{ baseUrl: bootstrap.url, token: bootstrap.token, fetch: fetchRunner, renew }} collectionId={bootstrap.target.collectionId || ''} artifactId={bootstrap.target.artifactId || ''} viewState={viewState}/> : bootstrap.kind === 'workspace' ? <Workspace
       fixedWorkspaceId={bootstrap.fixedWorkspaceId || undefined}
       connection={{ baseUrl: bootstrap.url, token: bootstrap.token, fetch: fetchRunner, renew }}
       viewState={viewState} host={workspaceHost} onTargetChange={saveSelection} onOpenViewer={openViewer}
@@ -294,7 +296,7 @@ function DesktopWindow({ bootstrap, followRestart, renew }: { bootstrap: Bootstr
       onFocusMain={focusMain}
     />}
     </>}
-  </div>;
+  </div></OpenHtmlInBrowserContext.Provider></ArtifactExportContext.Provider>;
 }
 // The host rereads this window's Runner locator. A restarted Runner (a Codefly
 // hot reload, or Restart Runner from the app) gets a new bearer and may get a

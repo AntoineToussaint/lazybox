@@ -141,6 +141,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .manage(attention::Attention::default())
         .manage(runners::Runners::default())
         .manage(links::Links::default())
+        .manage(host::HtmlPreviews::default())
         .manage(viewer::Viewers::default())
         .manage(updates::Pending::default())
         .invoke_handler(tauri::generate_handler![
@@ -165,6 +166,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             viewer::web_view_reset,
             host::copy_sign_in_code,
             host::choose_repository_folder,
+            host::save_artifact_export,
+            host::open_html_preview_in_browser,
             host::save_surface,
             host::open_console,
             host::open_chat,

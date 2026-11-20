@@ -1,5 +1,7 @@
 .terminal-panel{display:flex;flex-direction:column;flex:1;min-height:0;background:var(--surface-sunken)}
-.terminal-tabs{display:flex;align-items:center;gap:4px;min-height:36px;padding:0 10px;border-bottom:1px solid var(--line);background:var(--surface);overflow-x:auto;overflow-y:hidden}
+.terminal-tabs{display:flex;align-items:center;gap:4px;min-height:36px;padding:0 10px 8px;border-bottom:1px solid var(--line);background:var(--surface);overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
+.terminal-tabs::-webkit-scrollbar{height:5px}
+.terminal-tabs::-webkit-scrollbar-thumb{border-radius:5px;background:var(--line-strong)}
 .terminal-tab{display:inline-flex;align-items:center;flex-shrink:0;border-radius:6px}
 .terminal-tab.selected{background:var(--surface-selected)}
 .workspace-shell .terminal-tab button{font-size:calc(11px * var(--code-scale));padding:4px 8px;color:var(--text-subtle)}

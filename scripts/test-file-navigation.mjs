@@ -151,6 +151,24 @@ try{
  const look=page.getByRole('dialog',{name:'File preview'});await expect(look).toBeVisible();
  await look.getByRole('button',{name:'Close file preview'}).click();await expect(look).toHaveCount(0);
 
+ // HTML can render locally or in a separate browser tab, with scripts removed.
+ const htmlPath='api/preview.html';
+ fixture.workspaceFiles.set('alpha/'+htmlPath,{path:htmlPath,version:'v1',text:'<!doctype html><style>h1 { color: rgb(12, 34, 56) }</style><h1>Workspace preview</h1><script>document.body.textContent = "script ran"</script><img src="https://example.invalid/pixel">'});
+ channel.push({type:'message_delta',text:'See [HTML report](api/preview.html).'});
+ await page.getByRole('button',{name:'HTML report',exact:true}).click({modifiers:['Alt']});
+ await look.getByRole('button',{name:'Open in Lazybox',exact:true}).click();
+ const rendered=look.frameLocator('iframe[title="HTML file preview"]');
+ await expect(rendered.getByRole('heading',{name:'Workspace preview'})).toHaveCSS('color','rgb(12, 34, 56)');
+ await expect(rendered.locator('script, [src]')).toHaveCount(0);
+ const [external]=await Promise.all([page.context().waitForEvent('page'),look.getByRole('button',{name:'Open in browser',exact:true}).click()]);
+ await expect(external.getByRole('heading',{name:'Workspace preview'})).toBeVisible();
+ await expect(external.locator('script, [src]')).toHaveCount(0);
+ await external.close();
+ await look.getByRole('button',{name:'View source',exact:true}).click();
+ await expect(look.locator('.monaco-editor')).toBeVisible();
+ await look.getByRole('button',{name:'Close file preview'}).click();
+ await expect(look).toHaveCount(0);
+
  // Reveal the active file from the Files panel.
  await tree.locator('[data-path="api"]').click();await expect(tree.locator('[data-path="api"]')).toHaveAttribute('aria-expanded','false');
  await page.getByRole('button',{name:'Reveal active file'}).click();

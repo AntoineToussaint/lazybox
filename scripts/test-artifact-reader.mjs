@@ -81,7 +81,6 @@ try {
   await page.getByRole('tab', { name: 'Preview' }).click();
   await page.getByLabel('Version', { exact: true }).selectOption('1');
   await expect(preview.getByText('Latency')).toHaveCount(1);
-  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.getByRole('tab', { name: 'Source' }).click();
   await page.locator('.artifact-html-source').evaluate(node => {
     const range = document.createRange();
@@ -89,10 +88,21 @@ try {
     getSelection().removeAllRanges();
     getSelection().addRange(range);
   });
-  await page.getByRole('button', { name: 'Send selection to agent' }).click();
-  const reference = await page.evaluate(() => navigator.clipboard.readText());
-  assert.match(reference, /--version 1/);
-  assert.match(reference, /Selected excerpt:\n> .*Latency/);
+  const sendsBefore = fixture.mutations.filter(call => call.method === 'Apply').length;
+  await page.getByRole('button', { name: 'Discuss selection in chat' }).click();
+  const chat = page.getByRole('complementary', { name: 'Artifact chat' });
+  await expect(chat.getByRole('combobox', { name: 'Conversation' })).toHaveValue(session.id);
+  const draft = chat.getByRole('textbox', { name: 'Message', exact: true });
+  await expect(draft).toHaveValue(/--version 1[\s\S]*Selected excerpt:\n> .*Latency/);
+  await expect(page.getByRole('separator', { name: 'Resize the chat' })).toBeVisible();
+  await page.setViewportSize({ width: 650, height: 900 });
+  await expect(chat).toBeVisible();
+  await expect(page.getByRole('separator', { name: 'Resize the chat' })).toBeHidden();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await chat.getByRole('button', { name: 'Close artifact chat' }).click();
+  await expect(chat).toHaveCount(0);
+  await expect(page.getByLabel('Version', { exact: true })).toHaveValue('1');
+  assert.equal(fixture.mutations.filter(call => call.method === 'Apply').length, sendsBefore, 'opening artifact chat must not send a prompt');
   await page.getByRole('tab', { name: 'Preview' }).click();
   await page.getByLabel('Export', { exact: true }).click();
   const downloadPromise = page.waitForEvent('download');
@@ -104,6 +114,31 @@ try {
   await expect(page.getByLabel('Version', { exact: true })).toHaveValue('3');
   await page.getByRole('tab', { name: 'Source' }).click();
   await expect(page.locator('.artifact-html-source')).toHaveText(htmlSource);
+
+  // An artifact without an originating conversation uses the workspace’s new-chat form.
+  const standaloneNote = fixture.artifacts.agentPut({ collectionId: 'alpha', title: 'Workspace note', content: 'Notes for a new discussion.' });
+  await page.goto(standalone.replace(doc.id, standaloneNote.id));
+  await page.getByRole('button', { name: 'Discuss in chat' }).click();
+  await expect(chat.getByRole('combobox', { name: 'Conversation' })).toHaveValue('');
+  await expect(chat).toContainText('The artifact reference will be added to your draft');
+  assert.equal(fixture.mutations.filter(call => call.method === 'OpenSession').length, 0, 'the chat pane does not start an agent');
+  await chat.getByRole('button', { name: /^Start Claude/ }).click();
+  await expect(draft).toHaveValue(/Workspace note/);
+  const started = fixture.mutations.find(call => call.method === 'OpenSession');
+  assert.equal(started?.body.collectionId, 'alpha');
+  assert.equal(fixture.mutations.filter(call => call.method === 'Apply').length, sendsBefore, 'starting the selected conversation must leave the reference in the draft');
+
+  const noteDraft = await draft.inputValue();
+  await draft.fill(noteDraft + '\n\nCould you check this?');
+  await chat.getByRole('button', { name: 'Close artifact chat' }).click();
+  await expect(chat).toHaveCount(0);
+  await page.getByRole('button', { name: 'Discuss in chat' }).click();
+  await expect(draft).toHaveValue(noteDraft + '\n\nCould you check this?');
+  await chat.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect.poll(() => fixture.mutations.filter(call => call.method === 'Apply' && call.body.message).length).toBe(sendsBefore + 1);
+  const discussion = fixture.mutations.find(call => call.method === 'Apply' && call.body.message);
+  assert.match(JSON.stringify(discussion.body.message), /Workspace note.*Could you check this/);
+  assert.equal(fixture.sessions.find(item => item.id === discussion.body.sessionId)?.collectionId, 'alpha');
 
   await page.goto(standalone.replace(doc.id, shellDoc.id));
   const shellReviews = page.getByRole('button', { name: 'Review in terminal' });
@@ -145,6 +180,13 @@ try {
   assert.ok(measure.size >= 15, `body text at ${measure.size}px`);
   assert.match(measure.font, /Inter Variable/);
   await expect.poll(() => page.evaluate(() => document.fonts.check('16px "Inter Variable"') && document.fonts.check('40px "Newsreader Variable"'))).toBe(true);
+
+  const edges = await article.evaluate(node => {
+    const left = selector => node.querySelector(selector).getBoundingClientRect().left;
+    return ['.doc-column', '.doc-title', '.doc-body > p', '.doc-body > h2', '.doc-table', '.doc-body > .code-block']
+      .map(left);
+  });
+  assert.ok(Math.max(...edges) - Math.min(...edges) <= 1, `document blocks share one left edge: ${edges}`);
 
   // Callouts: the label leaves the text and becomes the callout's head.
   await expect(article.locator('.doc-callout')).toHaveCount(3);

@@ -1,5 +1,5 @@
 import { artifactFormat } from './artifact-formats';
-import { documentSnapshot, exportDocumentHTML, type DocumentHeading } from './artifact-export';
+import { ArtifactExportContext, documentSnapshot, exportDocumentHTML, type DocumentHeading } from './artifact-export';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Artifact, ArtifactVersion, Collection } from '@lazybox/protocol';
 import { ActionMenu } from './ActionMenu';
@@ -38,6 +38,8 @@ type Props = {
   onBack?(): void;
   /** In a workspace: show a conversation (source message, Send to agent). */
   onShowSession?(target: ViewTarget): void;
+  onDiscuss?(artifact: Artifact, reference: string): void;
+  chatOpen?: boolean;
   /** The conversation the page is beside, for Send to agent. */
   conversationId?: string;
   conversationTitle?: string;
@@ -65,9 +67,11 @@ const fullDate = (unixMillis: bigint | number) => new Date(Number(unixMillis)).t
  * callouts, tables, diagrams), its versions with the changes between them,
  * where it came from, and every way out of Lazybox.
  */
-export function ArtifactPage({ collectionId, artifactId, summary, collection, onBack, onShowSession, conversationId, conversationTitle, onDeleted, standalone, focus }: Props) {
+export function ArtifactPage({ collectionId, artifactId, summary, collection, onBack, onShowSession, conversationId, conversationTitle, onDeleted, onDiscuss, chatOpen, standalone, focus }: Props) {
   const { api } = useRunner();
   const host = useContext(ArtifactHostContext);
+  const saveArtifactExport = useContext(ArtifactExportContext);
+  const savePending = useRef(false);
   const workbench = useWorkbench();
   const [artifact, setArtifact] = useState<Artifact>(), [error, setError] = useState(''), [missing, setMissing] = useState(false);
   const library = useLibrary(api);
@@ -241,7 +245,6 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   if (!artifact) return <div className="artifact-page is-empty">{error ? <p className="artifact-error" role="alert">{error}<button onClick={() => setPoll(value => value + 1)}>Retry</button></p> : <p className="module-empty" role="status">Opening artifact…</p>}</div>;
 
   const kind = asKind(artifact.kind);
-  const latestContent = contents.get(latestNumber) ?? artifact.content;
   const update = async (change: { title?: string; kind?: string; stopTracking?: boolean }, said: string) => {
     try { setArtifact(await api.updateArtifact({ collectionId, artifactId, ...change }, { timeoutMs: 10000 })); artifactsChanged(collectionId); say(said); }
     catch (e) { setError(errorText(e)); }
@@ -281,17 +284,32 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   };
   const retiredBy = artifact.retired?.by?.kind === 'agent' ? 'an agent' : 'you';
   const copy = async (text: string, said: string) => { try { await navigator.clipboard.writeText(text); say(said); } catch (e) { setError(`Copy failed: ${errorText(e)}`); } };
-  const exportContent = structured ? currentText : Preview ? content : latestContent;
-  const downloadFile = (payload: string, extension: string, mime: string) => {
+  const exportContent = structured ? currentText : content;
+  const downloadFile = async (payload: string, extension: string, mime: string) => {
+    if (savePending.current) return;
+    setError('');
     const filename = `${slug(artifact.title)}.${extension}`;
-    const url = URL.createObjectURL(new Blob([payload], { type: `${mime};charset=utf-8` }));
-    const link = document.createElement('a'); link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    say(`Downloaded ${filename}`);
+    savePending.current = true;
+    try {
+      if (saveArtifactExport) {
+        if (await saveArtifactExport(filename, payload)) say('Artifact saved.');
+        return;
+      }
+      const url = URL.createObjectURL(new Blob([payload], { type: `${mime};charset=utf-8` }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      say(`Download started for ${filename}.`);
+    } catch (error) { setError(`Could not export the artifact: ${errorText(error)}`); }
+    finally { savePending.current = false; }
   };
   const download = (source = false) => {
     const payload = source ? content : exportContent;
-    if (payload !== undefined) downloadFile(payload, source ? 'json' : extension, source ? 'application/json' : mime);
+    if (payload !== undefined) void downloadFile(payload, source ? 'json' : extension, source ? 'application/json' : mime);
   };
   const shownAt = version?.createdAtUnixMillis || artifact.updatedAtUnixMillis;
   const exportRendered = (format: 'print' | 'html') => {
@@ -314,7 +332,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
       }
       if (format === 'html') {
         const dark = document.documentElement.dataset.scheme === 'dark';
-        downloadFile(exportDocumentHTML(sheet, node, dark), 'html', 'text/html');
+        void downloadFile(exportDocumentHTML(sheet, node, dark), 'html', 'text/html');
       } else {
         void printDocument(sheet, node).catch(error => setError(`Could not open the print dialog: ${errorText(error)}`));
       }
@@ -330,9 +348,13 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
     revealMessage({ sessionId: message.sessionId, messageId: message.messageId });
   };
   const openFile = () => { if (filePath && workbench) workbench.open(filePath, { focus: true }); };
-  const sendToAgent = () => {
+  const discussionReference = () => {
     const reference = agentReference(artifact, currentText ?? '', 1200, shown);
-    const text = excerpt ? `${reference}Selected excerpt:\n${excerpt.split('\n').map(line => `> ${line}`).join('\n')}\n\n` : reference;
+    return excerpt ? `${reference}Selected excerpt:\n${excerpt.split('\n').map(line => `> ${line}`).join('\n')}\n\n` : reference;
+  };
+  const sendToAgent = () => {
+    const text = discussionReference();
+    if (onDiscuss) { onDiscuss(artifact, text); return; }
     if (conversationId && onShowSession) {
       composeInConversation({ sessionId: conversationId, text });
       onShowSession({ collectionId, sessionId: conversationId, commandId: '' });
@@ -342,6 +364,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   const pick = (number: number) => { setSelected(number === latestNumber ? 0 : number); setBase(0); };
   const compare = (number: number) => { pick(number); setView('changes'); if (!wide) setHistoryOpen(false); };
   const minutes = reading === undefined || Preview ? 0 : readingMinutes(reading);
+  const discussLabel = chatOpen ? (excerpt ? 'Add selection to chat' : 'Add to chat') : (excerpt ? 'Discuss selection in chat' : 'Discuss in chat');
   const historyLabel = `History · ${versions.length} version${versions.length === 1 ? '' : 's'}`;
 
   return <article ref={measureRef} className={`artifact-page${historyOpen ? ' has-history' : ''}${wide ? ' is-wide' : ''}${scrolled ? ' is-scrolled' : ''}`} aria-label={artifact.title} onKeyDown={toggleKey}>
@@ -364,7 +387,12 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
       <div className="artifact-page-actions">
         <span className="artifact-status" role="status" aria-live="polite">{status}</span>
         <button type="button" className="artifact-tool artifact-history-toggle" aria-expanded={historyOpen} aria-label={historyLabel} aria-keyshortcuts="H" title={`${historyLabel} (H)`} onClick={() => setHistoryOpen(!historyOpen)}><Icon name="history" size={15}/><span className="artifact-tool-label">History</span><span className="artifact-count">{versions.length}</span></button>
-        <button type="button" className="artifact-tool" aria-label={excerpt ? 'Send selection to agent' : 'Send to agent'} onMouseDown={event => { if (excerpt) event.preventDefault(); }} onClick={sendToAgent} title={conversationId ? `Put a reference in the message box of “${conversationTitle || 'the conversation'}” (not sent)` : 'Copy a reference an agent can read'}><Icon name="send" size={14}/><span className="artifact-tool-label">{excerpt ? 'Send selection' : 'Send to agent'}</span></button>
+        <button type="button" className={onDiscuss ? "artifact-tool artifact-discuss" : "artifact-tool"}
+          aria-label={onDiscuss ? discussLabel : (excerpt ? 'Send selection to agent' : 'Send to agent')}
+          onMouseDown={event => { if (excerpt) event.preventDefault(); }} onClick={sendToAgent}
+          title={onDiscuss ? 'Open chat and add this reference to its draft' : conversationId ? `Put a reference in the message box of “${conversationTitle || 'the conversation'}” (not sent)` : 'Copy a reference an agent can read'}>
+          <Icon name={onDiscuss ? 'chat' : 'send'} size={14}/><span className="artifact-tool-label">{onDiscuss ? discussLabel : excerpt ? 'Send selection' : 'Send to agent'}</span>
+        </button>
         <ActionMenu label="Export" className="artifact-export-menu" summary={<><Icon name="download" size={14}/><span className="artifact-tool-label">Export</span></>}>
           <button type="button" disabled={exportContent === undefined} onClick={() => void copy(exportContent ?? '', `Copied ${formatLabel}.`)}><Icon name="copy"/><span>{Preview ? 'Copy HTML source' : 'Copy as Markdown'}</span></button>
           <button type="button" disabled={exportContent === undefined} onClick={() => download()}><Icon name="download"/><span>Download .{extension}</span></button>
@@ -376,6 +404,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
         </ActionMenu>
         {!standalone && host.openArtifact && <button type="button" className="artifact-tool artifact-open-window" aria-label="Open in its own window" title="Open in its own window" onClick={() => void host.openArtifact!({ collectionId, artifactId }).catch(e => setError(errorText(e)))}><Icon name="external" size={14}/></button>}
         <ActionMenu ref={moreMenu} label="Artifact actions" className="artifact-more-menu">
+          {onDiscuss && <button type="button" onClick={() => void copy(discussionReference(), 'Copied artifact reference.')}><Icon name="copy"/><span>Copy artifact reference</span></button>}
           <button type="button" onClick={() => { setView('document'); setRenaming(true); }}><Icon name="pencil"/><span>Rename</span></button>
           {!standalone && host.openArtifact && <button type="button" className="artifact-menu-window" onClick={() => void host.openArtifact!({ collectionId, artifactId }).catch(e => setError(errorText(e)))}><Icon name="external"/><span>Open in its own window</span></button>}
           <button type="button" disabled={!message || !onShowSession} title={!onShowSession && message ? 'Open it from the workspace window' : undefined} onClick={openMessage}><Icon name="chat"/><span>Open source message</span></button>

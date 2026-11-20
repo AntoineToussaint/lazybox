@@ -34,10 +34,8 @@
 /* A short window: the preview gives up its height first, so the sheet's own
    fields and its footer stay inside it (the sheet never grows past the window). */
 .new-task-sheet.draggable-dialog[open]:has(.item-source){max-height:calc(100dvh - 16px)}
-.new-task-sheet form{flex:1 1 auto}
-.new-task-sheet form>*{flex-shrink:0}
-.new-task-sheet form>.new-task-item{flex-shrink:1;min-height:0}
-.new-task-sheet form>.new-task-item:has(.item-source-preview){min-height:calc(116px * var(--text-scale))}
+.new-task-fields>.new-task-item{flex-shrink:1;min-height:0}
+.new-task-fields>.new-task-item:has(.item-source-preview){min-height:calc(116px * var(--text-scale))}
 .new-task-item .item-source-preview{overflow:hidden}
 .new-task-item>.item-source{flex:1 1 auto;min-height:0}
 .new-task-item .item-source-preview{flex:1 1 auto;min-height:0}

@@ -378,6 +378,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
       <button type="button" aria-label="Close new task" title={busy ? 'Keeps starting in the background' : 'Close · your message is kept'} onClick={() => busy ? moveToBackground() : onClose()}>×</button>
     </DialogHeader>
     <form onSubmit={submit} aria-busy={busy || undefined}>
+      <div className="new-task-fields">
       <textarea ref={prompt} className="new-task-prompt" aria-label="First message" rows={itemRef ? 2 : 4} data-item={itemRef ? '' : undefined} maxLength={100_000} disabled={busy} placeholder={itemRef ? `Anything to add about ${itemRef.key}? (optional)` : 'What should the agent do? Paste an issue link to start from it.'}
         value={draft.prompt} onChange={event => { change({ prompt: event.target.value }); setProblem(undefined); }} onKeyDown={promptKeys} onPaste={pasted}/>
 
@@ -475,6 +476,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
         ? <ReplaceRepositoryCopy key={replaced.identity} replacement={replaced} autoFocus onReplaced={() => { setReplaced(undefined); setError(''); void reloadCatalog(); void start(false); }}/>
         : (problem || error) && <p className="new-task-problem" role="alert">{problem?.message || error}</p>}
       {busy && <div className="new-task-progress" role="status"><span>{progress || 'Starting…'}</span><progress aria-label="Starting the task"/><small>Esc keeps it going in the background.</small></div>}
+      </div>
       <footer>
         <span className="new-task-keys" aria-hidden="true"><kbd>↵</kbd> start · <kbd>{mod}↵</kbd> in the background · {draft.identities.length && !draft.empty ? <><kbd>⌥B</kbd> start from</> : <><kbd>⇧↵</kbd> new line</>}</span>
         <button type="button" className="new-task-background" disabled={busy} title={`Start it and keep working here (${mod}↵)`} onClick={() => void start(true)}>Start in background</button>

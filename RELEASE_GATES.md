@@ -274,3 +274,11 @@ Hover-delay assertions use a paused browser clock: absence before the delay
 and presence afterward cannot depend on how long CI stalls between commands.
 Docking resize assertions wait for the final movement to reach the layout
 before releasing the pointer, then verify the width remains persisted.
+
+The workspace-reorder fixture collects browser runtime errors and unhandled
+rejections through DOM events. WebKit's protocol can label a caught fetch
+failure during navigation as `pageerror`; that diagnostic is not an uncaught
+application error. The page-errors gate tests both browsers, retains genuine
+throws and rejected promises, and exercises caught fetches across navigation.
+
+The issue-start gate checks the action row at 1024×680 and 390×680. The new-task form scrolls its fields independently of the footer, including when agent controls wrap; repository selection and branch pickers remain covered by their existing gates.

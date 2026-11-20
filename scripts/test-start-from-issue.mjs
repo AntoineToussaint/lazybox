@@ -219,6 +219,15 @@ try {
   const startButton = await sheet.locator('footer button.primary').boundingBox();
   assert.ok(startButton && startButton.y + startButton.height <= Math.min(680, box.y + box.height), `Start is inside the sheet, on screen, at 1024×680: ${JSON.stringify({ startButton, box })}`);
   await page.screenshot({ path: '.cache/start-from-issue-1024-light.png' });
+  // Wrapped controls on a narrow window must not push the actions off screen.
+  await page.setViewportSize({ width: 390, height: 680 });
+  const narrow = await sheet.boundingBox();
+  const action = await sheet.locator('footer button.primary').boundingBox();
+  assert.ok(action && action.y + action.height <= Math.min(680, narrow.y + narrow.height), 'Start remains inside the narrow sheet');
+  const fields = sheet.locator('.new-task-fields');
+  assert.ok(await fields.evaluate(el => el.scrollHeight > el.clientHeight), 'overflowing controls have a scroll owner');
+  await sheet.getByRole('combobox', { name: 'Mode', exact: true }).scrollIntoViewIfNeeded();
+  await expect(sheet.getByRole('combobox', { name: 'Mode', exact: true })).toBeInViewport();
   await page.keyboard.press('Escape');
 
   assert.deepEqual(errors, [], 'no page errors');

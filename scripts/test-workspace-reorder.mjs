@@ -14,6 +14,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {collectPageErrors} from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 // Eight workspaces: more than a short window shows, so the list scrolls.
@@ -28,7 +29,7 @@ try {
   const context = await browser.newContext({viewport: {width: 1400, height: 900}, colorScheme: 'dark'});
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = await collectPageErrors(page);
   const url = `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=beta#token=${f.token}`;
   await page.goto(url);
   const nav = page.getByRole('navigation', {name: 'Workspaces'});

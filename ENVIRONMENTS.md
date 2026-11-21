@@ -319,20 +319,19 @@ reinstalling dependencies underneath a running development environment.
 
 ### Rebuild Dev and stage Working from a conversation
 
-Request the workspace action `lazybox/rebuild-dev-working` from a conversation
-in the Lazybox repository. Review its script in the workspace Actions panel.
-The Runner supplies the configured repository home and its environment root.
-Both the Runner and the source on main must include managed-build support.
+In the Lazybox workspace Actions panel, run **Rebuild Dev**
+(`lazybox/rebuild-dev`) to build and launch Dev, or **Stage Working**
+(`lazybox/stage-working`) to validate a Working candidate. Each action
+fast-forwards the configured repository home's clean `main` and uses its
+existing environment root. Run one action at a time so both can safely update
+the same checkout.
 
-The action fast-forwards a clean main checkout. Dev launches from that home
-detached from the action console. It reports the revision after the new Runner
-answers Info and the rebuilt desktop opens its window. A running Dev launcher
-accepts a shutdown request through its private lock receipt. For the
-first upgrade from a launcher without this receipt, close that launcher
-yourself. Once the Dev attempt finishes, Working stages a Git archive of the
-same commit through the release gates. Each channel reports its outcome in the action console. Promotion is a
-separate explicit operation. An interrupted action can leave
-`managed-build.lock` in the environment root. Confirm the build has ended
-before removing that lock and retrying.
+Dev reports readiness when its Runner answers and the rebuilt desktop opens.
+If a launcher predates the managed shutdown receipt, close it yourself before
+the first managed rebuild. Stage Working checks a Git archive of the selected
+commit and prints the candidate ID when the checks pass. Promotion is separate.
+
+An interrupted action can leave `managed-build.lock` in the environment root.
+Confirm the build has ended before moving that lock aside and retrying.
 
 Managed Dev stop requests are durable files addressed to the launcher nonce in its control receipt. The launcher checks that exact file every 100 ms rather than relying on filesystem notification delivery; closing the control listener stops the checks. A request for another launcher generation has no effect.

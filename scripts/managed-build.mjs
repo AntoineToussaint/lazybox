@@ -1,4 +1,4 @@
-// Entry point for the approved rebuild-dev-working workspace action.
+// Entry point for the Rebuild Dev and Stage Working workspace actions.
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -125,8 +125,10 @@ async function working({ home, root, revision, env }) {
     return 'staged ' + candidate.id;
   } finally { await rm(temp, { recursive: true, force: true }); }
 }
-export async function rebuild({ home, root, channels = { Dev: dev, Working: working }, report = console.log }) {
+export async function rebuild({ home, root, channel, channels = { Dev: dev, Working: working }, report = console.log }) {
   if (!home || !root || !isAbsolute(home) || !isAbsolute(root)) throw new Error('The Runner must supply the repository home and environment root');
+  const selected = Object.entries(channels).filter(([name]) => channel === undefined || name.toLowerCase() === channel);
+  if (!selected.length) throw new Error('Choose a managed build channel: dev or working');
   const lock = join(root, 'managed-build.lock');
   // Fail closed after an interrupted build. Two contenders must never both reclaim a stale lock.
   try { await mkdir(lock, { mode: 0o700 }); }
@@ -139,14 +141,14 @@ export async function rebuild({ home, root, channels = { Dev: dev, Working: work
     let revision;
     try { revision = await selectRevision(home); }
     catch (error) {
-      for (const name of Object.keys(channels)) report(`[${name}] skipped: ${error.message}`);
+      for (const [name] of selected) report(`[${name}] skipped: ${error.message}`);
       throw error;
     }
     await writeFile(join(lock, 'revision'), revision);
     const env = { ...process.env, LAZYBOX_V2_ENVIRONMENTS: root, LAZYBOX_BUILD_REVISION: revision };
     const outcomes = [];
     let failed = false;
-    for (const [name, build] of Object.entries(channels)) {
+    for (const [name, build] of selected) {
       report(`[${name}] building ${revision}`);
       let outcome;
       try { outcome = `[${name}] ${await build({ home, root, revision, env })} ${revision}`; }
@@ -162,7 +164,7 @@ export async function rebuild({ home, root, channels = { Dev: dev, Working: work
   } finally { await rm(lock, { recursive: true }); }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  rebuild({ home: process.env.LAZYBOX_REPOSITORY_HOME, root: process.env.LAZYBOX_ENVIRONMENTS }).catch(error => {
+  rebuild({ home: process.env.LAZYBOX_REPOSITORY_HOME, root: process.env.LAZYBOX_ENVIRONMENTS, channel: process.argv[2] }).catch(error => {
     console.error(error.message);
     process.exitCode = 1;
   });

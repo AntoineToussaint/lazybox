@@ -36,6 +36,18 @@ test('both channels receive the fetched main revision and report independent res
   assert.match(lines.join('\n'), /Dev.*failed.*launcher refused/);
   assert.ok(lines.includes('[Working] staged ' + f.revision));
 });
+test('either standalone action runs only the requested channel', async t => {
+  const f = await fixture(t), calls = [];
+  const channels = {
+    Dev: async ({ revision }) => { calls.push(['dev', revision]); return 'running'; },
+    Working: async ({ revision }) => { calls.push(['working', revision]); return 'staged'; },
+  };
+  for (const channel of ['working', 'dev']) {
+    await rebuild({ ...f, channel, channels, report: () => {} });
+    assert.deepEqual(calls.splice(0), [[channel, f.revision]]);
+  }
+  await assert.rejects(rebuild({ ...f, channel: 'invalid', channels }), /Choose a managed build channel/);
+});
 test('local changes, divergent history and a concurrent request prevent channel work', async t => {
   const f = await fixture(t), before = f.git(f.home, 'rev-parse', 'HEAD');
   let starts = 0;
@@ -76,7 +88,7 @@ test('running Dev must acknowledge its launcher-specific request and release its
   }
 });
 
-test('managed entry point starts Dev twice and stages the selected tree without changing the Working pin', async t => {
+test('standalone Dev restarts and Working stages without touching Dev or the Working pin', async t => {
   const f = await fixture(t);
   await mkdir(join(f.remote, 'scripts'));
   await writeFile(join(f.remote, 'scripts/managed-build.mjs'), '// supported');
@@ -114,15 +126,20 @@ test('managed entry point starts Dev twice and stages the selected tree without 
   const lines = [], request = { ...f, report: line => lines.push(line) };
   const lock = join(f.root, 'dev/launch.lock');
   try {
-    await rebuild(request);
+    await rebuild({ ...request, channel: 'dev' });
     const first = JSON.parse(await readFile(join(lock, 'control.json')));
     await writeFile(join(f.home, 'ignored-input'), 'local only');
-    await rebuild(request);
+    await rebuild({ ...request, channel: 'dev' });
     const second = JSON.parse(await readFile(join(lock, 'control.json')));
     assert.notEqual(first.request, second.request);
     assert.equal(second.revision, revision);
     assert.equal(lines.filter(line => line === '[Dev] running ' + revision).length, 2);
-    assert.equal(lines.filter(line => line === '[Working] staged fixture-candidate ' + revision).length, 2);
+    assert.ok(!lines.some(line => line.startsWith('[Working]')));
+    lines.length = 0;
+    await rebuild({ ...request, channel: 'working' });
+    assert.ok(lines.includes('[Working] staged fixture-candidate ' + revision));
+    assert.ok(!lines.some(line => line.startsWith('[Dev]')));
+    assert.deepEqual(JSON.parse(await readFile(join(lock, 'control.json'))), second);
     assert.equal(await readFile(pin, 'utf8'), 'pinned-before');
   } finally { await stopDev(lock); }
 });

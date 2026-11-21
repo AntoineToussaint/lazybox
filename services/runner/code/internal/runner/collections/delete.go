@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 )
 
 type DeletionPreview struct {
@@ -249,21 +248,42 @@ func missingWorktreeLink(path string) bool {
 	if err != nil || !info.IsDir() {
 		return false
 	}
-	_, err = os.Lstat(filepath.Join(path, ".git"))
-	return errors.Is(err, os.ErrNotExist)
+	// A Git administrative directory (including a bare repository) can
+	// itself occupy this path without a .git entry. Its HEAD and object
+	// store or commondir must never be treated as disposable checkout files.
+	missing := func(name string) bool {
+		_, err := os.Lstat(filepath.Join(path, name))
+		return errors.Is(err, os.ErrNotExist)
+	}
+	return missing(".git") && (missing("HEAD") || (missing("objects") && missing("commondir")))
 }
 
 func (m *Manager) registeredWorktree(ctx context.Context, repo Repository, path string) (bool, error) {
-	listing, err := m.git(ctx, repo.Path, "worktree", "list", "--porcelain", "-z")
-	if err != nil {
-		return false, err
-	}
-	for _, field := range strings.Split(listing, "\x00") {
-		if field == "worktree "+path {
-			return true, nil
+	field := worktreeField{want: "worktree " + path}
+	err := m.gitOutput(ctx, repo.Path, &field, "worktree", "list", "--porcelain", "-z")
+	return field.found, err
+}
+
+// Match a complete NUL-terminated porcelain field across arbitrary writes.
+// A lock reason or a long list of unrelated worktrees uses no extra memory.
+type worktreeField struct {
+	want    string
+	matched int
+	found   bool
+}
+
+func (f *worktreeField) Write(data []byte) (int, error) {
+	for _, ch := range data {
+		if ch == 0 {
+			f.found = f.found || f.matched == len(f.want)
+			f.matched = 0
+		} else if f.matched >= 0 && f.matched < len(f.want) && f.want[f.matched] == ch {
+			f.matched++
+		} else {
+			f.matched = -1
 		}
 	}
-	return false, nil
+	return len(data), nil
 }
 
 func (m *Manager) removeRegisteredWorktree(ctx context.Context, repo Repository, member Member, discard bool) error {

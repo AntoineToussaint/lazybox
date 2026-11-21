@@ -220,3 +220,31 @@ func TestDeleteRepairsMissingGitLinkOnlyAfterDiscardConsent(t *testing.T) {
 		t.Fatal("branch lost")
 	}
 }
+
+func TestDeleteUnregisteredMemberWithoutGitLink(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "orphan", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := c.Members[0]
+	if err := os.Remove(filepath.Join(member.Path, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo.Path, "worktree", "prune", "--expire", "now")
+	inactive := func(string) bool { return false }
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, inactive); err == nil {
+		t.Fatal("discard consent required")
+	}
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, true, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.FinishDeletion(ctx, c.ID, true, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitTest(t, repo.Path, "rev-parse", "refs/heads/"+member.Branch); got != member.BaseCommit {
+		t.Fatal("branch lost")
+	}
+}

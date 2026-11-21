@@ -12,6 +12,8 @@ export const acpId = (provider: string) => isAcp(provider) ? provider.slice(ACP_
 
 /** Built-in ACP agents by id: their names and icons, before the Runner says. */
 const BUILTINS: Record<string, { title: string; icon: string }> = {
+  antigravity: { title: 'Google Antigravity', icon: 'agent-gemini' },
+  hermes: { title: 'Hermes Agent', icon: 'agent' },
   gemini: { title: 'Gemini CLI', icon: 'agent-gemini' },
   goose: { title: 'Goose', icon: 'agent-goose' },
   opencode: { title: 'OpenCode', icon: 'agent-opencode' },

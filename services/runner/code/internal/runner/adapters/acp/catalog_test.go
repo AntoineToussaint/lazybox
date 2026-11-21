@@ -60,3 +60,16 @@ func TestRegistryKeepsThePersonsAgentsPrivately(t *testing.T) {
 		t.Fatal("provider names")
 	}
 }
+
+func TestAntigravityAndHermesLaunchCommands(t *testing.T) {
+	r, err := OpenRegistry(filepath.Join(t.TempDir(), "agents.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, command := range map[string]string{"antigravity": "agy", "hermes": "hermes"} {
+		a, ok := r.Get(id)
+		if !ok || a.Command != command || len(a.Args) != 1 || a.Args[0] != "acp" {
+			t.Errorf("wrong launch command for %s: %s %v", id, a.Command, a.Args)
+		}
+	}
+}

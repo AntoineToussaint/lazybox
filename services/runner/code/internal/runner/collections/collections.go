@@ -672,8 +672,11 @@ func (m *Manager) validate(ctx context.Context, member Member) error {
 		return errors.New("worktree moved or replaced by a symlink")
 	}
 	top, err := m.git(ctx, member.Path, "rev-parse", "--show-toplevel")
-	if err != nil || top != member.Path {
-		return errors.New("member is not the expected worktree root")
+	if err != nil {
+		return fmt.Errorf("cannot verify worktree root: %w", err)
+	}
+	if top != member.Path {
+		return fmt.Errorf("member is not the expected worktree root: Git reported %q, expected %q", top, member.Path)
 	}
 	common, err := m.git(ctx, member.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {

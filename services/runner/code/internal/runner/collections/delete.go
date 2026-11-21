@@ -47,12 +47,10 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 			verified := ok && m.common[repo.ID] == member.CommonDir
 			m.mu.Unlock()
 			if verified && member.Path == filepath.Join(c.Root, member.Name) && missingWorktreeLink(member.Path) {
-				registered, checkErr := m.registeredWorktree(ctx, repo, member.Path)
-				if checkErr == nil && registered {
-					// With no Git status, assume there are files to discard.
-					p.Dirty = append(p.Dirty, member.Name)
-					continue
-				}
+				// A pruned registration leaves ordinary files in the owned
+				// workspace. Both cases require explicit discard consent.
+				p.Dirty = append(p.Dirty, member.Name)
+				continue
 			}
 			return p, fmt.Errorf("%s: %w", member.Name, err)
 		}
@@ -193,8 +191,12 @@ func (m *Manager) FinishDeletion(ctx context.Context, id string, discard bool, a
 		}
 		if discard && member.Path == filepath.Join(c.Root, member.Name) && missingWorktreeLink(member.Path) {
 			registered, err := m.registeredWorktree(ctx, repo, member.Path)
-			if err != nil || !registered || !missingWorktreeLink(member.Path) {
+			if err != nil || !missingWorktreeLink(member.Path) {
 				return fail(errors.New("damaged worktree changed during deletion; retry to check it again"))
+			}
+			if !registered {
+				// Only the workspace files remain for RemoveAll below.
+				continue
 			}
 			// Git can recreate a missing link from its registration. It can
 			// emit a diagnostic for the broken link even after repairing it.

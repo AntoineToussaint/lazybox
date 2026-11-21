@@ -33,6 +33,8 @@ Lazybox finds the agents installed on the Runner's computer. Open
 | Agent | Installed with |
 | --- | --- |
 | Gemini CLI | `npm install -g @google/gemini-cli` |
+| Google Antigravity | [Install Antigravity CLI](https://antigravity.google/docs/cli/tutorial/) |
+| Hermes Agent | [Install Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) with ACP support |
 | Goose | `brew install block-goose-cli` |
 | OpenCode | `npm install -g opencode-ai` |
 | Qwen Code | `npm install -g @qwen-code/qwen-code` |
@@ -46,6 +48,12 @@ Each agent runs on **its own sign-in**: run it once in your terminal (`gemini`,
 `goose configure`, …) and sign in the way it asks. Lazybox never sees that
 account. If an agent is not signed in, starting a conversation says so and
 names the ways that agent signs in.
+
+For **Google Antigravity**, run `agy acp --login` on the Runner to use your
+Google subscription, or edit Antigravity’s Environment and set
+`GEMINI_API_KEY` to your existing Gemini API key. For **Hermes Agent**, run
+`hermes model` to choose and authenticate its model provider. New conversations
+use those credentials through `agy acp` and `hermes acp`, respectively.
 
 ## Start a conversation
 

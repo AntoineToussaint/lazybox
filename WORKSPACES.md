@@ -1350,3 +1350,5 @@ retries a temporary Runner failure before showing a warning. If the refresh
 still fails, existing entries remain visible and **Retry history refresh**
 appears below **History**. History polling pauses while the Runner is slow
 or disconnected and resumes automatically when it responds again.
+
+Deletion treats a member folder with a missing Git link as potentially dirty, even after Git prunes its worktree registration. Explicitly discarding it removes the remaining workspace files and preserves the source repository and branch.

@@ -12,6 +12,8 @@ const report = (...providers: ProviderStatus[]) => ({ providers, checkedAtUnixMi
 test('every surface names an agent the same way', () => {
   assert.equal(agentTitle('claude'), 'Claude');
   assert.equal(agentTitle('codex'), 'Codex');
+  assert.equal(agentTitle('acp:antigravity'), 'Google Antigravity');
+  assert.equal(agentTitle('acp:hermes'), 'Hermes Agent');
   assert.equal(agentTitle('acp:gemini'), 'Gemini CLI');
   assert.equal(agentTitle('acp:my-agent'), 'My Agent');
   assert.equal(agentTitle('acp:my-agent', [{ provider: 'acp:my-agent', label: 'Team bot' }]), 'Team bot');

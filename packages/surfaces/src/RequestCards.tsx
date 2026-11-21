@@ -28,6 +28,7 @@ export type RequestCardProps = {
   /** "1 of 3" when several requests wait. */
   position?: RequestPosition;
   agentName?: string;
+  enableFullAccess?(): Promise<boolean>;
   /** Asks before allowing a flagged or default-to-no request (the phone does; the computer shows the flags). */
   confirmAllow?(approval: Approval): Promise<boolean>;
   /** On a paired phone: a request to start a conversation is Start or Deny, as asked. */
@@ -52,7 +53,7 @@ const SCOPE_CHIP: Record<string, string> = { conversation: 'This conversation', 
 
 type Row = { id: string; label: string; detail?: string; key?: string; tone: 'allow' | 'always' | 'deny'; choice?: AlwaysChoice };
 
-function ApprovalCard({ request, api, session, onError, root = '', position, agentName = 'the agent', confirmAllow }: RequestCardProps) {
+function ApprovalCard({ request, api, session, onError, root = '', position, agentName = 'the agent', confirmAllow, enableFullAccess }: RequestCardProps) {
   const data = useMemo(() => providerData(request.providerDataJson), [request.providerDataJson]);
   const approval = useMemo(() => approvalOf(data, request.text, root), [data, request.text, root]);
   const settings = isSettingsUpdate(data.tool);
@@ -66,11 +67,17 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
     { id: 'deny', label: 'Deny', detail: `Tell ${agentName} what to do instead`, key: 'n', tone: 'deny' },
   ];
   const sent = useRef(false);
-  const decide = async (decision: Decision, extra: { always?: string; reason?: string } = {}) => {
+  const decide = async (decision: Decision, extra: { always?: string; reason?: string; fullAccess?: boolean } = {}) => {
     if (sent.current) return;
     sent.current = true; setWaiting(true);
-    try { await api.apply({ sessionId: session, operationId: crypto.randomUUID(), operation: { case: 'approval', value: { requestId: request.requestId, decision, always: extra.always || '', reason: extra.reason || '' } } }); }
-    catch (e) { onError(humanError(e)); setWaiting(false); sent.current = false; }
+    let permissionChanged = false;
+    try {
+      if (extra.fullAccess && !(await enableFullAccess?.())) { setWaiting(false); sent.current = false; return; }
+      permissionChanged = !!extra.fullAccess;
+      const receipt = await api.apply({ sessionId: session, operationId: crypto.randomUUID(), operation: { case: 'approval', value: { requestId: request.requestId, decision, always: extra.always || '', reason: extra.reason || '' } } });
+      if (receipt.delivery === 'failed') throw new Error(receipt.error || 'Could not send the approval.');
+    }
+    catch (e) { onError(permissionChanged ? `Full access is enabled. The command approval could not be sent. ${humanError(e)}` : humanError(e)); setWaiting(false); sent.current = false; }
   };
   const activate = (row: Row) => {
     if (waiting) return;
@@ -119,6 +126,9 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
         <span className="decision-text"><span>{row.tone === 'deny' ? 'Deny…' : <CodeText text={row.label}/>}{row.choice && SCOPE_CHIP[row.choice.scope] && <em className="decision-scope">{SCOPE_CHIP[row.choice.scope]}</em>}</span>{row.detail && <small>{row.detail}</small>}</span>
         {row.key && keys && <Kbd>{row.key.toUpperCase()}</Kbd>}
       </button>)}
+      {enableFullAccess && approval.command && !settings && !approval.acceptUnsupported && <button type="button" className="decision-row" data-tone="always" disabled={waiting} onClick={() => void decide(Decision.ACCEPT, { fullAccess: true })}>
+        <span className="decision-text"><span>Allow and enable Full access</span><small>Approves this command and skips approvals for agent tools and ordinary Lazybox commands in this conversation. Codex runs with full filesystem access on the next turn.</small></span>
+      </button>}
     </div> : <form className="deny-reason" onSubmit={event => { event.preventDefault(); deny(); }}>
       <label>Why not? <small>Optional. {agentName} is told, and can try another way.</small>
         <textarea rows={2} value={reason} placeholder={`e.g. Use make test instead`} onChange={e => setReason(e.target.value)} onKeyDown={event => {

@@ -141,11 +141,11 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
             ? null
             : <label>Working directory<input required disabled={opening} placeholder="/absolute/path/to/project" value={cwd} onChange={e => setCwd(e.target.value)}/></label>}
       <label>Permissions<select disabled={opening || assistant || checkInFirst} value={assistant || checkInFirst ? 'read-only' : permission} onChange={e => setPermission(e.target.value)}>
-        <option value="">Runner default{runnerSettings?.permission ? ` · ${runnerSettings.permission === 'yolo' ? 'YOLO' : runnerSettings.permission}` : ' · current CLI settings'}</option>
+        <option value="">Runner default{runnerSettings?.permission ? ` · ${runnerSettings.permission === 'yolo' ? 'Full access' : runnerSettings.permission}` : ' · current CLI settings'}</option>
         <option value="inherit">Current CLI settings</option>
         <option value="ask">Ask for approval</option>
         <option value="read-only">Read only</option>
-        <option value="yolo" disabled={workflow === 'plan'}>YOLO · full access, no approval prompts</option>
+        <option value="yolo" disabled={workflow === 'plan'}>Full access · no approval prompts</option>
       </select></label>
       {(permission === 'yolo' || (!permission && runnerSettings?.permission === 'yolo')) && !assistant && !checkInFirst && <small>Full tool access for this session. Existing conversations keep their original permissions.</small>}
       {!assistant && <label>Behavior profile<select disabled={opening} value={behaviorProfile} onChange={event => setBehaviorProfile(event.target.value)}>

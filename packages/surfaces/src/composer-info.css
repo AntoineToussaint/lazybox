@@ -29,3 +29,8 @@
   .workspace-shell .embedded-chat .composer-info-meter{display:none}
   .workspace-shell .embedded-chat .composer-info>.composer-info-context{height:32px;padding:0 5px}
 }
+
+.composer-info-permission svg{flex:none}
+@container (max-width:540px){
+  .composer-info-permission>span{display:none}
+}

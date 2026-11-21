@@ -58,7 +58,7 @@ export function OrchestrationProcessSettings() {
         <ol className="process-phases">{cards.phases.map(p => <li key={p.id}><strong>{p.id}</strong><span>exits through <em>{p.exit}</em> ({p.gate})</span>{p.detail && <small>{p.detail}</small>}</li>)}</ol>
         <h3>Roles</h3>
         <div className="subscription-grid">{cards.roles.map(r => <article className="subscription-card process-role" key={r.name} aria-label={`${r.name} role`}>
-          <header><div className="subscription-identity"><h3>{r.name}</h3><span>{r.providers || 'no provider'}{r.model ? ` · ${r.model}` : ''}</span></div><span className={`account-state${r.permission === 'YOLO' ? ' tone-warn' : ''}`}>{r.permission}</span></header>
+          <header><div className="subscription-identity"><h3>{r.name}</h3><span>{r.providers || 'no provider'}{r.model ? ` · ${r.model}` : ''}</span></div><span className={`account-state${r.permission === 'Full access' ? ' tone-warn' : ''}`}>{r.permission}</span></header>
           <div className="process-role-body">
             {r.scopes.length > 0 && <p className="process-scopes">{r.scopes.map(s => <code key={s}>{s}</code>)}</p>}
             {r.wakes.length > 0 ? <ul>{r.wakes.map(w => <li key={w}>{w}</li>)}</ul> : <small>No triggers: rules or another role start it</small>}

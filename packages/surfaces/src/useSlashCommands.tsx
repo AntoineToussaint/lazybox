@@ -78,7 +78,7 @@ const ACTIONS: Partial<Record<string, ActionId>> = {
   model: 'chat.model', permissions: 'chat.permissions', subscription: 'chat.subscription', browser: 'chat.browser', compact: 'chat.compact', clear: 'chat.clear',
   context: 'chat.usage', review: 'chat.review', artifact: 'chat.artifact', stop: 'chat.stop', rename: 'chat.rename', orchestrate: 'chat.orchestrate',
 };
-const PERMISSION_WORDS: Record<string, string> = { ask: 'ask', approve: 'ask', default: 'ask', 'read-only': 'read-only', readonly: 'read-only', 'read only': 'read-only', read: 'read-only', plan: 'read-only', yolo: 'yolo', bypass: 'yolo' };
+const PERMISSION_WORDS: Record<string, string> = { ask: 'ask', approve: 'ask', default: 'ask', 'read-only': 'read-only', readonly: 'read-only', 'read only': 'read-only', read: 'read-only', plan: 'read-only', 'full access': 'yolo', yolo: 'yolo', bypass: 'yolo' };
 
 type Tracking = { kind: 'track'; message: TranscriptMessage; existing: Artifact[] } | { kind: 'update'; message: TranscriptMessage; artifact: Artifact };
 
@@ -443,6 +443,7 @@ export function useSlashCommands(o: Options) {
     menu: menu as SlashMenuState | null, onKeyDown, intercept, above, prompt, dialogs, textareaProps,
     /** The model picker of the ⋯ menu and the header: the same choices and switch as `/model`. */
     models: { choices: modelMenuChoices, efforts: effortChoices, live: context.liveModel, disabled: modelCommand.disabled, choose: (value: string) => { void switchModel(value); }, pick: () => fromPalette('model') },
+    pickPermissions: byName('permissions').disabled ? undefined : () => fromPalette('permissions'),
     find: (name: string) => findCommand(commands, name),
   };
 }

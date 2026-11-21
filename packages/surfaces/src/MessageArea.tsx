@@ -28,7 +28,7 @@ type Transcript = ReturnType<typeof useTranscript>;
  * the agent's pending requests (and a subscription limit) in the scrolling pane, and a way back to the
  * latest message once the reader scrolled away from it.
  */
-export function MessageArea({ api, session, sessionID, transcript, scroll, spoken, agentName, limited, nameFor, onOpenFile, onError, onHandoff, onOpenHandoff, onBranch, subscription, detail = 'smart', alwaysShowTime }: {
+export function MessageArea({ api, session, sessionID, transcript, scroll, spoken, agentName, limited, nameFor, onOpenFile, onError, onHandoff, onOpenHandoff, onBranch, subscription, enableFullAccess, detail = 'smart', alwaysShowTime }: {
   api: RunnerClient;
   alwaysShowTime?: boolean;
   session?: Session;
@@ -45,6 +45,7 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
   onOpenFile?(reference: FileLink, how: OpenModifiers): void;
   onError(message: string): void;
   onHandoff?(message: HandoffMessage): void;
+  enableFullAccess?(): Promise<boolean>;
   onBranch?(message: TranscriptMessage): void;
   onOpenHandoff?: OpenHandoffConversation;
   /** The subscription limit card and switch dialog, after the requests. */
@@ -92,7 +93,7 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
           {!transcript.loading && !transcript.error && !spoken && <EmptyConversation agentName={agentName}/>}
           <MessageScopeProvider scope={artifactScope}><ToolLineContext.Provider value={toolScope}><ConversationSourceContext.Provider value={onOpenHandoff && handoffWorkspace ? openSource : undefined}><MessageList messages={spoken ? conversation : []} visible={scroll.visibleMessages} agentName={agentName} onOpenFile={onOpenFile} onShowEarlier={scroll.showEarlier} nameFor={nameFor} checkpoints={checkpoints} sessionId={sessionID} onReveal={scroll.revealMessage} onHandoff={onHandoff} onBranch={onBranch} detail={detail} alwaysShowTime={alwaysShowTime} loadingEarlier={transcript.partial}/></ConversationSourceContext.Provider></ToolLineContext.Provider></MessageScopeProvider>
           {session?.fault && !limited && <FaultBanner api={api} session={session} sessionID={sessionID} onError={onError}/>}
-          <PendingRequests api={api} session={session} sessionID={sessionID} agentName={agentName} onError={onError}/>
+          <PendingRequests enableFullAccess={enableFullAccess} api={api} session={session} sessionID={sessionID} agentName={agentName} onError={onError}/>
           {subscription}
         </div>
       </div>
@@ -129,7 +130,7 @@ function EmptyConversation({ agentName }: { agentName: string }) {
 }
 
 /** Questions and approvals the agent waits on, answered in place. */
-function PendingRequests({ api, session, sessionID, agentName, onError }: { api: RunnerClient; session?: Session; sessionID: string; agentName: string; onError(message: string): void }) {
+function PendingRequests({ api, session, sessionID, agentName, onError, enableFullAccess }: { api: RunnerClient; enableFullAccess?(): Promise<boolean>; session?: Session; sessionID: string; agentName: string; onError(message: string): void }) {
   const count = session?.pending.length || 0;
-  return <>{session?.pending.map((p, index) => <RequestCard key={p.requestId} request={p} api={api} session={sessionID} onError={onError} root={session.workingDirectory} agentName={agentName} position={{ index, count }}/>)}</>;
+  return <>{session?.pending.map((p, index) => <RequestCard enableFullAccess={enableFullAccess} key={p.requestId} request={p} api={api} session={sessionID} onError={onError} root={session.workingDirectory} agentName={agentName} position={{ index, count }}/>)}</>;
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Installs Lazybox from this clone (docs/install.md#install-from-source):
+// Installs Lazybox from this clone (docs/install.md#install-from-source).
+// Linux installs the Runner runtime and CLI, including the web client.
+// On macOS:
 //
 //   make install   [PREFIX=~/Applications] [LINK_DIR=<dir>] [OPEN=0] [SMOKE=1]
 //   make uninstall [PREFIX=…] [PURGE=1]
@@ -72,14 +74,22 @@ export function requirements(dir = root) {
 }
 
 /**
- * Each prerequisite with whether this Mac has it and, when not, the command
+ * Each prerequisite with whether this host has it and, when not, the command
  * that gets it. `found` is what probe() saw; empty strings mean "not found".
  */
-export function evaluate(need, found) {
+export function evaluate(need, found, platform = 'darwin') {
   const tool = (name, have, minimum, fix, why) => ({
     name: `${name} ${minimum} or later`, why, have: have || 'not found',
     ok: !!have && compareVersions(have, minimum) >= 0, fix: have ? fix.upgrade : fix.install,
   });
+  if (platform === 'linux') return [
+    { name: 'Linux x64 or arm64', why: 'the Runner runtime', have: found.arch, ok: ['x64', 'arm64'].includes(found.arch) },
+    tool('glibc', found.glibc, '2.28', { install: 'Use a glibc-based Linux distribution such as Ubuntu.', upgrade: 'Use a newer Linux distribution.' }, 'the bundled Node.js runtime'),
+    tool('Go', found.go, need.go, { install: 'Install Go from https://go.dev/dl/', upgrade: 'Update Go from https://go.dev/dl/' }, 'the Runner and CLI'),
+    tool('Node.js', found.node, need.node, { install: 'Install Node.js from https://nodejs.org/', upgrade: 'Update Node.js from https://nodejs.org/' }, 'the worker and web client'),
+    tool('npm', found.npm, need.npm, { install: 'Install Node.js with npm', upgrade: `npm install --global npm@${need.npm}` }, 'the locked JavaScript dependencies'),
+    ...['git', 'make', 'tar'].map(name => ({ name, have: found.tools?.[name] ? 'installed' : 'not found', ok: !!found.tools?.[name], fix: `Install ${name} using your package manager.` })),
+  ];
   return [
     { name: 'An Apple Silicon Mac', why: 'Lazybox is built for Apple Silicon only', have: found.arm64 ? 'Apple Silicon' : found.arch || 'another processor', ok: !!found.arm64, fix: 'Lazybox does not run on Intel Macs yet.' },
     tool('macOS', found.macos, need.macos, { install: '', upgrade: 'System Settings → General → Software Update' }, 'the app'),
@@ -100,8 +110,16 @@ function capture(command, args, options = {}) {
   return result.status === 0 ? `${result.stdout || ''}${result.stderr || ''}`.trim() : '';
 }
 
-/** What this Mac has. Runs each tool where the build runs it, so rustup and Go pick this checkout's toolchains. */
+/** What this host has. Runs each tool where the build runs it, so rustup and Go pick this checkout's toolchains. */
 export function probe(dir = root) {
+  if (process.platform === 'linux') return {
+    arch: process.arch,
+    glibc: process.report.getReport().header.glibcVersionRuntime,
+    go: versionIn(capture('go', ['version'], { cwd: join(dir, 'services/runner/code') }).replace(/^go version go/, '')),
+    node: versionIn(process.version),
+    npm: versionIn(capture('npm', ['--version'])),
+    tools: Object.fromEntries(['git', 'make', 'tar'].map(tool => [tool, !!capture(tool, ['--version'])])),
+  };
   const arm64 = capture('/usr/sbin/sysctl', ['-n', 'hw.optional.arm64']) === '1';
   let freeGB;
   try { const s = statfsSync(dir); freeGB = s.bavail * s.bsize / 1e9; } catch { /* unknown */ }
@@ -187,9 +205,53 @@ function cliJSON(cli, args) {
   try { return JSON.parse(result.stdout.trim()); } catch { return undefined; }
 }
 
+/** Linux PREFIX is the directory that contains the installed runtime. */
+export function linuxRuntimePath(prefix, home = homedir()) {
+  const folder = !prefix ? join(home, '.local', 'lib') : prefix === '~' ? home : prefix.startsWith('~/') ? join(home, prefix.slice(2)) : prefix;
+  if (!isAbsolute(folder)) throw new Error(`PREFIX must be an absolute folder, not ${prefix}`);
+  return join(folder, 'lazybox');
+}
+
+function checkLinuxRuntime(runtime) {
+  if (existsSync(runtime) && !readJSON(join(runtime, 'SOURCE.json'))?.checkout) {
+    throw new Error(`${runtime} is not a Lazybox source installation; choose another PREFIX`);
+  }
+}
+
+async function installLinux({ prefix, linkDir, smoke }) {
+  const runtime = linuxRuntimePath(prefix);
+  checkLinuxRuntime(runtime);
+  if (linkDir && !isAbsolute(linkDir)) throw new Error('LINK_DIR must be an absolute folder');
+  mkdirSync(dirname(runtime), { recursive: true });
+  const lock = runtime + '.installing';
+  mkdirSync(lock);
+  try {
+    const incoming = join(lock, 'runtime');
+    const previous = join(lock, 'previous');
+    const { buildLinuxSource } = await import('./build.mjs');
+    await buildLinuxSource(incoming);
+    if (run(join(incoming, 'node', 'bin', 'node'), ['--version']) !== 0) throw new Error('Bundled Node could not start. On Ubuntu, install libatomic1 and retry.');
+    if (smoke && run(join(incoming, 'bin', 'lazybox'), ['--version']) !== 0) throw new Error('The built CLI failed its smoke check');
+    if (existsSync(runtime)) renameSync(runtime, previous);
+    try {
+      renameSync(incoming, runtime);
+    } catch (error) {
+      if (existsSync(previous)) renameSync(previous, runtime);
+      throw error;
+    }
+    const cli = join(runtime, 'bin', 'lazybox');
+    if (run(cli, ['service', 'install']) !== 0) throw new Error(`The runtime was installed, but the Runner service did not start. Run \`${cli} service logs\` to inspect it.`);
+    if (run(cli, ['link', ...(linkDir ? ['--dir', linkDir] : [])]) !== 0) throw new Error(`The Runner was installed. Run \`${cli} link --dir <a folder on your PATH>\` to link the CLI.`);
+    console.log(`✓ Lazybox Runner and CLI installed in ${runtime}. Run lazybox doctor to check the installation.`);
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
+}
+
 async function install({ prefix, linkDir, open, smoke }) {
-  const checks = evaluate(requirements(), probe());
+  const checks = evaluate(requirements(), probe(), process.platform);
   if (!report(checks)) process.exit(1);
+  if (process.platform === 'linux') return installLinux({ prefix, linkDir, smoke });
   const app = appPath(prefix);
   const folder = dirname(app);
   if (existsSync(folder) && !writable(folder)) throw new Error(`Cannot write to ${folder}. Install for yourself instead: make install PREFIX=~/Applications`);
@@ -241,19 +303,21 @@ Next:
 }
 
 async function uninstall({ prefix, purge }) {
-  const app = appPath(prefix);
-  const cli = join(app, 'Contents', 'Resources', 'runtime', 'bin', 'lazybox');
+  const linux = process.platform === 'linux';
+  const app = linux ? linuxRuntimePath(prefix) : appPath(prefix);
+  const cli = linux ? join(app, 'bin', 'lazybox') : join(app, 'Contents', 'Resources', 'runtime', 'bin', 'lazybox');
   if (!existsSync(cli)) {
     console.log(`No Lazybox at ${app}${prefix ? '' : ' (pass PREFIX= if you installed it elsewhere)'}.`);
     return;
   }
-  if (plistValue(app, 'CFBundleIdentifier') !== APP_ID) throw new Error(`${app} is not Lazybox; nothing was removed`);
+  if (linux) checkLinuxRuntime(app);
+  else if (plistValue(app, 'CFBundleIdentifier') !== APP_ID) throw new Error(`${app} is not Lazybox; nothing was removed`);
   // The CLI lists what goes; the app goes too, so its own "drag the app to
   // the Trash" advice is not shown (--json), and PURGE asks here.
   const plan = cliJSON(cli, ['uninstall', '--dry-run', ...(purge ? ['--remove-data'] : [])]);
   if (!plan) throw new Error(`\`${cli} uninstall --dry-run\` could not say what it would remove; nothing was removed`);
   console.log('Removing:');
-  for (const r of [...(plan.remove || []), { what: 'the app', path: app }]) console.log(`  - ${r.what} ${r.path.replace(homedir(), '~')}`);
+  for (const r of [...(plan.remove || []), { what: linux ? 'the runtime' : 'the app', path: app }]) console.log(`  - ${r.what} ${r.path.replace(homedir(), '~')}`);
   if (purge) {
     if (!process.stdin.isTTY) throw new Error('PURGE=1 deletes your conversations and workspaces; run it from a terminal to confirm');
     const answer = await new Promise(done => {
@@ -263,20 +327,21 @@ async function uninstall({ prefix, purge }) {
     });
     if (answer !== 'delete') { console.log('Nothing was removed.'); return; }
   }
-  await quit(app);
+  if (!linux) await quit(app);
   const result = spawnSync(cli, ['uninstall', '--json', ...(purge ? ['--remove-data', '--yes'] : [])], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
   if (result.status !== 0) throw new Error('lazybox uninstall did not finish (above); the app was left in place');
   rmSync(app, { recursive: true, force: true });
   let kept = '';
   try { const report = JSON.parse(result.stdout); const live = report.keptRunning || {}; const total = Object.values(live).reduce((sum, n) => sum + (typeof n === 'number' ? n : 0), 0); if (total) kept = `\n  Still running: ${live.agents || 0} agents, ${live.commands || 0} commands, ${live.terminals || 0} terminals. They stop by themselves within a day, or are picked up again if you install before then.`; } catch { /* the summary is enough */ }
-  console.log(`✓ Lazybox is uninstalled: the app, its Runner service and the lazybox command.${purge ? ' Your data is deleted.' : ' Your conversations, subscriptions and settings are kept; make install brings them back, make uninstall PURGE=1 deletes them.'}${kept}`);
+  console.log(`✓ Lazybox is uninstalled: ${linux ? 'the runtime' : 'the app'}, its Runner service and the lazybox command.${purge ? ' Your data is deleted.' : ' Your conversations, subscriptions and settings are kept; make install brings them back, make uninstall PURGE=1 deletes them.'}${kept}`);
 }
 
 async function main() {
   const [command = 'check'] = process.argv.slice(2);
   const env = process.env;
   const flag = (value, fallback) => value === undefined || value === '' ? fallback : !['0', 'no', 'false'].includes(value.toLowerCase());
-  if (command === 'check') process.exit(report(evaluate(requirements(), probe())) ? 0 : 1);
+  if (!['darwin', 'linux'].includes(process.platform)) throw new Error('Source installation supports macOS and Linux');
+  if (command === 'check') process.exit(report(evaluate(requirements(), probe(), process.platform)) ? 0 : 1);
   else if (command === 'install') await install({ prefix: env.PREFIX, linkDir: env.LINK_DIR, open: flag(env.OPEN, true), smoke: flag(env.SMOKE, false) });
   else if (command === 'uninstall') await uninstall({ prefix: env.PREFIX, purge: flag(env.PURGE, false) });
   else throw new Error(`Unknown command ${command}: check, install or uninstall`);

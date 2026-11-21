@@ -346,6 +346,18 @@ at boot; without it (a container) the Runner runs, but you start it.
 **Add a computer** (Settings → Runners, or `lazybox remote add <ssh-host>`)
 does all of this over SSH ([guide](guides/remote-computers.md)). By hand:
 
+**From source.** From a Lazybox checkout, run `make install-check` and then
+`make install`. The installer builds the Runner, CLI, Claude worker, and web
+client without Xcode or Rust. It installs the runtime under
+`~/.local/lib/lazybox`, registers and starts the Runner under your user account,
+and links the CLI to your PATH. Use `PREFIX=/absolute/directory` to change the
+runtime's parent directory, and `LINK_DIR=/absolute/directory` to choose where
+to link the CLI. On Ubuntu, install `make`, `git`, and `libatomic1` using
+APT, then use the Go and Node.js versions reported by `make install-check`.
+`make update` rebuilds after a fast-forward pull. `make uninstall` stops the
+Runner and removes its runtime and links while keeping your data. Pass the same
+`PREFIX` if you installed to a custom directory.
+
 **Homebrew.** Once a stable release publishes the Linux formula, install it
 from the Lazybox tap and register the service under your user account:
 

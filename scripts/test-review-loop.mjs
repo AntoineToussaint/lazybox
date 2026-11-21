@@ -157,11 +157,14 @@ try{
   assert.ok(diffBox.height>=300,`${name}: the diff keeps ≥300px (${Math.round(diffBox.height)}px)`);
   assert.ok(trayBox.x+trayBox.width<=diffBox.x+1,`${name}: the tray covers no part of the diff`);
   // Every loop control and the Send button answer a click where they are, even with the findings scrolled to their end.
-  await tray.evaluate(node=>{node.scrollTop=node.scrollHeight;});
-  for(const control of [fourthControls.getByRole('combobox',{name:'Between rounds'}),fourthControls.getByRole('button',{name:'Pause'}),fourthControls.getByRole('button',{name:'Stop loop'}),fourthControls.getByRole('button',{name:'Take over'}),fourthRow.getByRole('status'),tray.getByRole('button',{name:/^Send/}),tray.getByRole('button',{name:'Close review'})])
+  await tray.locator('.review-tray-scroll').evaluate(node=>{node.scrollTop=node.scrollHeight;});
+  for(const control of [fourthControls.getByRole('combobox',{name:'Between rounds'}),fourthControls.getByRole('button',{name:'Pause'}),fourthControls.getByRole('button',{name:'Stop loop'}),fourthControls.getByRole('button',{name:'Take over'}),fourthRow.getByRole('status'),tray.getByRole('button',{name:/^Send/}),tray.getByRole('button',{name:'Close review'})]) {
+   await control.scrollIntoViewIfNeeded();
    assert.ok(await hit(control),`${name}: ${await control.evaluate(node=>node.getAttribute('aria-label')||node.textContent)} is in reach`);
-  await tray.evaluate(node=>{node.scrollTop=0;});
-  await tray.getByRole('button',{name:/^To triage/}).click();
+  }
+  const triage=tray.getByRole('button',{name:/^To triage/});
+  assert.ok(await hit(triage),`${name}: To triage is in reach with the findings scrolled`);
+  await triage.click();
   const finding=tray.locator('.review-tray-list').getByRole('listitem').filter({hasText:'Handle has no test for the error path'});
   for(const action of ['Accept','Dismiss','Ask Codex']){const button=finding.getByRole('button',{name:action});await button.scrollIntoViewIfNeeded();assert.ok(await hit(button),`${name}: ${action} is in reach, scrolled to`);}
   for(const scheme of ['dark','light']){await page.emulateMedia({colorScheme:scheme});await page.mouse.move(0,0);await page.waitForTimeout(400);await page.screenshot({path:`.cache/review-tray-narrow-${name}-${scheme}.png`});}

@@ -183,7 +183,7 @@ test('a Runner that could not save says so once, as its own notice', () => {
 
 test('a Codex outside the versions Lazybox is tested with says so in one plain line', () => {
   cursor = 0n;
-  const said = "This Codex version (0.171.0) isn't tested with Lazybox yet; some features may not work. Lazybox is tested with Codex 0.164 to 0.169.";
+  const said = "This Codex version (0.172.0) isn't tested with Lazybox yet; some features may not work. Lazybox is tested with Codex 0.164 to 0.171.";
   const t = fold(emptyTranscript(), record(0, { type: 'provider_notice', status: 'untested_version', text: said }));
   assert.deepEqual(t.messages.map(m => [m.type, m.notice, m.text]), [['notice', 'provider', said]]);
 });

@@ -343,3 +343,5 @@ when the workspace opens and about every six hours while it is open.
 latest versions and links to update instructions. Bundled Claude Code is
 updated through Lazybox. Version checks send no account details and do not
 install updates or restart agents.
+
+In Settings → Subscriptions, filter cards by their reported status. Sort within each provider by availability, account name, or earliest limit reset. Accounts without a reported limit reset follow timed resets.

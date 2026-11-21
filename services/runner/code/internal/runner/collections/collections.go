@@ -672,8 +672,11 @@ func (m *Manager) validate(ctx context.Context, member Member) error {
 		return errors.New("worktree moved or replaced by a symlink")
 	}
 	top, err := m.git(ctx, member.Path, "rev-parse", "--show-toplevel")
-	if err != nil || top != member.Path {
-		return errors.New("member is not the expected worktree root")
+	if err != nil {
+		return fmt.Errorf("cannot verify worktree root: %w", err)
+	}
+	if top != member.Path {
+		return fmt.Errorf("member is not the expected worktree root: Git reported %q, expected %q", top, member.Path)
 	}
 	common, err := m.git(ctx, member.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
@@ -978,6 +981,14 @@ func (b *capOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 func (m *Manager) git(ctx context.Context, path string, args ...string) (string, error) {
+	var out capOutput
+	if err := m.gitOutput(ctx, path, &out, args...); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out.data)), nil
+}
+
+func (m *Manager) gitOutput(ctx context.Context, path string, stdout io.Writer, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	stop := context.AfterFunc(m.ctx, cancel)
@@ -994,14 +1005,12 @@ func (m *Manager) git(ctx context.Context, path string, args ...string) (string,
 		cmd.Env = append(cmd.Env, e)
 	}
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
-	var output capOutput
-	cmd.Stdout, cmd.Stderr = &output, &output
-	err := cmd.Run()
-	text := strings.TrimSpace(string(output.data))
-	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", args[0], errors.Join(err, ctx.Err()), text)
+	var stderr capOutput
+	cmd.Stdout, cmd.Stderr = stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git %s: %w: %s", args[0], errors.Join(err, ctx.Err()), strings.TrimSpace(string(stderr.data)))
 	}
-	return text, nil
+	return nil
 }
 func (m *Manager) branchExists(ctx context.Context, repo, branch string) (bool, error) {
 	// for-each-ref exits successfully for an absent ref, so genuine Git errors

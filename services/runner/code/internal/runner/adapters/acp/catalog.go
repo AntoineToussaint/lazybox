@@ -40,6 +40,8 @@ type Agent struct {
 // order every surface lists them.
 var Builtins = []Agent{
 	{ID: "gemini", Title: "Gemini CLI", Command: "gemini", Args: []string{"--acp"}, Icon: "agent-gemini", Install: "npm install -g @google/gemini-cli", Homepage: "https://github.com/google-gemini/gemini-cli"},
+	{ID: "antigravity", Title: "Google Antigravity", Command: "agy", Args: []string{"acp"}, Icon: "agent-gemini", Install: "curl -fsSL https://antigravity.google/cli/install.sh | bash", Homepage: "https://antigravity.google/docs/cli/acp"},
+	{ID: "hermes", Title: "Hermes Agent", Command: "hermes", Args: []string{"acp"}, Icon: "agent", Install: "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash", Homepage: "https://hermes-agent.nousresearch.com/docs/user-guide/features/acp"},
 	{ID: "goose", Title: "Goose", Command: "goose", Args: []string{"acp"}, Icon: "agent-goose", Install: "brew install block-goose-cli", Homepage: "https://goose-docs.ai"},
 	{ID: "opencode", Title: "OpenCode", Command: "opencode", Args: []string{"acp"}, Icon: "agent-opencode", Install: "npm install -g opencode-ai", Homepage: "https://opencode.ai"},
 	{ID: "qwen", Title: "Qwen Code", Command: "qwen", Args: []string{"--acp"}, Icon: "agent-qwen", Install: "npm install -g @qwen-code/qwen-code", Homepage: "https://github.com/QwenLM/qwen-code"},

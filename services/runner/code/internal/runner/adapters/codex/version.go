@@ -17,7 +17,7 @@ import (
 // schema the new version generates (`codex app-server generate-ts
 // --experimental` with a scratch CODEX_HOME) against what this adapter
 // sends and reads; RUNTIME_EVIDENCE.md records each check.
-const TestedVersions = "0.164.0-0.169"
+const TestedVersions = "0.164.0-0.171"
 
 // UntestedVersionNotice is the event type of the one line a conversation
 // shows when its Codex is outside TestedVersions.

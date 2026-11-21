@@ -62,7 +62,7 @@ try {
   await expect(sheet.getByTestId('new-task-branch')).toHaveText('812-fix-refund-rounding');
   await expect(sheet.locator('.new-task-name')).toHaveText('Fix refund rounding');
   // Item text is not the person's: the Runner's YOLO default becomes Ask.
-  await expect(sheet.getByTestId('new-task-item-mode')).toContainText('the agent asks first');
+  await expect(sheet.getByTestId('new-task-item-mode')).toContainText('Tasks from an issue start with approvals.');
 
   // What the agent gets, exactly; the comments can be left out.
   await source.getByRole('button', { name: 'What the agent gets' }).click();

@@ -32,7 +32,8 @@ from the registry, not the installed version (checked, below, not enforced);
 protocol v1 only; `mcpServers: []`; questions are not mapped.
 
 Built-in agents (`adapters/acp/catalog.go`), found on the Runner's PATH:
-Gemini CLI (`gemini --acp`), Goose (`goose acp`), OpenCode (`opencode acp`),
+Gemini CLI (`gemini --acp`), Google Antigravity (`agy acp`), Hermes Agent
+(`hermes acp`), Goose (`goose acp`), OpenCode (`opencode acp`),
 Qwen Code (`qwen --acp`), GitHub Copilot (`copilot --acp`), Cursor Agent
 (`cursor-agent acp`), Kiro CLI (`kiro-cli acp`), Cline (`cline --acp`) and
 Auggie (`auggie --acp`), each with its install command. Launch commands follow

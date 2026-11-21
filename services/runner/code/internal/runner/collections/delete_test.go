@@ -220,3 +220,64 @@ func TestDeleteRepairsMissingGitLinkOnlyAfterDiscardConsent(t *testing.T) {
 		t.Fatal("branch lost")
 	}
 }
+
+func TestDeleteUnregisteredMemberWithoutGitLink(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "orphan", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := c.Members[0]
+	if err := os.Remove(filepath.Join(member.Path, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo.Path, "worktree", "prune", "--expire", "now")
+	inactive := func(string) bool { return false }
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, inactive); err == nil {
+		t.Fatal("discard consent required")
+	}
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, true, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.FinishDeletion(ctx, c.ID, true, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitTest(t, repo.Path, "rev-parse", "refs/heads/"+member.Branch); got != member.BaseCommit {
+		t.Fatal("branch lost")
+	}
+}
+
+func TestOrphanDeletionPreservesReplacementBareRepository(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "bare-replacement", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := c.Members[0]
+	gitTest(t, repo.Path, "worktree", "remove", member.Path)
+	gitTest(t, repo.Path, "clone", "--bare", repo.Path, member.Path)
+	inactive := func(string) bool { return false }
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, true, false, inactive); err == nil {
+		t.Fatal("accepted deletion of a replacement bare repository")
+	}
+}
+
+func TestRegisteredWorktreeBeforeLargeListingTail(t *testing.T) {
+	repo := repoTest(t)
+	m := newTest(t, t.TempDir(), repo)
+	ctx := context.Background()
+	c, err := m.Create(ctx, "large-list", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Git prints the lock reason in porcelain output, after the member path.
+	gitTest(t, repo.Path, "worktree", "lock", "--reason", strings.Repeat("x", 70000), c.Members[0].Path)
+	found, err := m.registeredWorktree(ctx, repo, c.Members[0].Path)
+	if err != nil || !found {
+		t.Fatalf("lost a registered worktree in a large listing: %v", err)
+	}
+}

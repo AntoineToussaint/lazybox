@@ -22,7 +22,7 @@ import { SettingsHeader, settingsError, useNow } from './settings-parts';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Icon } from './Icons';
 import { ProviderGroups } from './SubscriptionGroups';
-import { subscriptionGroups } from './subscription-groups';
+import { cardStatus, subscriptionCardGroups } from './subscription-groups';
 import './settings.css';
 import { RepositoryBrowser } from './RepositoryBrowser';
 import { RepositoryHomesSettings } from './home-checkouts';
@@ -110,7 +110,7 @@ function SubscriptionCard({ profile, now, refreshing, error, onRefresh, onRename
   const usage = profile.availability, windows = usage?.windows || [], codex = profile.provider === 'codex';
   const name = profile.label || (codex ? 'Current Codex account' : 'Current Claude account');
   const back = comeback(profile, now), line = comebackLine(back, now, refreshing);
-  const state = back.kind === 'available' ? (usage?.state === 'available' || windows.length ? 'Available' : 'Not checked') : back.kind === 'sign-in' ? 'Sign-in required' : back.kind === 'billing' ? 'Billing issue' : back.kind === 'due' ? 'Resetting' : usage?.state === 'throttled' ? 'Rate limited' : 'Limit reached';
+  const state = cardStatus(profile, back);
   const tone = back.kind === 'available' ? (state === 'Available' ? 'ok' : 'muted') : back.kind === 'sign-in' || back.kind === 'billing' ? 'bad' : back.kind === 'due' ? 'muted' : 'warn';
   const passed = (w: UsageWindow) => w.resetAt > 0n && Number(w.resetAt) * 1000 <= now;
   // An available card names only its next reset: the one of its most-used window.
@@ -119,8 +119,7 @@ function SubscriptionCard({ profile, now, refreshing, error, onRefresh, onRename
   return <article className={`subscription-card tone-${tone}`} aria-label={`${name} subscription`}>
     <header>
       <span className={`provider-mark ${profile.provider}`} aria-hidden="true">{codex ? '›' : '✳'}</span>
-      <div className="subscription-identity"><div className="subscription-name"><h3 title={name}>{name}</h3><button type="button" className="icon-button" onClick={onRename} aria-label="Rename subscription" title="Rename subscription"><Icon name="pencil" size={13}/></button></div>{usage?.email && <small className="subscription-email">{usage.email}</small>}<span>{codex ? 'Codex' : 'Claude'}{usage?.plan ? ` · ${usage.plan[0].toUpperCase()}${usage.plan.slice(1)}` : ''}</span></div>
-      <span className={`account-state tone-${tone}`}>{state}</span>
+      <div className="subscription-identity"><div className="subscription-name"><h3 title={name}>{name}</h3><button type="button" className="icon-button" onClick={onRename} aria-label="Rename subscription" title="Rename subscription"><Icon name="pencil" size={13}/></button></div>{usage?.email && <small className="subscription-email">{usage.email}</small>}<div className="subscription-meta"><span>{codex ? 'Codex' : 'Claude'}{usage?.plan ? ` · ${usage.plan[0].toUpperCase()}${usage.plan.slice(1)}` : ''}</span><span className={`account-state tone-${tone}`}>{state}</span></div></div>
     </header>
     {line && <p className={`subscription-back tone-${line.tone}`} role="status" title={back.kind === 'back' || back.kind === 'due' ? new Date(back.resetAt * 1000).toLocaleString() : undefined}>{line.text}</p>}
     <div className="subscription-usage">{windows.length ? windows.map(window => {
@@ -346,6 +345,8 @@ export function SettingsPage({ initialAddSubscription = false, onOpenExtensionPa
   const { settings: runnerSettings, setSettings: setRunnerSettings } = useRunnerSettings();
   // An account imported from a token earlier: Settings → Subscriptions → Remove.
   const [removing, setRemoving] = useState<Profile>();
+  const [statusFilter, setStatusFilter] = useState("All statuses");
+  const [cardOrder, setCardOrder] = useState("Availability");
   const [renaming, setRenaming] = useState<Profile>();
   // Claude sign-in in Lazybox is off unless the person turned it on (CLAUDE_COMPLIANCE.md).
   const claudeGated = !!runnerSettings && !runnerSettings.claudeSubscriptionSignIn;
@@ -366,6 +367,7 @@ export function SettingsPage({ initialAddSubscription = false, onOpenExtensionPa
   const profiles = info?.profiles.filter(profile => profile.managed).map(profile => (updated[profile.id]?.availability?.observedAtUnixMillis || 0n) > (profile.availability?.observedAtUnixMillis || 0n) ? { ...profile, availability: updated[profile.id].availability } : profile) || [];
   const pending = !!flowID && !terminal(flow?.state);
   const now = useNow(30_000);
+  const visibleGroups = subscriptionCardGroups(profiles, statusFilter, cardOrder, now);
   // A limit whose reported reset has passed is checked once, by itself: the
   // card says "checking" and then shows what the provider reports now.
   const autoChecked = useRef(new Set<string>());
@@ -475,7 +477,12 @@ export function SettingsPage({ initialAddSubscription = false, onOpenExtensionPa
       {pending && !adding && <div className="sign-in-banner"><span>{flow?.label || 'Subscription'} · sign-in pending</span><button onClick={() => setAdding(true)}>Continue sign-in</button></div>}
       {!info && <p className="settings-empty" role="status">Loading subscriptions…</p>}
       {info && !profiles.length && <div className="settings-empty"><h3>No subscriptions yet</h3><p>Add a Claude or Codex account so agents can run on it. Your CLI sign-ins keep working either way.</p></div>}
-      <ProviderGroups groups={subscriptionGroups(profiles, { now })} className="subscription-grid">{items => items.map(profile => <SubscriptionCard key={profile.id} profile={profile} now={now} refreshing={refreshing.has(profile.id)} error={refreshErrors[profile.id]} onRefresh={() => void updateUsage(profile)} onRename={() => setRenaming(profile)}
+      {profiles.length > 0 && <div className="subscription-controls">
+        <label>Status <select aria-label="Subscription status" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}>{['All statuses', 'Available', 'Limited', 'Resetting', 'Sign-in required', 'Billing issue', 'Not checked'].map(value => <option key={value}>{value}</option>)}</select></label>
+        <label>Sort by <select aria-label="Sort subscriptions by" value={cardOrder} onChange={event => setCardOrder(event.target.value)}>{['Availability', 'Earliest limit reset', 'Name'].map(value => <option key={value}>{value}</option>)}</select></label>
+      </div>}
+      {profiles.length > 0 && !visibleGroups.length && <p role="status">No subscriptions match this status.</p>}
+      <ProviderGroups groups={visibleGroups} className="subscription-grid">{items => items.map(profile => <SubscriptionCard key={profile.id} profile={profile} now={now} refreshing={refreshing.has(profile.id)} error={refreshErrors[profile.id]} onRefresh={() => void updateUsage(profile)} onRename={() => setRenaming(profile)}
         footer={profile.tokenImported ? <span className="subscription-imported"><small className="subscription-gated" title="Lazybox no longer imports subscription tokens: Anthropic does not allow apps to store Claude.ai credentials. Sign in again, or use an API key.">Imported token; not recommended</small><button type="button" className="quiet" onClick={() => setRemoving(profile)}>Remove</button></span>
           : profile.provider === 'claude' && profile.isolation === 'environment' && runnerSettings && !runnerSettings.claudeSubscriptionSignIn
           ? <small className="subscription-gated" title="Claude sign-in in Lazybox is off (Settings → Agents & workspaces → Claude)">Not used: Claude sign-in in Lazybox is off</small>

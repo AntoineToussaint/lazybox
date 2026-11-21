@@ -181,6 +181,14 @@ try {
  await expect(groups.locator('.provider-group-heading')).toHaveText(['Claude','Codex']);
  await expect(groups.nth(0).locator('.subscription-card h3')).toHaveText(['Personal']);
  await expect(groups.nth(1).locator('.subscription-card h3')).toHaveText(['Team Codex','Work']);
+ const statusFilter=page.getByLabel('Subscription status',{exact:true});
+ await statusFilter.selectOption('Limited');
+ await expect(page.getByText('No subscriptions match this status.')).toBeVisible();
+ await statusFilter.selectOption('All statuses');
+ await page.getByLabel('Sort subscriptions by',{exact:true}).selectOption('Name');
+ await expect(groups.nth(1).locator('.subscription-card h3')).toHaveText(['Team Codex','Work']);
+ await expect(codex.locator('h3')).toHaveCSS('white-space','normal');
+ await expect(codex.locator('.subscription-email')).toHaveCSS('overflow-wrap','anywhere');
  await expect(groups.nth(0)).toHaveAttribute('aria-label','Claude');
  await page.screenshot({path:'.cache/settings-subscriptions-grouped.png',fullPage:true});
  await page.emulateMedia({colorScheme:'dark'});await page.waitForTimeout(400);await page.screenshot({path:'.cache/settings-subscriptions-grouped-dark.png',fullPage:true});await page.emulateMedia({colorScheme:'light'});
@@ -288,7 +296,8 @@ try {
  const cards=page.locator('.provider-group[data-provider="codex"] .subscription-card');await expect(cards).not.toHaveCount(0);
  const first=await cards.nth(0).boundingBox(),third=await cards.nth(2).boundingBox();
  assert.equal(first.y,third.y,'wide Settings view should fit three accounts per row');
- assert.ok(first.height<=240,`two-window card too tall: ${first.height}`);
+ const compact=await cards.filter({has:page.getByRole('heading',{name:/^Account [0-9]+$/})}).first().boundingBox();
+ assert.ok(compact.height<=240,`two-window card with a short identity too tall: ${compact.height}`);
  await page.screenshot({path:'.cache/settings-ten-subscriptions.png',fullPage:true});
  await page.setViewportSize({width:480,height:850});
  const narrowFirst=await cards.nth(0).boundingBox(),narrowSecond=await cards.nth(1).boundingBox();

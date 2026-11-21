@@ -19,13 +19,13 @@ func TestCodexVersionOutsideTheTestedRangeIsSaid(t *testing.T) {
 	}
 	for v, untested := range map[string]bool{
 		"0.164.0": false, "0.166.2": false, "0.169.0": false, "0.169.7": false,
-		"0.163.9": true, "0.170.0": true, "0.170.0-alpha.2": true, "1.0.0": true,
+		"0.163.9": true, "0.170.0": false, "0.171.0": false, "0.171.7": false, "0.172.0": true, "0.172.0-alpha.2": true, "1.0.0": true,
 	} {
 		ev, said := versionNotice(agentOf(v))
 		if said != untested {
 			t.Fatalf("%s: notice %v", v, said)
 		}
-		if said && (ev.Type != UntestedVersionNotice || ev.Status != "untested_version" || ev.Text != "This Codex version ("+v+") isn't tested with Lazybox yet; some features may not work. Lazybox is tested with Codex 0.164 to 0.169.") {
+		if said && (ev.Type != UntestedVersionNotice || ev.Status != "untested_version" || ev.Text != "This Codex version ("+v+") isn't tested with Lazybox yet; some features may not work. Lazybox is tested with Codex 0.164 to 0.171.") {
 			t.Fatalf("%s: %+v", v, ev)
 		}
 	}
@@ -43,7 +43,7 @@ func TestUntestedCodexShowsOneLineAtStart(t *testing.T) {
 	for _, tc := range []struct {
 		version string
 		said    bool
-	}{{"0.171.0", true}, {"0.169.0", false}} {
+	}{{"0.172.0", true}, {"0.171.0", false}} {
 		t.Setenv("FIXTURE_CODEX_VERSION", tc.version)
 		s, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Host: &agent.Hosting{Root: fixtureRoot(t)}})
 		if err != nil {

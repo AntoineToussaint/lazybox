@@ -170,8 +170,8 @@ export function renderNotices({ version, components, node }) {
 }
 
 /** Collects every component and writes the notices; returns what needs attention. */
-export function writeNotices({ out, version, nodeLicense, nodeVersion = '', omit }) {
-  const components = [...npmComponents(root, { omit }), ...goComponents(), ...rustComponents()];
+export function writeNotices({ out, version, nodeLicense, nodeVersion = '', omit, desktop = true }) {
+  const components = [...npmComponents(root, { omit }), ...goComponents(), ...(desktop ? rustComponents() : [])];
   const node = nodeLicense ? { kind: 'node', name: 'Node.js', version: nodeVersion, license: 'MIT and others (see its LICENSE)', files: [nodeLicense] } : undefined;
   writeFileSync(out, renderNotices({ version, components, node }));
   return {

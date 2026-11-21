@@ -18,7 +18,7 @@ type Row = { id: RowId; label: string; detail?: string; key: string; tone: 'allo
 type Draft = { title: string; brief: string; profile: string; model: string; mode: 'same' | 'new' };
 
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
-const permissionWords: Record<string, string> = { yolo: 'YOLO', 'read-only': 'Read only', ask: 'Ask', inherit: 'Ask' };
+const permissionWords: Record<string, string> = { yolo: 'Full access', 'read-only': 'Read only', ask: 'Ask', inherit: 'Ask' };
 
 /**
  * An agent asks to start a conversation, because the person asked it to in

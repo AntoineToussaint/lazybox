@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { appPath, compareVersions, evaluate, report, requirements, runningCopies, versionIn } from './install.mjs';
+import { appPath, compareVersions, evaluate, linuxRuntimePath, report, requirements, runningCopies, versionIn } from './install.mjs';
 import { sourceManifest, sourceVersion, tauriReleaseConfig } from './build.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -84,4 +84,14 @@ test('a build from source carries the newest version the changelog names, and it
   assert.equal(sourceVersion([{ id: '2026-11-18.1' }, { id: '0.1.0-pre.1' }, { id: '0.0.9' }]), '0.1.0-pre.1');
   assert.throws(() => sourceVersion([{ id: '2026-11-18.1' }]), /names no version/);
   assert.deepEqual(sourceManifest({ commit: 'abc', dirty: true, checkout: '/src', date: new Date('2026-11-17T10:00:00.123Z') }), { commit: 'abc', dirty: true, checkout: '/src', builtAt: '2026-11-17T10:00:00Z' });
+});
+
+test('Linux needs the Runner build tools and uses a per-user runtime directory', () => {
+  const found = { ...everything, glibc: '2.39', tools: { git: true, make: true, tar: true }, clt: false, rust: '', macos: '' };
+  assert.ok(evaluate(need, found, 'linux').every(check => check.ok));
+  assert.deepEqual(evaluate(need, { ...found, glibc: '' }, 'linux').filter(check => !check.ok).map(check => check.name), ['glibc 2.28 or later']);
+  assert.equal(linuxRuntimePath(undefined, '/home/me'), '/home/me/.local/lib/lazybox');
+  assert.equal(linuxRuntimePath('~/apps', '/home/me'), '/home/me/apps/lazybox');
+  assert.equal(linuxRuntimePath('/opt/apps', '/home/me'), '/opt/apps/lazybox');
+  assert.throws(() => linuxRuntimePath('apps', '/home/me'), /absolute/);
 });

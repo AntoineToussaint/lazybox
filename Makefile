@@ -140,16 +140,18 @@ release: deps
 # Install from a clone (docs/install.md#install-from-source): checks what the
 # build needs and says how to get anything missing, builds the app from
 # source (ad-hoc signed, no updater, no secrets), puts it in PREFIX
-# (/Applications by default), sets up the Runner service and links the
+# (/Applications by default). On Linux, this installs the Runner runtime
+# under PREFIX (default ~/.local/lib), with the CLI and web client.
+# Both platforms set up the Runner service and link the
 # lazybox command, as the app's first launch does. make update pulls and
 # reinstalls; make uninstall keeps your data unless PURGE=1.
 # PREFIX counts only on the command line: an exported PREFIX meant for
 # another tool must not move the app. The build uses every core
 # (INSTALL_JOBS), not the one-job default this Makefile keeps for shared
 # build machines.
-INSTALL_JOBS ?= $(shell sysctl -n hw.ncpu 2>/dev/null || echo 4)
+INSTALL_JOBS ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 INSTALL_ENV = PREFIX='$(if $(filter command line,$(origin PREFIX)),$(PREFIX))' LINK_DIR='$(LINK_DIR)' OPEN='$(OPEN)' SMOKE='$(SMOKE)' PURGE='$(PURGE)' CARGO_BUILD_JOBS='$(INSTALL_JOBS)' GOMAXPROCS='$(INSTALL_JOBS)' GOFLAGS='-p=$(INSTALL_JOBS)'
-NEED_NODE = command -v node >/dev/null 2>&1 || { echo 'Node.js is missing: install Node.js 24 or later (brew install node, or https://nodejs.org), then run make install again.'; exit 1; }
+NEED_NODE = command -v node >/dev/null 2>&1 || { echo 'Node.js is missing: install Node.js 24 or later (https://nodejs.org), then run make install again.'; exit 1; }
 .PHONY: install uninstall update install-check
 install:
 	@$(NEED_NODE)

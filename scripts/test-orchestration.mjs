@@ -60,7 +60,7 @@ async function run(scheme) {
   const sheet = page.getByRole('dialog', { name: 'Let this conversation run agents' });
   await expect(sheet).toBeVisible();
   await expect(sheet.getByRole('radio', { name: 'Ask' })).toBeChecked();
-  await expect(sheet.getByRole('radio', { name: 'YOLO' })).toBeDisabled();
+  await expect(sheet.getByRole('radio', { name: 'Full access' })).toBeDisabled();
   await expect(sheet.getByRole('button', { name: 'Let it run agents' })).toBeDisabled();
   await expect(sheet.locator('.grant-problem')).toContainText('Name the mission');
   await sheet.getByLabel('New mission').fill('Ship search');

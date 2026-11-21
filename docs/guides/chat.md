@@ -490,5 +490,14 @@ of absolute YAML file paths. Each pack contains a list, for example:
 ```
 
 Pack keys must be unique across the combined catalog. Each entry shows its
-pack filename as its origin. When the agent reports its native permissions,
-the composer shows its last report alongside the Lazybox permission setting.
+pack filename as its origin.
+
+### Agent and command permissions
+
+Use the shield beside the model picker to change the conversation’s permissions.
+**Full access** applies to the agent’s own tools and ordinary Lazybox-managed
+commands. Interactive terminal handoffs and changes to Lazybox settings still
+need your review. **CLI settings** inherits the agent’s native settings while
+Lazybox’s command approvals stay in effect. Hover over the shield to see the
+agent’s last report. The existing `/permissions yolo` shortcut selects Full
+access.

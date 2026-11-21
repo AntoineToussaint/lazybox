@@ -9,7 +9,7 @@ import type { Mission, MissionAttempt, MissionEvent, MissionGrant, MissionMessag
 
 export type PermissionMode = 'read-only' | 'ask' | 'yolo';
 export const PERMISSION_ORDER: readonly PermissionMode[] = ['read-only', 'ask', 'yolo'];
-export const permissionLabel: Record<string, string> = { 'read-only': 'Read only', ask: 'Ask', yolo: 'YOLO' };
+export const permissionLabel: Record<string, string> = { 'read-only': 'Read only', ask: 'Ask', yolo: 'Full access' };
 
 /** The level a conversation runs at, for comparing: inherit (the provider's default) counts as ask. */
 export function effectivePermission(mode: string | undefined): PermissionMode {

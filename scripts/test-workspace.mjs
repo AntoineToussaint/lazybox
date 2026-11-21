@@ -73,10 +73,10 @@ try {
   await chat.getByLabel('Session actions', { exact: true }).click();
   const permissions = chat.getByRole('group', { name: 'Permissions', exact: true });
   await expect(permissions.getByRole('button', { name: 'Ask for approval', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await permissions.getByRole('button', { name: 'YOLO', exact: true }).click();
+  await permissions.getByRole('button', { name: 'Full access', exact: true }).click();
   await expect.poll(() => fixture.mutations.find(m => m.method === 'Apply' && m.body.permission)?.body.permission.mode).toBe('yolo');
   await chat.getByLabel('Session actions', { exact: true }).click();
-  await expect(permissions.getByRole('button', { name: 'YOLO', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(permissions.getByRole('button', { name: 'Full access', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await page.locator('.workspace-brand').click();
   // Later assertions count execution starts; this deliberate change is not one.
   fixture.mutations.splice(fixture.mutations.findIndex(m => m.method === 'Apply' && m.body.permission), 1);

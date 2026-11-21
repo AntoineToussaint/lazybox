@@ -60,7 +60,7 @@ try {
     await page.route('**/GetTelemetry', route => { reads++; return route.fulfill({ json: usageAvailable ? telemetry() : { contexts: [], groups: [], recent: [] } }); });
     await page.goto(url(session.id));
     const chat = page.locator('.panel-chat'), header = chat.locator('.chat-heading'), composer = chat.locator('form.composer'), info = composer.locator('.composer-info');
-    const row = composer.locator('.row'), contextButton = info.locator('.composer-info-context'), modelButton = info.locator('.composer-info-model');
+    const row = composer.locator('.row'), contextButton = info.getByRole('button', { name: /^Context .*show context and cost/ }), modelButton = info.locator('.composer-info-model');
 
     // The header's words and number, first on the row.
     await expect(header.locator('.chat-model')).toHaveText('Claude · Opus 5.5');
@@ -169,7 +169,7 @@ try {
     await leave(url('beta-session'));
     await expect(page.locator('.panel-chat form.composer')).toBeVisible();
     await expect(page.locator('.panel-chat').getByRole('button', {name: /Codex.*change model/})).toBeVisible();
-    await expect(page.locator('.panel-chat .composer-info-context')).toHaveText('Context —');
+    await expect(page.locator('.panel-chat .composer-info').getByTitle('Waiting for the provider to report context usage')).toHaveText('Context —');
     assert.deepEqual(errors, []);
     await context.close();
   }

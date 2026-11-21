@@ -211,7 +211,7 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
   };
   // Escape closes the tray; a field's own Escape comes first.
   const closeOnEscape = (event: KeyboardEvent<HTMLElement>) => { if (event.key === 'Escape' && !event.defaultPrevented && !(event.target as Element).closest('select,textarea')) { event.preventDefault(); onClose(); } };
-  // The header and the reviews under way stay at the top, Send at the bottom; the rest scrolls between.
+  // Findings scroll between the review controls and the sending controls.
   return <aside className="review-tray" id={id} aria-label="Review" onKeyDown={closeOnEscape}>
     <div className="review-tray-top">
     <header>
@@ -224,37 +224,39 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
     <div className="review-filters" role="group" aria-label="Show">
       {trayFilters.filter(f => f.value !== 'proposed' || counts.proposed || hasFindings).map(f => <button key={f.value} aria-pressed={query.filter === f.value} onClick={() => setQuery(q => ({ ...q, filter: f.value }))}>{f.label}<span>{counts[f.value]}</span></button>)}
     </div>
-    {hasFindings && <div className="review-facets">
-      <label>By<select aria-label="Author" value={query.author} onChange={event => setQuery(q => ({ ...q, author: event.target.value }))}>{authors.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}</select></label>
-      <label>Severity<select aria-label="Severity" value={query.severity} onChange={event => setQuery(q => ({ ...q, severity: event.target.value }))}><option value="">Any</option>{severities.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}</select></label>
-    </div>}
-    <div className="review-tray-list">
-      {!counts.all && !runs.length && <p className="review-empty">Hover a line in the diff and click <b>+</b> to comment on it. Drag or Shift-click to comment on several lines. Or have another agent review: <b>Review with…</b> above. Comments collect here until you send them to the agent.</p>}
-      {(counts.all > 0 || runs.length > 0) && !shown.length && <p className="review-empty">{empty()}</p>}
-      {shown.map(group => <section key={group.file}>
-        <h4 title={group.file}>{group.file}</h4>
-        <ul>{group.comments.map(c => {
-          const fresh = freshnessLabel(c), finding = isFinding(c);
-          return <li key={c.id} className={`is-${c.disposition || 'open'}${finding ? ' is-finding' : ''}`}>
-            {isPending(c) && <input type="checkbox" checked={!excluded.has(c.id)} onChange={() => toggle(c.id)} aria-label={`Include the comment on ${group.file} ${linesLabel(c.side, c.startLine, c.endLine).toLowerCase()}`}/>}
-            <div className="review-tray-item">
-              <button className="review-tray-jump" onClick={() => onJump(c)} title="Show in the diff">
-                <span className="review-tray-where">
-                  {finding && <span className={`review-severity sev-${c.severity}`}>{severityLabel(c.severity)}</span>}
-                  {linesLabel(c.side, c.startLine, c.endLine)}
-                  {finding && <span className="review-chip is-author">{authorLabel(c)}</span>}
-                  {fresh && <span className={`review-chip fresh-${c.freshness}`}>{fresh}</span>}
-                  {!isPending(c) && <span className={`review-chip is-${c.disposition}`}>{dispositionLabel(c)}</span>}
-                </span>
-                {finding && <span className="review-tray-title">{c.title}</span>}
-                <span className="review-tray-body">{excerpt(c.body)}</span>
-                {c.disposition === 'dismissed' && c.note && <span className="review-muted">Dismissed: {c.note}</span>}
-              </button>
-              {finding && (isProposed(c) || isPending(c)) && <FindingActions comment={c} review={review} compact onAsk={comment => askReviewer(workspaceId, comment)}/>}
-            </div>
-          </li>;
-        })}</ul>
-      </section>)}
+    <div className="review-tray-scroll">
+      {hasFindings && <div className="review-facets">
+        <label>By<select aria-label="Author" value={query.author} onChange={event => setQuery(q => ({ ...q, author: event.target.value }))}>{authors.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}</select></label>
+        <label>Severity<select aria-label="Severity" value={query.severity} onChange={event => setQuery(q => ({ ...q, severity: event.target.value }))}><option value="">Any</option>{severities.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}</select></label>
+      </div>}
+      <div className="review-tray-list">
+        {!counts.all && !runs.length && <p className="review-empty">Hover a line in the diff and click <b>+</b> to comment on it. Drag or Shift-click to comment on several lines. Or have another agent review: <b>Review with…</b> above. Comments collect here until you send them to the agent.</p>}
+        {(counts.all > 0 || runs.length > 0) && !shown.length && <p className="review-empty">{empty()}</p>}
+        {shown.map(group => <section key={group.file}>
+          <h4 title={group.file}>{group.file}</h4>
+          <ul>{group.comments.map(c => {
+            const fresh = freshnessLabel(c), finding = isFinding(c);
+            return <li key={c.id} className={`is-${c.disposition || 'open'}${finding ? ' is-finding' : ''}`}>
+              {isPending(c) && <input type="checkbox" checked={!excluded.has(c.id)} onChange={() => toggle(c.id)} aria-label={`Include the comment on ${group.file} ${linesLabel(c.side, c.startLine, c.endLine).toLowerCase()}`}/>}
+              <div className="review-tray-item">
+                <button className="review-tray-jump" onClick={() => onJump(c)} title="Show in the diff">
+                  <span className="review-tray-where">
+                    {finding && <span className={`review-severity sev-${c.severity}`}>{severityLabel(c.severity)}</span>}
+                    {linesLabel(c.side, c.startLine, c.endLine)}
+                    {finding && <span className="review-chip is-author">{authorLabel(c)}</span>}
+                    {fresh && <span className={`review-chip fresh-${c.freshness}`}>{fresh}</span>}
+                    {!isPending(c) && <span className={`review-chip is-${c.disposition}`}>{dispositionLabel(c)}</span>}
+                  </span>
+                  {finding && <span className="review-tray-title">{c.title}</span>}
+                  <span className="review-tray-body">{excerpt(c.body)}</span>
+                  {c.disposition === 'dismissed' && c.note && <span className="review-muted">Dismissed: {c.note}</span>}
+                </button>
+                {finding && (isProposed(c) || isPending(c)) && <FindingActions comment={c} review={review} compact onAsk={comment => askReviewer(workspaceId, comment)}/>}
+              </div>
+            </li>;
+          })}</ul>
+        </section>)}
+      </div>
     </div>
     <footer>
       {error && <p className="review-error" role="alert">{error}</p>}

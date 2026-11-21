@@ -59,12 +59,11 @@
 .review-elsewhere{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--line-bold);border-radius:8px;background:var(--surface-sunken)}
 .review-elsewhere h4{margin:0;font-size:calc(12px * var(--text-scale));color:var(--warn);font-weight:600}
 
-.review-tray{--review-tray-bg:var(--canvas,var(--bg));container:review-tray/inline-size;display:flex;flex-direction:column;min-height:0;overflow:auto;overscroll-behavior:contain;border-left:1px solid var(--border,var(--line-subtle));padding-left:12px;font-size:calc(12px * var(--text-scale));gap:8px}
-/* The tray scrolls as one: its header and the reviews under way (with their
-   loop controls) stay at the top, Send stays at the bottom, and whatever the
-   height nothing is squeezed out of reach. */
+.review-tray{--review-tray-bg:var(--canvas,var(--bg));container:review-tray/inline-size;display:flex;flex-direction:column;min-height:0;overflow:hidden;border-left:1px solid var(--border,var(--line-subtle));padding-left:12px;font-size:calc(12px * var(--text-scale));gap:8px}
 .review-tray>*{flex-shrink:0}
-.review-tray-top{position:sticky;top:0;z-index:1;display:flex;flex-direction:column;gap:6px;max-height:max(50%,min(184px,70%));min-height:0;padding-bottom:2px;background:var(--review-tray-bg)}
+.review-tray-top{display:flex;flex-direction:column;gap:6px;max-height:36%;min-height:0;padding-bottom:2px}
+.review-tray>.review-tray-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:8px}
+.review-tray-scroll>*{flex-shrink:0}
 .review-tray-top>header,.changes-panel .review-tray-top>header{display:grid;grid-template-columns:1fr auto;align-items:center;gap:2px 8px;padding:.5rem 0 0!important}
 .review-tray-top>header h3{display:flex;align-items:center;gap:6px;margin:0;font-size:calc(13px * var(--text-scale));color:var(--text)}
 .review-tray-top>header small{grid-column:1;margin:0!important}
@@ -83,7 +82,7 @@
 .review-tray-body{color:var(--text-tertiary);line-height:1.45;overflow-wrap:anywhere}
 .review-tray li.is-resolved .review-tray-body,.review-tray li.is-wont_fix .review-tray-body{text-decoration:line-through;text-decoration-color:var(--text-disabled)}
 .review-empty{margin:0;color:var(--text-muted);line-height:1.55}
-.review-tray>footer{position:sticky;bottom:0;z-index:1;display:flex;flex-direction:column;gap:8px;padding:8px 0 4px;border-top:1px solid var(--line-subtle);background:var(--review-tray-bg)}
+.review-tray>footer{max-height:27%;overflow:auto;display:flex;flex-direction:column;gap:8px;padding:8px 0 4px;border-top:1px solid var(--line-subtle);background:var(--review-tray-bg)}
 .review-target{display:flex;flex-direction:row;align-items:center;gap:8px;color:var(--text-subtle)}
 .review-target select{flex:1;min-width:0;padding:4px 6px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface-raised);color:var(--text);font-size:calc(12px * var(--text-scale))}
 .review-tray .review-send{justify-content:center;padding:7px 10px}

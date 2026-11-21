@@ -399,6 +399,31 @@ async function tarball(file, dir) {
   await run('tar', [...flags, '-czf', file, '-C', dir, '.'], { env: { ...buildEnv, COPYFILE_DISABLE: '1' } });
 }
 
+async function populateLinuxRuntime(runtime, version, arch) {
+  await mkdir(join(runtime, 'bin'), { recursive: true });
+  await buildGo(runtime, version, { goos: 'linux', goarch: arch.go });
+  const nodeVersion = await fetchNode(runtime, arch.node);
+  const packages = await bundleWorker(runtime, { claudeCode: false, platform: arch.node, build: false });
+  await cp(join(root, 'apps/web/dist'), join(runtime, 'web'), { recursive: true });
+  await copyDocs(runtime);
+  await writeFile(join(runtime, 'VERSION'), version + '\n');
+  for (const exe of ['bin/lazybox', 'bin/lazybox-runner', 'node/bin/node']) await chmod(join(runtime, exe), 0o755);
+  return { nodeVersion, packages };
+}
+
+/** Build the existing Linux runtime for the architecture of this checkout's host. */
+export async function buildLinuxSource(runtime) {
+  const arch = LINUX_ARCHES.find(candidate => candidate.name === process.arch);
+  if (process.platform !== 'linux' || !arch) throw new Error('The Linux source installer needs x64 or arm64 Linux');
+  const version = sourceVersion(await readChangelog());
+  await run('make', ['build-worker', 'build-web']);
+  const { nodeVersion } = await populateLinuxRuntime(runtime, version, arch);
+  writeNotices({ out: join(runtime, NOTICES_FILE), version, nodeLicense: join(runtime, 'node', 'LICENSE'), nodeVersion, omit: isClaudeCodePackage, desktop: false });
+  const commit = gitText(['rev-parse', 'HEAD']);
+  const dirty = !!gitText(['status', '--porcelain', '--untracked-files=no']);
+  await writeFile(join(runtime, 'SOURCE.json'), JSON.stringify(sourceManifest({ commit, dirty, checkout: root }), null, 2) + '\n');
+}
+
 /**
  * The Linux Runner, for each architecture: the macOS runtime's tree without
  * the app (REMOTE_RUNNERS.md §5.2), as lazybox-runner-<version>-linux-<arch>.tar.gz
@@ -413,15 +438,8 @@ async function buildLinuxBundles({ version, out, stage, notices }) {
     const parent = join(stage, `linux-${arch.name}`);
     const runtime = join(parent, names.runnerDir);
     await rm(parent, { recursive: true, force: true });
-    await mkdir(join(runtime, 'bin'), { recursive: true });
-    await buildGo(runtime, version, { goos: 'linux', goarch: arch.go });
-    await fetchNode(runtime, arch.node);
-    const packages = await bundleWorker(runtime, { claudeCode: false, platform: arch.node, build: false });
-    await cp(join(root, 'apps/web/dist'), join(runtime, 'web'), { recursive: true });
-    await copyDocs(runtime);
+    const { packages } = await populateLinuxRuntime(runtime, version, arch);
     await cp(notices, join(runtime, NOTICES_FILE));
-    await writeFile(join(runtime, 'VERSION'), version + '\n');
-    for (const exe of ['bin/lazybox', 'bin/lazybox-runner', 'node/bin/node']) await chmod(join(runtime, exe), 0o755);
     const inside = [];
     for (const rel of await filesUnder(runtime)) inside.push([rel, await sha256(join(runtime, rel))]);
     await writeFile(join(runtime, 'SHA256SUMS'), sumsText(inside));
@@ -472,7 +490,7 @@ async function linuxOnly(version) {
   // Node's licence is the same file on every platform; any architecture's will do.
   const nodeLicenseDir = join(stage, 'node-license');
   await fetchNode(nodeLicenseDir, LINUX_ARCHES[0].node);
-  writeNotices({ out: notices, version, nodeLicense: join(nodeLicenseDir, 'node', 'LICENSE'), nodeVersion: pin.version, omit: isClaudeCodePackage });
+  writeNotices({ out: notices, version, nodeLicense: join(nodeLicenseDir, 'node', 'LICENSE'), nodeVersion: pin.version, omit: isClaudeCodePackage, desktop: false });
   step('Linux Runner bundles');
   const artifacts = await buildLinuxBundles({ version, out, stage, notices });
   await writeFile(join(out, 'SHA256SUMS'), sumsText(artifacts));
@@ -595,7 +613,7 @@ async function main() {
   step('Linux Runner bundles');
   // Their own notices: they never ship Claude Code, whatever the app does.
   const linuxNotices = join(stage, `linux-${NOTICES_FILE}`);
-  writeNotices({ out: linuxNotices, version, nodeLicense: join(runtime, 'node', 'LICENSE'), nodeVersion, omit: isClaudeCodePackage });
+  writeNotices({ out: linuxNotices, version, nodeLicense: join(runtime, 'node', 'LICENSE'), nodeVersion, omit: isClaudeCodePackage, desktop: false });
   const linux = await buildLinuxBundles({ version, out, stage, notices: linuxNotices });
   const signature = await readFile(join(out, names.signature), 'utf8');
   await writeFile(join(out, names.latest), JSON.stringify(latestJson({ version, notes: updaterNotes(releases, noteVersion), releases: updaterReleases(releases, noteVersion), signature }), null, 2) + '\n');

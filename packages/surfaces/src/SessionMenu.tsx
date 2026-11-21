@@ -6,7 +6,7 @@ import { ActionMenuItems } from './ActionMenuItems';
 import type { MenuItem } from './context-menu-model';
 import { ACTIVITY_LABELS, type ActivityDetailState } from './activity-detail';
 import { ACTIVITY_DETAILS } from './tool-lines';
-import { permissionBlocked, shownModelChoices, type SlashChoice } from './slash-commands';
+import { PERMISSION_LABELS, permissionBlocked, shownModelChoices, type SlashChoice } from './slash-commands';
 import { showMenuNotice } from './ContextMenu';
 import { requestRename } from './ConversationTitle';
 import { conversationHandoffItems, useHandoffMenus } from './handoff';
@@ -19,7 +19,7 @@ import { agentTitle } from './providers';
 export type ModelChoices = { choices: SlashChoice[]; efforts?: SlashChoice[]; live: boolean; disabled?: string; choose(value: string): void; /** Any model id: `/model ` in the message box. */ pick(): void };
 const copySessionId = (id: string) => { void navigator.clipboard?.writeText(id).then(() => showMenuNotice('Session ID copied'), () => showMenuNotice('Could not copy the session ID')); };
 
-export const PERMISSION_CHOICES: [string, string][] = [['ask', 'Ask for approval'], ['read-only', 'Read only'], ['yolo', 'YOLO']];
+export const PERMISSION_CHOICES = Object.entries(PERMISSION_LABELS);
 
 /** Ends a live session, or starts a new one from a saved conversation. */
 export function SessionLifecycleButton({ session, allowStart, onNewSession, onClose }: { session?: Session; allowStart: boolean; onNewSession(): void; onClose(): void }) {

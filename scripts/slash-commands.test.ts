@@ -83,9 +83,9 @@ test('the menu: names while typing, choices after a space, a hint for free argum
  assert.equal(slashMenu('/mo',all(),true),null,'closed with Esc');
  assert.equal(slashMenu('hello',all()),null);});
 
-test('choices: YOLO is refused in plan mode; detail marks the current one',()=>{
+test('choices: Full access is refused in plan mode; detail marks the current one',()=>{
  const perms=lazyboxCommands(ctx({planWorkflow:true})).find(c=>c.name==='permissions')!;
- assert.equal(perms.choices!.find(c=>c.value==='yolo')!.disabled,'YOLO is unavailable in plan mode');
+ assert.equal(perms.choices!.find(c=>c.value==='yolo')!.disabled,'Full access is unavailable in plan mode');
  const {items,best}=rankChoices('',perms.choices!);assert.equal(items[best].value,'read-only','the current one is not the default pick');
  assert.equal(rankChoices('yo',perms.choices!).items[0].value,'yolo');
  assert.equal(rankChoices('bypass',perms.choices!).items[0].value,'yolo','keywords');
@@ -191,7 +191,7 @@ test('the line a command leaves in the conversation',()=>{
  assert.equal(shortTokens(156000),'156k');assert.equal(shortTokens(61_400),'61k');assert.equal(shortTokens(1_200_000),'1.2M');assert.equal(shortTokens(800),'800');
  assert.equal(commandLine('model_changed','claude-opus-5-5','live',{}),'Switched model to claude-opus-5-5');
  assert.equal(commandLine('model_changed','claude-opus-5-5','restart',{}),'Switched model to claude-opus-5-5 · the agent restarted');
- assert.equal(commandLine('permission_changed','yolo','live',{}),'Permissions: YOLO');
+ assert.equal(commandLine('permission_changed','yolo','live',{}),'Permissions: Full access');
  assert.equal(commandLine('compacted','','',{trigger:'manual',preTokens:156000,postTokens:61000}),'Compacted context: 156k → 61k tokens');
  assert.equal(commandLine('compacted','','',{trigger:'auto',preTokens:180000}),'Context compacted automatically from 180k tokens');
  assert.equal(commandLine('message_delta','hi','',{}),'');});
@@ -207,15 +207,15 @@ test('the conversation: the agent\'s catalog is kept, commands run are one line,
  assert.deepEqual(state.messages.map(m=>[m.text,!!m.command]),[['/review-pr 12',true],['/usr/bin is gone',false],['/compact',true]]);
  add('compacted','',{trigger:'manual',preTokens:156000,postTokens:61000});
  add('model_changed','claude-sonnet-5',undefined,'live');add('permission_changed','yolo',undefined,'live');
- assert.deepEqual(state.messages.slice(3).map(m=>[m.type,m.text]),[['command','Compacted context: 156k → 61k tokens'],['command','Switched model to claude-sonnet-5'],['command','Permissions: YOLO']]);
+ assert.deepEqual(state.messages.slice(3).map(m=>[m.type,m.text]),[['command','Compacted context: 156k → 61k tokens'],['command','Switched model to claude-sonnet-5'],['command','Permissions: Full access']]);
  assert.equal(state.reportedModel,'claude-sonnet-5');});
 
-test('the mode an agent is in is the current choice, never a blocked one: only YOLO in plan mode is',()=>{
- // A Codex conversation in YOLO: YOLO is current (selected), not unavailable.
+test('the mode an agent is in is the current choice, never a blocked one: only Full access in plan mode is',()=>{
+ // A Codex conversation in Full access: Full access is current (selected), not unavailable.
  const perms=lazyboxCommands(ctx({permission:'yolo'})).find(c=>c.name==='permissions')!.choices!;
  assert.deepEqual(perms.map(c=>[c.value,!!c.current,c.disabled||'']),[['ask',false,''],['read-only',false,''],['yolo',true,'']]);
  assert.equal(permissionBlocked('','yolo'),'','the current mode is not blocked');
- assert.equal(permissionBlocked('plan','yolo'),'YOLO is unavailable in plan mode');
+ assert.equal(permissionBlocked('plan','yolo'),'Full access is unavailable in plan mode');
  assert.equal(permissionBlocked('plan','ask'),'');});
 
 test('a conversation on the provider\'s default model has a current choice: Default',()=>{

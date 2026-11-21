@@ -17,8 +17,8 @@ const alpha=f.openEvents('alpha-session');alpha.push({type:'command_catalog',pro
 f.openEvents('beta-session');
 f.sessions.push({...structuredClone(f.sessions[1]),id:'codex-session',conversationId:'codex-conversation',title:'Codex refactor',provider:'codex',profileId:'codex-default',model:'gpt-6.1-sol',modelReported:true,busy:false,status:'ready',capabilities:{...f.sessions[1].capabilities,liveModel:true,resume:true,steer:true}});
 f.openEvents('codex-session').push({type:'command_catalog',providerDataJson:data({models:[{value:'gpt-6.1-sol',displayName:'GPT-6.1-Sol',description:'Workhorse'},{value:'gpt-6-astra',displayName:'GPT-6-Astra',description:'Frontier'},{value:'gpt-6-luna',displayName:'GPT-6-Luna',description:'Fast',effortLevels:['low','high']},{value:'gpt-5.5',displayName:'GPT-5.5',description:'Legacy'}]})});
-// A Codex conversation of the "Work" subscription in YOLO, on Codex's own default model (none asked for, none reported
-// yet), whose app-server lists a dozen models: the ⋯ menu marks YOLO and Default as current, and switches for real.
+// A Codex conversation of the "Work" subscription in Full access, on Codex's own default model (none asked for, none reported
+// yet), whose app-server lists a dozen models: the ⋯ menu marks Full access and Default as current, and switches for real.
 const manyModels=['gpt-6.1-sol','gpt-6-astra','gpt-6-luna','gpt-5.5','gpt-5.5-mini','gpt-5.4','gpt-5.4-mini','gpt-5.3','gpt-5.2','gpt-5.1','gpt-5','gpt-5-mini'].map(value=>({value,displayName:value.toUpperCase(),description:''}));
 f.sessions.push({...structuredClone(f.sessions[1]),id:'codex-default-session',conversationId:'codex-default-conversation',title:'Work refactor',provider:'codex',profileId:'codex-default',model:'',modelReported:false,permission:'yolo',busy:false,status:'ready',capabilities:{...f.sessions[1].capabilities,liveModel:true,livePermission:true,resume:true,steer:true}});
 f.openEvents('codex-default-session').push({type:'command_catalog',providerDataJson:data({models:manyModels})});
@@ -56,17 +56,25 @@ try{
  await page.keyboard.press('Escape');await expect(menu).toBeHidden();await expect(message).toHaveValue('/mo');
  await message.fill('');
 
- // /permissions: Enter shows the choices, Enter on YOLO switches live and says so in one line.
+ // The composer permission button opens the same picker and preserves a draft.
+ await message.fill('Draft to keep');
+ await chat.getByRole('button',{name:'Change permissions: Ask for approval'}).click();
+ await expect(chat.getByRole('listbox',{name:'/permissions choices'})).toBeVisible();
+ await page.keyboard.press('Escape');
+ await expect(message).toHaveValue('Draft to keep');
+ await message.fill('');
+
+ // /permissions: Enter shows the choices, Enter on Full access switches live and says so in one line.
  await page.keyboard.type('/perm');await expect(menu.getByRole('option',{selected:true})).toContainText('/permissions');
  await page.keyboard.press('Enter');
  const choices=chat.getByRole('listbox',{name:'/permissions choices'});
  await expect(choices).toBeVisible();await expect(message).toHaveValue('/permissions ');
  await expect(choices.getByRole('option',{name:/Ask for approval.*Current/})).toBeVisible();
- await page.keyboard.type('yo');await expect(choices.getByRole('option',{selected:true})).toContainText('YOLO');
+ await page.keyboard.type('yo');await expect(choices.getByRole('option',{selected:true})).toContainText('Full access');
  await page.keyboard.press('Enter');
  await expect.poll(()=>applies().at(-1)?.body.permission?.mode).toBe('yolo');
  await expect(message).toHaveValue('');
- await expect(chat.locator('.command-line').filter({hasText:'Permissions: YOLO'})).toBeVisible();
+ await expect(chat.locator('.command-line').filter({hasText:'Permissions: Full access'})).toBeVisible();
  assert.equal(await chat.locator('.message.operation_accepted').filter({hasText:'/permissions'}).count(),0,'no fake user message');
 
  // /model: the provider's models in display order, the current one marked; a live switch.
@@ -228,7 +236,7 @@ try{
  await betaMessage.focus();
  // /permissions yolo where the agent must restart to switch: the card takes the keyboard, Enter restarts, the box has it back.
  await page.keyboard.type('/permissions yolo');await page.keyboard.press('Enter');
- const permissionCard=betaChat.getByRole('alert').filter({hasText:'Switch to YOLO?'});
+ const permissionCard=betaChat.getByRole('alert').filter({hasText:'Switch to Full access?'});
  await expect(permissionCard.getByRole('button',{name:'Restart',exact:true})).toBeFocused();
  await page.keyboard.press('Escape');
  await expect(permissionCard).toHaveCount(0);await expect(betaMessage).toBeFocused();
@@ -332,7 +340,7 @@ try{
  await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe(partialInterrupt);
  await expect(codexMessage).toHaveValue('');
 
- // The ⋯ menu says what is current: YOLO is selected (pressed, not greyed out), and the provider's
+ // The ⋯ menu says what is current: Full access is selected (pressed, not greyed out), and the provider's
  // Default is the current model when the conversation names none. Twelve models: the first few, then More.
  await go(`${base}/?view=workspace&collection=beta&session=codex-default-session#token=${f.token}`);
  await page.getByText('Work refactor',{exact:true}).first().click();
@@ -341,7 +349,7 @@ try{
  await workChat.locator('summary[aria-label="Session actions"]').click();
  const workMenu=workChat.locator('.session-menu');
  const permissionGroup=workMenu.getByRole('group',{name:'Permissions'}),modelGroup=workMenu.getByRole('group',{name:'Model'});
- const yolo=permissionGroup.getByRole('button',{name:'YOLO',exact:true});
+ const yolo=permissionGroup.getByRole('button',{name:'Full access',exact:true});
  await expect(yolo).toHaveAttribute('aria-pressed','true');await expect(yolo).toBeEnabled();
  assert.equal(await yolo.getAttribute('aria-disabled'),null,'the current mode is not unavailable');
  await expect(permissionGroup.getByRole('button',{name:'Ask for approval',exact:true})).toHaveAttribute('aria-pressed','false');

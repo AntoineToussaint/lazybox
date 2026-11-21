@@ -468,7 +468,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
             {TASK_MODES.map(mode => <option key={mode.id} value={mode.id}>{mode.id === 'default' ? defaultModeLabel(info, settings?.permission) : mode.label}</option>)}
           </select>
         </div>
-        {safe.guarded && behaviorProfile !== CHECK_IN_FIRST && <p className="new-task-hint" data-testid="new-task-item-mode">From an issue the agent asks first, not YOLO: its text is not yours. Choose YOLO to change that.</p>}
+        {safe.guarded && behaviorProfile !== CHECK_IN_FIRST && <p className="new-task-hint" data-testid="new-task-item-mode">Tasks from an issue start with approvals. Choose Full access to change that.</p>}
       </div>
 
       {replaced && !problem && !busy
@@ -488,7 +488,7 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
 
 const defaultModeLabel = (info: InfoResponse | undefined, permission?: string) => {
   const value = permission || info?.defaultPermission || '';
-  return `Runner default${value ? ` · ${value === 'yolo' ? 'YOLO' : value === 'read-only' ? 'read only' : value === 'ask' ? 'ask' : value}` : ''}`;
+  return `Runner default${value ? ` · ${value === 'yolo' ? 'Full access' : value === 'read-only' ? 'read only' : value === 'ask' ? 'ask' : value}` : ''}`;
 };
 
 /**

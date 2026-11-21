@@ -22,7 +22,7 @@ export function formatBudget(b?: Budget): string {
   return [b.usd ? `$${b.usd}` : '', b.wall || '', b.turns ? `${b.turns} turns` : '', b.retries ? `${b.retries} ${b.retries === 1 ? 'retry' : 'retries'}` : ''].filter(Boolean).join(' · ');
 }
 
-const permissions: Record<string, string> = { read_only: 'Read only', ask: 'Ask', yolo: 'YOLO' };
+const permissions: Record<string, string> = { read_only: 'Read only', ask: 'Ask', yolo: 'Full access' };
 
 function wake(t: Trigger): string {
   const on = list(t.on).join(', ');

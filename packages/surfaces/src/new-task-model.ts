@@ -13,7 +13,7 @@ export const TASK_MODES = [
   { id: 'ask', label: 'Ask for approval', permission: 'ask', workflow: 'execute' },
   { id: 'plan', label: 'Plan first', permission: 'ask', workflow: 'plan' },
   { id: 'read-only', label: 'Read only', permission: 'read-only', workflow: 'execute' },
-  { id: 'yolo', label: 'YOLO · full access', permission: 'yolo', workflow: 'execute' },
+  { id: 'yolo', label: 'Full access', permission: 'yolo', workflow: 'execute' },
 ] as const;
 export type TaskMode = (typeof TASK_MODES)[number]['id'];
 export const modeOf = (id: string) => TASK_MODES.find(mode => mode.id === id) || TASK_MODES[0];

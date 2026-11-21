@@ -1,5 +1,8 @@
 version: 1
 actions:
-  rebuild-dev-working:
-    run: node scripts/managed-build.mjs
+  rebuild-dev:
+    run: node scripts/managed-build.mjs dev
+    concurrent: true
+  stage-working:
+    run: node scripts/managed-build.mjs working
     concurrent: true

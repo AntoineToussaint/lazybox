@@ -45,9 +45,9 @@ export function ComposerInfo({ agentName, modelLabel, modelRequested, sessionID,
       ? <button type="button" tabIndex={0} className="composer-info-model" data-requested={modelRequested || undefined} title={`${tooltip}\nSwitch model (/model)`} aria-label={`${text}: change model`} onClick={onPickModel}>{words}<Icon name="chevron" size={11}/></button>
       : <span className="composer-info-model" data-requested={modelRequested || undefined} title={tooltip}>{words}</span>}
     {onPickPermissions
-      ? <button type="button" tabIndex={0} className="composer-info-context composer-info-permission" title={permissionHint}
+      ? <button type="button" tabIndex={0} className="composer-info-permission" title={permissionHint}
         aria-label={`Change permissions: ${mode}`} onClick={onPickPermissions}><Icon name="shield" size={13}/><span>{mode}</span><Icon name="chevron" size={10}/></button>
-      : (permission || reportedPermission) && <span className="composer-info-context" title={permissionHint}>{mode}</span>}
+      : (permission || reportedPermission) && <span className="composer-info-permission" title={permissionHint}>{mode}</span>}
     {label && context && <button type="button" className="composer-info-context" data-level={percent === undefined ? undefined : contextLevel(percent)} popoverTarget={context.popover}
       title={`Context ${label} used · show context and cost`} aria-label={`Context ${label} used: show context and cost`}
       onClick={event => { const popover = document.getElementById(context.popover); if (popover) placeUsagePopover(popover, event.currentTarget.getBoundingClientRect(), 'below'); }}>

@@ -1,7 +1,7 @@
 /* The message box's agent and context (ComposerInfo.tsx): quiet text like the hint beside it,
    set apart from the box's own tools by a hairline. */
 .composer-info{display:inline-flex;align-items:center;gap:2px;min-width:0;margin:0 2px 0 -6px;padding-right:6px;border-right:1px solid var(--line-subtle)}
-.composer-info>.composer-info-model,.composer-info>.composer-info-context{display:inline-flex;align-items:center;gap:6px;height:24px;min-height:0;margin:0;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--text-muted);font-size:calc(11px * var(--text-scale));font-weight:400;line-height:1;white-space:nowrap;font-variant-numeric:tabular-nums}
+.composer-info>:is(.composer-info-model,.composer-info-context,.composer-info-permission){display:inline-flex;align-items:center;gap:6px;height:24px;min-height:0;margin:0;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--text-muted);font-size:calc(11px * var(--text-scale));font-weight:400;line-height:1;white-space:nowrap;font-variant-numeric:tabular-nums}
 .composer-info>button:hover{background:var(--surface-active);color:var(--text)}
 .composer-info>button:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
 .composer-info>.composer-info-model{display:inline-flex;line-height:24px}
@@ -22,12 +22,12 @@
 @container (max-width:360px){
   .composer-info-agent:has(+.composer-info-model-name){display:none}
   .embedded-chat .composer .row{column-gap:4px}
-  .composer-info>.composer-info-model,.composer-info>.composer-info-context{padding-inline:3px;gap:3px}
+  .composer-info>:is(.composer-info-model,.composer-info-context,.composer-info-permission){padding-inline:3px;gap:3px}
 }
 
 @media(max-width:760px){
   .workspace-shell .embedded-chat .composer-info-meter{display:none}
-  .workspace-shell .embedded-chat .composer-info>.composer-info-context{height:32px;padding:0 5px}
+  .workspace-shell .embedded-chat .composer-info>:is(.composer-info-context,.composer-info-permission){height:32px;padding:0 5px}
 }
 
 .composer-info-permission svg{flex:none}

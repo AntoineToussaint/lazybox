@@ -1,5 +1,6 @@
 import { agentIcon, agentTitle } from './providers';
-import { orderSubscriptions, subscriptionDetail, subscriptionName, subscriptionReady, type SubscriptionLike } from './subscription-model';
+import type { Profile } from '@lazybox/protocol';
+import { comeback, type Comeback, orderSubscriptions, subscriptionDetail, subscriptionName, subscriptionReady, type SubscriptionLike } from './subscription-model';
 
 /**
  * Subscriptions grouped by provider, the one way every list shows them
@@ -53,4 +54,31 @@ export function subscriptionGroups<T extends SubscriptionLike>(profiles: readonl
 export function subscriptionOption(profile: SubscriptionLike, now = Date.now()): string {
   const name = subscriptionName(profile, profile.id);
   return subscriptionReady(profile, now) ? name : `${name} · ${subscriptionDetail(profile, now)}`;
+}
+
+export function cardStatus(profile: Profile, back: Comeback) {
+  switch (back.kind) {
+    case 'available': return profile.availability?.state === 'available' || profile.availability?.windows.length ? 'Available' : 'Not checked';
+    case 'due': return 'Resetting';
+    case 'sign-in': return 'Sign-in required';
+    case 'billing': return 'Billing issue';
+    default: return profile.availability?.state === 'throttled' ? 'Rate limited' : 'Limit reached';
+  }
+}
+
+export function subscriptionCardGroups(profiles: readonly Profile[], statusFilter: string, cardOrder: string, now: number) {
+  const visibleGroups = subscriptionGroups(profiles.filter(profile => {
+    const status = cardStatus(profile, comeback(profile, now));
+    if (statusFilter === 'Limited') return status === 'Rate limited' || status === 'Limit reached';
+    return statusFilter === 'All statuses' || status === statusFilter;
+  }), { now });
+  const resetOrder = (profile: Profile) => {
+    const back = comeback(profile, now);
+    return back.kind === 'back' || back.kind === 'due' ? back.resetAt : Infinity;
+  };
+  for (const group of visibleGroups) {
+    if (cardOrder === 'Name') group.items.sort((a, b) => subscriptionName(a, a.id).localeCompare(subscriptionName(b, b.id), undefined, { numeric: true }));
+    if (cardOrder === 'Earliest limit reset') group.items.sort((a, b) => resetOrder(a) - resetOrder(b));
+  }
+  return visibleGroups;
 }

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create } from '@bufbuild/protobuf';
 import { ProfileSchema, type Profile } from '@lazybox/protocol';
-import { compareProviders, groupByProvider, subscriptionGroups, subscriptionOption } from '../packages/surfaces/src/subscription-groups.ts';
+import { subscriptionCardGroups, compareProviders, groupByProvider, subscriptionGroups, subscriptionOption } from '../packages/surfaces/src/subscription-groups.ts';
 import { orderSubscriptions, subscriptionChoices } from '../packages/surfaces/src/subscription-model.ts';
 
 // 2026-11-16 12:00 local time.
@@ -66,4 +66,14 @@ test('grouping keeps the order it is given and works on any item', () => {
   assert.deepEqual(groups.map(g => [g.provider, g.items.map(i => i.n)]), [['claude', [2]], ['codex', [1, 3]]]);
   assert.deepEqual(groupByProvider([], () => 'claude'), []);
   assert.ok(compareProviders('claude', 'codex') < 0 && compareProviders('codex', 'acp:aider') < 0 && compareProviders('acp:gemini', 'acp:goose') < 0);
+});
+
+test('limited cards order by recovery time with unknown resets last', () => {
+  const profiles = [...mixed,
+    profile('early', 'claude', 'Zed', { state: 'throttled', resetAt: BigInt(at(13)) }),
+    profile('unknown', 'claude', 'Aardvark', { state: 'exhausted' }),
+  ];
+  const ids = (order: string) => subscriptionCardGroups(profiles, 'Limited', order, noon).flatMap(group => group.items.map(p => p.id));
+  assert.deepEqual(ids('Earliest limit reset'), ['early', 'claude-personal', 'unknown']);
+  assert.deepEqual(ids('Name'), ['unknown', 'claude-personal', 'early']);
 });

@@ -207,11 +207,23 @@ try {
   await expect(page.locator('.composer-mic')).toHaveAccessibleName('Stop dictation');
   await expect(pill.getByRole('note'), 'the key has worked here: no word about other apps').toHaveCount(0);
   await say('dropped');
-  await pill.getByRole('button', { name: 'Cancel dictation' }).click();
+  const afterCancel = await pill.getByRole('button', {name: 'Cancel dictation'}).evaluate(button =>
+    new Promise(resolve => requestAnimationFrame(() => {
+      button.click();
+      const box = document.querySelector('textarea[data-agent-composer]');
+      // Select all immediately after cancel, before another paint. A delayed
+      // dictation caret used to collapse that selection and swallow Delete.
+      queueMicrotask(() => {
+        box.focus(); box.select();
+        requestAnimationFrame(() => resolve([box.selectionStart, box.selectionEnd]));
+      });
+    })));
   await expect(message).toHaveValue('Keep this kept by the button');
+  assert.deepEqual(afterCancel, [0, 'Keep this kept by the button'.length]);
 
   // A pause long enough that the browser ends its recognition: listening goes on in a new one, and the words before the pause stay.
   await message.fill('');
+  await expect(message).toHaveValue('');
   await page.keyboard.press('Alt+Space');
   await listening();
   await say('look at the logs');

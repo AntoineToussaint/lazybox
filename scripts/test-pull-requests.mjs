@@ -167,18 +167,24 @@ try {
   await pullRows.first().getByRole('button', {name: 'Send the failures to Claude'}).click();
   await expect.poll(() => sent('SendPullRequestFailures').length).toBe(2);
   await expect(pullRows.first().locator('.pr-inbox-note')).toContainText('Sent 2 failing checks');
-  await pullRows.nth(1).getByRole('button', {name: 'Address the review'}).click();
-  await expect.poll(() => sent('ImportPullRequestReview').length).toBe(1);
-  f.tracked.externalReviewOnly = true;
+  await expect(pullRows.first().getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
+  await expect(pullRows.first()).toContainText(/Auto-dismiss in \d+s/);
   const reviewRow = pullRows.nth(1);
+  f.tracked.refusal = 'Review unavailable';
+  await reviewRow.getByRole('button', {name: 'Address the review'}).click();
+  await expect(reviewRow.getByRole('alert')).toContainText('Review unavailable');
+  await expect(reviewRow.getByRole('button', {name: 'Address the review'})).toBeEnabled();
+  f.tracked.refusal = '';
+  f.tracked.externalReviewOnly = true;
   await reviewRow.getByRole('button', {name: 'Address the review'}).click();
   await expect(reviewRow.getByRole('status')).toContainText('No new review feedback was sent.');
   await expect(reviewRow.getByRole('link', {name: 'Open review'})).toHaveAttribute('href', 'https://github.com/acme/api/pull/77/files');
   await reviewRow.screenshot({path: '.cache/pull-requests-external-review.png'});
-  assert.equal(f.tracked.sent.filter(item => item.method === 'ImportPullRequestReview').length, 1);
+  assert.equal(f.tracked.sent.filter(item => item.method === 'ImportPullRequestReview').length, 0);
   f.tracked.externalReviewOnly = false;
   await pullRows.nth(1).getByRole('button', {name: /Dismiss acme\/api#77/}).click();
   await expect(pullRows).toHaveCount(1);
+  await expect(pullRows).toHaveCount(0, {timeout: 12_000});
   await page.keyboard.press('Escape');
 
   // 6. The phone: the same rows, thumb-sized, with Undo before a send.
@@ -199,7 +205,11 @@ try {
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'no sideways scrolling on a phone');
   await phoneRows.first().getByRole('button', {name: 'Send the failures to Claude'}).click();
   await expect.poll(() => sent('SendPullRequestFailures').length, {timeout: 15_000}).toBe(3);
+  await expect(phoneRows.first().getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
+  await expect(phoneRows.first()).toContainText('Auto-dismiss in');
 
+  await phoneRows.nth(1).getByRole('button', {name: 'Address the review'}).click();
+  await expect.poll(() => f.tracked.sent.filter(item => item.method === 'ImportPullRequestReview').length, {timeout: 15_000}).toBe(1);
   assert.deepEqual(errors, []);
   console.log('PASS: header pills, sidebar badge, Pull requests panel and keys with confirmations, the chip in the conversation, Inbox reactions, phone rows.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

@@ -14,15 +14,46 @@ export function useTrackedItems() {
 }
 
 const DISMISSED = 'lazybox:pull-inbox-dismissed';
-/** The Inbox rows this window dismissed (a new failure or review brings a row back). */
+const listeners = new Set<() => void>();
+const completed = new Map<string, { text: string; until: number; timer: number }>();
+const readDismissed = () => {
+  try { return new Set(parseDismissed(localStorage.getItem(DISMISSED))); }
+  catch { return new Set<string>(); }
+};
+let dismissed = readDismissed();
+let snapshot = { dismissed, completed: new Map(completed) };
+function publish() {
+  snapshot = { dismissed, completed: new Map(completed) };
+  listeners.forEach(listener => listener());
+}
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+function remember(key: string) {
+  const keys = new Set([...readDismissed(), ...dismissed]);
+  keys.add(key);
+  dismissed = new Set([...keys].slice(-500));
+  try { localStorage.setItem(DISMISSED, JSON.stringify([...dismissed])); } catch { /* keep in memory */ }
+}
+function dismiss(key: string) {
+  window.clearTimeout(completed.get(key)?.timer);
+  completed.delete(key);
+  remember(key);
+  publish();
+}
+function complete(key: string, text: string) {
+  if (dismissed.has(key)) return;
+  remember(key);
+  const until = Date.now() + 10_000;
+  const timer = window.setTimeout(() => { completed.delete(key); publish(); }, 10_000);
+  completed.set(key, { text, until, timer });
+  publish();
+}
+/** All Inbox surfaces and their badges share the same dismissal and receipt. */
 export function useDismissedPulls() {
-  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(() => { try { return new Set(parseDismissed(localStorage.getItem(DISMISSED))); } catch { return new Set(); } });
-  const dismiss = useCallback((key: string) => setDismissed(previous => {
-    const next = new Set(previous); next.add(key);
-    try { localStorage.setItem(DISMISSED, JSON.stringify([...next].slice(-500))); } catch { /* per-viewer convenience only */ }
-    return next;
-  }), []);
-  return { dismissed, dismiss };
+  const state = useSyncExternalStore(subscribe, () => snapshot);
+  return { ...state, dismiss, complete };
 }
 
 export type PullAction = 'send' | 'review' | 'merge';

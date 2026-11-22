@@ -80,3 +80,5 @@ On a subscription limit card, **Show all subscriptions** opens the latest report
 In a running Codex turn, **Allow and enable Full access** accepts the pending command. Subsequent ordinary main-agent command requests use a one-time approval automatically. Codex applies the new sandbox policy when the next turn starts.
 
 Saved snippet text in drafts and sent prompts appears as a named chip. Hover, focus, or tap the chip to read the full text. **Edit prompt** opens the original draft, and **Collapse snippet text** restores the compact view. Matching uses the current snippet catalog; unmatched text stays visible.
+
+After a successful pull request Inbox action, its button gives way to a delivery receipt and a ten-second auto-dismiss countdown. Dismiss closes it immediately. Failed actions remain available to retry.

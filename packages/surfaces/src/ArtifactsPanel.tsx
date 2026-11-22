@@ -232,6 +232,7 @@ export function ArtifactsPanel({ workspaceId, collections, viewState, target, on
       focus={focus?.artifactId === current.id ? focus : undefined}
       conversationId={other ? undefined : conversation?.id} conversationTitle={other ? undefined : conversation?.title} onDeleted={back}/>
       : (all ? everywhere.items.length > 0 : artifacts.length > 0) && <div className="artifact-page is-placeholder"><p className="module-empty">Choose an artifact to read it.</p></div>}
+    {menu && <ContextMenu menu={menu} onClose={() => setMenu(undefined)}/>}
     {deleting && <DeleteArtifactDialog artifact={deleting} onClose={() => setDeleting(undefined)} onDeleted={() => { if (deleting.id === selected) setSelected(''); setDeleting(undefined); }}/>}
   </div>;
 }

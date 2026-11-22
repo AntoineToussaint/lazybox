@@ -15,7 +15,7 @@ import { SlashMenu, SLASH_MENU_ID, slashOptionId } from './SlashMenu';
 import { useDismiss } from './dismiss';
 import { useConfirmCard } from './confirm-card';
 import {
-  boxAfterCommand, decideSend, findCommand, lazyboxCommands, mergeModels, modelRestartText, paletteCommand, reviewRequest, providerCommands, resolveModel, sameModel, slashCommandList, slashMenu, snippetCommands,
+  boxAfterCommand, decideSend, findCommand, lazyboxCommands, mergeModels, orderedModelChoices, modelRestartText, paletteCommand, reviewRequest, providerCommands, resolveModel, sameModel, slashCommandList, slashMenu, snippetCommands,
   type CommandCatalog, type ProviderModel, type SlashChoice, type SlashCommand, type SlashContext, type SlashMenuState,
 } from './slash-commands';
 import { useProviderAvailability } from './useProviderAvailability';
@@ -183,10 +183,10 @@ export function useSlashCommands(o: Options) {
     const model = resolveModel(name || '', modelsRef.current);
     const { session: current, sessionID: id, onError } = latest.current;
     if (!model || !current) return;
-    const choice = byNameLatest('model')?.choices?.find(c => c.value.toLowerCase() === [model, effort].filter(Boolean).join(' ').toLowerCase());
-    const label = choice?.label || [modelName(model), effort].filter(Boolean).join(' · ');
+    const choice = byNameLatest('model')?.choices?.find(c => c.value.toLowerCase() === model.toLowerCase());
+    const label = [choice?.label || modelName(model), effort].filter(Boolean).join(' · ');
     // The model it runs on already: nothing to switch, nothing to confirm.
-    if (choice?.current || ((!effort || current.effort === effort) && sameModel({ value: model, displayName: modelName(model), description: '' }, latest.current.model))) { setRestart(undefined); notice(`Already on ${label}`); return; }
+    if ((!effort || current.effort === effort) && (choice?.current || sameModel({ value: model, displayName: modelName(model), description: '' }, latest.current.model))) { setRestart(undefined); notice(`Already on ${label}`); return; }
     if (current.capabilities?.liveModel) {
       try {
         await api.apply({ sessionId: id, operationId: crypto.randomUUID(), operation: { case: 'model', value: { model, effort } } });
@@ -236,9 +236,10 @@ export function useSlashCommands(o: Options) {
       case 'effort': {
         const { model, session: current } = latest.current;
         if (!args || args === 'status') { notice(`Reasoning effort: ${current?.effort || 'Provider default'}`); break; }
-        if (!model) { notice('Choose a model and effort with /model'); break; }
-        if (!/^(none|minimal|low|medium|high|xhigh|max|ultra)$/.test(args)) { notice('Choose a supported effort with /model'); break; }
-        void switchModel(`${model} ${args}`);
+        const target = byNameLatest('model')?.choices?.find(choice => choice.current)?.value || model;
+        if (!target) { notice('Choose a model with /model'); break; }
+        if (!/^(none|minimal|low|medium|high|xhigh|max|ultra)$/.test(args)) { notice('Choose a supported level with /effort'); break; }
+        void switchModel(`${target} ${args}`);
         break;
       }
       case 'diff': if (!runAction('changes.show')) notice('Open Changes in the workspace window'); break;
@@ -440,10 +441,9 @@ export function useSlashCommands(o: Options) {
   };
   const modelCommand = byName('model');
   const choices = modelCommand.choices || [];
-  const currentModel = choices.find(choice => choice.current)?.value.split(' ')[0];
-  const modelMenuChoices = choices.filter(choice => !choice.effort).map(choice =>
-    choice.value === currentModel && !choice.current ? { ...choice, current: true } : choice);
-  const effortChoices = choices.filter(choice => choice.effort && choice.value.split(' ')[0] === currentModel);
+  const currentModel = choices.find(choice => choice.current)?.value;
+  const modelMenuChoices = orderedModelChoices(choices);
+  const effortChoices = (lazybox.find(command => command.name === 'effort')?.choices || []).map(choice => ({ ...choice, value: `${currentModel} ${choice.value}` }));
 
   return {
     snippetRows, updateSnippetCatalog: setSnippetRows, menu: menu as SlashMenuState | null, onKeyDown, intercept, above, prompt, dialogs, textareaProps,

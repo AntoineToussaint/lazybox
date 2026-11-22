@@ -237,3 +237,18 @@ test('the ⋯ menu shows the first models and the current one, the rest behind M
  assert.equal(more,7);
  assert.equal(shownModelChoices(twelve,true).shown.length,12);
  assert.equal(shownModelChoices(twelve.slice(0,MODEL_CHOICES_SHOWN+1),false).more,0,'one hidden model is not worth a More button');});
+
+test('model rows stay unique when the provider repeats or shuffles effort levels', () => {
+ const models = [
+  {value:'fable',displayName:'Fable 5',description:'',effortLevels:['max','low','high','medium','xhigh','low']},
+  {value:'default',displayName:'Default (recommended)',description:'',effortLevels:['high','low']},
+  {value:'sonnet',displayName:'Sonnet 5',description:''},
+ ];
+ const commands=lazyboxCommands(ctx({model:'fable',effort:'high',providerModels:models,models:[]}));
+ const menu=slashMenu('/model ',commands);
+ assert.ok(menu?.kind==='choices');
+ assert.deepEqual(menu.items.map(item=>item.value),['fable','default','sonnet']);
+ const efforts=commands.find(command=>command.name==='effort')!.choices!;
+ assert.deepEqual(efforts.map(item=>item.value),['low','medium','high','xhigh','max']);
+ assert.deepEqual(efforts.filter(item=>item.current).map(item=>item.value),['high']);
+});

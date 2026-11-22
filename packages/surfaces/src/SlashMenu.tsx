@@ -50,7 +50,7 @@ export function SlashMenu({ menu, selected, sessionId, agentName, onSelect, onCh
       <div className="slash-list" ref={list} id={id} role="listbox" aria-label={`/${command.name} choices`}>
         {items.map((choice, i) => <ChoiceRow key={choice.value} choice={choice} id={slashOptionId(sessionId, i)} selected={i === selected} onHover={() => onSelect(i)} onChoose={() => onChoose(i)}/>)}
       </div>
-      <Footer hint={items[selected]?.disabled ? "Unavailable · ↑↓ to choose · Tab to leave · Esc to close" : command.freeArgument ? '↑↓ to choose · Enter to switch · or type an id · Esc to close' : '↑↓ to choose · Enter to apply · Esc to close'} onClose={onClose}/>
+      <Footer hint={items[selected]?.disabled ? "Unavailable · ↑↓ to choose · Tab to leave · Esc to close" : command.key === 'lazybox:model' ? '↑↓ to choose · Enter to switch · /effort for reasoning level' : command.freeArgument && command.name !== 'effort' ? '↑↓ to choose · Enter to switch · or type an id · Esc to close' : '↑↓ to choose · Enter to apply · Esc to close'} onClose={onClose}/>
     </div>;
   }
 

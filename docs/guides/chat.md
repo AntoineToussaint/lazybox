@@ -149,7 +149,7 @@ runs and `Esc` closes it and leaves your text. It works in Vim insert mode too.
   command block), `/stop`, `/detail quiet|smart|verbose`, `/rename <title>` and
   `/help`. A command that takes a choice lists it (models, modes) with the
   current one marked. The unfiltered `/model` list puts the current model first
-  and sorts the rest by name. An unavailable suggestion says why and lets Tab move
+  and the provider default next when available, then sorts the rest by name and version number. Each model appears once. Use `/effort` to choose a supported reasoning level for the current model, or type both in one command, such as `/model luna high`. An unavailable suggestion says why and lets Tab move
   focus away. Enter returns to the normal send flow, which asks before sending
   an unsupported command as text. They are in the command
   palette (`⌘K`) as well, where they leave your draft alone; there `/review`

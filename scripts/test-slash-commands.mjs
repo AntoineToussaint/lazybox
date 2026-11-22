@@ -317,7 +317,7 @@ try{
  await expect(codexMessage).toBeEnabled();
  await codexMessage.click();await page.keyboard.type('/model ');
  const codexModels=codexChat.getByRole('listbox',{name:'/model choices'});
- await expect(codexModels.getByRole('option')).toHaveText([/GPT-6\.1-Sol.*Current/,/GPT-5\.5/,/GPT-6-Astra/,/GPT-6-Luna/,/GPT-6-Luna · high/,/GPT-6-Luna · low/]);
+ await expect(codexModels.getByRole('option')).toHaveText([/GPT-6\.1-Sol.*Current/,/GPT-5\.5/,/GPT-6-Astra/,/GPT-6-Luna/]);
  await page.keyboard.press('ArrowUp');await page.keyboard.press('Enter');
  await expect(codexModels).toBeHidden();await expect(codexChat.locator('.restart-model')).toHaveCount(0);
  assert.equal(applies().filter(m=>m.body.sessionId==='codex-session').length,0,'the current Codex model applies nothing');
@@ -331,6 +331,13 @@ try{
  await efforts.getByRole('button',{name:'low',exact:true}).click();
  await expect.poll(()=>applies().findLast(m=>m.body.sessionId==='codex-session')?.body.model?.effort).toBe('low');
  await expect(codexChat.locator('.restart-model')).toHaveCount(0);
+
+ // Effort belongs to the current model and appears in increasing order.
+ await codexMessage.fill('/effort ');
+ const effortList=codexChat.getByRole('listbox',{name:'/effort choices'});
+ await expect(effortList.getByRole('option')).toHaveText([/low.*Current/,/high/]);
+ await effortList.getByRole('option').last().click();
+ await expect.poll(()=>applies().findLast(m=>m.body.sessionId==='codex-session')?.body.model?.effort).toBe('high');
 
  // /mcp is a provider inventory request, even while composing another turn.
  await codexMessage.fill('/mcp');
@@ -394,7 +401,7 @@ try{
  // More shows the rest in place (the menu stays open) and the keyboard moves to the first one it revealed; a model there switches live.
  await more.click();
  await expect(modelGroup.locator('button[data-model]')).toHaveCount(13);
- await expect(modelGroup.getByRole('button',{name:'GPT-5.5',exact:true})).toBeFocused();
+ await expect(modelGroup.locator('button[data-model]').nth(4)).toBeFocused();
  await modelGroup.getByRole('button',{name:'GPT-5.4',exact:true}).click();
  await expect.poll(()=>applies().findLast(m=>m.body.sessionId==='codex-default-session')?.body.model?.model).toBe('gpt-5.4');
  await expect(workChat.locator('.command-line').filter({hasText:'Switched model to gpt-5.4'})).toBeVisible();

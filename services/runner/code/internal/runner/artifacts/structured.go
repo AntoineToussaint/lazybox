@@ -11,9 +11,11 @@ import (
 //go:embed templates/*.json
 var templates embed.FS
 
-// Template returns an editable example for the supported artifact kind.
+var starterNames = []string{"pr-walkthrough", "incident-timeline", "release-checklist"}
+
+// Template returns an editable artifact example by kind or named starter.
 func Template(kind string) (string, error) {
-	if !slices.Contains(Kinds, kind) {
+	if !slices.Contains(Kinds, kind) && !slices.Contains(starterNames, kind) {
 		return "", fmt.Errorf("%w: unknown artifact kind %q", ErrInvalid, kind)
 	}
 	data, err := templates.ReadFile("templates/" + kind + ".json")

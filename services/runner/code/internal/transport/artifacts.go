@@ -53,7 +53,7 @@ func wireArtifact(a artifacts.Artifact) *pb.Artifact {
 		out.Versions = append(out.Versions, &pb.ArtifactVersion{Schema: v.Schema, Number: v.Number, CreatedAtUnixMillis: v.CreatedAt, Author: &pb.ArtifactAuthor{Kind: v.Author.Kind, SessionId: v.Author.SessionID}, Source: artifactWireSource(v.Source), Digest: v.Digest, Size: v.Size})
 	}
 	for _, l := range a.Links {
-		out.Links = append(out.Links, &pb.ArtifactLink{Kind: l.Kind, Id: l.ID, Role: l.Role})
+		out.Links = append(out.Links, &pb.ArtifactLink{Kind: l.Kind, Id: l.ID, Role: l.Role, Version: l.Version})
 	}
 	if r := a.Retired; r != nil {
 		out.Retired = &pb.ArtifactRetirement{AtUnixMillis: r.At, By: &pb.ArtifactAuthor{Kind: r.By.Kind, SessionId: r.By.SessionID}, SupersededBy: r.SupersededBy, Reason: r.Reason}
@@ -114,9 +114,12 @@ func (s *Service) PutArtifact(ctx context.Context, r *pb.PutArtifactRequest) (*p
 	if err != nil {
 		return nil, err
 	}
-	put := artifacts.Put{ID: r.ArtifactId, Title: r.Title, Kind: r.Kind, Format: r.Format, Content: r.Content, ExpectedVersion: r.ExpectedVersion, Author: artifacts.Author{Kind: "person"}}
+	if r.CreationKey != "" && len(r.Supersedes) != 0 {
+		return nil, grpcError(codes.InvalidArgument, errors.New("keyed creation cannot retire other artifacts"))
+	}
+	put := artifacts.Put{CreationKey: r.CreationKey, ID: r.ArtifactId, Title: r.Title, Kind: r.Kind, Format: r.Format, Content: r.Content, ExpectedVersion: r.ExpectedVersion, Author: artifacts.Author{Kind: "person"}}
 	for _, l := range r.Links {
-		put.Links = append(put.Links, artifacts.Link{Kind: l.Kind, ID: l.Id, Role: l.Role})
+		put.Links = append(put.Links, artifacts.Link{Kind: l.Kind, ID: l.Id, Role: l.Role, Version: l.Version})
 	}
 	if session := callerSession(ctx); session != "" {
 		// An agent writes as itself: the request cannot claim a person or a message.

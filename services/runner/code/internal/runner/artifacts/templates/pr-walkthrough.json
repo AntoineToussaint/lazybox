@@ -1,0 +1,13 @@
+{
+  "schema": "report.v1",
+  "scope": "PR, base revision, head revision and intended behavior",
+  "findings": [
+    "Start at the user-visible change. Trace the call through the files a reviewer should read in order."
+  ],
+  "evidence": [
+    "Link the diff hunk and the before/after test or screenshot."
+  ],
+  "verificationGaps": [
+    "Record untested paths and the decision required before merge."
+  ]
+}

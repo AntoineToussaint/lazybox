@@ -116,3 +116,13 @@ test('repeating the destination gives each command its own home handoff', () => 
   assert.deepEqual(homeOffers(text).map(({ command, target }) => ({ command, target })),
     commands.map(command => ({ command, target: { kind: 'repository', repository: 'api' } })));
 });
+
+test('an explicit home handoff preserves a long shell expression exactly', () => {
+  const line = "bash -o pipefail -c 'for root in alpha beta; do " +
+    'printf "%s" "$root" | jq -e --arg label "keep  both  spaces" ' +
+    '"[.resources[] | select((.instances | length) > 0)]" || exit 1; ' +
+    ': "' + 'long command '.repeat(20) + '"; done' + "'";
+  assert.deepEqual(homeOffers('Run in the home checkout of infra-base: `' + line + '`'),
+    [{ command: line, target: { kind: 'repository', repository: 'infra-base' }, explicit: true }]);
+  assert.deepEqual(homeOffers('I ran `' + line + '` yesterday.'), []);
+});

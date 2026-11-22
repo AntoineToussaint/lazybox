@@ -294,7 +294,7 @@ export class CodeRuns {
     const repositories = this.homeRepositories();
     return homeOffers(last.text).map(offer => ({
       offer, place: offer.explicit ? this.runPlace(offer.target) : placeFor(offer.target, repositories, offer.hint),
-    })).filter(entry => entry.place.kind !== 'unknown');
+    }));
   }
   homeSignature(messageId: string): string { return JSON.stringify(this.homeOffers(messageId)); }
   /** Where a block or command can run outside the workspace: each repository's home that exists, then the home folder. */
@@ -644,17 +644,19 @@ function HomeRun({ host, messageId, offer, place }: { host: CodeRuns; messageId:
   const view = JSON.parse(useSyncExternalStore(host.subscribe, () => host.signature(messageId, offer.command))) as RunView;
   const setup = place.kind === 'repository' && !place.repository.home;
   const name = place.kind === 'repository' ? place.repository.name : '';
-  const label = setup ? `Create ${name} home and run` : placeLabel(place);
+  const unavailable = place.kind === 'unknown' ? `No checkout for ${place.name} is available on this Runner` : '';
+  const label = unavailable || (setup ? `Create ${name} home and run` : placeLabel(place));
   const others = (): MenuItem[] => [
-    { label: PASTE_LABEL, icon: 'paste', run: () => void host.runIn(messageId, offer.command, place, 'paste') },
+    { label: PASTE_LABEL, icon: 'paste', disabled: unavailable || undefined, run: () => void host.runIn(messageId, offer.command, place, 'paste') },
     ...host.homePlaces().filter(other => placeLabel(other) !== placeLabel(place)).map(other => ({ label: placeLabel(other), icon: 'home', run: () => void host.runIn(messageId, offer.command, other) })),
-    { label: 'Open in Terminal (your app)', icon: 'external', run: () => void host.openOwnTerminal(offer.command, place) },
+    { label: 'Open in Terminal (your app)', icon: 'external', disabled: unavailable || undefined, run: () => void host.openOwnTerminal(offer.command, place) },
     { label: 'Copy command', icon: 'copy', run: () => void copyText(place.kind === 'repository' ? inHome(offer.command).command : offer.command, 'Copied the command') },
   ];
   return <span className="home-run-row">
     <span className="home-run-split" role="group" aria-label={`${label}: ${offer.command}`}>
       <button type="button" className={'home-run' + (setup ? ' is-setup' : '')}
-        title={setup ? `Clone ${name}’s home checkout (your own copy, outside the workspace), then ${runsAtOnce(offer.command) ? 'run this in a shell there' : 'type this in a shell there for you to review'}` : terminalRunTitle(place.kind === 'repository' ? inHome(offer.command).command : offer.command, host.placeName(place))}
+        disabled={!!unavailable}
+        title={unavailable || (setup ? `Clone ${name}’s home checkout (your own copy, outside the workspace), then ${runsAtOnce(offer.command) ? 'run this in a shell there' : 'type this in a shell there for you to review'}` : terminalRunTitle(place.kind === 'repository' ? inHome(offer.command).command : offer.command, host.placeName(place)))}
         onClick={() => void host.runIn(messageId, offer.command, place, 'run', true)}>
         <Icon name="home" size={12}/><span>{label}</span><code>{offer.command.split('\n')[0]}{offer.command.includes('\n') ? ' …' : ''}</code>
       </button>

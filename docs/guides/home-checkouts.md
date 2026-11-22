@@ -80,7 +80,7 @@ offers **Tell Claude it's done**: it sends *Done: `<command>` finished (exit
 just copies it.
 
 Agents are told to write these as "run in the home checkout of api:
-`make playground`", which Lazybox reads for certain. Other wording is read on
+`make playground`", which also works for long, single-line shell commands with pipes, comparisons, and quoted arguments. If the Runner cannot resolve the named checkout, the control shows which checkout is missing and its menu lets you copy the command. Other wording is read on
 a best-effort basis: a command the message plainly hands to you ("run …
 yourself", "you'll need to run …", "needs a real terminal", a login). A
 command the agent says it ran is never offered, nor one for later (`make stop`

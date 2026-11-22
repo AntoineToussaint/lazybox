@@ -176,7 +176,7 @@ export function CommandPalette({ keymap, navigator, viewState, initialQuery = ''
         navigator.goTo({ collectionId: entry.collectionId, sessionId: '', commandId: '' });
       },
     })) : [];
-    const missionItems: Item[] = navigator.showPanel ? missions.missions.filter(mission => !mission.canceled).map(mission => ({
+    const missionItems: Item[] = navigator.showPanel && actionEnabled('missions.page') ? missions.missions.filter(mission => !mission.canceled).map(mission => ({
       key: `mission:${mission.id}`, kind: 'mission', title: mission.title || 'Untitled mission', detail: `Mission · ${mission.tasks.length} ${mission.tasks.length === 1 ? 'task' : 'tasks'}`, extra: mission.brief.slice(0, 200), icon: <Icon name="target" size={15}/>,
       run: () => { navigator.showPanel!('missions'); selectMission(mission.id); },
     })) : [];

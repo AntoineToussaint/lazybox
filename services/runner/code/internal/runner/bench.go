@@ -176,6 +176,7 @@ type Execution struct {
 	browserTools bool
 }
 type Bench struct {
+	conversationCosts  sync.Map
 	verificationFlow   sync.Map
 	verificationLaunch sync.Map
 	forkMu             sync.Mutex

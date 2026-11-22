@@ -37,6 +37,10 @@
       "type": "command_catalog"
     },
     {
+      "text": "default",
+      "type": "agent_permission"
+    },
+    {
       "data": {
         "files": null,
         "kind": "message"
@@ -47,10 +51,6 @@
       "requestId": "",
       "text": "tour",
       "type": "operation_accepted"
-    },
-    {
-      "text": "default",
-      "type": "agent_permission"
     },
     {
       "agentId": "root",

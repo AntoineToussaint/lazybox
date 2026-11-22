@@ -77,6 +77,8 @@ type CommandRun struct {
 type Query struct {
 	Workspace, Execution, Conversation string
 	Prices                             Pricer
+	// Restrict usage to records observed in [Since, Until); zero bounds are open.
+	Since, Until time.Time
 	// Series also reports usage hour by hour (Report.Series).
 	Series bool
 }

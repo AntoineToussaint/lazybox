@@ -12,6 +12,7 @@ export { WindowControls } from './WindowControls';
 export { WindowErrorBoundary } from './WindowErrorBoundary';
 export { RemoteApp } from './remote/RemoteApp';
 export { DevicesSettings } from './DevicesSettings';
+export { MissionWindow } from './MissionWindow';
 export { ArtifactWindow } from './ArtifactWindow';
 export { ArtifactExportContext } from './artifact-export';
 export { OpenHtmlInBrowserContext } from './artifact-formats';

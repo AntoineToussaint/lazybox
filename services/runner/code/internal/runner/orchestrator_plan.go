@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/artifacts"
@@ -141,59 +140,85 @@ type TreeBudget struct {
 
 // TreeBudgetOf is a grant's tree budget, for the board.
 func (b *Bench) TreeBudgetOf(ctx context.Context, state *work.State, g *work.Grant) TreeBudget {
-	return b.treeBudget(ctx, state, g)
-}
-
-func (b *Bench) treeBudget(ctx context.Context, state *work.State, g *work.Grant) TreeBudget {
-	out := TreeBudget{Costs: map[string]float64{}}
-	conversations := []string{g.Holder}
-	for _, ch := range state.Children(g.Holder) {
-		conversations = append(conversations, ch.Attempt.Conversation)
-	}
-	for _, c := range conversations {
-		if _, seen := out.Costs[c]; seen {
-			continue
-		}
-		cost := b.ConversationCost(ctx, c)
-		out.Costs[c], out.Spent = cost, out.Spent+cost
-	}
-	for _, t := range state.Tasks {
-		a := t.Current()
-		if a == nil || a.Ended || a.Grant != g.Grant || state.Done(t) || t.Canceled {
-			continue
-		}
-		if entry, ok := state.ApprovedTask(g.Grant, t.ID); ok {
-			out.Reserved += max(0, entry.EstimateUSD-out.Costs[a.Conversation])
-		}
-	}
+	out, _ := b.treeBudget(ctx, state, g, false)
 	return out
 }
 
-// costCache keeps conversation costs for a few seconds: boards poll often.
-var costCache sync.Map
-
-type cachedCost struct {
-	at   time.Time
-	usd  float64
-	none bool
+func (b *Bench) treeBudget(ctx context.Context, state *work.State, g *work.Grant, fresh bool) (TreeBudget, error) {
+	out := TreeBudget{Costs: map[string]float64{}}
+	end := state.CanceledAt
+	for ancestor := g; ancestor != nil; ancestor = state.Grant(ancestor.Parent) {
+		end = earliestBound(end, ancestor.RevokedAt)
+	}
+	var err error
+	out.Spent, err = b.conversationCost(ctx, g.Holder, g.Issued, end, fresh)
+	if err != nil {
+		return out, err
+	}
+	out.Costs[g.Holder] = out.Spent
+	for _, t := range state.Tasks {
+		for _, a := range t.Attempts {
+			if a.Grant != g.Grant {
+				continue
+			}
+			cost, err := b.conversationCost(ctx, a.Conversation, a.Assigned, earliestBound(end, t.ClosedAt, a.EndedAt), fresh)
+			if err != nil {
+				return out, err
+			}
+			out.Costs[a.Conversation] += cost
+			out.Spent += cost
+			if a == t.Current() && !a.Ended && t.ClosedAt.IsZero() && end.IsZero() {
+				if entry, ok := state.ApprovedTask(g.Grant, t.ID); ok {
+					out.Reserved += max(0, entry.EstimateUSD-cost)
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
-// ConversationCost is what a conversation's usage cost so far, in dollars
-// (API-equivalent prices; unpriced usage counts as nothing).
-func (b *Bench) ConversationCost(ctx context.Context, conversation string) float64 {
-	if b.Telemetry == nil || conversation == "" {
-		return 0
+// An open end has no timestamp. Stop attributing spend when the first owner closes.
+func earliestBound(bounds ...time.Time) time.Time {
+	var end time.Time
+	for _, bound := range bounds {
+		if !bound.IsZero() && (end.IsZero() || bound.Before(end)) {
+			end = bound
+		}
 	}
-	if v, ok := costCache.Load(conversation); ok && time.Since(v.(cachedCost).at) < 5*time.Second {
-		return v.(cachedCost).usd
+	return end
+}
+
+// AttemptCost counts usage observed while the conversation was assigned to this task.
+func (b *Bench) AttemptCost(ctx context.Context, state *work.State, task *work.Task, a *work.Attempt) float64 {
+	cost, _ := b.conversationCost(ctx, a.Conversation, a.Assigned, earliestBound(a.EndedAt, task.ClosedAt, state.CanceledAt), false)
+	return cost
+}
+
+type costWindow struct {
+	conversation string
+	since, until time.Time
+}
+
+type cachedCost struct {
+	at  time.Time
+	usd float64
+}
+
+func (b *Bench) conversationCost(ctx context.Context, conversation string, since, until time.Time, fresh bool) (float64, error) {
+	if b.Telemetry == nil || conversation == "" {
+		return 0, errors.New("usage is unavailable")
+	}
+	key := costWindow{conversation, since, until}
+	if v, ok := b.conversationCosts.Load(key); !fresh && ok && time.Since(v.(cachedCost).at) < 5*time.Second {
+		return v.(cachedCost).usd, nil
 	}
 	var prices telemetry.Pricer
 	if b.Preferences != nil {
 		prices = b.Preferences.Rates()
 	}
-	report, err := b.Telemetry.Report(ctx, telemetry.Query{Conversation: conversation, Prices: prices})
+	report, err := b.Telemetry.Report(ctx, telemetry.Query{Conversation: conversation, Prices: prices, Since: since, Until: until})
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	var nanos int64
 	for _, g := range report.Groups {
@@ -202,8 +227,8 @@ func (b *Bench) ConversationCost(ctx context.Context, conversation string) float
 		}
 	}
 	usd := float64(nanos) / 1e9
-	costCache.Store(conversation, cachedCost{at: time.Now(), usd: usd})
-	return usd
+	b.conversationCosts.Store(key, cachedCost{at: time.Now(), usd: usd})
+	return usd, nil
 }
 
 // checkBudget refuses a spawn whose estimate would take the tree past its
@@ -214,7 +239,11 @@ func (b *Bench) checkBudget(ctx context.Context, state *work.State, g *work.Gran
 	if limit <= 0 {
 		return nil
 	}
-	tree := b.treeBudget(ctx, state, g)
+	// A paid spawn must use current, readable telemetry even if the board just polled.
+	tree, err := b.treeBudget(ctx, state, g, true)
+	if err != nil {
+		return fmt.Errorf("%w: cannot check the mission budget: %v", work.ErrRefused, err)
+	}
 	committed := tree.Spent + tree.Reserved + estimate
 	payload := work.BudgetPayload{CapUSD: limit, SpentUSD: round2(tree.Spent), ReservedUSD: round2(tree.Reserved)}
 	if committed > limit {

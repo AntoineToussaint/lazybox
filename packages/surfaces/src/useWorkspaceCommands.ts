@@ -13,6 +13,8 @@ type Commands = {
   root: string;
   /** The main window (not a window fixed to one workspace): it takes other windows' requests and has Settings. */
   main: boolean;
+  canShowMissions: boolean;
+  missionOpen: boolean;
   collections: Collection[];
   selection: ViewTarget;
   workspaceId: string;
@@ -26,6 +28,7 @@ type Commands = {
   showSession(target: ViewTarget): void;
   selectWorkspace(target: ViewTarget): void;
   showPanel(kind: string): void;
+  showRun(target: ViewTarget): void;
   openSettings(tab: string): void;
   closeSettings(): void;
   newConversation(): void;
@@ -48,16 +51,17 @@ export function useWorkspaceCommands(commands: Commands): CommandNavigator {
     'settings.open': commands.main && { run: tab => c().openSettings(typeof tab === 'string' ? tab : 'subscriptions') },
     'conversation.new': { run: () => c().newConversation(), enabled: () => c().canStartConversation },
     'changes.show': { run: () => c().showPanel('changes'), enabled: () => !!c().workspaceId },
-    'missions.open': { run: () => c().showPanel('missions'), enabled: () => !!c().registry.missions },
-    'missions.page': { run: () => showMissionsPage(), enabled: () => !!c().registry.missions },
-    'pulls.open': { run: () => c().showPanel('pulls'), enabled: () => !!c().registry.pulls },
+    'missions.open': { run: () => c().showPanel('missions'), enabled: () => c().canShowMissions },
+    'missions.page': { run: () => showMissionsPage(), enabled: () => c().canShowMissions },
+    'pulls.open': { run: () => c().showPanel('pulls'), enabled: () => !c().missionOpen && !!c().registry.pulls },
     'terminal.open':{ run: () => c().showPanel('terminal'), enabled: () => c().terminalReady },
     'workspace.window': { run: () => c().openWorkspaceWindow(), enabled: () => c().canOpenWorkspaceWindow },
-    'page.customize': () => c().toggleEditing(),
-    'layout.configure': () => c().toggleConfiguring(),
+    'page.customize': { run: () => c().toggleEditing(), enabled: () => !c().missionOpen },
+    'layout.configure': { run: () => c().toggleConfiguring(), enabled: () => !c().missionOpen },
   });
   // A detached chat window asks this window to show a conversation, or an artifact (its Open in main window).
   useNavigationRequests(commands.root, commands.main, target => {
+    if (target.commandId) { latest.current.closeSettings(); latest.current.showRun(target); return; }
     if (target.artifactId === undefined) { goTo(target); return; }
     const request = { collectionId: target.collectionId, artifactId: target.artifactId };
     latest.current.closeSettings();
@@ -77,8 +81,8 @@ export function useWorkspaceCommands(commands: Commands): CommandNavigator {
   const windowsKey = (commands.windows || []).map(item => `${item.id}:${item.title}`).join('|');
   const panels = useMemo(() => Object.entries(commands.registry).filter(([kind]) => !pageOnly.has(kind)).map(([kind, module]) => ({ kind, title: module.title, icon: module.icon || 'file' })), [commands.registry]);
   return useMemo(() => ({
-    collections: commands.collections, current: commands.selection, workbench: commands.workbench, panels, windows: commands.windows,
+    collections: commands.collections, current: commands.selection, workbench: commands.workbench, panels: commands.missionOpen ? [] : panels, windows: commands.windows,
     goTo, showPanel: (kind: string) => latest.current.showPanel(kind),
     openSettings: commands.main ? (tab: string) => latest.current.openSettings(tab) : undefined,
-  }), [commands.collections, commands.selection, commands.workbench, panels, commands.main, windowsKey]);
+  }), [commands.collections, commands.selection, commands.workbench, panels, commands.main, commands.missionOpen, windowsKey]);
 }

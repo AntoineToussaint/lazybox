@@ -271,8 +271,10 @@ origin. Separate Working/Dev identities and state retain separate personal views
 Old layout files remain intact; first adoption of the stable identity starts a
 new scope instead of guessing which old authority's private drafts to import.
 Individual view entries are limited to 256 KiB, with a 4 MiB total budget; failed
-writes are visible. An unreadable view file is retained and reported. Attachment
-bytes are not persisted as drafts: reattach missing files after reopening.
+writes are visible. An unreadable view file is retained and reported. Attached files and large pasted boxes save asynchronously in IndexedDB for the
+window origin. Their names survive in the view entry. If the origin changes or
+the window closes before the write finishes, the composer can ask you to
+reattach those files.
 
 The selected private locator is reread in both Dev and Working, and a different
 Runner identity is rejected. Every Runner start publishes a new bearer: a Codefly

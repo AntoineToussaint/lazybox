@@ -15,7 +15,9 @@ import { monacoVimCompat } from './monaco-vim-compat.mjs';
 // queues per key (a setState in an effect keyed on the text) then never gets
 // to run between keys, and React gives up after 50 of them.
 const fixture = await startRunnerFixture();
-const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react(), monacoVimCompat()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
+// A hot reload during keyboard.type destroys the focused box halfway through a burst.
+// This suite exercises explicit reloads only.
+const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react(), monacoVimCompat()], server: { watch: null, host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
 const browsers = [];
 const rounds = Number(process.env.ROUNDS || 3);
 const words = 'the quick brown fox jumps over the lazy dog 0123456789 ';
@@ -35,6 +37,17 @@ try {
     await page.goto(url);
     const message = page.getByRole('textbox', { name: 'Message', exact: true });
     await expect(message).toBeEnabled();
+
+    // Reproduce an unrelated commit between the browser changing the value
+    // and React receiving its input event. An attachment renders the composer.
+    await message.fill('before ');
+    await message.evaluate(box => box.setRangeText('input', box.value.length, box.value.length, 'end'));
+    await page.locator('input[type="file"][aria-label="Attach files"]').setInputFiles({ name: 'sample.txt', mimeType: 'text/plain', buffer: Buffer.from('test') });
+    const remove = page.getByRole('button', { name: 'Remove sample.txt', exact: true });
+    await expect(remove).toBeVisible();
+    await expect(message).toHaveValue('before input');
+    await message.dispatchEvent('input', { bubbles: true });
+    await remove.click();
 
     /** Clears the box, runs `input` with the main thread mostly busy, and checks the result. */
     const burst = async (label, input, expected) => {
@@ -73,7 +86,7 @@ try {
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.getByRole('tab', { name: 'Shortcuts' }).click();
     await page.getByRole('switch', { name: 'Vim editing in the message box' }).check();
-    await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+    await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
     await expect(message).toBeEnabled();
     await burst('Vim insert mode', async () => { await expect(page.locator('.vim-mode-chip')).toHaveText('INSERT'); await page.keyboard.type(text, { delay: 0 }); }, text);
 

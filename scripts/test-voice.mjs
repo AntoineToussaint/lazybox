@@ -207,11 +207,23 @@ try {
   await expect(page.locator('.composer-mic')).toHaveAccessibleName('Stop dictation');
   await expect(pill.getByRole('note'), 'the key has worked here: no word about other apps').toHaveCount(0);
   await say('dropped');
-  await pill.getByRole('button', { name: 'Cancel dictation' }).click();
+  const afterCancel = await pill.getByRole('button', {name: 'Cancel dictation'}).evaluate(button =>
+    new Promise(resolve => requestAnimationFrame(() => {
+      button.click();
+      const box = document.querySelector('textarea[data-agent-composer]');
+      // Select all immediately after cancel, before another paint. A delayed
+      // dictation caret used to collapse that selection and swallow Delete.
+      queueMicrotask(() => {
+        box.focus(); box.select();
+        requestAnimationFrame(() => resolve([box.selectionStart, box.selectionEnd]));
+      });
+    })));
   await expect(message).toHaveValue('Keep this kept by the button');
+  assert.deepEqual(afterCancel, [0, 'Keep this kept by the button'.length]);
 
   // A pause long enough that the browser ends its recognition: listening goes on in a new one, and the words before the pause stay.
   await message.fill('');
+  await expect(message).toHaveValue('');
   await page.keyboard.press('Alt+Space');
   await listening();
   await say('look at the logs');
@@ -340,7 +352,7 @@ try {
   await expect(settings.getByRole('link', { name: 'Wispr setup' })).toHaveAttribute('href', 'https://api-docs.wisprflow.ai/quickstart');
   await settings.getByLabel('Engine').selectOption('wispr');
   await expect(settings.getByRole('note', { name: 'Privacy' })).toContainText('to Wispr Flow');
-  const work = page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first();
+  const work = page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true });
   await work.click();
   await message.fill('');
   await page.getByRole('button', { name: 'Dictate', exact: true }).click();
@@ -376,7 +388,7 @@ try {
   await dictateRow.getByRole('button', { name: 'Reset' }).click();
   await expect(dictateRow.locator('kbd')).toHaveText(['Right ⌥', '⌥Space']);
   await expect(dictateRow).toContainText('If ⌥Space does nothing, another app (ChatGPT, Raycast, Alfred) may use it.');
-  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
 
   // Saying "envoie" (in French now) sends: the message without the command word.
   await message.fill('');
@@ -391,7 +403,7 @@ try {
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('tab', { name: 'Shortcuts' }).click();
   await page.getByRole('switch', { name: 'Vim editing in the message box' }).check();
-  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
   await message.click();
   await page.keyboard.type('vim text');
   await page.keyboard.press('Escape');
@@ -414,7 +426,7 @@ try {
   await page.getByRole('switch', { name: 'Vim editing in the message box' }).uncheck();
   await page.getByRole('tab', { name: 'Voice' }).click();
   await settings.getByLabel('Language').selectOption('');
-  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
 
   // Voice commands: hold ⌥⇧Space, say it, release. A clear match runs.
   const palette = page.getByRole('dialog', { name: 'Command palette' });
@@ -483,7 +495,7 @@ try {
   await expect.poll(() => page.evaluate(() => window.__spoken.at(-1))).toEqual({ text: 'Voici comment Lazybox lira les réponses de vos agents.', rate: 1, voice: 'voice-fr' });
   await page.evaluate(() => window.__finishSpeaking());
   await settings.getByLabel('Voice', { exact: true }).selectOption('');
-  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
   await expect(message).toBeVisible();
   const spokenBefore = await page.evaluate(() => window.__spoken.length);
   alpha.push({ type: 'operation_accepted', text: 'Why is the login test flaky?', turnId: 't1' });
@@ -555,7 +567,7 @@ try {
   await other.getByRole('tab', { name: 'Voice' }).click();
   await expect(other.locator('.voice-settings')).toContainText('This browser has no speech recognition');
   // ⌥Space says so instead of failing silently.
-  await other.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+  await other.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
   await other.getByRole('textbox', { name: 'Message', exact: true }).click();
   await other.keyboard.press('Alt+Space');
   await expect(other.locator('.voice-pill.is-error')).toContainText('no speech recognition');

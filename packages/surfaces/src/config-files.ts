@@ -15,7 +15,7 @@ import type { ConfigFile } from '@lazybox/protocol';
 export type ConfigEdit = { path: string[]; json: string };
 import { actionDefinition, actionDefinitions, bindings, canonicalBinding, isMac, joinBindings, resolveMod } from './actions';
 import { keyboardPreset, validateKeymap, withFixedKeys, type Keymap, type MenuEntry, type VimPreferences } from './keyboard';
-import { builtinPresets, stackTemplateSidebar, type LayoutPreset, type TemplateNode } from './layout-presets';
+import { builtinPresets, restoreTemplate, type LayoutPreset, type TemplateNode } from './layout-presets';
 import { defaultNotificationPreferences, type NotificationPreferences } from './attention';
 import { DEFAULT_PREFERENCES, parsePreferences, type AppearancePreferences, type Typography } from './appearance/preferences';
 
@@ -204,7 +204,7 @@ export type FileLayout = LayoutPreset & { file: string };
 export function layoutsFromFiles(docs: ConfigDoc[]): FileLayout[] {
   return docs.filter(d => d.kind === 'layout' && d.value).map(d => {
     const value = d.value as LayoutValue;
-    return { id: `file:${d.name.slice('layouts/'.length)}`, name: value.name, description: value.description || '', layout: stackTemplateSidebar(value.layout), file: d.name };
+    return { id: `file:${d.name.slice('layouts/'.length)}`, name: value.name, description: value.description || '', layout: restoreTemplate(value.layout), file: d.name };
   });
 }
 

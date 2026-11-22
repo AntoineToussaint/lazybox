@@ -61,9 +61,16 @@ try {
   await page.getByText('Create implementation roadmap…', { exact: true }).click();
   const roadmap = page.getByRole('dialog', { name: 'Create implementation roadmap' });
   await roadmap.getByLabel('Include a review').selectOption(structuredDocs.find(item => item.record.kind === 'report').record.id);
-  await roadmap.getByLabel('Milestones').fill('## Deliver the first slice\nVerify the original regression.');
+  await expect(roadmap.getByLabel('Milestones')).toHaveValue(/Milestone: M1[\s\S]*Phase:[\s\S]*Status: Open[\s\S]*Definition of done:[\s\S]*Verification evidence:/);
+  await roadmap.getByLabel('Milestones').fill('## Deliver the first slice\n- Milestone: M1\n- Deliverable: Ship the fix\n- Definition of done: Verify the original regression.');
   await roadmap.getByRole('button', { name: 'Save roadmap' }).click();
   await expect(page.getByRole('heading', { name: 'Deliver the first slice' })).toBeVisible();
+  await page.getByLabel('Export', { exact: true }).click();
+  const missionDownload = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Download mission plan' }).click();
+  const savedMission = JSON.parse(await readFile(await (await missionDownload).path(), 'utf8'));
+  assert.equal(savedMission.tasks[0].key, 'M1');
+  assert.match(savedMission.tasks[0].brief, /Verify the original regression/);
   await expect(page.getByRole('button', { name: /Source review.*Structured report/ })).toBeVisible();
   await page.getByLabel('Artifact actions', { exact: true }).click();
   await page.getByText('Draft mission proposal in chat…').click();

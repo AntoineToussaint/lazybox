@@ -39,7 +39,9 @@ These rules hold for every caller:
 
 ## Design and review to roadmap
 
-In **Artifact actions → Create implementation roadmap**, the reader starts an editable Markdown outline from the displayed revision. Edit the deliverables, dependencies and acceptance checks, optionally include a workspace review, then save a separate plan. The plan records each source revision. Source documents list their roadmaps; opening a source from a roadmap returns to the pinned revision even after the source changes. A deleted source leaves its ID and revision in the plan. Source links describe the plan’s origin and persist across edits.
+For a milestone roadmap, **Export → Download mission plan** saves a proposal for `lazybox mission plan FILE`. Separate dependency IDs with commas or spaces, and leave the field empty for an independent milestone. Export validates unique IDs, dependencies, cycles, deliverables and definitions of done. Each task includes its source revision and milestone brief. Submitting the file requires an orchestrator grant. Execution has a separate approval step.
+
+In **Artifact actions → Create implementation roadmap**, the reader starts an editable Markdown outline from the displayed revision. Each milestone starts open with an editable ID, phase, deliverable, dependencies, definition of done, verification evidence and open decisions. Keep its ID when moving it between phases. Update the same plan as evidence arrives. Edit the milestones, optionally include a workspace review, then save a separate plan. The plan records each source revision. Source documents list their roadmaps; opening a source from a roadmap returns to the pinned revision even after the source changes. A deleted source leaves its ID and revision in the plan. Source links describe the plan’s origin and persist across edits.
 
 **Draft mission proposal in chat** prepares a handoff containing the plan and pinned source references. In a window without a target conversation the handoff is copied. The person reviews and sends the draft. Mission creation and execution use the separate orchestration and approval flow.
 

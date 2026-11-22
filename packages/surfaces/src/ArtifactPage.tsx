@@ -6,7 +6,7 @@ import { ActionMenu } from './ActionMenu';
 import { RoadmapDialog, CreateIssueDialog, DeleteArtifactDialog, DiffStats, DiffView, SaveToRepositoryDialog } from './ArtifactDialogs';
 import { artifactsChanged, errorText, restoreArtifacts, retireArtifact } from './artifact-client';
 import { TodoList, todoMarkdown } from './TodoList';
-import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, slug, versionOrigin } from './artifact-model';
+import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, roadmapMissionPlan, slug, versionOrigin } from './artifact-model';
 import { extractToc, readingMinutes, tocOutline, withoutRepeatedTitle } from './artifact-reader';
 import { DocumentBody, RenderedDiff, TableOfContents, useScrollSpy } from './ArtifactReader';
 import { openArtifact, revealMessage } from './artifact-events';
@@ -445,6 +445,12 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
         <ActionMenu label="Export" className="artifact-export-menu" summary={<><Icon name="download" size={14}/><span className="artifact-tool-label">Export</span></>}>
           <button type="button" disabled={exportContent === undefined} onClick={() => void copy(exportContent ?? '', `Copied ${formatLabel}.`)}><Icon name="copy"/><span>{Preview ? 'Copy HTML source' : 'Copy as Markdown'}</span></button>
           <button type="button" disabled={exportContent === undefined} onClick={() => download()}><Icon name="download"/><span>Download .{extension}</span></button>
+          {artifact.kind === 'plan' && artifact.format !== 'html' && <button type="button" disabled={currentText === undefined} onClick={() => {
+            try {
+              const plan = roadmapMissionPlan(currentText ?? '', artifact.title, artifactId, shown);
+              void downloadFile(JSON.stringify(plan, null, 2), 'mission.json', 'application/json');
+            } catch (e) { setError(errorText(e)); }
+          }}><Icon name="download"/><span>Download mission plan</span></button>}
           {structured && <button type="button" disabled={content === undefined} onClick={() => download(true)}><Icon name="download"/><span>Download .json</span></button>}
           {!Preview && <><button type="button" disabled={reading === undefined} onClick={() => exportRendered('html')}><Icon name="download"/><span>Download .html</span></button>
           <button type="button" disabled={reading === undefined} onClick={() => exportRendered('print')}><Icon name="print"/><span>Print or save as PDF…</span></button>
@@ -455,7 +461,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
         <ActionMenu ref={moreMenu} label="Artifact actions" className="artifact-more-menu">
           <button type="button" disabled={content === undefined || !shown} onClick={() => setRoadmapInput({ version: shown, markdown: artifact.format === 'html' ? '' : currentText ?? '' })}><Icon name="artifact"/><span>Create implementation roadmap…</span></button>
           {artifact.kind === 'plan' && <button type="button" disabled={content === undefined} onClick={() => sendToAgent(
-            `Prepare a mission proposal from this roadmap. Identify task dependencies, acceptance checks, and open decisions. Leave execution for separate approval.\n\n${discussionReference()}`
+            `Prepare a mission proposal from this roadmap. Read the full pinned roadmap revision. Preserve milestone IDs, phases, dependencies, definitions of done, and open decisions in the task briefs. Carry forward existing verification evidence. Distinguish reported completion from owner acceptance. Leave execution for separate approval.\n\n${discussionReference()}`
           )}><Icon name="send"/><span>{conversationId || onDiscuss ? 'Draft mission proposal in chat…' : 'Copy mission proposal brief'}</span></button>}
           {onDiscuss && <button type="button" onClick={() => void copy(discussionReference(), 'Copied artifact reference.')}><Icon name="copy"/><span>Copy artifact reference</span></button>}
           <button type="button" onClick={() => { setView('document'); setRenaming(true); }}><Icon name="pencil"/><span>Rename</span></button>

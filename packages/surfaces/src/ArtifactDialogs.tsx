@@ -94,7 +94,7 @@ export function RoadmapDialog({ source, version, markdown, reviews, onClose, onS
   const [body, setBody] = useState(() => {
     const sections = extractToc(markdown).filter(entry => entry.level === 2);
     const milestones = sections.length ? sections.map(entry => entry.text) : [source.title];
-    return milestones.map(name => `## ${name}\n\n- Deliverable: \n- Dependencies: \n- Acceptance check: `).join('\n\n');
+    return milestones.map((name, index) => `## ${name}\n\n- Milestone: M${index + 1}\n- Phase: \n- Status: Open\n- Deliverable: \n- Depends on: \n- Definition of done: \n- Verification evidence: \n- Open decisions: `).join('\n\n');
   });
   const [review, setReview] = useState<{ id: string; version: number }>();
   const [busy, setBusy] = useState(false), [error, setError] = useState('');

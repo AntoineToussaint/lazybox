@@ -120,7 +120,7 @@ try{
 
  // 5. Send the accepted finding to the author, exactly as filed; never sent for the person.
  const applies=fixture.mutations.filter(m=>m.method==='Apply').length;
- await tray.getByRole('button',{name:'Send 1 comment to the agent'}).click();
+ await tray.getByRole('button',{name:/Fix 1 finding in/}).click();
  await expect(box).toHaveValue(/^Please address this review comment/);
  await expect(box).toHaveValue(new RegExp(`### 1\\. api/src/handler\\.go:3–4\\n\\n\\*\\*Blocker: The error is logged, not returned\\*\\* \\(finding ${blocker.id}, from Codex\\)`));
  await expect(box).toHaveValue(/Return it so callers can retry\./);
@@ -242,5 +242,13 @@ try{
  await page.screenshot({path:'.cache/agent-review-settings.png'});
 
  assert.deepEqual(errors,[]);
+ await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}#token=${fixture.token}`);
+ await page.getByRole('button',{name:'Snippets',exact:true}).click();
+ const picker=page.getByRole('dialog',{name:'Snippets',exact:true});
+ await picker.getByRole('searchbox').fill('review');
+ await picker.getByRole('button',{name:'Start review'}).click();
+ await expect(picker).toHaveCount(0);
+ assert.equal(starts().at(-1).focus,'Review the current change carefully.');
+ assert.equal(starts().at(-1).templateId,'code-review-v1');
  console.log('Agent review: one click from Changes, a turn, the PR card, the file list, /review and ⌘K; findings triaged and sent as filed; settings.');
 }finally{await browser?.close();await server.close();await fixture.close();}

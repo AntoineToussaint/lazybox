@@ -407,7 +407,11 @@ not price — and how many tokens that leaves out.
 - **Snippets** (`]] s`, or the snippet icon in the message box): a searchable
   picker over Lazybox's snippet catalog with a preview of the exact text.
   `Enter` sends it, `Shift+Enter` inserts it into your draft. Recent and
-  favourite snippets come first.
+  favourite snippets come first. Sending the **review** or **deepreview** snippet on
+  its own starts a structured code review with its instructions. Open **Review**
+  on the resulting chat card, select the findings you want, and choose the
+  current conversation or **Fix in new conversation**. Both prepare a draft
+  containing the selected findings for you to send.
 - **Your own leader keys:** Settings → Shortcuts can add `]]` menu entries that
   send or insert a snippet with one key.
 

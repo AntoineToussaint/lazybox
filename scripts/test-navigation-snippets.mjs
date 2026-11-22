@@ -142,14 +142,15 @@ try {
   await page.getByRole("button", { name: "Snippets", exact: true }).click();
   await dialog.getByRole("searchbox").fill("review");
   await dialog
-    .getByRole("button", { name: "Send snippet", exact: true })
+    .getByRole("button", { name: "Start review", exact: true })
     .click();
   await expect(dialog).toHaveCount(0);
-  assert.equal(f.mutations.filter((m) => m.method === "Apply").length, 1);
+  assert.equal(f.mutations.filter((m) => m.method === "Apply").length, 0);
+  assert.equal(f.mutations.findLast(m => m.method === "StartReview").body.focus, "Review the current change carefully.");
   await expect(message).toHaveValue("");
   const attempts=[];let reject=true;
   await page.route('**/Apply',async route=>{attempts.push(route.request().postDataJSON());if(reject){reject=false;await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({code:'unavailable',message:'Fixture delivery interruption'})});}else await route.continue();});
-  await page.getByRole('button',{name:'Snippets',exact:true}).click();await dialog.getByRole('searchbox').fill('review');await dialog.getByRole('button',{name:'Send snippet',exact:true}).click();await expect(dialog.getByRole('alert')).toContainText('not confirmed');await dialog.getByRole('button',{name:'Close snippets'}).click();await expect(message).toHaveValue('Review the current change carefully.');await page.getByRole('button',{name:'Send message',exact:true}).click();await expect(message).toHaveValue('');assert.equal(attempts.length,2);assert.equal(attempts[0].operationId,attempts[1].operationId);await page.unroute('**/Apply');
+  await page.getByRole('button',{name:'Snippets',exact:true}).click();await dialog.getByRole('searchbox').fill('test');await dialog.getByRole('button',{name:'Send snippet',exact:true}).click();await expect(dialog.getByRole('alert')).toContainText('not confirmed');await dialog.getByRole('button',{name:'Close snippets'}).click();await expect(message).toHaveValue('Run the relevant tests.');await page.getByRole('button',{name:'Send message',exact:true}).click();await expect(message).toHaveValue('');assert.equal(attempts.length,2);assert.equal(attempts[0].operationId,attempts[1].operationId);await page.unroute('**/Apply');
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("tab", { name: "Shortcuts" }).click();
   await page.getByLabel("Preset").selectOption("tmux");

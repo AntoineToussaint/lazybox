@@ -108,8 +108,8 @@ func TestStartReviewUsesTheConfiguredReviewer(t *testing.T) {
 	if err != nil || named.Run.ReviewerProvider != "claude" {
 		t.Fatalf("a named reviewer: %+v %v", named.GetRun(), err)
 	}
-	if _, err = f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Focus: strings.Repeat("x", 3<<10)}); err == nil {
-		t.Fatal("a focus over 2 KiB was accepted")
+	if _, err = f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Focus: strings.Repeat("x", 33<<10)}); err == nil {
+		t.Fatal("a focus over 32 KiB was accepted")
 	}
 }
 

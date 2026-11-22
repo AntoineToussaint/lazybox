@@ -78,7 +78,7 @@ type BriefInput struct {
 }
 
 // FocusLimit bounds the focus a person gives a review.
-const FocusLimit = 2 << 10
+const FocusLimit = TemplateLimit
 
 const (
 	goalLimit  = 6 << 10

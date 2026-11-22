@@ -18,7 +18,7 @@ import { useTranscript } from './useTranscript';
 import { useLiveStatus } from './LiveIndicator';
 import { PromptHistoryDialog } from './PromptHistoryDialog';
 import { savePrompt } from './prompt-history';
-import { saveSnippetUse } from './snippet-usage';
+import { isReviewSnippet, saveSnippetUse } from './snippet-usage';
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { type CommandStatus, type Session } from '@lazybox/protocol';
@@ -162,7 +162,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       const snippet = result.snippets.find(row => row.key === entry.snippet);
       if (!snippet) { setError(`Snippet "${entry.snippet}" no longer exists. Update the ]] menu in Settings → Keyboard.`); return; }
       saveSnippetUse(viewState, snippet.key);
-      if (entry.mode === 'send' && !message.trim() && !files.length && !missingFiles.length && !sending) void send(undefined, snippet.body);
+      if (entry.mode === 'send' && !message.trim() && !files.length && !missingFiles.length && !sending) void send(undefined, snippet.body, snippet.key);
       else { const next = message + (message && !message.endsWith('\n') ? '\n' : '') + snippet.body; setMessage(next); persistDraft(next, files, missingFiles); requestAnimationFrame(() => composer.current?.focus()); }
     }, error => setError(humanError(error)));
   });
@@ -275,7 +275,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     onStarted: (id, workspace) => { setSessionID(id); setCommand(''); onSessionChange?.(id, workspace); },
   });
 
-  const send = async (event?: FormEvent, snippetText?: string) => {
+  const send = async (event?: FormEvent, snippetText?: string, snippetKey?: string) => {
     event?.preventDefault();
     // ⌘↵ (chat.send-now) submits this same form, after dictation's last words
     // settle when it was listening: the message it sends goes now.
@@ -299,6 +299,15 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     sendingRef.current = true; setSending(true); setError(''); jumpToLatest();
     const signal = lifetime.current!.signal;
     try {
+      const reviewKey = snippetKey ?? slash.snippetRows.find(row => isReviewSnippet(row.key) && row.body.trim() === text.trim())?.key;
+      if (reviewKey && isReviewSnippet(reviewKey) && !files.length) {
+        const launcher = chatReview.launcher;
+        if (launcher.unavailable) { setError(launcher.unavailable); return false; }
+        const started = await launcher.start({ scope: 'changes' }, undefined, text, 'code-review-v1');
+        if (!started?.run || started.run.state === 'failed') return false;
+        if (!signal.aborted && !snippetText) { setMessage(''); persistDraft('', [], []); }
+        return true;
+      }
       const previous = sendAttempt.current;
       const attempt = previous?.text === text && previous.files.length === files.length && files.every((file, i) => file === previous.files[i]) ? previous : { id: uncertainSend || crypto.randomUUID(), text, files };
       sendAttempt.current = attempt;
@@ -660,7 +669,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     {snippetsOpen && <SnippetPicker workspace={session?.collectionId || collectionId} store={viewState} canSend={canCompose && !sending && !message.trim() && !files.length && !missingFiles.length}
       onClose={() => { setSnippetsOpen(false); composer.current?.focus(); }}
       onCatalog={slash.updateSnippetCatalog} onInsert={insertSnippet}
-      onSend={text => send(undefined, text)}/>}
+      onSend={(text, key) => send(undefined, text, key)}/>}
     {!embedded && <WindowTopbar connecting={connecting} info={info} sessionID={sessionID} session={session}/>}
     {(error || connectionError || refreshError) && !(embedded && connectionError) && <div className={sessionID ? "error" : "error session-launch-error"} role="alert"><span>{error || connectionError || refreshError}</span><button onClick={() => { setError(''); setRefreshError(''); }}>Dismiss</button></div>}
     {!info && !connecting && <div className="connection-retry"><button onClick={refresh}>Retry connection</button></div>}

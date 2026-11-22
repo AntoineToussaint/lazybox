@@ -1,3 +1,4 @@
+import { isReviewSnippet } from './snippet-usage';
 import { readPreference, writePreference } from "./view-state";
 import { readSnippetUsage, saveSnippetUse, searchSnippets, sortSnippets, type SnippetUsage } from "./snippet-usage";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -24,7 +25,7 @@ export function SnippetPicker({
   onClose(): void;
   onCatalog(rows: Snippet[]): void;
   onInsert(text: string): void;
-  onSend(text: string): Promise<boolean>;
+  onSend(text: string, key: string): Promise<boolean>;
 }) {
   const { api } = useRunner(),
     dialog = useRef<HTMLDialogElement>(null);
@@ -96,12 +97,12 @@ export function SnippetPicker({
     if (!selected || !canSend || busy) return;
     setBusy(true);
     try {
-      if (await onSend(selected.body)) {
+      if (await onSend(selected.body, selected.key)) {
         used(selected.key);
         onClose();
       } else
         setError(
-          "The send was not confirmed. Close this picker to retry the retained draft.",
+          isReviewSnippet(selected.key) ? "The review did not start. Check the conversation for details." : "The send was not confirmed. Close this picker to retry the retained draft.",
         );
     } catch (e) {
       setError(String(e));
@@ -211,7 +212,7 @@ export function SnippetPicker({
           disabled={!selected || !canSend || busy}
           onClick={() => void send()}
         >
-          {busy ? "Sending…" : "Send snippet"}
+          {busy ? "Starting…" : selected && isReviewSnippet(selected.key) ? "Start review" : "Send snippet"}
         </button>
       </footer>
     </DraggableDialog>

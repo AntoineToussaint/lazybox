@@ -158,11 +158,13 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
   const { api } = useRunner();
   const handingOff = useRef(false);
   const [target, setTarget] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('');
-  const counts = useMemo(() => Object.fromEntries(trayFilters.map(f => [f.value, review.comments.filter(c => matchesFilter(c, f.value)).length])) as Record<TrayFilter, number>, [review.comments]);
+  const scoped = useMemo(() => focusRun ? review.comments.filter(c => c.reviewId === focusRun) : review.comments, [focusRun, review.comments]);
+  const counts = useMemo(() => Object.fromEntries(trayFilters.map(f => [f.value, scoped.filter(c => matchesFilter(c, f.value)).length])) as Record<TrayFilter, number>, [scoped]);
   const authors = useMemo(() => reviewAuthors(review.comments), [review.comments]);
   const hasFindings = review.comments.some(isFinding);
-  const shown = groupByFile(review.comments.filter(c => matchesQuery(c, query)));
-  const chosen = review.comments.filter(c => isPending(c) && !excluded.has(c.id));
+  const shown = groupByFile(scoped.filter(c => matchesQuery(c, query)));
+  const selectable = shown.flatMap(group => group.comments).filter(c => isPending(c) || isProposed(c));
+  const chosen = selectable.filter(c => !excluded.has(c.id));
   // Findings go back to the conversation whose work was reviewed.
   const author = runs.find(run => chosen.some(c => c.reviewId === run.id))?.sourceSessionId || (conversation && reviewers.has(conversation.id) ? runs.find(run => run.reviewerSessionId === conversation.id)?.sourceSessionId : '');
   const to = conversations.find(s => s.id === target) || conversations.find(s => s.id === author) || conversations[0];
@@ -175,11 +177,9 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
       await review.setDisposition(chosen.map(c => c.id), 'sent', { sessionId: to.id, sessionTitle: conversationName(to, '') });
     } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
   };
-  const templateRun = runs.find(run => run.id === focusRun && run.resultArtifactId);
-  const selectedFindings = chosen.filter(finding => finding.reviewId === templateRun?.id);
-  const authorSession = conversations.find(session => session.id === templateRun?.sourceSessionId);
+  const authorSession = to;
   const startFixConversation = async () => {
-    if (!templateRun || !authorSession || !selectedFindings.length || handingOff.current || busy) return;
+    if (!authorSession || !chosen.length || handingOff.current || busy) return;
     handingOff.current = true;
     setBusy(true);
     setError('');
@@ -189,8 +189,9 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
       const sessionId = opened.session.id;
       const draft = [
         'Verify these selected findings against the current workspace, then address the issues that still apply.',
-        `Source: findings artifact ${templateRun.resultArtifactId} v1. Finding IDs: ${selectedFindings.map(finding => finding.id).join(', ')}.`,
-        reviewMessage(selectedFindings),
+        ...runs.filter(run => run.resultArtifactId && chosen.some(finding => finding.reviewId === run.id)).map(run => `Source: findings artifact ${run.resultArtifactId} v1.`),
+        `Finding IDs: ${chosen.map(finding => finding.id).join(', ')}.`,
+        reviewMessage(chosen),
       ].join('\n\n');
       composeInConversation({ sessionId, text: draft, api });
       const openedBeside = openRelatedConversation({ collectionId: workspaceId, sessionId: authorSession.id, commandId: '' },
@@ -226,6 +227,7 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
     </div>
     <div className="review-tray-scroll">
       {hasFindings && <div className="review-facets">
+        {focusRun && <button type="button" onClick={() => { setFocusRun(''); setQuery(q => ({ ...q, author: '' })); }}>Show all reviews</button>}
         <label>By<select aria-label="Author" value={query.author} onChange={event => setQuery(q => ({ ...q, author: event.target.value }))}>{authors.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}</select></label>
         <label>Severity<select aria-label="Severity" value={query.severity} onChange={event => setQuery(q => ({ ...q, severity: event.target.value }))}><option value="">Any</option>{severities.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}</select></label>
       </div>}
@@ -237,7 +239,7 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
           <ul>{group.comments.map(c => {
             const fresh = freshnessLabel(c), finding = isFinding(c);
             return <li key={c.id} className={`is-${c.disposition || 'open'}${finding ? ' is-finding' : ''}`}>
-              {isPending(c) && <input type="checkbox" checked={!excluded.has(c.id)} onChange={() => toggle(c.id)} aria-label={`Include the comment on ${group.file} ${linesLabel(c.side, c.startLine, c.endLine).toLowerCase()}`}/>}
+              {(isPending(c) || isProposed(c)) && <input type="checkbox" checked={!excluded.has(c.id)} onChange={() => toggle(c.id)} aria-label={`Include the comment on ${group.file} ${linesLabel(c.side, c.startLine, c.endLine).toLowerCase()}`}/>}
               <div className="review-tray-item">
                 <button className="review-tray-jump" onClick={() => onJump(c)} title="Show in the diff">
                   <span className="review-tray-where">
@@ -260,14 +262,19 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
     </div>
     <footer>
       {error && <p className="review-error" role="alert">{error}</p>}
+      {!!selectable.length && <button type="button" onClick={() => setExcluded(previous => {
+        const next = new Set(previous);
+        for (const c of selectable) { if (chosen.length === selectable.length) next.add(c.id); else next.delete(c.id); }
+        return next;
+      })}>{chosen.length === selectable.length ? 'Clear selection' : 'Select all'}</button>}
       {conversations.length > 1 && <label className="review-target">Send to<select value={to?.id || ''} onChange={event => setTarget(event.target.value)} aria-label="Conversation">
         {conversations.map(s => <option key={s.id} value={s.id}>{conversationName(s, 'Untitled conversation')}{s.id === author ? ' (author)' : s.id === conversation?.id ? ' (current)' : ''}</option>)}
       </select></label>}
-      {templateRun && authorSession && <button type="button" className="review-send" disabled={!selectedFindings.length || busy} onClick={() => void startFixConversation()}>
-        <Icon name="chat" size={14}/>Address selected findings in a new conversation
+      {authorSession && <button type="button" className="review-send" disabled={!chosen.length || busy} onClick={() => void startFixConversation()}>
+        <Icon name="chat" size={14}/>Fix in new conversation
       </button>}
       <button className="primary review-send" disabled={!chosen.length || !to || busy} onClick={() => void send()}>
-        <Icon name="send" size={14}/>{chosen.length ? `Send ${plural(chosen.length, 'comment')} to the agent` : 'Send review to the agent'}
+        <Icon name="send" size={14}/>{chosen.some(isFinding) ? `Fix ${plural(chosen.length, 'finding')} in ${to?.id === conversation?.id ? 'this conversation' : (to ? conversationName(to, 'conversation') : 'conversation')}` : chosen.length ? `Send ${plural(chosen.length, 'comment')} to the agent` : 'Send review to the agent'}
       </button>
       <small className="review-muted">{!to ? 'No conversation in this workspace yet. Start one to send it comments.' : `Goes to the message box of “${conversationName(to, 'the conversation')}” as one message, findings exactly as filed. You review it and send it; nothing is sent for you.`}</small>
       <label className="review-auto check-row"><input type="checkbox" checked={review.autoResolve} onChange={event => { const enabled = event.target.checked; void review.setAutoResolve(enabled).catch(e => setError(errorText(e))); }}/><span>Resolve sent comments when a commit changes their lines</span></label>

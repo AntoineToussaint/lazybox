@@ -59,7 +59,8 @@ it did.
   code). Hover it to scroll through it; click it to read or edit it. ⌘Z right
   after the paste, or the box's ⋯ → **Insert inline**, puts the text in the
   message instead. A pasted box counts as one of the four files, and it is
-  kept with your draft if the window reloads.
+  kept with your draft if the window reloads. Large pasted boxes use the local
+  attachment store and can still be edited after reloading.
 - Attached files, including screenshots, are saved with the draft on this device.
   Reloading restores the files from local storage. If the stored bytes are
   unavailable, the composer names the missing files so you can reattach or remove them.

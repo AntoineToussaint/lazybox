@@ -22,15 +22,22 @@ export function useNavigationRequests(root: string, enabled: boolean, show: (tar
   const ref = useRef(show); ref.current = show;
   useEffect(() => {
     if (!enabled || !root) return;
-    const listener = (event: StorageEvent) => {
-      if (event.key !== navigateKey(root) || !event.newValue) return;
+    const key = navigateKey(root);
+    const deliver = () => {
       try {
-        const value = JSON.parse(event.newValue);
-        if (typeof value?.collectionId !== 'string' || typeof value.sessionId !== 'string' || !(Date.now() - value.at < fresh)) return;
+        const raw = localStorage.getItem(key);
+        if (!raw) return;
+        localStorage.removeItem(key);
+        const value = JSON.parse(raw);
+        const age = Date.now() - value.at;
+        if (typeof value?.collectionId !== 'string' || typeof value.sessionId !== 'string' || !(age >= 0 && age < fresh)) return;
         ref.current({ collectionId: value.collectionId, sessionId: value.sessionId, commandId: typeof value.commandId === 'string' ? value.commandId : '', ...(typeof value.artifactId === 'string' ? { artifactId: value.artifactId } : {}) });
-      } catch { /* a malformed request is ignored */ }
+      } catch { /* unavailable storage or malformed request */ }
     };
+    const listener = (event: StorageEvent) => { if (event.key === key && event.newValue) deliver(); };
     window.addEventListener('storage', listener);
+    // A detached mission may have just reopened the main window.
+    deliver();
     return () => window.removeEventListener('storage', listener);
   }, [root, enabled]);
 }

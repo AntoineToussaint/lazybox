@@ -14,6 +14,7 @@ type Commands = {
   /** The main window (not a window fixed to one workspace): it takes other windows' requests and has Settings. */
   main: boolean;
   canShowMissions: boolean;
+  missionOpen: boolean;
   collections: Collection[];
   selection: ViewTarget;
   workspaceId: string;
@@ -52,11 +53,11 @@ export function useWorkspaceCommands(commands: Commands): CommandNavigator {
     'changes.show': { run: () => c().showPanel('changes'), enabled: () => !!c().workspaceId },
     'missions.open': { run: () => c().showPanel('missions'), enabled: () => c().canShowMissions },
     'missions.page': { run: () => showMissionsPage(), enabled: () => c().canShowMissions },
-    'pulls.open': { run: () => c().showPanel('pulls'), enabled: () => !!c().registry.pulls },
+    'pulls.open': { run: () => c().showPanel('pulls'), enabled: () => !c().missionOpen && !!c().registry.pulls },
     'terminal.open':{ run: () => c().showPanel('terminal'), enabled: () => c().terminalReady },
     'workspace.window': { run: () => c().openWorkspaceWindow(), enabled: () => c().canOpenWorkspaceWindow },
-    'page.customize': () => c().toggleEditing(),
-    'layout.configure': () => c().toggleConfiguring(),
+    'page.customize': { run: () => c().toggleEditing(), enabled: () => !c().missionOpen },
+    'layout.configure': { run: () => c().toggleConfiguring(), enabled: () => !c().missionOpen },
   });
   // A detached chat window asks this window to show a conversation, or an artifact (its Open in main window).
   useNavigationRequests(commands.root, commands.main, target => {
@@ -80,8 +81,8 @@ export function useWorkspaceCommands(commands: Commands): CommandNavigator {
   const windowsKey = (commands.windows || []).map(item => `${item.id}:${item.title}`).join('|');
   const panels = useMemo(() => Object.entries(commands.registry).filter(([kind]) => !pageOnly.has(kind)).map(([kind, module]) => ({ kind, title: module.title, icon: module.icon || 'file' })), [commands.registry]);
   return useMemo(() => ({
-    collections: commands.collections, current: commands.selection, workbench: commands.workbench, panels, windows: commands.windows,
+    collections: commands.collections, current: commands.selection, workbench: commands.workbench, panels: commands.missionOpen ? [] : panels, windows: commands.windows,
     goTo, showPanel: (kind: string) => latest.current.showPanel(kind),
     openSettings: commands.main ? (tab: string) => latest.current.openSettings(tab) : undefined,
-  }), [commands.collections, commands.selection, commands.workbench, panels, commands.main, windowsKey]);
+  }), [commands.collections, commands.selection, commands.workbench, panels, commands.main, commands.missionOpen, windowsKey]);
 }

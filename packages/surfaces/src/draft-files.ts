@@ -1,8 +1,9 @@
 // Keep binary draft data in the window origin's database. The compact text
 // draft references exact file identities, including for same-named files.
 import type { ViewStateStore } from '@lazybox/platform';
+import { pastedTextOf, restorePastedText } from './attachment-boxes';
 
-type Entry = { id: string; name: string; type: string; lastModified: number; bytes: ArrayBuffer };
+type Entry = { id: string; name: string; type: string; lastModified: number } & ({ bytes: ArrayBuffer } | { text: string });
 const pending = new Map<string, Promise<void>>();
 const ids = new WeakMap<File, string>();
 let database: Promise<IDBDatabase> | undefined;
@@ -29,10 +30,11 @@ export function saveDraftFiles(store: ViewStateStore, session: string, files: Fi
   const previous = pending.get(draftKey);
   const save = async () => {
     // WebKit can refuse File objects in a private window. Persist their bytes.
-    const entries = await Promise.all(files.map(async file => ({
-      id: draftFileId(file), name: file.name, type: file.type,
-      lastModified: file.lastModified, bytes: await file.arrayBuffer(),
-    })));
+    const entries = await Promise.all(files.map(async (file): Promise<Entry> => {
+      const metadata = { id: draftFileId(file), name: file.name, type: file.type, lastModified: file.lastModified };
+      const text = pastedTextOf(file);
+      return text === undefined ? { ...metadata, bytes: await file.arrayBuffer() } : { ...metadata, text };
+    }));
     const db = await openDatabase();
     const tx = db.transaction('drafts', 'readwrite');
     const drafts = tx.objectStore('drafts');
@@ -56,8 +58,9 @@ export async function loadDraftFiles(store: ViewStateStore, session: string) {
     request.onsuccess = () => resolve(request.result || []);
     request.onerror = () => reject(request.error);
   });
-  return new Map(entries.map(({ id, name, type, lastModified, bytes }) => {
-    const file = new File([bytes], name, { type, lastModified });
+  return new Map(entries.map(entry => {
+    const { id, name, type, lastModified } = entry;
+    const file = 'text' in entry ? restorePastedText(name, entry.text, lastModified, type) : new File([entry.bytes], name, { type, lastModified });
     ids.set(file, id);
     return [id, file];
   }));

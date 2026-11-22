@@ -73,7 +73,7 @@ try {
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.getByRole('tab', { name: 'Shortcuts' }).click();
     await page.getByRole('switch', { name: 'Vim editing in the message box' }).check();
-    await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+    await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
     await expect(message).toBeEnabled();
     await burst('Vim insert mode', async () => { await expect(page.locator('.vim-mode-chip')).toHaveText('INSERT'); await page.keyboard.type(text, { delay: 0 }); }, text);
 

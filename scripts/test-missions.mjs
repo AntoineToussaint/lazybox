@@ -20,7 +20,8 @@ let browser;
 try {
   await server.listen();
   browser = await (process.env.TEST_CHROMIUM ? chromium : webkit).launch();
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
   // A reload cuts every panel's in-flight poll, which WebKit reports as page
   // errors ("access control checks") on the page being left: not failures.
   let navigating = false;
@@ -28,7 +29,7 @@ try {
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
   await expect(page.locator('.panel-chat').getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
 
-  // The Panels menu shows the Missions panel like any other; with no mission it explains itself.
+  // The Runner-wide page opens outside the workspace layout.
   await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   const panel = page.getByRole('region', { name: 'Missions and tasks', exact: true });
   await expect(panel).toBeVisible();
@@ -41,6 +42,21 @@ try {
   // A mission: an outcome, an optional brief. Its process is pinned and said.
   await panel.getByLabel('Outcome').fill('Ship the parser split');
   await panel.getByLabel(/Brief/).fill('parser.go is 4,000 lines; split it without changing behaviour.');
+  // Keep a pre-creation list response in flight until the mutation completes.
+  const staleList = Promise.withResolvers();
+  const releaseList = Promise.withResolvers();
+  const listFinished = Promise.withResolvers();
+  let held = false;
+  await page.route('**/ListMissions', async route => {
+    if (held) return route.continue();
+    held = true;
+    staleList.resolve();
+    await releaseList.promise;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"missions":[]}' });
+    listFinished.resolve();
+  });
+  await panel.getByRole('button', { name: 'Refresh missions' }).click();
+  await staleList.promise;
   const createKeys = [];
   await page.route('**/CreateMission', async route => {
     createKeys.push(route.request().postDataJSON().requestKey);
@@ -54,6 +70,9 @@ try {
   assert.equal(createKeys[0],createKeys[1]);
   await page.unroute('**/CreateMission');
   await expect(panel.getByRole('heading', { name: 'Ship the parser split' })).toBeVisible();
+  releaseList.resolve();
+  await listFinished.promise;
+  await page.unroute('**/ListMissions');
   await expect(panel.locator('.mission-process')).toHaveText('One agent per task · you accept each task');
   await expect(panel.getByRole('heading', { name: 'Start with one task' })).toBeVisible();
   await expect(panel.locator('.mission-column')).toHaveCount(0);
@@ -68,7 +87,23 @@ try {
   await expect(panel.getByLabel('Task', { exact: true })).toHaveValue('');
   await panel.getByLabel('Task', { exact: true }).fill('Document the parser');
   await panel.getByLabel(/Starts after/).selectOption({ label: 'Split the parser' });
+  // The Runner applied this task before its response was lost. Retrying
+  // the unchanged form must replay the operation and leave one task.
+  const taskKeys = [];
+  await page.route('**/UpdateMission', async route => {
+    const { addTask, operationId } = route.request().postDataJSON();
+    if (!addTask) return route.continue();
+    taskKeys.push(operationId);
+    if (taskKeys.length > 1) return route.continue();
+    await route.fetch();
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({code:'unavailable', message:'Task response lost'}) });
+  });
   await panel.getByRole('button', { name: 'Add task', exact: true }).click();
+  await expect(panel.getByRole('alert').first()).toContainText('Task response lost');
+  await panel.getByRole('button', { name: 'Add task', exact: true }).click();
+  await expect.poll(() => taskKeys.length).toBe(2);
+  assert.equal(taskKeys[0], taskKeys[1]);
+  await page.unroute('**/UpdateMission');
   await panel.getByRole('button', { name: 'Done', exact: true }).click();
   const card = title => panel.locator('.mission-card').filter({ has: page.getByRole('button', { name: title, exact: true }) });
   const column = key => panel.locator(`.column-${key}`);
@@ -248,6 +283,13 @@ try {
   await detached.reload();
   await expect(missionHeading).toBeVisible();
   await expect(detached.getByRole('button', {name: 'New mission'})).toHaveCount(0);
+  // A detached mission stays usable after closing its main window.
+  await page.close();
+  const reopened = detached.waitForEvent('popup', { timeout: 6000 });
+  await detached.locator('.mission-card').filter({ has: detached.getByRole('button', {name: 'Split the parser', exact: true}) }).locator('.mission-conversation').click();
+  const workspace = await reopened;
+  await expect(workspace.locator('.panel-chat').getByRole('textbox', {name: 'Message', exact: true})).toBeVisible();
+  await expect(workspace.getByRole('tab', {selected: true}).filter({hasText: /Split the parser/i})).toBeVisible();
   console.log('missions: create, assign, evidence, report, accept and changes requested pass');
 } finally {
   await browser?.close();

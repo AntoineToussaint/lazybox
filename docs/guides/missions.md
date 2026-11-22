@@ -15,9 +15,9 @@ can tell *claimed* from *verified* at a glance, across many agents.
 2. Create a mission with an outcome and an optional brief. Choose **Add first task** to describe one deliverable. The board appears when you add that task. Later tasks can depend on earlier ones.
 3. **Assign** a task: pick a workspace and start a new conversation there (or
    hand it to one you already have), optionally sending the task's brief as the
-   first message.
+   first message. If the response is lost, retry the same form. The Runner reuses the assignment and completes any pending brief delivery.
 
-Choose **Detach mission** to keep the selected mission in its own window while you switch workspaces. The detached window stays on that mission across reloads. Opening the same mission again focuses its window.
+Choose **Detach mission** to keep the selected mission in its own window while you switch workspaces. The detached window stays on that mission across reloads. Opening the same mission again focuses its window. Opening a task conversation from a detached mission brings the main window forward or reopens it.
 
 The board has four columns — **Ready**, **Working**, **Needs you**, **Done** —
 and each card shows the task's status, its trust, its evidence, the

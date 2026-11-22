@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sources/github"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
@@ -144,6 +146,22 @@ func (s *Service) UpdateMission(ctx context.Context, r *pb.UpdateMissionRequest)
 // chosen workspace, and optionally sends it the task's brief as the
 // conversation's next message (recorded as a mission prompt).
 func (s *Service) assign(ctx context.Context, store *work.Store, mission, key string, a *pb.TaskAssign) (*work.State, string, string, error) {
+	// OpenSession allocates a conversation before Store.Assign records its ID.
+	// Serialize this task's requests so a concurrent retry sees the saved ID.
+	scope := [2]string{mission, a.GetTaskId()}
+	done := make(chan struct{})
+	for {
+		active, busy := s.assigning.LoadOrStore(scope, done)
+		if !busy {
+			break
+		}
+		select {
+		case <-active.(chan struct{}):
+		case <-ctx.Done():
+			return nil, "", "", ctx.Err()
+		}
+	}
+	defer func() { s.assigning.Delete(scope); close(done) }()
 	current, err := store.Mission(mission)
 	if err != nil {
 		return nil, "", "", err
@@ -156,9 +174,15 @@ func (s *Service) assign(ctx context.Context, store *work.Store, mission, key st
 		// A retried assignment opens no second conversation.
 		if e, ok := current.Event(key); ok {
 			var p work.AttemptPayload
-			_ = json.Unmarshal(e.Payload, &p)
-			return current, p.Attempt, p.Execution, nil
+			if e.Type != work.TaskAssigned || json.Unmarshal(e.Payload, &p) != nil || p.Task != task.ID {
+				return nil, "", "", fmt.Errorf("%w: operation already belongs to another change", work.ErrRefused)
+			}
+			err := s.sendAssignmentBrief(ctx, current, task, p)
+			return current, p.Attempt, p.Execution, err
 		}
+	}
+	if current.Canceled || task.Canceled || current.Done(task) {
+		return nil, "", "", fmt.Errorf("%w: only an open task can be assigned", work.ErrRefused)
 	}
 	var e *runner.Execution
 	switch {
@@ -187,24 +211,41 @@ func (s *Service) assign(ctx context.Context, store *work.Store, mission, key st
 	if conversation == "" {
 		conversation = e.ID
 	}
-	state, attempt, err := store.Assign(mission, task.ID, work.Human, key, work.AttemptPayload{Conversation: conversation, Workspace: e.CollectionID, Execution: e.ID, New: a.Open != nil})
+	payload := work.AttemptPayload{Conversation: conversation, Workspace: e.CollectionID, Execution: e.ID, New: a.Open != nil}
+	if a.SendBrief {
+		operation := key
+		if operation == "" {
+			operation = commands.ID()
+		}
+		payload.BriefOperation = fmt.Sprintf("mission-brief-%x", sha256.Sum256([]byte(mission+"/"+operation)))
+	}
+	state, attempt, err := store.Assign(mission, task.ID, work.Human, key, payload)
 	if err != nil {
 		return nil, "", "", err
 	}
-	if a.SendBrief {
-		text := briefMessage(current, task)
-		operation := key
-		if operation == "" {
-			operation = attempt
-		}
-		origin := &agent.Origin{Kind: agent.OriginMissionBrief, Summary: "Task assigned · " + task.Title, Detail: current.Title}
-		_, err = s.apply(ctx, &pb.ApplyRequest{SessionId: e.ID, OperationId: operation + "/brief", Operation: &pb.ApplyRequest_Message{Message: &pb.Message{Text: text, Source: &pb.PromptSource{Kind: work.SourceMission, MissionId: mission, TaskId: task.ID}}}}, origin)
-		if err != nil {
-			// The assignment stands; say the brief did not go.
-			return state, attempt, e.ID, fmt.Errorf("assigned, but the brief was not delivered: %w", err)
-		}
+	payload.Attempt = attempt
+	err = s.sendAssignmentBrief(ctx, state, state.Task(task.ID), payload)
+	return state, attempt, e.ID, err
+}
+
+// The operation is persisted with the assignment before delivery. Old assignments
+// carry no pending operation; a retry returns their original result.
+func (s *Service) sendAssignmentBrief(ctx context.Context, state *work.State, task *work.Task, p work.AttemptPayload) error {
+	if p.BriefOperation == "" || (s.Bench.Prompts != nil && s.Bench.Prompts.Submitted(p.Conversation, p.BriefOperation)) {
+		return nil
 	}
-	return state, attempt, e.ID, nil
+	if at := task.Current(); at == nil || at.ID != p.Attempt || at.Ended || task.Canceled || state.Canceled || state.Done(task) {
+		return fmt.Errorf("%w: assignment ended before its brief was delivered", work.ErrRefused)
+	}
+	origin := &agent.Origin{Kind: agent.OriginMissionBrief, Summary: "Task assigned · " + task.Title, Detail: state.Title}
+	receipt, err := s.apply(ctx, &pb.ApplyRequest{SessionId: p.Execution, OperationId: p.BriefOperation, Operation: &pb.ApplyRequest_Message{Message: &pb.Message{Text: briefMessage(state, task), Source: &pb.PromptSource{Kind: work.SourceMission, MissionId: state.ID, TaskId: task.ID}}}}, origin)
+	if err != nil {
+		return fmt.Errorf("assigned, but the brief was not delivered: %w", err)
+	}
+	if receipt.Error != "" {
+		return fmt.Errorf("assigned, but the brief was not delivered: %s", receipt.Error)
+	}
+	return nil
 }
 
 // briefMessage is the message a conversation receives when a task is

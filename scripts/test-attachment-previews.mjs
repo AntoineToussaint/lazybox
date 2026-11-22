@@ -262,6 +262,22 @@ try {
     await expect(attached).toHaveCount(0);
     await expect(composer).toHaveValue(python);
 
+    // This paste fits the Runner but would overflow native draft storage when JSON-escaped.
+    const dense = 'é"'.repeat(95000);
+    await composer.fill('');
+    await page.evaluate(text => navigator.clipboard.writeText(text), dense);
+    await composer.focus(); await page.keyboard.press('ControlOrMeta+V');
+    await expect(attached.getByRole('button', {name: /^Open Pasted text/}).first()).toBeVisible();
+    await expect.poll(() => page.evaluate(() => {
+      const draft = Object.entries(localStorage).find(([key, value]) => key.includes(':draft:') && value.includes('Pasted text'));
+      if (!draft) return false;
+      const value = JSON.parse(draft[1]);
+      return value.files.length === 1 && !!value.files[0].blobId;
+    })).toBe(true);
+    await page.reload();
+    await attached.getByLabel('More for the pasted text', {exact:true}).click();
+    await page.getByRole('group', {name:'More for the pasted text menu'}).getByRole('button', {name:'Insert inline'}).click();
+    assert.equal(await composer.inputValue(), dense);
     // A click opens it in the viewer, where it can be edited; Save keeps the edit.
     await composer.fill(''); await paste();
     await box.click();

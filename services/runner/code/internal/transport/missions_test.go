@@ -308,6 +308,55 @@ func TestAssigningToANewConversationAndDeletingIt(t *testing.T) {
 	}
 }
 
+// Race two identical requests at the RPC boundary. The losing request must
+// return the same session and leave no extra conversation in the workspace.
+func TestConcurrentMissionAssignmentStartsOneConversation(t *testing.T) {
+	f := newTerminalFixture(t)
+	owner := bearer(timeout(t), ownerToken)
+	mission, task := missionWithTask(t, f, owner)
+	started := len(f.bench.List())
+	request := &pb.UpdateMissionRequest{MissionId: mission, OperationId: "retry", Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: task, Open: &pb.OpenSessionRequest{ProfileId: "claude-default", CollectionId: f.theirs.Id}, SendBrief: true}}}
+	type reply struct {
+		mission *pb.Mission
+		err     error
+	}
+	results := make(chan reply, 2)
+	for i := 0; i < 2; i++ {
+		go func() { m, err := f.client.UpdateMission(owner, request); results <- reply{m, err} }()
+	}
+	first, second := <-results, <-results
+	if first.err != nil || second.err != nil || first.mission.SessionId == "" || first.mission.SessionId != second.mission.SessionId || len(f.bench.List()) != started+1 {
+		t.Fatalf("concurrent assignment: %+v %+v sessions %d -> %d", first, second, started, len(f.bench.List()))
+	}
+	history, err := f.client.ListPromptHistory(owner, &pb.ListPromptHistoryRequest{CollectionId: f.theirs.Id})
+	if err != nil || len(history.Prompts) != 1 {
+		t.Fatalf("wanted one assigned brief: %v %v", history, err)
+	}
+}
+
+// Model a Runner interruption after persisting an assignment but before its
+// brief. Retrying twice must complete that delivery once, to the original agent.
+func TestMissionAssignmentRetryFinishesMissingBrief(t *testing.T) {
+	f := newTerminalFixture(t)
+	owner := bearer(timeout(t), ownerToken)
+	mission, task := missionWithTask(t, f, owner)
+	e := f.conversation
+	_, attempt, err := f.bench.Work.Assign(mission, task, work.Human, "interrupted", work.AttemptPayload{Execution: e.ID, Conversation: e.Saved.ConversationID, Workspace: e.CollectionID, BriefOperation: "persisted-brief"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		m, err := f.client.UpdateMission(owner, &pb.UpdateMissionRequest{MissionId: mission, OperationId: "interrupted", Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: task, SessionId: e.ID, SendBrief: true}}})
+		if err != nil || m.CreatedId != attempt || m.SessionId != e.ID {
+			t.Fatalf("retry %d: %v %v", i, m, err)
+		}
+	}
+	history, err := f.client.ListPromptHistory(owner, &pb.ListPromptHistoryRequest{ConversationId: e.ID})
+	if err != nil || len(history.Prompts) != 1 || history.Prompts[0].Source.GetTaskId() != task {
+		t.Fatalf("wanted the missing brief: %v %v", history, err)
+	}
+}
+
 // Messages go in the prompt log with their source; a message that is exactly
 // a catalog snippet is recorded as that snippet, with its next: chain.
 func TestPromptLogAndSnippetChains(t *testing.T) {

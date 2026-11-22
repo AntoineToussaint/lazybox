@@ -100,6 +100,10 @@ async function run(scheme) {
   await tabs.getByRole('tab', { name: /Messages/ }).click();
   const threads = panel.locator('.message-thread');
   await expect(threads).toHaveCount(2);
+  // ListMissions omits history and messages. A list refresh keeps the open thread.
+  const listRead = page.waitForResponse(response => response.url().endsWith('/ListMissions'));
+  await panel.getByRole('button', {name: 'Refresh missions'}).click();
+  await listRead;
   await expect(threads.first()).toContainText('Index the corpus');
   await expect(panel.locator('.thread-message.kind-report')).toContainText('Indexed 1,204 files');
   await page.screenshot({ path: `${shots}orchestration-messages-${scheme}.png` });

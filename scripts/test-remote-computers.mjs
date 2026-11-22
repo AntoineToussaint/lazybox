@@ -144,7 +144,7 @@ try {
       await expect(item).toBeVisible({ timeout: 10_000 });
       await expect(item.locator('.runners-remote')).toHaveText('On build-box · SSH build-box · 42 ms · SHA256:q1w2e3r4t5y6u7i8o9p0');
       await expect(item.getByRole('button', { name: 'Remove build-box from this computer' })).toBeVisible();
-      await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+      await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
     }
 
     // The sidebar groups by computer: This Mac (Dev), then build-box over SSH.

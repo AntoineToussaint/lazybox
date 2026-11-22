@@ -100,7 +100,7 @@ try {
         await row.getByRole('switch', { name: 'Show in this window' }).click();
         await expect(row).not.toHaveAttribute('data-hidden');
       }
-      await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+      await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
     };
     if (scheme === 'dark') {
       // Dismissed, the hint does not come back; Working stays out until the person opts in, in Settings → Runners.
@@ -395,7 +395,7 @@ try {
       await expect(list.locator('.runners-item[data-runner=release]')).toHaveAttribute('data-hidden', 'true');
       await list.locator('.runners-item[data-runner=working]').getByRole('button', { name: 'Make primary' }).click();
       await expect(list.locator('.runners-item[data-runner=working] .runners-tag.is-primary')).toHaveText('Primary');
-      await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+      await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
       await expect(groups).toHaveCount(2);
       navigating = true; await page.reload(); await page.waitForLoadState('load'); navigating = false;
       await expect(page.locator('.runner-group[data-active]')).toHaveAttribute('data-runner', 'working');

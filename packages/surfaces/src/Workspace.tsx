@@ -212,7 +212,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const display = useDisplayDetail(viewState);
   const missionsKey = `${viewState?.key || 'window'}:missions-open`;
   const [surface, setSurface] = useState<'workspace' | 'settings' | 'missions'>(() => {
-    try { return sessionStorage.getItem(missionsKey) === '1' ? 'missions' : 'workspace'; } catch { return 'workspace'; }
+    try { return !fixedWorkspaceId && sessionStorage.getItem(missionsKey) === '1' ? 'missions' : 'workspace'; } catch { return 'workspace'; }
   });
   const missionOpen = surface === 'missions';
   const workspaceOpen = surface === 'workspace';
@@ -365,7 +365,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     const review: WorkspacePage = { id, name: 'Changes', selection: { ...page.selection, collectionId: workspaceID }, layout: { type: 'group', id: `g-${panel.id}`, panels: [panel], active: panel.id }, floating: [], popouts: [], detached: [] };
     if (commit({ ...current.current, selectedPage: id, pages: [...current.current.pages, review] })) setSettings(false);
   };
-  const showMissionsPage = () => { setSurface('missions'); setBeside(undefined); };
+  const showMissionsPage = () => { if (fixedWorkspaceId) return; setSurface('missions'); setBeside(undefined); };
   useMissionsPageHost(showMissionsPage);
   // A switch from another Runner asked for this conversation (or workspace): shown once the page is up.
   useEffect(() => { if (reveal?.sessionId) showSession(reveal); else if (reveal?.collectionId) select(reveal); }, []);
@@ -468,7 +468,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     return true;
   };
   useWebViewer(openWeb);
-  useKeyboardAction('web.open', () => { openWeb({ url: '', newPanel: !shownPanels(livePage()).some(panel => panel.kind === 'web' && !panel.detached) }); });
+  useKeyboardAction('web.open', () => { openWeb({ url: '', newPanel: !shownPanels(livePage()).some(panel => panel.kind === 'web' && !panel.detached) }); }, () => !missionOpen);
   // Ask Lazybox (Help menu, ⌘K, ]] h): its panel on this page, with the message box focused.
   useKeyboardAction('help.training', () => showModule('training'));
   useKeyboardAction('help.ask', question => {
@@ -782,7 +782,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   // ⇧⌘D (or the Window menu) with a popped-out group's window in front: that group goes back.
   useKeyboardAction('window.put-back', () => { const group = dock.current?.focusedPopout(); if (group) dock.current?.dockBack(group); }, () => !!dock.current?.focusedPopout());
   const navigator = useWorkspaceCommands({
-    root: viewState?.root || '', main: !fixedWorkspaceId && ownWindows, canShowMissions: !fixedWorkspaceId, collections, selection: missionOpen ? emptyTarget() : page.selection, workspaceId: missionOpen ? '' : workspaceID, workbench: missionOpen ? undefined : workbench, registry,
+    root: viewState?.root || '', main: !fixedWorkspaceId && ownWindows, canShowMissions: !fixedWorkspaceId, missionOpen, collections, selection: missionOpen ? emptyTarget() : page.selection, workspaceId: missionOpen ? '' : workspaceID, workbench: missionOpen ? undefined : workbench, registry,
     windows: missionOpen ? [] : otherWindows, canStartConversation: !missionOpen && !!info && !pending && canShowNewSession, terminalReady: !missionOpen && terminalReady, canOpenWorkspaceWindow: !missionOpen && !!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId,
     showRun: target => showPanelFor('console', target), showSession, selectWorkspace: select, closeSettings: () => setSettings(false),
     showPanel: kind => kind === 'terminal' ? showTerminal() : kind === 'changes' ? showChanges() : kind === 'agents' ? void bringBackAgents() : void showModule(kind),
@@ -889,9 +889,9 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         command(`layout.resize-${direction}`, `Resize: move the active group’s edge ${direction}`, 'Layout', () => dock.current?.resize(direction, false), () => docked && !!panel, keymap[`layout.resize-${direction}`]),
       ]),
       command('layout.add', 'New tab in the active group…', 'Layout', () => group && openAddMenu(group.id), () => docked && canAdd(group), keymap['layout.add']),
-      command('layout.reset', 'Reset layout to default', 'Layouts', () => applyLayout(builtinPresets.find(value => value.id === DEFAULT_PRESET)!), () => !locked),
-      command('layout.reset-all', 'Reset the layout and shortcuts', 'Layouts', () => resetEverything(), () => true, keymap['layout.reset-all']),
-      ...[...builtinPresets, ...savedLayouts].map(preset => command(`layout.preset:${preset.id}`, `Layout: ${preset.name}`, 'Layouts', () => applyLayout(preset), () => !locked)),
+      command('layout.reset', 'Reset layout to default', 'Layouts', () => applyLayout(builtinPresets.find(value => value.id === DEFAULT_PRESET)!), () => workspaceOpen && !locked),
+      command('layout.reset-all', 'Reset the layout and shortcuts', 'Layouts', () => resetEverything(), () => workspaceOpen, keymap['layout.reset-all']),
+      ...[...builtinPresets, ...savedLayouts].map(preset => command(`layout.preset:${preset.id}`, `Layout: ${preset.name}`, 'Layouts', () => applyLayout(preset), () => workspaceOpen && !locked)),
       ...Object.entries(registry).map(([kind, module]) => command(`panel.show:${kind}`, `Show ${module.title}`, 'Panels', () => kind === 'terminal' ? showTerminal() : kind === 'chat' ? showSession(livePage().selection) : kind === 'artifacts' ? showWorkspaceArtifacts() : kind === 'agents' ? void bringBackAgents() : void showModule(kind), () => !locked && workspaceOpen && (kind !== 'terminal' || terminalReady))),
     ];
   };
@@ -942,7 +942,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     ...directional('resize', (direction, argument) => dock.current?.resize(direction, !!(argument as { repeat?: boolean } | undefined)?.repeat)),
     ...tabSlots,
     'layout.add': { run: () => { const group = dock.current?.activeGroup(); if (group) openAddMenu(group.id); }, enabled: () => hasActive() && canAdd(dock.current?.activeGroup()) },
-    'layout.reset-all': () => resetEverything(),
+    'layout.reset-all': { run: () => resetEverything(), enabled: () => workspaceOpen },
   } as Parameters<typeof useActions>[0]);
   /** Whether a group has a `+`: not the sidebar (its panels are the workspace list), and not a group in a window of its own. */
   const canAdd = (group?: { panels: Panel[]; location: string }) => !!group && group.location !== 'popout' && !group.panels.every(panel => sidebarKinds.has(panel.kind));

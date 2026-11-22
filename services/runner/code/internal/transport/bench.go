@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
@@ -37,7 +38,8 @@ import (
 type Service struct {
 	Inspector gitinspect.Inspector
 	pb.UnimplementedRunnerServiceServer
-	Bench *runner.Bench
+	Bench     *runner.Bench
+	assigning sync.Map // mission/task -> channel closed when the assignment finishes
 	// Restart is the launcher that starts this Runner again after RestartRunner;
 	// nil when nothing would (a plain `codefly run`, a test, a Codefly service).
 	Restart Restarter

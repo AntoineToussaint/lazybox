@@ -1,4 +1,4 @@
-import { useMemo, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
+import { useEffect, useMemo, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { conversationName } from './conversation-model';
 import { ComposerAttachment } from './AttachmentThumbnail';
 import { ErrorBox } from './AttachmentBox';
@@ -8,6 +8,7 @@ import type { ComposerAttachments } from './useComposerAttachments';
 import type { Session } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
 import type { VimMode } from './composer-vim';
+import { SnippetChip, useSnippetParts } from './SnippetPrompt';
 import { Icon } from './Icons';
 import { leaderKeys, useVimPreferences, type Keymap } from './keyboard';
 import { useComposerVim } from './useComposerVim';
@@ -74,7 +75,12 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
   const vim = useComposerVim({ textarea, enabled: vimEditing, value: message, resetKey: sessionID, reserved: reservedKeys, onSend: () => { if (canSend || missingFiles.length > 0 || !!message.trim()) textarea.current?.form?.requestSubmit(); } });
   const dictation = useComposerDictation({ textarea, store: viewState, destination: conversationName(session), value: message, enabled: canCompose && !sending, onPreview: text => (onDictate || onChange)(text), onCommit: onChange,
     onSend: () => textarea.current?.form?.requestSubmit() });
+  const snippetParts = useSnippetParts(message);
+  const [editingSnippet, setEditingSnippet] = useState(false);
+  useEffect(() => { if (!snippetParts) setEditingSnippet(false); }, [snippetParts]);
+  const folded = !!snippetParts && !editingSnippet && !dictation.active;
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (folded && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) setEditingSnippet(true);
     const mod = event.metaKey || event.ctrlKey;
     // ⌘Z right after a paste became a box puts the text back where it was pasted.
     if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z' && attachments.undoPaste()) { event.preventDefault(); return; }
@@ -144,10 +150,14 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
     {uncertainSend && !sending && <small className="composer-hint">The previous send was not confirmed. Retrying the unchanged message checks the same operation.</small>}
     {handedOver && <p className="composer-handover" role="status">{handedOver}<button type="button" aria-label="Dismiss" onClick={onDismissHandover}>×</button></p>}
     {slash?.above}
-    <textarea ref={textarea} data-agent-composer aria-label="Message" placeholder={dictation.active ? 'Listening… speak now' : limited ? `Message ${agentName}… (sent when the conversation continues)` : `Message ${agentName}… (/ for commands)`} value={message}
+    {folded && <div className="snippet-draft-summary">{snippetParts.map((part, i) => typeof part === 'string'
+      ? <span key={i}>{part}</span> : <SnippetChip key={i} snippet={part} draft/>)}
+      <button type="button" className="text-button" onClick={() => { setEditingSnippet(true); textarea.current?.focus(); }}>Edit prompt</button>
+    </div>}
+    <textarea ref={textarea} data-agent-composer data-folded-snippet={folded || undefined} aria-label="Message" placeholder={dictation.active ? 'Listening… speak now' : limited ? `Message ${agentName}… (sent when the conversation continues)` : `Message ${agentName}… (/ for commands)`} value={message}
       className={dictation.active ? 'is-dictating' : undefined}
       aria-busy={dictation.active || undefined}
-      onChange={e => { dictation.takeOver(); onChange(e.target.value); }}
+      onChange={e => { if (folded) setEditingSnippet(true); dictation.takeOver(); onChange(e.target.value); }}
       // Read-only, not disabled, while a send is in flight: WebKit blurs a
       // disabled field, and the box would lose the keyboard after every send.
       disabled={!canCompose}
@@ -157,6 +167,7 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
       {...slash?.textareaProps}
       onKeyDown={keyDown}
       onPaste={paste}/>
+    {editingSnippet && snippetParts && <button type="button" className="text-button" onClick={() => { setEditingSnippet(false); textarea.current?.focus(); }}>Collapse snippet text</button>}
     <DictationOverlay textarea={textarea} text={message} range={dictation.live}/>
     {permissionPrompt}
     {(vim.mode || (session?.instructionsPending && !session.closed)) && <div className="composer-notices">

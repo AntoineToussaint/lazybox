@@ -5,6 +5,7 @@ import type { HandoffMessage } from './ConversationHandoff';
 import { contextMenu, type ContextMenuContext } from './ContextMenu';
 import type { MenuItem } from './context-menu-model';
 import { messageItems, messageRole, promptBefore, type MessageMenuDetail } from './chat-context-menu';
+import { SnippetChip, useSnippetParts } from './SnippetPrompt';
 import { RichContent } from './RichContent';
 import { SentAttachments } from './AttachmentThumbnail';
 import './message-list.css';
@@ -40,6 +41,10 @@ const ownSummary = (text: string) => { const line = text.trim().replace(/\s+/g, 
  */
 function PersonText({ text, quoted, onOpenFile }: { text: string; quoted: boolean; onOpenFile?(reference: FileLink, how: OpenModifiers): void }) {
   const parts = quoted ? splitItemContext(text) : undefined;
+  const snippets = useSnippetParts(quoted && !parts ? text : '');
+  if (snippets) return <>{snippets.map((part, i) => typeof part === 'string'
+    ? <RichContent key={i} text={part} onOpenFile={onOpenFile}/>
+    : <SnippetChip key={i} snippet={part}/>)}</>;
   if (!parts) return <RichContent text={text} onOpenFile={onOpenFile}/>;
   return <>
     {parts.before && <RichContent text={parts.before} onOpenFile={onOpenFile}/>}

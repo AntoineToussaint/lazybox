@@ -5,6 +5,7 @@ import { DetachedArtifacts } from './DetachedArtifacts';
 import { AppearanceSync } from './appearance/AppearanceSync';
 import { LeaderMenu } from './LeaderMenu';
 import { DetachedCommands } from './DetachedCommands';
+import { PromptSnippets } from './SnippetPrompt';
 import { SnippetPicker } from './SnippetPicker';
 import { useKeyboardNavigation, useKeyboardAction, useKeymap, useMenuSnippet, type KeyHint } from './keyboard';
 import { continueConversation } from './transcript-cache';
@@ -157,6 +158,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   useMenuSnippet(entry => {
     if (!canCompose || !composerFocused()) return;
     void api.listSnippets({}).then(result => {
+      slash.updateSnippetCatalog(result.snippets);
       const snippet = result.snippets.find(row => row.key === entry.snippet);
       if (!snippet) { setError(`Snippet "${entry.snippet}" no longer exists. Update the ]] menu in Settings → Keyboard.`); return; }
       saveSnippetUse(viewState, snippet.key);
@@ -657,7 +659,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     {!embedded && <LeaderMenu hint={keyboardHint}/>}
     {snippetsOpen && <SnippetPicker workspace={session?.collectionId || collectionId} store={viewState} canSend={canCompose && !sending && !message.trim() && !files.length && !missingFiles.length}
       onClose={() => { setSnippetsOpen(false); composer.current?.focus(); }}
-      onInsert={insertSnippet}
+      onCatalog={slash.updateSnippetCatalog} onInsert={insertSnippet}
       onSend={text => send(undefined, text)}/>}
     {!embedded && <WindowTopbar connecting={connecting} info={info} sessionID={sessionID} session={session}/>}
     {(error || connectionError || refreshError) && !(embedded && connectionError) && <div className={sessionID ? "error" : "error session-launch-error"} role="alert"><span>{error || connectionError || refreshError}</span><button onClick={() => { setError(''); setRefreshError(''); }}>Dismiss</button></div>}
@@ -666,7 +668,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       ? <div className="empty">Select an existing session to view its chat.</div>
       : !sessionID
         ? <NewSessionForm launcher={launcher} info={info} purpose={purpose} emptyWorkspace={emptyWorkspace} collectionId={collectionId} agentName={agentName}/>
-        : <SubagentContext.Provider value={subagents}><CurrentChatContext.Provider value={activity.current}><section className="single-session">
+        : <SubagentContext.Provider value={subagents}><CurrentChatContext.Provider value={activity.current}><PromptSnippets.Provider value={slash.snippetRows}><section className="single-session">
           {embedded
             ? <ChatHeader agentName={agentName} session={session} sessionID={sessionID} title={title} status={status} statusText={live.text + (session?.queued ? ` · ${session.queued} queued` : '')} statusBusy={live.tone === 'busy' || live.tone === 'waiting'}
               modelLabel={modelLabel} stats={stats} realTitle={realTitle} branch={branch} shownAccount={headerAccount} onOpenChat={onOpenChat} origin={assistant ? undefined : <ItemOriginChip workspace={workspace}/>}
@@ -756,6 +758,6 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             onSendToAgent={canCompose && !sending ? text => { addToDraft(text, HANDOVER_NOTICE); return ''; } : undefined}/>}
           {!embedded && <EventLog events={events}/>}
           <SubagentPanel/>
-        </section></CurrentChatContext.Provider></SubagentContext.Provider>}
+        </section></PromptSnippets.Provider></CurrentChatContext.Provider></SubagentContext.Provider>}
   </main>;
 }

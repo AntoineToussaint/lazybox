@@ -14,6 +14,7 @@ export function SnippetPicker({
   store,
   canSend,
   onClose,
+  onCatalog,
   onInsert,
   onSend,
 }: {
@@ -21,6 +22,7 @@ export function SnippetPicker({
   store?: ViewStateStore;
   canSend: boolean;
   onClose(): void;
+  onCatalog(rows: Snippet[]): void;
   onInsert(text: string): void;
   onSend(text: string): Promise<boolean>;
 }) {
@@ -50,7 +52,7 @@ export function SnippetPicker({
       .listSnippets({}, { signal: controller.signal })
       .then(
         (v) => {
-          if (!controller.signal.aborted) setRows(v.snippets);
+          if (!controller.signal.aborted) { setRows(v.snippets); onCatalog(v.snippets); }
         },
         (e) => {
           if (!controller.signal.aborted) setError(String(e));
@@ -60,7 +62,7 @@ export function SnippetPicker({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [api]);
+  }, [api, onCatalog]);
   const matching = rows.filter(row =>
     view === 'all' || (view === 'favorites' ? favorites.includes(row.key) : (usage[row.key]?.count || 0) > 0),
   );

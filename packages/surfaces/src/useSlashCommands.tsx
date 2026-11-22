@@ -91,20 +91,26 @@ export function useSlashCommands(o: Options) {
   const { api, session, sessionID, catalog, provider } = o;
   const workspaceId = session?.collectionId || '';
 
-  // Snippets join the menu once a command is typed; the chain the last one offers comes first.
-  const [snippets, setSnippets] = useState<{ rows: Snippet[]; next: string[] }>({ rows: [], next: [] });
-  const typingCommand = o.message.startsWith('/');
-  const loadedFor = useRef('');
+  // The transcript also uses the catalog to fold saved snippet bodies on replay.
+  const [snippetRows, setSnippetRows] = useState<Snippet[]>([]);
   useEffect(() => {
-    if (!typingCommand || !o.enabled || loadedFor.current === sessionID) return;
-    loadedFor.current = sessionID;
+    if (!o.enabled) return;
     const controller = new AbortController();
-    void Promise.all([
-      api.listSnippets({}, { signal: controller.signal }).catch(() => ({ snippets: [] as Snippet[] })),
-      session?.conversationId ? api.listPromptHistory({ conversationId: session.conversationId, limit: 1 }, { signal: controller.signal }).catch(() => undefined) : Promise.resolve(undefined),
-    ]).then(([list, history]) => { if (!controller.signal.aborted) setSnippets({ rows: list.snippets, next: history?.nextSnippets || [] }); });
-    return () => { controller.abort(); if (loadedFor.current === sessionID) loadedFor.current = ''; };
-  }, [typingCommand, o.enabled, sessionID, api, session?.conversationId]);
+    void api.listSnippets({}, { signal: controller.signal }).then(list => {
+      if (!controller.signal.aborted) setSnippetRows(list.snippets);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [api, o.enabled, sessionID]);
+  const [nextSnippets, setNextSnippets] = useState<string[]>([]);
+  const typingCommand = o.message.startsWith('/');
+  useEffect(() => {
+    if (!typingCommand || !o.enabled || !session?.conversationId) return;
+    const controller = new AbortController();
+    void api.listPromptHistory({ conversationId: session.conversationId, limit: 1 }, { signal: controller.signal }).then(history => {
+      if (!controller.signal.aborted) setNextSnippets(history.nextSnippets);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [api, typingCommand, o.enabled, session?.conversationId]);
 
   // `/review`: another agent reviews this conversation's work (or, from a
   // review conversation, the work it reviews: a review is never reviewed).
@@ -128,7 +134,7 @@ export function useSlashCommands(o: Options) {
   };
   const lazybox = lazyboxCommands(context);
   const modelsRef = useRef(models); modelsRef.current = models;
-  const commands: SlashCommand[] = slashCommandList(lazybox, providerCommands(catalog, lazybox, o.canCompose ? undefined : 'The conversation cannot take a message now'), snippetCommands(snippets.rows, snippets.next));
+  const commands: SlashCommand[] = slashCommandList(lazybox, providerCommands(catalog, lazybox, o.canCompose ? undefined : 'The conversation cannot take a message now'), snippetCommands(snippetRows, nextSnippets));
   const byName = (name: string) => lazybox.find(command => command.name === name)!;
 
   // ---- The menu --------------------------------------------------------
@@ -440,7 +446,7 @@ export function useSlashCommands(o: Options) {
   const effortChoices = choices.filter(choice => choice.effort && choice.value.split(' ')[0] === currentModel);
 
   return {
-    menu: menu as SlashMenuState | null, onKeyDown, intercept, above, prompt, dialogs, textareaProps,
+    snippetRows, updateSnippetCatalog: setSnippetRows, menu: menu as SlashMenuState | null, onKeyDown, intercept, above, prompt, dialogs, textareaProps,
     /** The model picker of the ⋯ menu and the header: the same choices and switch as `/model`. */
     models: { choices: modelMenuChoices, efforts: effortChoices, live: context.liveModel, disabled: modelCommand.disabled, choose: (value: string) => { void switchModel(value); }, pick: () => fromPalette('model') },
     pickPermissions: byName('permissions').disabled ? undefined : () => fromPalette('permissions'),

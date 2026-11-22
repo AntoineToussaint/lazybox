@@ -26,5 +26,5 @@
   .queued-messages{margin:0 10px 6px;padding:6px 6px 6px 10px}
   .queued-row{flex-wrap:wrap}
   .queued-text{flex:1 1 100%}
-  .queued-actions{margin-left:auto}
+  .queued-actions{margin-left:auto;max-width:100%;flex-wrap:wrap}
 }

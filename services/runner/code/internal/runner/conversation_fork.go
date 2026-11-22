@@ -198,7 +198,7 @@ func readForkBoundary(ctx context.Context, timeline *Timeline, thread, after str
 			}
 			if prompt, found := prompts[delivery.Receipt.ID]; found {
 				if delivery.Receipt.Delivery == "acknowledged" || delivery.Receipt.Delivery == "delivered" {
-					if event.Status == "steered" {
+					if event.Status == "steered" || event.Status == "delegation_requested" {
 						fork.history = append(fork.history, prompt)
 					} else {
 						fork.history = append(fork.history, agent.Event{})

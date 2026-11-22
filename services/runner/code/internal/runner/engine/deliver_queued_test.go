@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
@@ -244,5 +245,40 @@ func TestDeleteQueuedLeavesCurrentTurnAndOrderingIntact(t *testing.T) {
 		if op := applied(t, s); op.Kind != agent.Message || op.ID != want {
 			t.Fatalf("next operation = %+v, want message %q", op, want)
 		}
+	}
+}
+
+func TestDelegateQueuedRequestsChildWithoutInterrupt(t *testing.T) {
+	e, s := bench(t, true)
+	ctx := contextFor(t)
+	for _, id := range []string{"running", "delegate-me", "later"} {
+		if _, err := e.Apply(ctx, agent.Operation{ID: id, Kind: agent.Message, Text: id}); err != nil {
+			t.Fatal(err)
+		}
+		if id == "running" {
+			applied(t, s)
+		}
+	}
+	e.mu.Lock()
+	e.state.Capabilities.Subagents = false
+	e.mu.Unlock()
+	if _, err := e.DeliverQueued(ctx, "delegate-me", DelegateQueued); !errors.Is(err, agent.ErrUnsupported) {
+		t.Fatalf("unsupported delegation: %v", err)
+	}
+	e.mu.Lock()
+	e.state.Capabilities.Subagents = true
+	e.mu.Unlock()
+	if _, err := e.DeliverQueued(ctx, "delegate-me", DelegateQueued); err != nil {
+		t.Fatal(err)
+	}
+	op := applied(t, s)
+	if op.Kind != agent.Steer || op.ID != "delegate-me" || !strings.Contains(op.Text, "spawn a sub-agent") || !strings.HasSuffix(op.Text, "\n\ndelegate-me") {
+		t.Fatalf("delegation: %+v", op)
+	}
+	if q := e.Snapshot().QueuedMessages; len(q) != 1 || q[0].OperationID != "later" {
+		t.Fatalf("remaining queue: %+v", q)
+	}
+	if _, err := e.DeliverQueued(ctx, "delegate-me", DelegateQueued); !errors.Is(err, ErrNotQueued) {
+		t.Fatalf("duplicate request: %v", err)
 	}
 }

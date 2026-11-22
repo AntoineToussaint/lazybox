@@ -1246,7 +1246,7 @@ actions:
             }
           }
           // Steered into the running turn: the receipt says so (engine.DeliverQueued).
-          else ch?.push({type:'receipt',status:'steered',receipt:{operationId,delivery:'acknowledged'}});
+          else ch?.push({type:'receipt',status:how==='delegate'?'delegation_requested':'steered',receipt:{operationId,delivery:'acknowledged'}});
           return json({operationId:body.operationId,delivery:'accepted'});
         }
         // A message sent during a turn waits in the queue, which a test opts into with session.queuedMessages.

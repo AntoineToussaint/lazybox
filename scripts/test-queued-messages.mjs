@@ -21,7 +21,7 @@ const now=Date.now();
 const busy=(session,provider)=>Object.assign(session,{provider,busy:true,status:'running',queued:0,queuedMessages:[],agents:[{id:'root',status:'running',phase:'tool',tool:'Bash',phaseSinceUnixMillis:String(now-300000),turnStartedAtUnixMillis:String(now-310000)}]});
 const [claude,codex]=f.sessions;
 busy(claude,'claude');claude.sentNowReply='Switching to port 4000.';
-busy(codex,'codex');Object.assign(codex,{profileId:'codex-default',capabilities:{...codex.capabilities,steer:true}});
+busy(codex,'codex');Object.assign(codex,{profileId:'codex-default',capabilities:{...codex.capabilities,steer:true,subagents:true}});
 const channels={};
 for(const session of [claude,codex]){
  const ch=channels[session.id]=f.openEvents(session.id),at=offset=>new Date(now+offset).toISOString();
@@ -184,6 +184,12 @@ try{
  await expect(youSaid(chat,'Also log the port it picked.')).toHaveCount(1);
  await expect(youSaid(chat,'Also log the port it picked.').locator('.message-tag')).toHaveText('steered');await expect(chat.getByRole('article',{name:'You, steered: Also log the port it picked.'})).toHaveCount(1);await expect(youSaid(chat,'Also log the port it picked.').locator('.eyebrow')).toHaveCount(0);await page.mouse.move(0,0);await youSaid(chat,'Also log the port it picked.').screenshot({path:'.cache/message-own-steered.png'});
 
+ await composer.fill('Inspect the error path independently');await composer.press('Enter');
+ await strip.getByRole('button',{name:'Send to sub-agent'}).click();
+ await expect.poll(()=>deliveries().at(-1)).toEqual({operationId:sentAs('Inspect the error path independently'),how:'delegate'});
+ assert.equal(codex.interrupted,undefined);
+ await expect(youSaid(chat,'Inspect the error path independently').locator('.message-tag')).toHaveText('sub-agent requested');
+ await expect(strip).toHaveCount(0);
  // Steer stays a button: ⌘↵ with nothing typed and nothing queued sends nothing, and says so quietly.
  const before=f.mutations.filter(m=>m.method==='Apply').length;
  await composer.focus();await composer.press(sendNowKey);

@@ -79,11 +79,11 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
   const context = m.promptContext;
   const info = own ? [agentName, at && exactTime(at), 'Model: ' + (m.promptModel || 'Unreported'),
     'Last reported context: ' + (context ? context.used.toLocaleString() + (context.capacity ? ' / ' + context.capacity.toLocaleString() : '') + ' tokens' : 'Unreported')].filter(Boolean).join(' · ') : undefined;
-  return <article title={info} className={'message ' + m.type} data-message-id={m.id} data-time-visible={alwaysShowTime || undefined} aria-label={own ? `You${m.steered ? ', steered' : ''}: ${ownSummary(m.text)}` : undefined}
+  return <article title={info} className={'message ' + m.type} data-message-id={m.id} data-time-visible={alwaysShowTime || undefined} aria-label={own ? `You${m.delegationRequested ? ', sub-agent requested' : m.steered ? ', steered' : ''}: ${ownSummary(m.text)}` : undefined}
     onContextMenu={menu && contextMenu<MessageMenuDetail>('message', menu, { message: m, role: messageRole(m), sessionId }, 'Message actions')}>
     {/* A message steered into a running turn says so, where it reached the agent. */}
     {own
-      ? <>{m.steered && <span className="message-tag" title={`Given to ${agentName} inside its running turn`}>steered</span>}
+      ? <>{m.steered && <span className="message-tag" title={`Given to ${agentName} inside its running turn`}>{m.delegationRequested ? 'sub-agent requested' : 'steered'}</span>}
           <div className="message-byline">{at !== undefined && <ActivityTime at={at} className="prompt-sent-time" description={info}/>} {turnControl}</div></>
       : (!reply || at !== undefined) && <div className="message-byline">
         {!reply && <span className="eyebrow">{m.type === 'failure' ? 'Stopped' : agentName}</span>}

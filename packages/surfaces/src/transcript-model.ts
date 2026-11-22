@@ -31,6 +31,7 @@ export type TranscriptMessage = { id: string; type: string; text: string; turnId
   detail?: string;
   /** A queued message given to the agent inside its running turn (Steer), shown where it was. */
   steered?: boolean;
+  delegationRequested?: boolean;
   terminalHandoff?: TerminalHandoff };
 
 export type TerminalHandoff = { id: string; workspaceId: string; cwd: string; argv: string[]; status: string; terminalId?: string };
@@ -192,9 +193,10 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
       if (message) {
         delete (pending ??= { ...state.pending })[receipt.id];
         if (receipt.delivery !== 'canceled_before_delivery') {
-          const steered = event.status === 'steered';
+          const delegationRequested = event.status === 'delegation_requested';
+          const steered = delegationRequested || event.status === 'steered';
           // The turn it starts can be recorded a moment before its receipt (Codex): it opens that turn.
-          place(steered ? { ...message, steered } : message, steered || !next.turnRunning ? undefined : next.turnStart);
+          place(steered ? { ...message, steered, ...(delegationRequested && { delegationRequested }) } : message, steered || !next.turnRunning ? undefined : next.turnStart);
         }
       }
       // A receipt during a turn is its start's, or later than it.

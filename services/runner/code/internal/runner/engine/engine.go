@@ -503,6 +503,8 @@ const (
 	DeliverNow = "now"
 	// DeliverSteer sends the message into the running turn (Capabilities.Steer).
 	DeliverSteer = "steer"
+	// DelegateQueued asks the active provider to give the message to a native sub-agent.
+	DelegateQueued = "delegate"
 	// DeleteQueued removes a message before it reaches the agent.
 	DeleteQueued = "delete"
 )
@@ -517,8 +519,8 @@ var ErrNotQueued = errors.New("that message is no longer queued")
 // it out of the queue and sends it into the running turn; if the provider
 // refuses, it goes back to the head of the queue and the error is returned.
 func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Receipt, error) {
-	if how != DeliverNow && how != DeliverSteer && how != DeleteQueued {
-		return agent.Receipt{}, errors.New(`queue action must be "now", "steer", or "delete"`)
+	if how != DeliverNow && how != DeliverSteer && how != DelegateQueued && how != DeleteQueued {
+		return agent.Receipt{}, errors.New(`queue action must be "now", "steer", "delegate", or "delete"`)
 	}
 	e.mu.Lock()
 	at := -1
@@ -547,8 +549,8 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 		return agent.Receipt{}, errors.New("session is closed or faulted")
 	}
 	op := e.queue[at]
-	if how == DeliverSteer {
-		if !e.state.Capabilities.Steer {
+	if how == DeliverSteer || how == DelegateQueued {
+		if !e.state.Capabilities.Steer || (how == DelegateQueued && !e.state.Capabilities.Subagents) {
 			e.mu.Unlock()
 			return agent.Receipt{}, agent.ErrUnsupported
 		}
@@ -564,6 +566,9 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 		e.opMu.Lock()
 		steer := op
 		steer.Kind = agent.Steer
+		if how == DelegateQueued {
+			steer.Text = "Please spawn a sub-agent for the following queued message and continue your current task. If delegation is unavailable, tell me.\n\n" + op.Text
+		}
 		r, err := e.control(steer)
 		e.opMu.Unlock()
 		r.ID = op.ID
@@ -587,7 +592,11 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 		e.ops[op.ID] = old
 		// The receipt says it was steered: a client shows the message here,
 		// inside the running turn, where every other delivery starts a turn.
-		e.appendLocked(map[string]any{"type": "receipt", "receipt": r, "status": "steered"})
+		status := "steered"
+		if how == DelegateQueued {
+			status = "delegation_requested"
+		}
+		e.appendLocked(map[string]any{"type": "receipt", "receipt": r, "status": status})
 		e.mu.Unlock()
 		return r, nil
 	}

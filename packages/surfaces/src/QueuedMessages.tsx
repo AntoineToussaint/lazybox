@@ -38,15 +38,22 @@ const clip = (text: string, length = 140) => { const line = text.replace(/\s+/g,
  * Delivering queued messages ahead of their turn, and what the strip shows
  * meanwhile: one state for the strip's buttons and for ⌘↵ in the message box.
  */
+type QueueAction = 'now' | 'steer' | 'delete' | 'delegate';
+const queueFeedback = {
+  now: { pending: 'Stopping the current step…', failure: 'Could not send it now', timeout: 'The current step has not stopped yet. Send now again to retry.' },
+  steer: { pending: 'Steering…', failure: 'Could not steer', timeout: 'The agent has not taken it yet. Steer again, or Send now.' },
+  delete: { pending: 'Deleting…', failure: 'Could not delete', timeout: 'Deletion was not confirmed. Try again.' },
+  delegate: { pending: 'Requesting a sub-agent…', failure: 'Could not request a sub-agent', timeout: 'Delegation was not confirmed. Check the conversation.' },
+} satisfies Record<QueueAction, { pending: string; failure: string; timeout: string }>;
 export type QueuedDelivery = {
-  working?: { id: string; how: 'now' | 'steer' | 'delete'; acknowledged?: boolean };
+  working?: { id: string; how: QueueAction; acknowledged?: boolean };
   error?: { id: string; text: string };
   /**
    * Delivers the queued message with this operation id. `justSent`: the
    * message was sent a moment ago, so one the Runner already took (the turn
    * ended meanwhile) went out as it should, and is no error.
    */
-  deliver(operationId: string, how: 'now' | 'steer' | 'delete', justSent?: boolean): Promise<void>;
+  deliver(operationId: string, how: QueueAction, justSent?: boolean): Promise<void>;
 };
 /** How long Send now or Steer may say it is at work before the strip gives the buttons back to try again. */
 export const DELIVERY_TIMEOUT_MS = 20_000;
@@ -68,11 +75,11 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
     if (!working) return;
     const timer = setTimeout(() => {
       setWorking(current => current === working ? undefined : current);
-      setError({ id: working.id, text: working.how === 'delete' ? 'Deletion was not confirmed. Try again.' : working.how === 'steer' ? 'The agent has not taken it yet. Steer again, or Send now.' : 'The current step has not stopped yet. Send now again to retry.' });
+      setError({ id: working.id, text: queueFeedback[working.how].timeout });
     }, DELIVERY_TIMEOUT_MS);
     return () => clearTimeout(timer);
   }, [working]);
-  const deliver = async (operationId: string, how: 'now' | 'steer' | 'delete', justSent = false) => {
+  const deliver = async (operationId: string, how: QueueAction, justSent = false) => {
     const attempt = { id: operationId, how };
     setError(undefined); setWorking(attempt);
     try {
@@ -82,7 +89,7 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
       setWorking(current => current === attempt ? undefined : current);
       const why = humanError(e);
       if (justSent && /no longer queued/.test(why)) return;
-      setError({ id: operationId, text: `${how === 'delete' ? 'Could not delete' : how === 'steer' ? 'Could not steer' : 'Could not send it now'}: ${why}` });
+      setError({ id: operationId, text: `${queueFeedback[how].failure}: ${why}` });
     }
   };
   return { working, error, deliver };
@@ -111,7 +118,7 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
   if (!session || session.closed || !queued.length) return null;
 
   const steer = !!session?.capabilities?.steer;
-  const deliver = (message: QueuedEntry, how: 'now' | 'steer' | 'delete') => delivery.deliver(message.operationId, how);
+  const deliver = (message: QueuedEntry, how: QueueAction) => delivery.deliver(message.operationId, how);
   const many = queued.length > 1;
   const shown = collapsed ? [] : !showAll && queued.length > 2 ? queued.slice(0, 2) : queued;
   // What the agent is busy with, as the live bar says it: the step and its time, else the status line.
@@ -139,9 +146,11 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
             {event ? <span className="queued-text queued-event" title={message.text}><Icon name={event.icon} size={11}/><span>{clip(event.line)}</span>{event.detail && <small>{event.detail}</small>}</span>
               : <q className="queued-text" title={message.text}>{clip(message.text)}</q>}
             <span className="queued-actions">
-              {mine ? <span className="queued-working" role="status">{working!.how === 'delete' ? 'Deleting…' : working!.how === 'steer' ? 'Steering…' : working!.acknowledged ? 'Waiting for the current turn to end…' : 'Stopping the current step…'}</span> : <>
+              {mine ? <span className="queued-working" role="status">{working.how === 'now' && working.acknowledged ? 'Waiting for the current turn to end…' : queueFeedback[working.how].pending}</span> : <>
                 {busy && steer && <button type="button" onClick={() => void deliver(message, 'steer')}
                   title={`Give ${agentName} this message now, inside the running turn, without stopping it`}><Icon name="send" size={11}/>Steer</button>}
+                {busy && steer && session.capabilities?.subagents && !origin && <button type="button" onClick={() => void deliver(message, 'delegate')}
+                  title={`Ask ${agentName} to delegate this message to a sub-agent and continue the current task`}>Send to sub-agent</button>}
                 {busy && <button type="button" onClick={() => void deliver(message, 'now')}
                   title={`${stops} and send this as the next turn${index === 0 && sendNowKey ? ` (${sendNowKey})` : ''}`}><Icon name="stop" size={11}/>Send now</button>}
                 <button type="button" onClick={() => void deliver(message, 'delete')}

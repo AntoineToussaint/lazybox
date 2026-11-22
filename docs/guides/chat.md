@@ -24,7 +24,9 @@ it did.
   next in one click (its tooltip names the step it stops), and, for
   Claude and Codex, **Steer**, which hands it to the running turn without
   stopping it: the agent reads it after the step it is on, as when you type
-  into its own terminal mid-turn. An agent that cannot take a message
+  into its own terminal mid-turn. **Send to sub-agent** asks the running agent to
+  delegate that queued message and continue its current task. It appears for
+  your messages when the agent supports both steering and sub-agents. An agent that cannot take a message
   mid-turn (an ACP agent, or a Claude agent an older Lazybox started) has no
   Steer, and the strip says so. After Send
   now the conversation shows one quiet line, *Stopped to send your message*,

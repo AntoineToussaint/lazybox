@@ -31,10 +31,10 @@ without anyone asking:
 - every **`lazybox run`** (or `lazybox log`) that finishes, with its exit
   status, the full output and what the agent saw;
 - **commits** made through the PR loop;
-- **pull requests** explicitly delivered by the assigned conversation, and their **checks**. Run `lazybox link <PR URL>` in that conversation, or create the PR there with a supported tool such as `gh pr create`. Link it while the conversation has one active task so the Runner can identify the attempt. A workspace branch alone does not associate its PR with a mission. Previously recorded history remains visible.
+- **pull requests** explicitly delivered by the assigned conversation, and their **checks**. Run `lazybox link <PR URL>` in that conversation, or create the PR there with a supported tool such as `gh pr create`. Link it while the conversation has one active task so the Runner can identify the attempt. A workspace branch alone does not associate its PR with a mission. An ambiguous command or result needs an explicit link. When a task changes hands, the replacement attempt starts with its own evidence. Previously recorded workspace-only checks and earlier attempts remain in the expanded history. Verification requires a check observation after delivery to the current attempt.
 
 Click a run to open its output in the console; click a pull request to open it
-on GitHub.
+on GitHub. Each delivered PR has its own chip. Linking another PR keeps existing check results visible.
 
 ## Trust, derived — never declared
 
@@ -42,7 +42,7 @@ on GitHub.
 | --- | --- |
 | **claimed** | Reported done, with no passing evidence. A failing last run is flagged. |
 | **observed** | The last real `lazybox run` exited 0, or the agent is running. |
-| **verified** | Checks passed on a pull request whose head is the newest Lazybox has seen. A later commit makes it *stale*. |
+| **verified** | Current checks passed on an explicitly delivered PR for this attempt. Failing, pending or stale checks on another delivered PR block verification. A newer local revision can make checks *stale*. |
 | **accepted** | You passed the task's gate. |
 
 ## Accept or send back

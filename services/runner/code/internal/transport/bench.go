@@ -774,7 +774,7 @@ func (s *Service) RegisterPipe(ctx context.Context, r *pb.RegisterPipeRequest) (
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	c, err := s.Bench.RegisterPipe(e, r.Title)
+	c, err := s.Bench.RegisterPipe(e, r.Title, r.CreatesPullRequest)
 	if err != nil {
 		return nil, rpcError(err)
 	}

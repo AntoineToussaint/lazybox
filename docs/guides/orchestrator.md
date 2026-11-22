@@ -155,7 +155,7 @@ moves between them):
 - **Board**: the columns, the orchestrator with its agents, budget and
   plan, and each task's cost and who started it.
 - **Timeline**: everything that happened, oldest first, one lane per actor
-  (you, the orchestrator, each agent, Lazybox). Narrow windows and timelines with more than eight participants show the actor’s name above each event. Select a conversation name to open it. *after #12* on an event jumps
+  (you, the orchestrator, each agent, Lazybox). Narrow windows and timelines with more than eight participants show the actor’s name above each event. Select a conversation name to open it. When its session is unavailable, the timeline keeps the actor’s name as plain text. *after #12* on an event jumps
   to the one it reacts to.
 - **Messages**: what the orchestrator and each agent said to each other,
   one thread per pair.

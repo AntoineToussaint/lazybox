@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { Mission, MissionEvent } from '@lazybox/protocol';
 import { Icon } from './Icons';
-import { useOpenConversation } from './AgentMessages';
+import { useConversationSession, useOpenConversation } from './AgentMessages';
 import { lanesOf, messageThreads, type Lane } from './orchestration-model';
 import { ago } from './missions-model';
 import './orchestration.css';
@@ -40,6 +40,8 @@ export function MissionTimeline({ mission, now }: { mission: Mission; now: numbe
   const [lit, setLit] = useState('');
   const byId = useMemo(() => new Map(events.map(e => [e.id, e])), [events]);
   const open = useOpenConversation();
+  const resolveSession = useConversationSession();
+  const available = useMemo(() => new Set(lanes.filter(l => l.conversation && resolveSession(l.conversation)).map(l => l.key)), [lanes, resolveSession]);
   const show = (id: string) => {
     setLit(id);
     document.getElementById(`timeline-${id}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -49,7 +51,7 @@ export function MissionTimeline({ mission, now }: { mission: Mission; now: numbe
     <div className="timeline-head" role="row">
       <span role="columnheader" aria-label="When" className="timeline-when"/>
       {lanes.map(l => <span key={l.key} role="columnheader" className={`timeline-lane-head tone-${l.tone}`} title={l.title}>
-        {l.conversation ? <button type="button" onClick={() => open(l.conversation!)} aria-label={`Open ${l.title}`}>{l.short}</button> : <span>{l.short}</span>}
+        {available.has(l.key) ? <button type="button" onClick={() => open(l.conversation!)} aria-label={`Open ${l.title}`}>{l.short}</button> : <span>{l.short}</span>}
       </span>)}
       <span role="columnheader" className="timeline-what">What happened</span>
     </div>
@@ -61,7 +63,7 @@ export function MissionTimeline({ mission, now }: { mission: Mission; now: numbe
         <time role="cell" title={new Date(Number(e.atUnixMillis)).toLocaleString()}>{ago(e.atUnixMillis, now)}</time>
         {lanes.map((l, i) => <span key={l.key} role="cell" className={`timeline-cell${i === lane ? ` on tone-${l.tone}` : ''}`} aria-label={i === lane ? l.title : undefined}>{i === lane && <span className="timeline-dot" aria-hidden="true"/>}</span>)}
         <span role="cell" className="timeline-summary">
-          <span className="timeline-actor">{actor.conversation
+          <span className="timeline-actor">{available.has(actor.key)
             ? <button type="button" className="link-button" onClick={() => open(actor.conversation!)}>{actor.title}</button>
             : actor.tone === 'system' ? 'Lazybox' : actor.title}</span>
           <span>{e.summary}</span>

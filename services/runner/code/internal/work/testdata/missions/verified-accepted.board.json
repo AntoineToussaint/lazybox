@@ -9,21 +9,18 @@
    "id": "t_ok",
    "status": "done",
    "trust": "accepted",
-   "evidence_trust": "verified",
+   "evidence_trust": "observed",
    "live": "idle",
-   "reason": "Accepted: Looks right; evidence: checks passed on team/api#12 at aaa1111"
+   "reason": "Accepted: Looks right; evidence: last run passed: go test ./... (exit 0)"
   },
   {
    "id": "t_stale",
    "status": "needs_you",
    "trust": "observed",
    "evidence_trust": "observed",
-   "flags": [
-    "stale"
-   ],
    "gate": "reviewed",
    "live": "idle",
-   "reason": "Reported done, waiting for you to accept · last run passed: go test ./... (exit 0); checks passed on an older head of team/api#13 at aaa1111"
+   "reason": "Reported done, waiting for you to accept · last run passed: go test ./... (exit 0)"
   },
   {
    "id": "t_redo",

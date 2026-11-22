@@ -32,11 +32,24 @@ To github.com:acme/api.git
 `
 
 func TestDetectorsTellDeliveredFromMentioned(t *testing.T) {
-	if !CreatesPullRequest(`{"command":"git push -u origin HEAD && gh pr create --fill"}`) || !CreatesPullRequest("lazybox run -- hub pull-request -m fix") || !CreatesPullRequest("glab mr create --fill") || !CreatesPullRequest("mcp__github__create_pull_request {}") {
-		t.Fatal("commands that open a pull request")
+	for _, cmd := range []string{"git push -u origin HEAD && gh pr create --fill", "lazybox run -- hub pull-request -m fix", "glab mr create --fill"} {
+		if !createsPullRequestCommand(cmd) {
+			t.Fatalf("missed create: %s", cmd)
+		}
 	}
-	if CreatesPullRequest("gh pr view 812") || CreatesPullRequest("git push") || CreatesPullRequest("ngh pr create") {
-		t.Fatal("commands that do not open one")
+	for _, cmd := range []string{"gh pr view 812", "git push", "ngh pr create", "gh pr create --help && gh pr view 1216 --json url --jq .url", "printf '%s\\n' 'gh pr create' 'https://github.com/acme/api/pull/7'", "gh pr create --help", "gh pr create --dry-run", "gh pr create --web", "gh pr create && gh pr view 1216", "true || gh pr create", "gh pr create | cat", "exit 0; gh pr create", "echo gh pr create", "cat <<'EOF'\ngh pr create\nEOF"} {
+		if createsPullRequestCommand(cmd) {
+			t.Fatalf("read-only or ambiguous command delivered: %s", cmd)
+		}
+	}
+	if ToolCreatesPullRequest("Bash", []byte(`{"command":"echo hello","description":"gh pr create"}`)) || ToolCreatesPullRequest("Read", []byte(`{"command":"gh pr create"}`)) {
+		t.Fatal("unrelated tool or description treated as executable input")
+	}
+	if !ToolCreatesPullRequest("mcp__github__create_pull_request", []byte("{}")) {
+		t.Fatal("GitHub create tool")
+	}
+	if got := Scan("mentions https://github.com/acme/api/pull/812 in prose", true); len(got) != 1 || got[0].Role != RoleMentions {
+		t.Fatal(got)
 	}
 	found := Scan(ghPRCreate, true)
 	if len(found) != 1 || found[0].Role != RoleDelivers || found[0].Ref != (Ref{Provider: "github", Key: "acme/api#812"}) || found[0].URL != "https://github.com/acme/api/pull/812" {
@@ -57,8 +70,16 @@ func TestDetectorsTellDeliveredFromMentioned(t *testing.T) {
 		t.Fatalf("last URL delivered: %+v", found)
 	}
 	// JSON tool output escapes slashes.
-	if found = Scan(`{"html_url":"https:\/\/github.com\/acme\/api\/pull\/5"}`, true); len(found) != 1 || found[0].Ref.Key != "acme/api#5" {
+	if found = Scan(`{"html_url":"https:\/\/github.com\/acme\/api\/pull\/5"}`, true); len(found) != 1 || found[0].Role != RoleDelivers || found[0].Ref.Key != "acme/api#5" {
 		t.Fatalf("escaped: %+v", found)
+	}
+	for _, result := range []string{
+		`[{"type":"text","text":"{\"url\":\"https://github.com/acme/api/pull/5\"}"}]`,
+		`{"content":[{"type":"text","text":"{\"html_url\":\"https://github.com/acme/api/pull/5\"}"}]}`,
+	} {
+		if found = Scan(result, true); len(found) != 1 || found[0].Role != RoleDelivers {
+			t.Fatalf("MCP result: %+v", found)
+		}
 	}
 	many := strings.Repeat("https://github.com/acme/api/pull/1 ", 1)
 	for i := 2; i < 20; i++ {
@@ -80,10 +101,10 @@ func TestDetectorsTellDeliveredFromMentioned(t *testing.T) {
 // `lazybox run`'s view.
 func TestDetectorsReadRealPullRequestCreation(t *testing.T) {
 	input, _ := json.Marshal(map[string]any{"command": "cat > /tmp/pr-body.md <<'EOF'\n## Summary\nEOF\ngh pr create --repo acme/platform --base main --title x --body-file /tmp/pr-body.md", "description": "Open the pull request"})
-	if !CreatesPullRequest(ToolCommand("Bash", input)) {
+	if !ToolCreatesPullRequest("Bash", input) {
 		t.Fatal("gh pr create on its own line after a heredoc")
 	}
-	if CreatesPullRequest(ToolCommand("Bash", []byte(`{"command":"echo done\ngh pr view 5"}`))) {
+	if ToolCreatesPullRequest("Bash", []byte(`{"command":"echo done\ngh pr view 5"}`)) {
 		t.Fatal("gh pr view")
 	}
 	for name, output := range map[string]string{

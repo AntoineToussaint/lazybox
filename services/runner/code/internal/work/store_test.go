@@ -420,11 +420,46 @@ func TestPullRequestEvidenceFollowsLinkedAttempt(t *testing.T) {
 	if _, _, err := s.Assign(one, task, Human, "", AttemptPayload{Conversation: "replacement", Workspace: "shared"}); err != nil {
 		t.Fatal(err)
 	}
+	if trust, flags, _ := judge(mustOK[*State](t)(s.Mission(one)).Task(task)); trust != TrustClaimed || !contains(flags, FlagNoEvidence) {
+		t.Fatalf("replacement inherited earlier checks: %s %v", trust, flags)
+	}
 	pr.Outcome = OutcomeFail
 	record(Origin{Workspace: "shared"}, pr, 0)
 	assign("Three", "replacement")
 	record(Origin{Conversation: "replacement"}, link, 0)
 	if len(mustOK[*State](t)(s.Mission(one)).Task(task).Evidence) != 2 {
 		t.Fatal("historical evidence changed after reassignment")
+	}
+}
+
+func TestRefreshAfterLinkingLegacyPullRequest(t *testing.T) {
+	s := newStore(t, t.TempDir())
+	m := mustOK[*State](t)(s.Create(Human, "", "Upgrade", ""))
+	_, task, err := s.AddTask(m.ID, Human, "", "", "Delivery", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, attempt, err := s.Assign(m.ID, task, Human, "", AttemptPayload{Workspace: "ws", Conversation: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := Evidence{Kind: EvidencePR, Repository: "team/api", Member: "api", Number: 12, Ref: "pr:team/api#12@abc", Head: "abc", Outcome: OutcomePass, Task: task, Attempt: attempt}
+	if _, _, err := s.Append(m.ID, Draft{Subject: TaskSubject(task), Type: EvidenceRecorded, Actor: Actor{Kind: ActorCheck}, Payload: pr}); err != nil {
+		t.Fatal(err)
+	}
+	record := func(origin Origin, ev Evidence) {
+		t.Helper()
+		if n, err := s.Record(origin, Actor{Kind: ActorLazybox}, ev); n != 1 || err != nil {
+			t.Fatalf("record %s: %d %v", ev.Ref, n, err)
+		}
+	}
+	record(Origin{Conversation: "worker"}, Evidence{Kind: EvidencePR, Repository: pr.Repository, Number: pr.Number, Ref: PullRequestLinkRef(pr.Repository, pr.Number)})
+	record(Origin{Workspace: "ws"}, pr)
+	next := pr
+	next.Ref, next.Head = "pr:team/api#12@def", "def"
+	record(Origin{Workspace: "ws"}, next)
+	record(Origin{Workspace: "ws"}, pr)
+	if trust, flags, reason := judge(mustOK[*State](t)(s.Mission(m.ID)).Task(task)); trust != TrustVerified || len(flags) != 0 {
+		t.Fatalf("%s %v: %s", trust, flags, reason)
 	}
 }

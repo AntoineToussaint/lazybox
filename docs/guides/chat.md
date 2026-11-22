@@ -62,8 +62,10 @@ it did.
   kept with your draft if the window reloads. Large pasted boxes use the local
   attachment store and can still be edited after reloading.
 - Attached files, including screenshots, are saved with the draft on this device.
-  Reloading restores the files from local storage. If the stored bytes are
-  unavailable, the composer names the missing files so you can reattach or remove them.
+  The composer remembers their names immediately. Binary files and large pasted
+  boxes finish saving in the background. Closing or reloading the window before
+  that write finishes can leave a name without its contents. The composer lists
+  each missing file so you can reattach or remove it before sending.
 
 - **Every agent gets your attachments**, Claude, Codex and ACP agents alike,
   after your text and in the order of the boxes: an image as an image (when

@@ -268,11 +268,25 @@ try {
     await page.evaluate(text => navigator.clipboard.writeText(text), dense);
     await composer.focus(); await page.keyboard.press('ControlOrMeta+V');
     await expect(attached.getByRole('button', {name: /^Open Pasted text/}).first()).toBeVisible();
-    await expect.poll(() => page.evaluate(() => {
+    // Metadata is written synchronously. Reload once a second reader can see the
+    // exact pasted file, proving that its separate IndexedDB transaction committed.
+    await expect.poll(() => page.evaluate(async () => {
       const draft = Object.entries(localStorage).find(([key, value]) => key.includes(':draft:') && value.includes('Pasted text'));
       if (!draft) return false;
-      const value = JSON.parse(draft[1]);
-      return value.files.length === 1 && !!value.files[0].blobId;
+      const refs = JSON.parse(draft[1]).files;
+      if (refs.length !== 1 || !refs[0].blobId) return false;
+      if (!(await indexedDB.databases()).some(db => db.name === 'lazybox-composer-files')) return false;
+      return new Promise((resolve, reject) => {
+        const open = indexedDB.open('lazybox-composer-files');
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result;
+          const request = db.transaction('drafts').objectStore('drafts').get(draft[0]);
+          request.onsuccess = () => resolve(request.result?.some(entry => entry.id === refs[0].blobId && typeof entry.text === 'string') ?? false);
+          request.onerror = () => reject(request.error);
+          db.close();
+        };
+      });
     })).toBe(true);
     await page.reload();
     await attached.getByLabel('More for the pasted text', {exact:true}).click();

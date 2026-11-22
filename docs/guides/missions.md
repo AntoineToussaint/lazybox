@@ -12,8 +12,7 @@ can tell *claimed* from *verified* at a glance, across many agents.
 ## Create a mission
 
 1. Open **Panels → Missions**, or find **Open the missions board** in the command palette (`⌘K`). The board belongs to the connected Runner. **Back to workspace** returns to the layout you were using.
-2. Create a mission with a title and a brief, then add its tasks. Tasks can
-   depend on each other.
+2. Create a mission with an outcome and an optional brief. Choose **Add first task** to describe one deliverable. The board appears when you add that task. Later tasks can depend on earlier ones.
 3. **Assign** a task: pick a workspace and start a new conversation there (or
    hand it to one you already have), optionally sending the task's brief as the
    first message.

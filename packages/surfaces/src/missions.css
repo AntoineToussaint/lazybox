@@ -168,3 +168,8 @@
 .missions-panel .mission-budget-stop input{width:72px;padding:3px 6px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface-sunken);color:var(--text);font:inherit}
 .mission-cost{font-size:calc(10.5px * var(--text-scale));font-variant-numeric:tabular-nums;color:var(--text-subtle)}
 .mission-cost.over{color:var(--warn-strong)}
+
+.mission-first-task{padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface-raised);margin-bottom:14px}
+.mission-first-task h4{margin:0}
+.mission-first-task p{max-width:54ch;margin:6px 0 12px;color:var(--text-secondary)}
+.mission-first-task .task-form{margin:0}

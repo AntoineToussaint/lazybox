@@ -120,6 +120,10 @@ function MissionBoard({ missionId, workspaceId, collections, viewState, onShowSe
     try { const result = await missions.update(mission.id, input); if (done) setNotice(done); return result; }
     catch (e) { setError(message(e)); throw e; }
   };
+  const firstTask = !mission.tasks.length && !mission.error && !mission.canceled;
+  const addTask = async (title: string, brief: string, blockedBy: string[]) => {
+    await change({ case: 'addTask', value: { title, brief, blockedBy, goalId: '' } });
+  };
   const board = arrange(mission.tasks);
   const openConversation = (task: MissionTask) => {
     const a = task.attempt; if (!a?.sessionId) return;
@@ -135,10 +139,16 @@ function MissionBoard({ missionId, workspaceId, collections, viewState, onShowSe
       <div className="mission-title"><h3>{mission.title}</h3>
         <span className="mission-process" title={`Process ${mission.process}, pinned when the mission started (${mission.processDigest}). A report asks you to accept the task; only you can.`}>{mission.process === 'solo-pair' ? 'One agent per task' : mission.process} · you accept each task</span>
       </div>
-      <p className="mission-summary" role="status">{missionSummary(mission)}</p>
+      {!firstTask && <p className="mission-summary" role="status">{missionSummary(mission)}</p>}
       {mission.brief && <details className="mission-brief"><summary>Brief</summary><p>{mission.brief}</p></details>}
       {mission.error && <p className="missions-notice tone-warn">{mission.error}</p>}
     </div>
+    {firstTask && <section className="mission-first-task">
+      <h4>Start with one task</h4>
+      <p>Choose a piece of this outcome that one conversation can deliver. You can pick its workspace when you assign it.</p>
+      {!adding && <button type="button" className="primary" onClick={() => { chooseTab('board'); setAdding(true); }}>Add first task</button>}
+      {adding && <AddTask mission={mission} onClose={() => setAdding(false)} onAdd={addTask}/>}
+    </section>}
     <OrchestratorStrip mission={mission} onNotice={setNotice} onError={setError} change={change}/>
     {notice && <p className="missions-notice" role="status">{notice}<button type="button" className="link-button" onClick={() => setNotice('')}>Dismiss</button></p>}
     {error && <p className="missions-error" role="alert">{error}<button type="button" className="link-button" onClick={() => setError('')}>Dismiss</button></p>}
@@ -147,10 +157,10 @@ function MissionBoard({ missionId, workspaceId, collections, viewState, onShowSe
     {tab === 'messages' && <div role="tabpanel" id="mission-view-messages" aria-labelledby="mission-tab-messages"><MissionMessages mission={mission} now={now}/></div>}
     {tab === 'leases' && <div role="tabpanel" id="mission-view-leases" aria-labelledby="mission-tab-leases"><MissionLeases mission={mission}/></div>}
     {tab === 'board' && <div role="tabpanel" id="mission-view-board" aria-labelledby="mission-tab-board">
-    {!mission.canceled && !mission.error && (adding
-      ? <AddTask mission={mission} onClose={() => setAdding(false)} onAdd={async (title, brief, blockedBy) => { await change({ case: 'addTask', value: { title, brief, blockedBy, goalId: '' } }); }}/>
+    {!firstTask && !mission.canceled && !mission.error && (adding
+      ? <AddTask mission={mission} onClose={() => setAdding(false)} onAdd={addTask}/>
       : <button type="button" className="mission-add-task" onClick={() => setAdding(true)}><Icon name="plus" size={13}/> Add task</button>)}
-    <div className="mission-columns">
+    {mission.tasks.length > 0 && <div className="mission-columns">
       {columns.map(column => <section key={column.key} className={`mission-column column-${column.key}`} aria-labelledby={`column-${mission.id}-${column.key}`}>
         <h4 id={`column-${mission.id}-${column.key}`}>{column.title}<span>{board[column.key].length}</span></h4>
         {!board[column.key].length && <p className="mission-column-empty">{column.empty}</p>}
@@ -161,7 +171,7 @@ function MissionBoard({ missionId, workspaceId, collections, viewState, onShowSe
           onReject={() => setDialog({ kind: 'reject', task })} onCancel={() => setDialog({ kind: 'cancel', task })}
           onNotice={setNotice} onError={setError}/>)}</ul>
       </section>)}
-    </div>
+    </div>}
     <MissionHistory mission={mission} now={now}/>
     </div>}
     {dialog?.kind === 'assign' && <AssignDialog task={dialog.task} mission={mission} collections={collections} workspaceId={workspaceId} viewState={viewState} onClose={() => setDialog(undefined)}

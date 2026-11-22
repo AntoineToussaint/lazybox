@@ -54,10 +54,11 @@ try {
   await page.unroute('**/CreateMission');
   await expect(panel.getByRole('heading', { name: 'Ship the parser split' })).toBeVisible();
   await expect(panel.locator('.mission-process')).toHaveText('One agent per task · you accept each task');
-  await expect(panel.locator('.mission-summary')).toHaveText('No tasks yet');
+  await expect(panel.getByRole('heading', { name: 'Start with one task' })).toBeVisible();
+  await expect(panel.locator('.mission-column')).toHaveCount(0);
 
   // Tasks: the brief starts from V1's four lines; a dependency makes the second wait.
-  await panel.getByRole('button', { name: 'Add task' }).click();
+  await panel.getByRole('button', { name: 'Add first task' }).click();
   await panel.getByLabel('Task', { exact: true }).fill('Split the parser');
   await panel.getByLabel(/Brief/).focus();
   await expect(panel.getByLabel(/Brief/)).toHaveValue(/^Objective: \nDone when:/);

@@ -96,6 +96,12 @@ async function run(scheme) {
   await expect(timeline.locator('.timeline-row').filter({ hasText: 'Overlap:' })).toBeVisible();
   await page.screenshot({ path: `${shots}orchestration-timeline-${scheme}.png` });
 
+  await page.setViewportSize({ width: 640, height: 900 });
+  await expect(timeline.locator('.timeline-lane-head').first()).toBeHidden();
+  await expect(timeline.locator('.timeline-actor').getByRole('button', {name: 'Search lead', exact:true}).first()).toBeVisible();
+  assert.ok(await timeline.evaluate(node => node.scrollWidth <= node.clientWidth + 1));
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   // Messages: one thread per pair, who said what.
   await tabs.getByRole('tab', { name: /Messages/ }).click();
   const threads = panel.locator('.message-thread');

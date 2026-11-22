@@ -120,9 +120,9 @@
 .mission-tabs button span{padding:0 6px;border-radius:8px;background:var(--surface-active);font-size:calc(10.5px * var(--text-scale));font-variant-numeric:tabular-nums;color:var(--text-subtle)}
 
 .mission-timeline{display:grid;gap:0;font-size:calc(12px * var(--text-scale));min-width:0}
-.timeline-head,.timeline-row{display:grid;align-items:center;column-gap:0}
+.timeline-head,.timeline-row{grid-template-columns:var(--timeline-columns,56px repeat(var(--lanes),22px) minmax(0,1fr));display:grid;align-items:center;column-gap:0}
 .timeline-head{position:sticky;top:-12px;z-index:1;padding:6px 0;background:var(--canvas,var(--surface));border-bottom:1px solid var(--line-subtle)}
-.timeline-lane-head{display:grid;place-items:center;font-size:calc(9.5px * var(--text-scale));font-weight:600;letter-spacing:.2px;color:var(--text-subtle)}
+.timeline-lane-head{display:var(--timeline-lane-display,grid);place-items:center;font-size:calc(9.5px * var(--text-scale));font-weight:600;letter-spacing:.2px;color:var(--text-subtle)}
 .missions-panel .timeline-lane-head button{padding:0;border:0;background:none;width:20px;height:20px;border-radius:50%;font:inherit;color:inherit;cursor:pointer}
 .missions-panel .timeline-lane-head button:hover{background:var(--surface-selected);color:var(--text)}
 .timeline-lane-head.tone-orchestrator{color:var(--accent-strong)}
@@ -133,13 +133,14 @@
 .timeline-row:hover,.timeline-row.lit{background:var(--surface-hover)}
 .timeline-row.lit{box-shadow:inset 2px 0 0 var(--accent)}
 .timeline-row time{font-size:calc(10.5px * var(--text-scale));color:var(--text-faint);font-variant-numeric:tabular-nums;padding-left:4px}
-.timeline-cell{position:relative;height:100%;min-height:26px;display:grid;place-items:center}
+.timeline-cell{position:relative;height:100%;min-height:26px;display:var(--timeline-lane-display,grid);place-items:center}
 .timeline-cell::before{content:'';position:absolute;top:0;bottom:0;left:50%;width:1px;background:var(--line-subtle)}
 .timeline-dot{position:relative;width:9px;height:9px;border-radius:50%;background:var(--text-tertiary);box-shadow:0 0 0 2px var(--canvas,var(--surface))}
 .timeline-cell.tone-orchestrator .timeline-dot{background:var(--accent)}
 .timeline-cell.tone-agent .timeline-dot{background:var(--running,var(--info))}
 .timeline-cell.tone-person .timeline-dot{background:var(--ok)}
-.timeline-summary{display:flex;align-items:baseline;gap:8px;padding:3px 8px;min-width:0;color:var(--text-soft);line-height:1.45}
+.timeline-summary{display:var(--timeline-summary-display,flex);align-items:baseline;gap:8px;padding:var(--timeline-row-padding,3px) 8px;min-width:0;color:var(--text-soft);line-height:1.45}
+.timeline-actor{display:var(--timeline-actor-display,none);font-weight:600}
 .timeline-summary>span{min-width:0;overflow-wrap:anywhere}
 .timeline-row.unknown .timeline-summary{color:var(--text-faint);font-style:italic}
 .missions-panel .timeline-cause{flex:none;display:inline-flex;align-items:center;gap:3px;padding:0 6px;border:1px solid var(--line);border-radius:8px;background:transparent;font-size:calc(10px * var(--text-scale));color:var(--text-subtle);width:auto}
@@ -171,3 +172,10 @@
 .overlap-list code{margin-left:4px;font-family:var(--font-mono,ui-monospace,monospace)}
 .mission-flag.flag-overlap{display:inline-flex;align-items:center;gap:3px;border-color:var(--warn-line);color:var(--warn-strong)}
 .mission-review-held{display:flex;align-items:center;gap:6px}
+
+/* Keep rows readable when there is little room for actor lanes. */
+@container (max-width:760px){
+  .mission-timeline{--timeline-columns:48px minmax(0,1fr);--timeline-lane-display:none;--timeline-actor-display:block;--timeline-summary-display:block;--timeline-row-padding:7px}
+}
+.mission-timeline[data-many-actors]{--timeline-columns:56px minmax(0,1fr);--timeline-lane-display:none;--timeline-actor-display:block;--timeline-summary-display:block;--timeline-row-padding:7px}
+.timeline-actor button{white-space:normal;overflow-wrap:anywhere;text-align:left}

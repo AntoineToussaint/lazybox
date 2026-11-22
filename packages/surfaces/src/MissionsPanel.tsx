@@ -20,7 +20,7 @@ import { agentTitle } from './providers';
 import { useMissionSelection } from './navigate-requests';
 import { GrantDialog } from './OrchestratorBadge';
 import { useOpenConversation } from './AgentMessages';
-import { budgetLine, ceilingLine, overlapsOfTask, permissionLabel, reviewHeld, usd } from './orchestration-model';
+import { budgetLine, overlapsOfTask, permissionLabel, reviewHeld, usd } from './orchestration-model';
 import { MissionLeases, MissionMessages, MissionTabs, MissionTimeline, type MissionTab } from './MissionViews';
 import { ReviewPlanButton } from './PlanSheet';
 import './missions.css';
@@ -274,14 +274,22 @@ function OrchestratorStrip({ collections, mission, onNotice, onError, change }: 
   if (mission.canceled || mission.error) return null;
   return <div className="mission-orchestrators" aria-label="Orchestrators">
     {live.map(g => <div key={g.id} className="mission-orchestrator">
-      <Icon name="subagent" size={13}/>
-      <button type="button" className="link-button" title="Open the orchestrator's conversation" onClick={() => open(g.conversationId, g.sessionId)}>{g.title || 'Orchestrator'}</button>
-      <span className="mission-orchestrator-count">{g.liveChildren}/{g.ceiling?.maxChildren} agents</span>
-      <span className="mission-orchestrator-ceiling">{ceilingLine(g)}{g.ceiling?.planRequired ? ' · plan first' : ''}</span>
-      <span className={`mission-orchestrator-budget${g.budgetState ? ' budget-' + g.budgetState : ''}`} title="What the orchestrator and its agents spent, and what its running agents reserved of their estimates">{budgetLine(g)}</span>
+      <div className="mission-orchestrator-heading">
+        <Icon name="subagent" size={13}/>
+        <button type="button" className="link-button" title="Open the orchestrator's conversation" onClick={() => open(g.conversationId, g.sessionId)}>{g.title || 'Orchestrator'}</button>
+        <span className="mission-orchestrator-count">{g.liveChildren}/{g.ceiling?.maxChildren} agents</span>
+      </div>
+      {g.ceiling && <span className="mission-orchestrator-ceiling">{[
+        `${permissionLabel[g.ceiling.permission] || g.ceiling.permission} or narrower`,
+        g.ceiling.depth > 1 && `${g.ceiling.depth} levels deep`,
+        g.ceiling.planRequired && 'plan first',
+      ].filter(Boolean).join(' · ')}</span>}
+      <div className="mission-orchestrator-accounting">
+        <span className={`mission-orchestrator-budget${g.budgetState ? ' budget-' + g.budgetState : ''}`} title="Spent is reported usage. Reserved is the remaining estimate for running agents. Both count toward the cap.">{budgetLine(g)}</span>
       {revoking === g.id
         ? <span className="mission-orchestrator-confirm">Its agents keep running.<button type="button" onClick={() => setRevoking('')}>Keep</button><button type="button" className="danger" autoFocus onClick={() => { setRevoking(''); void change({ case: 'revokeGrant', value: { grantId: g.id, reason: '' } }, `“${g.title || 'The orchestrator'}” can no longer run agents.`).catch(() => {}); }}>Revoke</button></span>
         : <button type="button" className="mission-orchestrator-revoke" onClick={() => setRevoking(g.id)}>Revoke…</button>}
+      </div>
       {mission.plans.filter(p => p.state === 'proposed' && p.grantId === g.id).map(p => <div key={p.id} className="mission-plan-waiting" role="status">
         <Icon name="checklist" size={13}/><span><b>Plan waiting for you:</b> {p.tasks.length} {p.tasks.length === 1 ? 'agent' : 'agents'} · est. {usd(p.totalUsd)}{p.overlaps.length ? ` · ${p.overlaps.length} shared ${p.overlaps.length === 1 ? 'path' : 'paths'}` : ''}</span>
         <ReviewPlanButton mission={mission} plan={p}/>

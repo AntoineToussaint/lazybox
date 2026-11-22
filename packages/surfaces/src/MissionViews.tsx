@@ -45,9 +45,8 @@ export function MissionTimeline({ mission, now }: { mission: Mission; now: numbe
     document.getElementById(`timeline-${id}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   };
   if (!events.length) return <p className="mission-muted">Nothing has happened yet.</p>;
-  const columns = `56px repeat(${lanes.length}, 22px) minmax(0, 1fr)`;
-  return <div className="mission-timeline" role="table" aria-label="Mission timeline" style={{ ['--lanes' as string]: lanes.length }}>
-    <div className="timeline-head" role="row" style={{ gridTemplateColumns: columns }}>
+  return <div className="mission-timeline" data-many-actors={lanes.length > 8 || undefined} role="table" aria-label="Mission timeline" style={{ ['--lanes' as string]: lanes.length }}>
+    <div className="timeline-head" role="row">
       <span role="columnheader" aria-label="When" className="timeline-when"/>
       {lanes.map(l => <span key={l.key} role="columnheader" className={`timeline-lane-head tone-${l.tone}`} title={l.title}>
         {l.conversation ? <button type="button" onClick={() => open(l.conversation!)} aria-label={`Open ${l.title}`}>{l.short}</button> : <span>{l.short}</span>}
@@ -56,12 +55,16 @@ export function MissionTimeline({ mission, now }: { mission: Mission; now: numbe
     </div>
     <ol className="timeline-rows">{events.map(e => {
       const lane = laneOf(lanes, e);
+      const actor = lanes[lane];
       const cause = e.causedBy ? byId.get(e.causedBy) : undefined;
-      return <li key={e.id || String(e.seq)} id={`timeline-${e.id}`} role="row" className={`timeline-row${lit === e.id ? ' lit' : ''}${e.known ? '' : ' unknown'}`} style={{ gridTemplateColumns: columns }}>
+      return <li key={e.id || String(e.seq)} id={`timeline-${e.id}`} role="row" className={`timeline-row${lit === e.id ? ' lit' : ''}${e.known ? '' : ' unknown'}`}>
         <time role="cell" title={new Date(Number(e.atUnixMillis)).toLocaleString()}>{ago(e.atUnixMillis, now)}</time>
         {lanes.map((l, i) => <span key={l.key} role="cell" className={`timeline-cell${i === lane ? ` on tone-${l.tone}` : ''}`} aria-label={i === lane ? l.title : undefined}>{i === lane && <span className="timeline-dot" aria-hidden="true"/>}</span>)}
         <span role="cell" className="timeline-summary">
-          <span title={`${e.type} v${e.version}`}>{e.summary}</span>
+          <span className="timeline-actor">{actor.conversation
+            ? <button type="button" className="link-button" onClick={() => open(actor.conversation!)}>{actor.title}</button>
+            : actor.tone === 'system' ? 'Lazybox' : actor.title}</span>
+          <span>{e.summary}</span>
           {cause && <button type="button" className="timeline-cause" onClick={() => show(cause.id)} title={`Caused by: ${cause.summary}`}><Icon name="back" size={10}/> after #{String(cause.seq)}</button>}
         </span>
       </li>;

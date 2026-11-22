@@ -219,15 +219,23 @@ const maxFound = 5
 // A GitHub create tool returns the object directly or wrapped in a single
 // MCP text block. Only its PR URL field identifies the created object.
 func createdResultURL(output string) string {
+	finalLine := func(text string) string {
+		text = strings.TrimSpace(text)
+		return strings.TrimSpace(text[strings.LastIndexByte(text, '\n')+1:])
+	}
 	type block struct{ Type, Text string }
 	var object struct {
 		HTMLURL string  `json:"html_url"`
 		URL     string  `json:"url"`
 		Content []block `json:"content"`
+		IsError bool    `json:"isError"`
 	}
 	var blocks []block
 	switch {
 	case json.Unmarshal([]byte(output), &object) == nil:
+		if object.IsError {
+			return ""
+		}
 		if object.HTMLURL != "" {
 			return object.HTMLURL
 		}
@@ -238,7 +246,7 @@ func createdResultURL(output string) string {
 	case json.Unmarshal([]byte(output), &blocks) == nil:
 	default:
 		// The CLI prints progress and then the new URL on its own final line.
-		return strings.TrimSpace(output[strings.LastIndexByte(output, '\n')+1:])
+		return finalLine(output)
 	}
 	if len(blocks) != 1 || blocks[0].Type != "text" {
 		return ""
@@ -248,7 +256,7 @@ func createdResultURL(output string) string {
 		URL     string `json:"url"`
 	}
 	if json.Unmarshal([]byte(blocks[0].Text), &pr) != nil {
-		return strings.TrimSpace(blocks[0].Text)
+		return finalLine(blocks[0].Text)
 	}
 	if pr.HTMLURL != "" {
 		return pr.HTMLURL

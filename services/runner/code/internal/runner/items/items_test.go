@@ -73,7 +73,11 @@ func TestDetectorsTellDeliveredFromMentioned(t *testing.T) {
 	if found = Scan(`{"html_url":"https:\/\/github.com\/acme\/api\/pull\/5"}`, true); len(found) != 1 || found[0].Role != RoleDelivers || found[0].Ref.Key != "acme/api#5" {
 		t.Fatalf("escaped: %+v", found)
 	}
+	if found = Scan(`{"isError":true,"content":[{"type":"text","text":"https://github.com/acme/api/pull/5"}]}`, true); len(found) != 1 || found[0].Role != RoleMentions {
+		t.Fatalf("failed MCP result: %+v", found)
+	}
 	for _, result := range []string{
+		`[{"type":"text","text":"Creating pull request\nhttps://github.com/acme/api/pull/5\n"}]`,
 		`[{"type":"text","text":"{\"url\":\"https://github.com/acme/api/pull/5\"}"}]`,
 		`{"content":[{"type":"text","text":"{\"html_url\":\"https://github.com/acme/api/pull/5\"}"}]}`,
 	} {

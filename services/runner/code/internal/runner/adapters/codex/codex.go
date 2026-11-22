@@ -689,6 +689,14 @@ func requestID(raw json.RawMessage) string {
 	}
 	return "n:" + string(raw)
 }
+
+// fullAccess is the person's current choice, including a change made mid-turn.
+func (s *session) fullAccess() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.permission == "yolo" && s.workflow != "plan" && !agent.IsAssistant(s.purpose)
+}
+
 func (s *session) read() {
 	defer s.cancel()
 	// Every event derived from a native line carries that line's transport
@@ -810,9 +818,7 @@ func (s *session) read() {
 						return
 					}
 					title := toolApproval(call.Tool, call.Arguments)
-					s.mu.Lock()
-					autoRun := call.Tool == agent.CommandTool && s.permission == "yolo" && s.workflow != "plan" && !agent.IsAssistant(s.purpose)
-					s.mu.Unlock()
+					autoRun := call.Tool == agent.CommandTool && s.fullAccess()
 					switch {
 					case title == "":
 						// Only reads: there is nothing to approve.
@@ -852,6 +858,13 @@ func (s *session) read() {
 					// The app-server acts only once it has the reply, so the
 					// user's recorded response is given again rather than asked anew.
 					if reply, err := nativeResponse(m.Method, m.Params, response); err == nil && s.p.Reply(m.ID, reply) == nil {
+						return
+					}
+				}
+				// Codex applies new sandbox settings at turn/start. While the old
+				// turn continues, honor Full access on new root command requests.
+				if m.Method == "item/commandExecution/requestApproval" && !m.Redelivered && root != "" && p.ThreadID == root && s.fullAccess() && offersCommandAccept(m.Params) {
+					if err := s.p.Reply(m.ID, map[string]string{"decision": "accept"}); err == nil {
 						return
 					}
 				}

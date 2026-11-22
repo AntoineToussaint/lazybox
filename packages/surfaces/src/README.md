@@ -76,3 +76,5 @@ latest observed activity with timestamps and the latest status or message.
 The **Priority** view groups conversations by what needs attention.
 
 On a subscription limit card, **Show all subscriptions** opens the latest reported account states grouped by provider, including the current account and reported reset times.
+
+In a running Codex turn, **Allow and enable Full access** accepts the pending command. Subsequent ordinary main-agent command requests use a one-time approval automatically. Codex applies the new sandbox policy when the next turn starts.

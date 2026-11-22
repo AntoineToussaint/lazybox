@@ -22,7 +22,6 @@ import { GrantDialog } from './OrchestratorBadge';
 import { useOpenConversation } from './AgentMessages';
 import { budgetLine, ceilingLine, overlapsOfTask, permissionLabel, reviewHeld, usd } from './orchestration-model';
 import { MissionLeases, MissionMessages, MissionTabs, MissionTimeline, type MissionTab } from './MissionViews';
-import { showMissionsPage } from './navigate-requests';
 import { ReviewPlanButton } from './PlanSheet';
 import './missions.css';
 
@@ -35,7 +34,7 @@ const selectedKey = 'missions:selected', profileKey = 'missions:assign-profile',
  * the evidence that backs it. A person creates missions and tasks, assigns a
  * task to a conversation, reports it done, and accepts it.
  */
-export function MissionsPanel({ workspaceId, collections, viewState, onShowSession, onShowPanel, onReturn, openMission, pinned }: Pick<ModuleProps, 'workspaceId' | 'collections' | 'viewState' | 'onShowSession' | 'onShowPanel' | 'openMission'> & { pinned?: string; onReturn?(): void }) {
+export function MissionsPanel({ collections, viewState, onShowSession, onShowPanel, onReturn, openMission, pinned }: Pick<ModuleProps, 'collections' | 'viewState' | 'onShowSession' | 'onShowPanel' | 'openMission'> & { pinned?: string; onReturn?(): void }) {
   const missions = useMissions();
   const [selected, setSelected] = useState(() => readPreference(viewState, selectedKey) || '');
   const [creating, setCreating] = useState(false);
@@ -48,7 +47,6 @@ export function MissionsPanel({ workspaceId, collections, viewState, onShowSessi
   const open = missions.missions.filter(m => !m.canceled), closed = missions.missions.filter(m => m.canceled);
   return <section className="missions-panel" aria-label="Missions and tasks">
     <header className="missions-header">
-      {onReturn && <button type="button" className="quiet" onClick={onReturn}>Back to workspace</button>}
       {pinned !== undefined && <strong className="missions-heading">{current?.title || "Mission"}</strong>}
       {pinned === undefined && missions.missions.length > 0 && !creating && current && <ActionMenu className="mission-picker" align="start" label={`Mission: ${current.title}`} title="Choose the mission"
         summary={<><span className="mission-picker-title">{current.title}</span><small>{current.canceled ? 'Canceled' : missionSummary(current)}</small><Icon name="chevron" size={11}/></>}>
@@ -64,7 +62,6 @@ export function MissionsPanel({ workspaceId, collections, viewState, onShowSessi
           setDetachError('');
           void openMission(current.id).then(() => onReturn?.()).catch(error => setDetachError(message(error)));
         }}>Detach mission</button>}
-        {pinned === undefined && !onReturn && <button type="button" className="icon-button" aria-label="Open the missions board as a page" title="Open as a page: the board, timeline and messages with room" onClick={() => showMissionsPage()}><Icon name="maximize" size={14}/></button>}
         <button type="button" className="icon-button" aria-label="Refresh missions" title="Refresh" onClick={() => void missions.refresh()}><Icon name="refresh" size={14}/></button>
       </div>
     </header>
@@ -80,7 +77,7 @@ export function MissionsPanel({ workspaceId, collections, viewState, onShowSessi
         <p>Describe the outcome. You can assign tasks to conversations in different workspaces on this Runner.</p>
         <NewMission onCreate={async (title, brief) => { const m = await missions.create(title, brief); choose(m.id); }}/>
       </div>}
-      {!creating && current && <MissionBoard key={current.id} missionId={current.id} workspaceId={workspaceId} collections={collections} viewState={viewState} onShowSession={onShowSession} onShowPanel={onShowPanel}/>}
+      {!creating && current && <MissionBoard key={current.id} missionId={current.id} collections={collections} viewState={viewState} onShowSession={onShowSession} onShowPanel={onShowPanel}/>}
     </div>
   </section>;
 }
@@ -101,9 +98,9 @@ function NewMission({ onCreate, onCancel }: { onCreate(title: string, brief: str
   </form>;
 }
 
-type BoardProps = { missionId: string; workspaceId: string; collections: Collection[]; viewState?: ViewStateStore; onShowSession?(target: ViewTarget): void; onShowPanel?(kind: string, target?: ViewTarget): void };
+type BoardProps = { missionId: string; collections: Collection[]; viewState?: ViewStateStore; onShowSession?(target: ViewTarget): void; onShowPanel?(kind: string, target?: ViewTarget): void };
 
-function MissionBoard({ missionId, workspaceId, collections, viewState, onShowSession, onShowPanel }: BoardProps) {
+function MissionBoard({ missionId, collections, viewState, onShowSession, onShowPanel }: BoardProps) {
   const missions = useMissions();
   const mission = useMissionDetail(missionId, missions.put);
   const [adding, setAdding] = useState(false);
@@ -149,7 +146,7 @@ function MissionBoard({ missionId, workspaceId, collections, viewState, onShowSe
       {!adding && <button type="button" className="primary" onClick={() => { chooseTab('board'); setAdding(true); }}>Add first task</button>}
       {adding && <AddTask mission={mission} onClose={() => setAdding(false)} onAdd={addTask}/>}
     </section>}
-    <OrchestratorStrip mission={mission} onNotice={setNotice} onError={setError} change={change}/>
+    <OrchestratorStrip collections={collections} mission={mission} onNotice={setNotice} onError={setError} change={change}/>
     {notice && <p className="missions-notice" role="status">{notice}<button type="button" className="link-button" onClick={() => setNotice('')}>Dismiss</button></p>}
     {error && <p className="missions-error" role="alert">{error}<button type="button" className="link-button" onClick={() => setError('')}>Dismiss</button></p>}
     <MissionTabs mission={mission} tab={tab} onTab={chooseTab}/>
@@ -174,7 +171,7 @@ function MissionBoard({ missionId, workspaceId, collections, viewState, onShowSe
     </div>}
     <MissionHistory mission={mission} now={now}/>
     </div>}
-    {dialog?.kind === 'assign' && <AssignDialog task={dialog.task} mission={mission} collections={collections} workspaceId={workspaceId} viewState={viewState} onClose={() => setDialog(undefined)}
+    {dialog?.kind === 'assign' && <AssignDialog task={dialog.task} mission={mission} collections={collections} viewState={viewState} onClose={() => setDialog(undefined)}
       onAssign={async (input, newConversation) => {
         const result = await change({ case: 'assign', value: input });
         setDialog(undefined);
@@ -267,13 +264,13 @@ function TaskCard({ task, goal, now, collections, titles, orchestrators, overlap
  * The mission's orchestrators: the conversations the person let run its
  * agents, what each may give them, and Revoke; or the way to name one.
  */
-function OrchestratorStrip({ mission, onNotice, onError, change }: { mission: Mission; onNotice(text: string): void; onError(text: string): void; change(input: ChangeInput, done?: string): Promise<Mission | undefined> }) {
+function OrchestratorStrip({ collections, mission, onNotice, onError, change }: { collections: Collection[]; mission: Mission; onNotice(text: string): void; onError(text: string): void; change(input: ChangeInput, done?: string): Promise<Mission | undefined> }) {
   const { info } = useRunner();
   const open = useOpenConversation();
   const [granting, setGranting] = useState(false);
   const [revoking, setRevoking] = useState('');
   const live = mission.grants.filter(g => g.live);
-  const candidates = useMemo(() => latestConversations(info?.sessions || []).filter(s => !s.closed && !s.lineage?.parentConversationId), [info?.sessions]);
+  const candidates = useMemo(() => latestConversations(info?.sessions || []).filter(s => !s.closed && !s.lineage?.parentConversationId && !s.lineage?.grantId), [info?.sessions]);
   if (mission.canceled || mission.error) return null;
   return <div className="mission-orchestrators" aria-label="Orchestrators">
     {live.map(g => <div key={g.id} className="mission-orchestrator">
@@ -293,7 +290,7 @@ function OrchestratorStrip({ mission, onNotice, onError, change }: { mission: Mi
     </div>)}
     {(() => { const held = reviewHeld(mission); return held && live.length > 0 && <p className="missions-notice tone-warn mission-review-held" role="status"><Icon name="pending" size={13}/> {held.waiting === 1 ? '1 task waits' : `${held.waiting} tasks wait`} for your review; new agents are held until you accept or send back work.</p>; })()}
     {!live.length && <button type="button" className="mission-orchestrate" disabled={!candidates.length} title={candidates.length ? 'Let one of your conversations start and drive agents for this mission' : 'Open a conversation first'} onClick={() => setGranting(true)}><Icon name="subagent" size={13}/> Let a conversation run agents…</button>}
-    {granting && <GrantDialog missionId={mission.id} candidates={candidates} onClose={() => setGranting(false)}/>}
+    {granting && <GrantDialog collections={collections} missionId={mission.id} candidates={candidates} onClose={() => setGranting(false)}/>}
   </div>;
 }
 
@@ -363,7 +360,7 @@ const actorLabel = (kind: string) => ({ human: 'You', agent: 'Agent', rule: 'Rul
 
 type AssignInput = { taskId: string; sessionId: string; open?: { profileId: string; collectionId: string; cwd: string; resumeReference: string; emptyWorkspace: boolean }; sendBrief: boolean };
 
-function AssignDialog({ task, mission, collections, workspaceId, viewState, onClose, onAssign }: { task: MissionTask; mission: Mission; collections: Collection[]; workspaceId: string; viewState?: ViewStateStore; onClose(): void; onAssign(input: AssignInput, newConversation: boolean): Promise<void> }) {
+function AssignDialog({ task, mission, collections, viewState, onClose, onAssign }: { task: MissionTask; mission: Mission; collections: Collection[]; viewState?: ViewStateStore; onClose(): void; onAssign(input: AssignInput, newConversation: boolean): Promise<void> }) {
   const { info } = useRunner();
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { dialog.current?.showModal(); }, []);
@@ -371,20 +368,20 @@ function AssignDialog({ task, mission, collections, workspaceId, viewState, onCl
   const conversations = useMemo(() => latestConversations(info?.sessions || []), [info?.sessions]);
   const profiles = info?.profiles || [];
   const [mode, setMode] = useState<'new' | 'existing'>(conversations.length && task.attempt ? 'existing' : 'new');
-  const [collectionId, setCollectionId] = useState(() => ready.find(c => c.id === (task.attempt?.collectionId || workspaceId))?.id || (ready.length === 1 ? ready[0].id : ''));
+  const [collectionId, setCollectionId] = useState('');
   const [profileId, setProfileId] = useState(() => { const saved = readPreference(viewState, profileKey); return profiles.find(p => p.id === saved)?.id || profiles[0]?.id || ''; });
-  const [sessionId, setSessionId] = useState(() => conversations.find(s => s.collectionId === workspaceId && s.conversationId !== task.attempt?.conversationId)?.id || conversations[0]?.id || '');
+  const [sessionId, setSessionId] = useState('');
   const [sendBrief, setSendBrief] = useState(true);
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
   const workspaceName = (id: string) => collections.find(c => c.id === id)?.name || 'No workspace';
   const submit = async (event: FormEvent) => {
-    event.preventDefault(); setBusy(true); setError('');
+    event.preventDefault(); if (!canSubmit) return; setBusy(true); setError('');
     try {
       if (mode === 'new') { try { writePreference(viewState, profileKey, profileId); } catch { /* a convenience */ } }
       await onAssign(mode === 'new' ? { taskId: task.id, sessionId: '', open: { profileId, collectionId, cwd: '', resumeReference: '', emptyWorkspace: false }, sendBrief } : { taskId: task.id, sessionId, sendBrief }, mode === 'new');
     } catch (e) { setError(message(e)); setBusy(false); }
   };
-  const canSubmit = !busy && (mode === 'new' ? !!collectionId && !!profileId : !!sessionId);
+  const canSubmit = !busy && (mode === 'new' ? ready.some(c => c.id === collectionId) && profiles.some(p => p.id === profileId) : conversations.some(s => s.id === sessionId));
   return <DraggableDialog ref={dialog} className="mission-dialog" aria-label={`Assign ${task.title}`} onCancel={event => { if (busy) event.preventDefault(); else onClose(); }}>
     <DialogHeader><h2>Assign “{task.title}”</h2><button type="button" aria-label="Close" disabled={busy} onClick={onClose}>×</button></DialogHeader>
     <form onSubmit={submit}>
@@ -397,7 +394,7 @@ function AssignDialog({ task, mission, collections, workspaceId, viewState, onCl
         <label>Workspace<select aria-label="Workspace" value={collectionId} onChange={e => setCollectionId(e.target.value)}>{!collectionId && <option value="">Choose a workspace…</option>}{ready.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
         <label>Agent<select aria-label="Agent" value={profileId} onChange={e => setProfileId(e.target.value)}><SubscriptionOptions profiles={profiles} label={(p, _, grouped) => { const name = agentTitle(p.provider, profiles); return grouped ? p.label || name : `${name}${p.label && p.label !== name ? ' · ' + p.label : ''}`; }}/></select></label>
         <p className="mission-muted">Every conversation in a workspace shares its files. Give parallel tasks their own workspaces.</p>
-      </> : <label>Conversation<select aria-label="Conversation" value={sessionId} onChange={e => setSessionId(e.target.value)}>{conversations.map(s => <option key={s.id} value={s.id}>{conversationName(s)} · {workspaceName(s.collectionId)}</option>)}</select></label>}
+      </> : <label>Conversation<select aria-label="Conversation" value={sessionId} onChange={e => setSessionId(e.target.value)}><option value="">Choose a conversation…</option>{conversations.map(s => <option key={s.id} value={s.id}>{conversationName(s)} · {workspaceName(s.collectionId)}</option>)}</select></label>}
       <label className="mission-check"><input type="checkbox" checked={sendBrief} onChange={e => setSendBrief(e.target.checked)}/> Send the task's brief to the agent now</label>
       {sendBrief && <pre className="mission-brief-preview" aria-label="Brief to send">{task.title}{task.brief ? '\n\n' + task.brief : ''}{`\n\n(Task of the Lazybox mission “${mission.title}”. …)`}</pre>}
       {error && <p className="missions-error" role="alert">{error}</p>}

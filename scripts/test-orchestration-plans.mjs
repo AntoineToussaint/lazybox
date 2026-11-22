@@ -74,8 +74,7 @@ async function run(scheme) {
   await expect(inbox.locator('.agents-summary')).toHaveText('1 waiting for you');
   await page.screenshot({ path: `${shots}orchestration-inbox-${scheme}.png` });
   // …and on the board, from where it opens too.
-  await page.locator('summary[aria-label="Panels"]').click();
-  await page.getByRole('button', { name: 'Show Missions', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   const panel = page.getByRole('region', { name: 'Missions and tasks', exact: true });
   await expect(panel.locator('.mission-plan-waiting')).toContainText('Plan waiting for you: 3 agents · est. $8.50 · 1 shared path');
   await expect(panel.locator('.mission-orchestrator-ceiling')).toContainText('plan first');
@@ -130,7 +129,7 @@ async function run(scheme) {
   await stop.getByRole('button', { name: 'Raise budget' }).click();
   await expect(stop).toHaveCount(0, { timeout: 10_000 });
   assert.equal(updates().find(u => u.raiseBudget).raiseBudget.capUsd, 25);
-  await panel.getByRole('button',{name:'Back to workspace'}).click();
+  await page.getByRole('navigation', {name: 'Pages'}).getByRole('button', {name: 'Workspaces', exact: true}).click();
   await expect(chat.locator('.lineage-line.kind-plan_decided')).toContainText('You approved the plan: 3 tasks, $12.00 cap.');
   await expect(line.locator('.lineage-state')).toHaveText('approved');
   assert.deepEqual(errors, []);

@@ -93,7 +93,7 @@ once, as part of its mission.
 
 In the conversation, type `/orchestrate` (or ⌘K → **Let this conversation run
 agents…**). From the Missions board, **Let a conversation run agents…** does
-the same and lets you pick the conversation.
+opens the sheet for that mission. Choose a conversation explicitly. Each option shows the workspace it runs in. Opening the sheet from a conversation instead fixes the conversation and asks you to choose or create its mission.
 
 The sheet asks:
 
@@ -132,6 +132,8 @@ orchestrator is told and starts them, in order, and nothing else.
 **Reject…** tells it why.
 
 ## Budget
+
+The Runner counts priced usage observed for the orchestrator while its grant is in force. A new grant starts at zero even when the conversation has a long history. A task counts usage observed while its conversation is assigned, up to the end of the attempt, closure of the task or cancellation of the mission. The grant counts those agents only while the grant is in force. If you assign one existing conversation to multiple tasks at once, each task shows the usage observed during its assignment. Those overlapping task figures cannot be added to produce a total.
 
 Each agent the orchestrator starts reserves its plan estimate against the
 cap. When what the tree spent (the orchestrator and every agent it started)

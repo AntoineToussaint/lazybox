@@ -867,7 +867,7 @@ func (b *Bench) agentTree(ctx context.Context, e *Execution, after uint64) (Line
 	for _, ch := range children {
 		v := b.childView(ctx, ch.Task, ch.Attempt, obs.Conversations[ch.Attempt.Conversation], rows[ch.Task.ID])
 		v.Relation = "child"
-		v.CostUSD = b.ConversationCost(ctx, ch.Attempt.Conversation)
+		v.CostUSD = b.AttemptCost(ctx, state, ch.Task, ch.Attempt)
 		if entry, ok := state.ApprovedTask(ch.Attempt.Grant, ch.Task.ID); ok {
 			v.EstimateUSD = entry.EstimateUSD
 		}

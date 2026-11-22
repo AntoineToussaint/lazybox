@@ -134,7 +134,8 @@ try {
   await expect(options.first()).toContainText('Notifications settings');
   await expect(options.first().locator('.command-palette-kind')).toHaveText('Settings');
   await search.fill('missions');
-  await expect(options.filter({hasText: 'Show Missions'})).toHaveCount(1);
+  await expect(options.filter({hasText: 'Open the missions board'})).toHaveCount(1);
+  await expect(options.filter({hasText: 'Show Missions'})).toHaveCount(0);
   // Recent first: the file opened a moment ago leads the empty palette (the current workspace is left out).
   await search.fill('');
   await expect(palette.getByRole('group', {name: 'Recent'}).getByRole('option').first()).toContainText('routes.ts');

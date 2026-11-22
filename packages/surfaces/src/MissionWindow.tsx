@@ -20,6 +20,6 @@ function MissionView({missionId, viewState, onFocusMain}: Props) {
     onFocusMain();
   };
   useConversationRequests('', request => show({...request, commandId: ''}));
-  return <main className="workspace-shell"><MissionsPanel workspaceId="" collections={collections} pinned={missionId} viewState={viewState}
+  return <main className="workspace-shell"><MissionsPanel collections={collections} pinned={missionId} viewState={viewState}
     onShowSession={show} onShowPanel={(_, target) => { if (target) show(target); }}/></main>;
 }

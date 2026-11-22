@@ -160,8 +160,7 @@ async function run(scheme) {
   await expect(chat.locator('.orchestrator-chip')).toBeVisible({ timeout: 10_000 });
 
   // The board: the orchestrator on top, who started each card.
-  await page.locator('summary[aria-label="Panels"]').click();
-  await page.getByRole('button', { name: 'Show Missions', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   const panel = page.getByRole('region', { name: 'Missions and tasks', exact: true });
   await expect(panel.locator('.mission-orchestrator')).toContainText('Search lead');
   await expect(panel.locator('.mission-orchestrator-count')).toHaveText('2/3 agents');
@@ -169,7 +168,7 @@ async function run(scheme) {
   await expect(panel.locator('.mission-card').filter({ hasText: 'Rank results' }).locator('.mission-lineage')).toContainText('researcher');
   await page.screenshot({ path: `${shots}orchestration-board-${scheme}.png` });
 
-  await panel.getByRole('button',{name:'Back to workspace'}).click();
+  await page.getByRole('navigation', {name: 'Pages'}).getByRole('button', {name: 'Workspaces', exact: true}).click();
   // Revoke from the badge: confirmed, then gone; its agents keep running.
   await chip.click();
   await card.getByRole('button', { name: 'Revoke grant…' }).click();
@@ -178,10 +177,26 @@ async function run(scheme) {
   await expect(chip).toHaveCount(0, { timeout: 15_000 });
   assert.ok(updates().some(u => u.revokeGrant?.grantId === granted.grant && true || u.revokeGrant), 'revoked through the Runner');
   await expect(chat.locator('.lineage-line.kind-orchestration_revoked')).toBeVisible();
-  await page.locator('summary[aria-label="Panels"]').click();
-  await page.getByRole('button',{name:'Show Missions',exact:true}).click();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   await expect(panel.locator('.mission-orchestrator')).toHaveCount(0, { timeout: 10_000 });
   await expect(panel.getByRole('button', { name: 'Let a conversation run agents…' })).toBeVisible();
+  await panel.getByRole('button', { name: 'Let a conversation run agents…' }).click();
+  const picker = sheet.getByLabel('Conversation', {exact:true});
+  await expect(picker).toHaveValue('');
+  await expect(sheet.getByRole('button', { name: 'Let it run agents' })).toBeDisabled();
+  await expect(sheet.getByLabel('New mission')).toHaveCount(0);
+  await picker.selectOption('alpha-session');
+  await expect(sheet.getByRole('button', { name: 'Let it run agents' })).toBeEnabled();
+  await sheet.getByRole('button', {name:'Cancel'}).click();
+  assert.equal(updates().filter(u => u.grant).length, 1, 'choosing then canceling grants nothing');
+  await page.getByRole('navigation', {name: 'Pages'}).getByRole('button', {name: 'Workspaces', exact: true}).click();
+  await composer.fill('/orchestrate');
+  await composer.press('Enter');
+  await expect(sheet.getByRole('radio', {name: /Ship search/})).not.toBeChecked();
+  await expect(sheet.getByRole('button', {name: 'Let it run agents'})).toBeDisabled();
+  await sheet.getByRole('radio', {name: /Ship search/}).check();
+  await expect(sheet.getByRole('button', {name: 'Let it run agents'})).toBeEnabled();
+  await sheet.getByRole('button', {name:'Cancel'}).click();
   assert.deepEqual(errors, []);
   await context.close();
 }

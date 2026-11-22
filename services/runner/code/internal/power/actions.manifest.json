@@ -695,7 +695,7 @@
   {
    "id": "missions.open",
    "title": "Show missions",
-   "group": "Workspace",
+   "group": "Go to",
    "scope": "global",
    "keys": "",
    "safe": true
@@ -703,7 +703,7 @@
   {
    "id": "missions.page",
    "title": "Open the missions board",
-   "group": "Workspace",
+   "group": "Go to",
    "scope": "global",
    "keys": "",
    "safe": true
@@ -1698,7 +1698,6 @@
   "changes",
   "usage",
   "sessions",
-  "missions",
   "pulls",
   "processes",
   "actions",

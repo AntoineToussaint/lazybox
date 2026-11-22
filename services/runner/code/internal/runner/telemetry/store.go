@@ -344,6 +344,9 @@ func (s *SQLite) Report(ctx context.Context, q Query) (Report, error) {
 			}
 			seen[key] = true
 		}
+		if (!q.Since.IsZero() && r.ObservedAt.Before(q.Since)) || (!q.Until.IsZero() && !r.ObservedAt.Before(q.Until)) {
+			continue
+		}
 		if r.Nanos == nil && q.Prices != nil && (r.Reason == "" || r.Reason == "No exact model price" || r.Reason == "Incomplete rate card" || r.Reason == "Long-context price requires an explicit rate") {
 			r.Reason = ""
 			r = q.Prices.Price(r)

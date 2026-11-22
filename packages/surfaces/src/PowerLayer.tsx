@@ -63,7 +63,7 @@ export function PowerLayer(props: PowerLayerProps) {
     const definition = actionDefinition(id);
     if (!definition) throw new Error(`The app has no action ${id}; lazybox do --list lists them`);
     const p = live.current, here = p.selection;
-    if (target && ((target.collectionId && target.collectionId !== here.collectionId) || (target.sessionId && target.sessionId !== here.sessionId))) {
+    if (id !== 'missions.open' && id !== 'missions.page' && target && ((target.collectionId && target.collectionId !== here.collectionId) || (target.sessionId && target.sessionId !== here.sessionId))) {
       if (target.sessionId) p.onShowSession(target); else p.onSelect(target);
       // Let the new workspace mount, so its handlers are the ones that run.
       await new Promise(resolve => setTimeout(resolve, 150));
@@ -145,6 +145,11 @@ export function PowerLayer(props: PowerLayerProps) {
   useUiRequests(props.primary, surface, {
     open: async (request: UiRequest) => {
       const p = live.current, target = { collectionId: request.collectionId, sessionId: request.sessionId };
+      if (request.panel === 'missions' && !request.file) {
+        navigation.openPanel('missions', { collectionId: '', sessionId: '' });
+        await p.host?.focusWindow?.().catch(() => undefined);
+        return 'Showed Missions';
+      }
       if (request.file) navigation.openFile(target, request.file, request.line || 1);
       else if (request.sessionId) p.onShowSession(target);
       else if (request.collectionId) p.onSelect(target);

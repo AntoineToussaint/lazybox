@@ -29,10 +29,11 @@ try {
   await expect(page.locator('.panel-chat').getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
 
   // The Panels menu shows the Missions panel like any other; with no mission it explains itself.
-  await page.locator('summary[aria-label="Panels"]').click();
-  await page.getByRole('button', { name: 'Show Missions', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   const panel = page.getByRole('region', { name: 'Missions and tasks', exact: true });
   await expect(panel).toBeVisible();
+  await expect(page.locator('.workspace-tools')).toHaveCount(0);
+  await expect(page.getByRole('navigation', { name: 'Pages' }).getByRole('button', {name: 'Missions', exact: true})).toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('tab',{name:'Missions',exact:true})).toHaveCount(0);
   await expect(panel.getByRole('heading', { name: 'Create your first mission' })).toBeVisible();
   await expect(panel).toContainText('different workspaces');
@@ -135,8 +136,7 @@ try {
   await expect(inbox.locator('.agents-summary')).toHaveText('1 waiting for you');
 
   const reopenBoard = async () => {
-    await page.locator('summary[aria-label="Panels"]').click();
-    await page.getByRole('button', { name: 'Show Missions', exact: true }).click();
+    await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   };
   await reopenBoard();
   // A passing run makes it observed; checks passing on the PR verify it.
@@ -153,8 +153,7 @@ try {
   await expect(page.getByRole('combobox', { name: 'Session', exact: true })).toHaveValue(taskSession);
   await page.screenshot({ path: '/tmp/lazybox-missions-verified.png' });
 
-  await page.locator('summary[aria-label="Panels"]').click();
-  await page.getByRole('button', { name: 'Show Missions', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   // Accepted from the inbox: done, accepted; the dependent task is ready.
   await inboxButton.click();
   await expect(awaiting.locator('.trust-badge')).toHaveText('Verified');
@@ -174,6 +173,7 @@ try {
   await docs.getByRole('button', { name: 'Assign…' }).click();
   const assignDocs = page.getByRole('dialog', { name: 'Assign Document the parser' });
   await assignDocs.getByRole('radio', { name: 'A conversation you have' }).check();
+  await expect(assignDocs.getByLabel('Conversation', { exact: true })).toHaveValue('');
   await assignDocs.getByLabel('Conversation', { exact: true }).selectOption('alpha-session');
   await assignDocs.getByLabel("Send the task's brief to the agent now").uncheck();
   await assignDocs.getByRole('button', { name: 'Assign', exact: true }).click();
@@ -233,7 +233,7 @@ try {
 
   // Docked narrow, columns stack and nothing scrolls sideways; on a phone too.
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(panel.getByRole('button', { name: 'Back to workspace' })).toBeVisible();
+  await expect(page.getByRole('navigation', {name: 'Pages'}).getByRole('button', {name: 'Workspaces', exact: true})).toBeVisible();
   const body = page.locator('.missions-body');
   await expect(body).toBeVisible();
   assert.ok(await body.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'no sideways scroll on a phone');

@@ -176,8 +176,8 @@ const tail = [
   { id: 'chat.artifact', title: 'Track the last reply as an artifact…', group: 'Conversation', icon: 'artifact', keys: '', scope: 'global', keywords: '/artifact document report save message' },
   { id: 'chat.stop', title: 'Interrupt the agent', group: 'Conversation', icon: 'stop', keys: '', scope: 'global', keywords: '/stop cancel abort halt' },
   { id: 'chat.rename', title: 'Rename the conversation…', group: 'Conversation', icon: 'pencil', keys: '', scope: 'global', keywords: '/rename title name' },
-  { id: 'missions.open', title: 'Show missions', group: 'Workspace', icon: 'target', keys: '', scope: 'global', safe: true, palette: false, keywords: '/mission tasks goals orchestrate' },
-  { id: 'missions.page', title: 'Open the missions board', group: 'Workspace', icon: 'target', keys: '', scope: 'global', safe: true, keywords: 'mission board timeline messages leases orchestrator agents plan' },
+  { id: 'missions.open', title: 'Show missions', group: 'Go to', icon: 'target', keys: '', scope: 'global', safe: true, palette: false, keywords: '/mission tasks goals orchestrate' },
+  { id: 'missions.page', title: 'Open the missions board', group: 'Go to', icon: 'target', keys: '', scope: 'global', safe: true, keywords: 'mission board timeline messages leases orchestrator agents plan' },
   { id: 'pulls.open', title: 'Show pull requests', group: 'Workspace', icon: 'pullRequest', keys: '', scope: 'global', safe: true, keywords: 'pull requests prs checks reviews merge github tracked' },
   // Voice (VOICE.md): dictation and spoken commands, held or toggled.
   { id: 'voice.dictate', title: 'Dictate', group: 'Voice', icon: 'mic', keys: 'AltRight or Alt+Space', scope: 'global', hold: true, keywords: 'voice speech speak talk microphone dictation push to talk dictée micro parler' },

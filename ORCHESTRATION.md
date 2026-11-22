@@ -917,10 +917,11 @@ leased: overlap is flagged in the plan only.
 
 ### The missions board, leases, live overlap and review capacity (slices 2c, 3a as built)
 
-**The board is a page.** ⌘K *Open the missions board* (or the expand
-button on the Missions panel, or a badge card's mission link) opens it as a
-page of its own (`showMissionsPage`, `navigate-requests.ts`), where the four
-columns stand side by side. Tabs (←/→, Home/End): **Board**, **Timeline**,
+**The board belongs to the Runner.** Choose **Missions** in the main navigation,
+use ⌘K *Open the missions board*, or follow a mission link from a conversation.
+The board opens outside workspace layouts. Restoring an older layout removes
+its docked Mission tabs and keeps the other panels. **Detach mission** opens
+the selected mission in its own window. Tabs (←/→, Home/End): **Board**, **Timeline**,
 **Messages**, **Leases**.
 
 - **Timeline** (`MissionTimeline`): every event of the log oldest first, one

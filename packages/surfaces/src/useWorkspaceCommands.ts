@@ -13,6 +13,7 @@ type Commands = {
   root: string;
   /** The main window (not a window fixed to one workspace): it takes other windows' requests and has Settings. */
   main: boolean;
+  canShowMissions: boolean;
   collections: Collection[];
   selection: ViewTarget;
   workspaceId: string;
@@ -49,8 +50,8 @@ export function useWorkspaceCommands(commands: Commands): CommandNavigator {
     'settings.open': commands.main && { run: tab => c().openSettings(typeof tab === 'string' ? tab : 'subscriptions') },
     'conversation.new': { run: () => c().newConversation(), enabled: () => c().canStartConversation },
     'changes.show': { run: () => c().showPanel('changes'), enabled: () => !!c().workspaceId },
-    'missions.open': { run: () => c().showPanel('missions'), enabled: () => !!c().registry.missions },
-    'missions.page': { run: () => showMissionsPage(), enabled: () => !!c().registry.missions },
+    'missions.open': { run: () => c().showPanel('missions'), enabled: () => c().canShowMissions },
+    'missions.page': { run: () => showMissionsPage(), enabled: () => c().canShowMissions },
     'pulls.open': { run: () => c().showPanel('pulls'), enabled: () => !!c().registry.pulls },
     'terminal.open':{ run: () => c().showPanel('terminal'), enabled: () => c().terminalReady },
     'workspace.window': { run: () => c().openWorkspaceWindow(), enabled: () => c().canOpenWorkspaceWindow },

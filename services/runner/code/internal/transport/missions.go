@@ -367,12 +367,8 @@ func (s *Service) wireMission(ctx context.Context, state *work.State, readErr er
 			task.Report, task.ReportedAtUnixMillis = report.Summary, millis(report.At)
 		}
 		// What it cost so far, against what its plan estimated.
-		seen := map[string]bool{}
 		for _, a := range v.Attempts {
-			if !seen[a.Conversation] {
-				seen[a.Conversation] = true
-				task.CostUsd += s.Bench.ConversationCost(ctx, a.Conversation)
-			}
+			task.CostUsd += s.Bench.AttemptCost(ctx, state, v.Task, a)
 		}
 		for _, p := range state.Plans {
 			for key, created := range p.Created {

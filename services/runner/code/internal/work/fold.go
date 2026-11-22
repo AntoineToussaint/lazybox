@@ -8,18 +8,19 @@ import (
 // observations. It is rebuilt from the log, never stored, and never mutated
 // after Fold returns it.
 type State struct {
-	ID       string
-	Title    string
-	Brief    string
-	Policy   Policy
-	Process  ProcessPayload
-	Created  time.Time
-	Updated  time.Time
-	Canceled bool
-	Reason   string
-	Seq      uint64
-	Goals    []*Goal
-	Tasks    []*Task
+	ID         string
+	Title      string
+	Brief      string
+	Policy     Policy
+	Process    ProcessPayload
+	Created    time.Time
+	Updated    time.Time
+	Canceled   bool
+	CanceledAt time.Time
+	Reason     string
+	Seq        uint64
+	Goals      []*Goal
+	Tasks      []*Task
 	// Grants and Messages: the Orchestrator grants and the messages between
 	// agents (grant.go).
 	Grants   []*Grant
@@ -60,6 +61,7 @@ type Task struct {
 	Updated      time.Time
 	Canceled     bool
 	CancelReason string
+	ClosedAt     time.Time
 	Attempts     []*Attempt
 	Reports      []Report
 	Evidence     []Recorded
@@ -76,7 +78,7 @@ type Attempt struct {
 	New          bool
 	// Lineage (grant.go): set when an orchestrator started this conversation.
 	Parent, Grant, Role, Permission, Profile string
-	Started                                  time.Time
+	Assigned, Started                        time.Time
 	StartSeq                                 uint64
 	Ended                                    bool
 	EndedAt                                  time.Time
@@ -340,7 +342,7 @@ func (s *State) fold(e Event) error {
 		s.Brief = p.Brief
 	case MissionCanceled:
 		p, _ := decode[CancelPayload](e)
-		s.Canceled, s.Reason = true, p.Reason
+		s.Canceled, s.Reason, s.CanceledAt = true, p.Reason, e.At
 	case GoalCreated:
 		p, ok := decode[GoalPayload](e)
 		if !ok || p.Goal == "" || p.Title == "" {
@@ -446,7 +448,7 @@ func (s *State) foldTask(e Event) error {
 		}
 	case TaskCanceled:
 		p, _ := decode[CancelPayload](e)
-		t.Canceled, t.CancelReason = true, p.Reason
+		t.Canceled, t.CancelReason, t.ClosedAt = true, p.Reason, e.At
 	case TaskAssigned:
 		p, _ := decode[AttemptPayload](e)
 		if p.Attempt == "" || p.Conversation == "" {
@@ -465,7 +467,7 @@ func (s *State) foldTask(e Event) error {
 				return err
 			}
 		}
-		t.Attempts = append(t.Attempts, &Attempt{Dispatch: p.Dispatch, ID: p.Attempt, Task: t.ID, Conversation: p.Conversation, Workspace: p.Workspace, Execution: p.Execution, New: p.New, Parent: p.Parent, Grant: p.Grant, Role: p.Role, Permission: p.Permission, Profile: p.Profile})
+		t.Attempts = append(t.Attempts, &Attempt{Assigned: e.At, Dispatch: p.Dispatch, ID: p.Attempt, Task: t.ID, Conversation: p.Conversation, Workspace: p.Workspace, Execution: p.Execution, New: p.New, Parent: p.Parent, Grant: p.Grant, Role: p.Role, Permission: p.Permission, Profile: p.Profile})
 	case AttemptStarted:
 		p, _ := decode[AttemptPayload](e)
 		a := t.Current()
@@ -543,6 +545,9 @@ func (s *State) foldTask(e Event) error {
 			return refuse("note is longer than %d bytes", maxNote)
 		}
 		t.Gates = append(t.Gates, GateEvent{Seq: e.Seq, At: e.At, Type: e.Type, Gate: p.Gate, Note: p.Note, Actor: e.Actor})
+		if e.Type == GatePassed && s.Done(t) {
+			t.ClosedAt = e.At
+		}
 	}
 	t.Updated = e.At
 	return nil

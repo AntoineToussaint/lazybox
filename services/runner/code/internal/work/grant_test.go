@@ -249,3 +249,20 @@ func TestPermissionOrder(t *testing.T) {
 		t.Fatal("permission order")
 	}
 }
+
+// The store-wide check must run inside the append lock, even when two callers
+// have already prepared valid grant drafts against different mission logs.
+func TestGrantAppendEnforcesOneMissionPerHolder(t *testing.T) {
+	s := newStore(t, t.TempDir())
+	first := mustOK[*State](t)(s.Create(Human, "", "First mission", ""))
+	second := mustOK[*State](t)(s.Create(Human, "", "Second mission", ""))
+	issue := func(id string) error {
+		g := GrantPayload{Holder: "orch", Grant: "grant-" + id, Ceiling: ceiling()}
+		_, _, err := s.Append(id, Draft{Subject: GrantSubject(g.Grant), Type: GrantIssued, Actor: Human, Payload: g})
+		return err
+	}
+	if err := issue(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	refused(t, issue(second.ID), "already orchestrates")
+}

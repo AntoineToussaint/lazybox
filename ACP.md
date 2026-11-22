@@ -129,7 +129,7 @@ machine's installed agents never change a test's providers.
 | `available_commands_update` | `command_catalog` commands (the `/` menu) |
 | config option of category `model`, or pre-standard `models` | `command_catalog` models; `LiveModel` via `session/set_config_option` or `session/set_model` |
 | session modes, or config option of category `mode` | Lazybox's permission modes (below) |
-| `usage_update` | context used and size, and the agent's own USD cost (`telemetry/acp.go`) |
+| `usage_update` | context used and size, and changes in the agent’s reported USD cost recorded at the time observed (`telemetry/acp.go`) |
 | `session/request_permission` | an approval card; `allow_always` options are its "Always allow" choices |
 | `session/cancel` | Interrupt; waiting permission requests are answered `cancelled` first |
 | `session/resume`, else `session/load` | resume; the history `session/load` replays is not journaled again: its reply is read in order with the replayed updates, so the replay ends exactly there |

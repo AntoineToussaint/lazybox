@@ -105,7 +105,6 @@ func TestOrchestratorPlanApprovalAndBudget(t *testing.T) {
 	if err = o.bench.Telemetry.Put(ctx, telemetry.Record{ID: "r1", Scope: telemetry.Scope{Conversation: index.Spawned.ConversationId, Execution: index.Spawned.SessionId, Profile: "codex-default", Provider: "codex"}, Model: "gpt-5.4", Source: "gateway", Status: "complete", Nanos: nanos(2_000_000_000), ObservedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(5100 * time.Millisecond) // the cost cache
 	// docs: $2 spent + $2 reserved + $3 > $6: refused, recorded, shown.
 	_, err = o.client.SpawnAgent(orch, &pb.SpawnAgentRequest{SessionId: o.orch.ID, TaskId: ids["docs"]})
 	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "the tree's budget is $6.00, and $2.00 is spent, $2.00 reserved") {

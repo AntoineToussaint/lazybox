@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -42,5 +43,13 @@ func TestMissionBudgetUsesEachGrantAndAttemptWindow(t *testing.T) {
 	}
 	if got := b.AttemptCost(ctx, state, task, a); got != 1 {
 		t.Fatalf("assigned task: got %v, want only usage during assignment", got)
+	}
+}
+
+func TestSpawnRequiresReadableBudget(t *testing.T) {
+	b := &Bench{}
+	g := &work.Grant{GrantPayload: work.GrantPayload{Holder: "holder", Ceiling: work.Ceiling{BudgetUSD: 1}}}
+	if err := b.checkBudget(context.Background(), &work.State{}, g, 0, nil); !errors.Is(err, work.ErrRefused) {
+		t.Fatalf("spawn without usage under a budget returned %v", err)
 	}
 }

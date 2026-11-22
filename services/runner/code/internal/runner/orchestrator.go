@@ -857,7 +857,7 @@ func (b *Bench) agentTree(ctx context.Context, e *Execution, after uint64) (Line
 		rows[v.ID] = v
 	}
 	if view.Grant != nil {
-		view.Budget = b.treeBudget(ctx, state, view.Grant)
+		view.Budget = b.TreeBudgetOf(ctx, state, view.Grant)
 		for i := len(state.Plans) - 1; i >= 0 && view.Plan == nil; i-- {
 			if state.Plans[i].Grant == view.Grant.Grant {
 				view.Plan = state.Plans[i]

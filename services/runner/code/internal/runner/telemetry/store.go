@@ -89,13 +89,59 @@ func (s *SQLite) Put(ctx context.Context, r Record) error {
 	if r.ObservedAt.IsZero() {
 		r.ObservedAt = time.Now().UTC()
 	}
+	if r.Source == "reported" && r.Nanos != nil {
+		return s.putReportedCost(ctx, r)
+	}
 	data, err := json.Marshal(r)
 	if err != nil {
 		return err
 	}
 	// A late partial/duplicate stream cannot erase a committed terminal snapshot.
-	_, err = s.db.ExecContext(ctx, `INSERT INTO usage VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET body=json_set(excluded.body,'$.scope',json_extract(usage.body,'$.scope')) WHERE json_extract(usage.body,'$.status')!='complete' OR (json_extract(excluded.body,'$.source')='sdk' AND json_extract(excluded.body,'$.tokens.output')>json_extract(usage.body,'$.tokens.output')) OR json_extract(excluded.body,'$.source')='reported'`, r.ID, r.Scope.Workspace, r.Scope.Execution, string(data))
+	_, err = s.db.ExecContext(ctx, `INSERT INTO usage VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET body=json_set(excluded.body,'$.scope',json_extract(usage.body,'$.scope')) WHERE json_extract(usage.body,'$.status')!='complete' OR (json_extract(excluded.body,'$.source')='sdk' AND json_extract(excluded.body,'$.tokens.output')>json_extract(usage.body,'$.tokens.output'))`, r.ID, r.Scope.Workspace, r.Scope.Execution, string(data))
 	return err
+}
+
+// putReportedCost records changes in an ACP attempt's reported total at their
+// observation times. This keeps grant, task and hourly cost windows additive.
+// Older databases have the last full total in usage under the attempt key.
+func (s *SQLite) putReportedCost(ctx context.Context, r Record) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	key := r.ID
+	var previous, sequence int64
+	err = tx.QueryRowContext(ctx, "SELECT json_extract(body,'$.total'), json_extract(body,'$.sequence') FROM baselines WHERE id=?", key).Scan(&previous, &sequence)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRowContext(ctx, "SELECT json_extract(body,'$.nanos') FROM usage WHERE id=?", key).Scan(&previous)
+		if errors.Is(err, sql.ErrNoRows) {
+			err = nil
+		} else {
+			sequence = 1
+		}
+	}
+	if err != nil {
+		return err
+	}
+	total := *r.Nanos
+	if sequence != 0 && previous == total {
+		return nil
+	}
+	sequence++
+	r.ID = fmt.Sprintf("reported-delta:%d:%s", sequence, key)
+	r.Nanos = number(total - previous)
+	body, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO usage VALUES(?,?,?,?)", r.ID, r.Scope.Workspace, r.Scope.Execution, string(body)); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO baselines VALUES(?, json_object('total',?,'sequence',?)) ON CONFLICT(id) DO UPDATE SET body=excluded.body", key, total, sequence); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // PutCommand records one `lazybox run`; a repeated ID replaces it.

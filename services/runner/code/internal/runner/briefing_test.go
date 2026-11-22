@@ -25,7 +25,7 @@ func TestEachBuiltinSectionTextIsPinnedToItsVersion(t *testing.T) {
 		version int
 		sum     string
 	}{
-		"workspace":     {7, "067d22ee65fdc6c9"},
+		"workspace":     {8, "146604a48bd31ccc"},
 		"run":           {3, "5e6c4cdceaa73f01"},
 		"documents":     {5, "1fc1b8fed9a25108"},
 		"conversations": {2, "9eef1f6b082a54f4"},
@@ -121,7 +121,7 @@ func TestANewConversationIsUpToDateAndRecordsItsVersions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "7" {
+	if saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "8" {
 		t.Fatalf("versions not recorded at the start: %v", saved.Briefing)
 	}
 	if !strings.Contains(saved.Context, "--provider codex") || !strings.Contains(saved.Context, "never changes its provider") || !strings.Contains(saved.Context, "only starts copies of yourself") {
@@ -165,7 +165,7 @@ func TestAnOldConversationHearsWhatLazyboxAddedOnceWithItsNextMessage(t *testing
 	}
 	journaled(t, e, `"briefing_updated"`, `"operationId":"m1"`, `"status":"features"`, `"conversations":"2"`, `with any agent`)
 	saved, err := b.History.Get(t.Context(), e.ID)
-	if err != nil || saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "7" {
+	if err != nil || saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "8" {
 		t.Fatalf("the versions it now has are durable: %v %v", err, saved.Briefing)
 	}
 
@@ -190,8 +190,8 @@ func TestAConversationBehindHearsOnlyTheChangesItMissed(t *testing.T) {
 		t.Fatalf("sections %v", u.Sections)
 	}
 	lines := strings.Split(strings.TrimPrefix(u.Text, briefingPreamble+"\n"), "\n")
-	if len(lines) != 6 || !strings.Contains(lines[3], "interactive action") || !strings.Contains(lines[4], "repeat the destination") {
-		t.Fatalf("workspace versions 3 to 7 and the conversation line, one line each:\n%s", u.Text)
+	if len(lines) != 7 || !strings.Contains(lines[3], "interactive action") || !strings.Contains(lines[4], "repeat the destination") {
+		t.Fatalf("workspace versions 3 to 8 and the conversation line, one line each:\n%s", u.Text)
 	}
 	if want := "`\"" + filepath.Join(b.Config.CLIDir, "lazybox") + "\"`"; !strings.Contains(lines[0], want) {
 		t.Fatalf("a note names this Runner's CLI: %q", lines[0])

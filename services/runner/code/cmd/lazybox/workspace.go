@@ -21,6 +21,7 @@ import (
 const workspaceUsage = `Usage:
   lazybox workspace export-definition [WORKSPACE] > collection.json
   lazybox workspace realize FILE --key REQUEST [--name NAME]
+  lazybox workspace rename "DISPLAY NAME"
   lazybox workspace repos [WORKSPACE]
   lazybox workspace request-repo <name|owner/repo|path> --reason "why you need it" [--no-wait] [--timeout 90s]`
 
@@ -37,6 +38,8 @@ func (c *cli) workspace(args []string) error {
 		return c.exportDefinition(args[1:])
 	case "realize":
 		return c.realizeDefinition(args[1:])
+	case "rename":
+		return c.renameWorkspace(args[1:])
 	case "repos":
 		return c.workspaceRepos(args[1:])
 	case "request-repo":
@@ -44,6 +47,33 @@ func (c *cli) workspace(args []string) error {
 	}
 	fmt.Fprintln(c.stderr, workspaceUsage)
 	return fail(exitUsage, "unknown workspace command %q", args[0])
+}
+
+func (c *cli) renameWorkspace(args []string) error {
+	positional, err := c.parse(c.flags("workspace rename"), args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 || strings.TrimSpace(positional[0]) == "" {
+		return fail(exitUsage, `usage: lazybox workspace rename "DISPLAY NAME"`)
+	}
+	id := c.getenv("LAZYBOX_V2_COLLECTION_ID")
+	if id == "" {
+		return fail(exitUsage, "workspace rename requires a current Lazybox workspace")
+	}
+	cl, err := c.dial()
+	if err != nil {
+		return err
+	}
+	response, err := got(cl.RenameCollection(c.ctx, connect.NewRequest(&pb.RenameCollectionRequest{CollectionId: id, Name: positional[0]})))
+	if err != nil {
+		return err
+	}
+	if c.json {
+		return c.printProtoJSON(response)
+	}
+	c.out("Renamed workspace to %s\n", response.Collection.Name)
+	return nil
 }
 
 func (c *cli) workspaceRepos(args []string) error {

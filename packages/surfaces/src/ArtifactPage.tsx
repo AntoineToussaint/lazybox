@@ -3,7 +3,7 @@ import { ArtifactExportContext, documentSnapshot, exportDocumentHTML, type Docum
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Artifact, ArtifactVersion, Collection } from '@lazybox/protocol';
 import { ActionMenu } from './ActionMenu';
-import { CreateIssueDialog, DeleteArtifactDialog, DiffStats, DiffView, SaveToRepositoryDialog } from './ArtifactDialogs';
+import { RoadmapDialog, CreateIssueDialog, DeleteArtifactDialog, DiffStats, DiffView, SaveToRepositoryDialog } from './ArtifactDialogs';
 import { artifactsChanged, errorText, restoreArtifacts, retireArtifact } from './artifact-client';
 import { TodoList, todoMarkdown } from './TodoList';
 import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, slug, versionOrigin } from './artifact-model';
@@ -47,7 +47,8 @@ type Props = {
   /** In its own window: the window is the page, so there is no "open in window". */
   standalone?: boolean;
   /** A version to show, compared with another (a chat card's "Compare with v2"); a new `at` applies it again. */
-  focus?: { version?: number; compareWith?: number; at: number };
+  onNavigateRelated?(next: RelatedPage, fromVersion: number): void;
+  focus?: { version?: number; pinned?: boolean; compareWith?: number; at: number };
 };
 
 /** Per-window reading preferences: kept for this window only, and harmless when storage is unavailable. */
@@ -67,7 +68,23 @@ const fullDate = (unixMillis: bigint | number) => new Date(Number(unixMillis)).t
  * callouts, tables, diagrams), its versions with the changes between them,
  * where it came from, and every way out of Lazybox.
  */
-export function ArtifactPage({ collectionId, artifactId, summary, collection, onBack, onShowSession, conversationId, conversationTitle, onDeleted, onDiscuss, chatOpen, standalone, focus }: Props) {
+type RelatedPage = { id: string; version?: number };
+
+export function ArtifactPage(props: Props) {
+  const [trail, setTrail] = useState<RelatedPage[]>([]);
+  const current = trail.at(-1);
+  const back = () => setTrail(pages => pages.slice(0, -1));
+  const navigate = (next: RelatedPage, fromVersion: number) => setTrail(pages => [
+    ...pages.slice(0, -1), { id: current?.id ?? props.artifactId, version: fromVersion }, next,
+  ]);
+  return <ArtifactDocument {...props} key={current?.id ?? props.artifactId}
+    artifactId={current?.id ?? props.artifactId} summary={current ? undefined : props.summary}
+    focus={current ? { version: current.version, pinned: true, at: trail.length } : props.focus}
+    onBack={trail.length > 1 ? back : props.onBack} onDeleted={trail.length > 1 ? back : props.onDeleted}
+    onRelated={props.onNavigateRelated ?? navigate}/>;
+}
+
+function ArtifactDocument({ collectionId, artifactId, summary, collection, onBack, onShowSession, conversationId, conversationTitle, onDeleted, onDiscuss, chatOpen, standalone, focus, onRelated }: Props & { onRelated(target: RelatedPage, fromVersion: number): void }) {
   const { api } = useRunner();
   const host = useContext(ArtifactHostContext);
   const saveArtifactExport = useContext(ArtifactExportContext);
@@ -104,7 +121,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
       if (result.error) setError(result.error);
     } finally { openingShell.current = false; }
   }, [api, collection, collectionId, library]);
-  const [selected, setSelected] = useState(0); // 0 follows the latest version
+  const [selected, setSelected] = useState(focus?.pinned ? focus.version ?? 0 : 0); // 0 follows the latest version
   const [discussionVersion, setDiscussionVersion] = useState<number>();
   const [reviewingVersion, setReviewingVersion] = useState<number>();
   const [view, setView] = useState<'document' | 'source' | 'changes'>('document');
@@ -119,6 +136,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   const sizes = useRef<ResizeObserver | null>(null);
   const measureRef = useCallback((node: HTMLElement | null) => { sizes.current?.disconnect(); if (!node) return; sizes.current = new ResizeObserver(([entry]) => setWide(entry.contentRect.width > 860)); sizes.current.observe(node); }, []);
   const [republishing, setRepublishing] = useState(false);
+  const [roadmapInput, setRoadmapInput] = useState<{ version: number; markdown: string }>();
   const [renaming, setRenaming] = useState(false), [dialog, setDialog] = useState<'delete' | 'save' | 'issue'>();
   const [status, setStatus] = useState('');
   const statusTimer = useRef(0);
@@ -149,7 +167,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
 
   // A retired page names what superseded it: the workspace's list (shared, retired included) has its title.
   const supersededBy = artifact?.retired?.supersededBy || '';
-  const siblings = useArtifacts(supersededBy ? collectionId : '', OTHER_ARTIFACTS_POLL_MS);
+  const siblings = useArtifacts(collectionId, OTHER_ARTIFACTS_POLL_MS);
   const successor = supersededBy ? [...siblings.artifacts, ...siblings.retired].find(a => a.id === supersededBy) : undefined;
   const moreMenu = useRef<HTMLDetailsElement>(null);
 
@@ -185,7 +203,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
     if (focusAfter.current.at !== focus.at) { focusAfter.current = { at: focus.at, loads }; setPoll(value => value + 1); return; }
     if (loads <= focusAfter.current.loads || !latestNumber) return;
     focused.current = focus.at;
-    const version = focus.version && focus.version < latestNumber ? focus.version : 0;
+    const version = focus.version && (focus.pinned || focus.version < latestNumber) ? focus.version : 0;
     setSelected(version); setBase(focus.compareWith && focus.compareWith < (version || latestNumber) ? focus.compareWith : 0);
     setView(focus.compareWith ? 'changes' : 'document');
   }, [focus, loads, latestNumber]);
@@ -377,8 +395,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
     const reference = agentReference(artifact, currentText ?? '', 1200, shown);
     return excerpt ? `${reference}Selected excerpt:\n${excerpt.split('\n').map(line => `> ${line}`).join('\n')}\n\n` : reference;
   };
-  const sendToAgent = () => {
-    const text = discussionReference();
+  const sendToAgent = (text = discussionReference()) => {
     if (onDiscuss) {
       if (!discussionVersion && shown) {
         setDiscussionVersion(shown);
@@ -391,7 +408,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
       composeInConversation({ sessionId: conversationId, text });
       onShowSession({ collectionId, sessionId: conversationId, commandId: '' });
       say(`Added to the message box of “${conversationTitle || 'the conversation'}”. Review it and send.`);
-    } else void copy(text, 'Copied a reference to this artifact. Paste it into a conversation to hand it to an agent.');
+    } else void copy(text, `Copied. Paste into a conversation in ${collection?.name || 'this workspace'}.`);
   };
   const pick = (number: number) => { setSelected(number === latestNumber ? 0 : number); setBase(0); };
   const compare = (number: number) => { pick(number); setView('changes'); if (!wide) setHistoryOpen(false); };
@@ -421,7 +438,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
         <button type="button" className="artifact-tool artifact-history-toggle" aria-expanded={historyOpen} aria-label={historyLabel} aria-keyshortcuts="H" title={`${historyLabel} (H)`} onClick={() => setHistoryOpen(!historyOpen)}><Icon name="history" size={15}/><span className="artifact-tool-label">History</span><span className="artifact-count">{versions.length}</span></button>
         <button type="button" className={onDiscuss ? "artifact-tool artifact-discuss" : "artifact-tool"}
           aria-label={onDiscuss ? discussLabel : (excerpt ? 'Send selection to agent' : 'Send to agent')}
-          onMouseDown={event => { if (excerpt) event.preventDefault(); }} onClick={sendToAgent}
+          onMouseDown={event => { if (excerpt) event.preventDefault(); }} onClick={() => sendToAgent()}
           title={onDiscuss ? 'Open chat and add this reference to its draft' : conversationId ? `Put a reference in the message box of “${conversationTitle || 'the conversation'}” (not sent)` : 'Copy a reference an agent can read'}>
           <Icon name={onDiscuss ? 'chat' : 'send'} size={14}/><span className="artifact-tool-label">{onDiscuss ? discussLabel : excerpt ? 'Send selection' : 'Send to agent'}</span>
         </button>
@@ -436,6 +453,10 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
         </ActionMenu>
         {!standalone && host.openArtifact && <button type="button" className="artifact-tool artifact-open-window" aria-label="Open in its own window" title="Open in its own window" onClick={() => void host.openArtifact!({ collectionId, artifactId }).catch(e => setError(errorText(e)))}><Icon name="external" size={14}/></button>}
         <ActionMenu ref={moreMenu} label="Artifact actions" className="artifact-more-menu">
+          <button type="button" disabled={content === undefined || !shown} onClick={() => setRoadmapInput({ version: shown, markdown: artifact.format === 'html' ? '' : currentText ?? '' })}><Icon name="artifact"/><span>Create implementation roadmap…</span></button>
+          {artifact.kind === 'plan' && <button type="button" disabled={content === undefined} onClick={() => sendToAgent(
+            `Prepare a mission proposal from this roadmap. Identify task dependencies, acceptance checks, and open decisions. Leave execution for separate approval.\n\n${discussionReference()}`
+          )}><Icon name="send"/><span>{conversationId || onDiscuss ? 'Draft mission proposal in chat…' : 'Copy mission proposal brief'}</span></button>}
           {onDiscuss && <button type="button" onClick={() => void copy(discussionReference(), 'Copied artifact reference.')}><Icon name="copy"/><span>Copy artifact reference</span></button>}
           <button type="button" onClick={() => { setView('document'); setRenaming(true); }}><Icon name="pencil"/><span>Rename</span></button>
           {!standalone && host.openArtifact && <button type="button" className="artifact-menu-window" onClick={() => void host.openArtifact!({ collectionId, artifactId }).catch(e => setError(errorText(e)))}><Icon name="external"/><span>Open in its own window</span></button>}
@@ -449,6 +470,14 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
         </ActionMenu>
       </div>
     </header>
+    {(artifact.links || []).filter(link => link.kind === 'artifact').map(link => {
+      const input = [...siblings.artifacts, ...siblings.retired].find(item => item.id === link.id);
+      return <button type="button" className="link-button" key={link.id} disabled={!input} onClick={() => onRelated({ id: link.id, version: link.version }, shown)}>
+        {link.role === 'review' ? 'Source review' : 'Source design'} · {input?.title ?? link.id} · v{link.version}{input && input.versions.length > link.version ? ' · newer revision available' : ''}
+      </button>;
+    })}
+    {siblings.artifacts.filter(item => item.links?.some(link => link.kind === 'artifact' && link.id === artifactId)).map(plan =>
+      <button type="button" key={plan.id} className="link-button" onClick={() => onRelated({ id: plan.id }, shown)}>Roadmap · {plan.title}</button>)}
     {error && <p className="artifact-error" role="alert">{error}<button type="button" className="link-button" onClick={() => setError('')}>Dismiss</button></p>}
     {updateReady && <div className="artifact-update-banner">
       <Icon name="history" size={16}/>
@@ -563,6 +592,8 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
       <TerminalPanel key={terminal.id} workspaceId={collectionId} collections={collection ? [collection] : []} initialTerminalId={terminal.id} initialInput={terminal.command}
         sessionId={conversationId} onShowSession={onShowSession} onClosePanel={() => setTerminal(undefined)}/>
     </section>}
+    {roadmapInput && <RoadmapDialog source={artifact} {...roadmapInput} reviews={siblings.artifacts.filter(item => item.kind === 'report' && item.id !== artifactId && item.versions.length > 0)}
+      onClose={() => setRoadmapInput(undefined)} onSaved={plan => { setRoadmapInput(undefined); say('Roadmap saved.'); onRelated({ id: plan.id }, shown); }}/>}
     {dialog === 'delete' && <DeleteArtifactDialog artifact={artifact} onClose={() => setDialog(undefined)} onDeleted={() => { setDialog(undefined); onDeleted?.(); }}/>}
     {dialog === 'save' && <SaveToRepositoryDialog artifact={artifact} collection={collection} onClose={() => setDialog(undefined)} onSaved={(path, next) => { setDialog(undefined); if (next) setArtifact(next); artifactsChanged(collectionId); say(`Saved to ${path}. It is not committed.`); }}/>}
     {dialog === 'issue' && <CreateIssueDialog artifact={artifact} collection={collection} onClose={() => setDialog(undefined)} onCreated={(url, number) => { setDialog(undefined); say(`Created issue #${number}.`); if (/^https:\/\//.test(url)) window.open(url, '_blank', 'noopener,noreferrer'); }}/>}

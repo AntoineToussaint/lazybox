@@ -30363,16 +30363,15 @@ func (x *ArtifactSource) GetPath() string {
 	return ""
 }
 
-// A reference from an artifact to work it belongs to. Reserved for missions
-// and tasks (ORCHESTRATION.md, slice 1): until the Runner has them, a link of
-// any kind is refused.
+// A pinned input to a derived plan. Mission/task links remain reserved.
 type ArtifactLink struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// "mission" or "task".
+	// "artifact" for a roadmap input.
 	Kind string `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
 	Id   string `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
-	// "brief" or "evidence".
+	// "design" or "review" for a roadmap input.
 	Role          string `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
+	Version       uint32 `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -30426,6 +30425,13 @@ func (x *ArtifactLink) GetRole() string {
 		return x.Role
 	}
 	return ""
+}
+
+func (x *ArtifactLink) GetVersion() uint32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
 }
 
 type ArtifactVersion struct {
@@ -30948,7 +30954,9 @@ type PutArtifactRequest struct {
 	// all are checked before anything is written).
 	Supersedes []string `protobuf:"bytes,9,rep,name=supersedes,proto3" json:"supersedes,omitempty"`
 	// Empty defaults to markdown on create and preserves format on update.
-	Format        string `protobuf:"bytes,10,opt,name=format,proto3" json:"format,omitempty"`
+	Format string `protobuf:"bytes,10,opt,name=format,proto3" json:"format,omitempty"`
+	// Optional key for replaying the same creation after a lost response.
+	CreationKey   string `protobuf:"bytes,11,opt,name=creation_key,json=creationKey,proto3" json:"creation_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -31049,6 +31057,13 @@ func (x *PutArtifactRequest) GetSupersedes() []string {
 func (x *PutArtifactRequest) GetFormat() string {
 	if x != nil {
 		return x.Format
+	}
+	return ""
+}
+
+func (x *PutArtifactRequest) GetCreationKey() string {
+	if x != nil {
+		return x.CreationKey
 	}
 	return ""
 }
@@ -40562,11 +40577,12 @@ const file_api_proto_rawDesc = "" +
 	"\n" +
 	"message_id\x18\x04 \x01(\tR\tmessageId\x12\x17\n" +
 	"\aturn_id\x18\x05 \x01(\tR\x06turnId\x12\x12\n" +
-	"\x04path\x18\x06 \x01(\tR\x04path\"F\n" +
+	"\x04path\x18\x06 \x01(\tR\x04path\"`\n" +
 	"\fArtifactLink\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\x12\x12\n" +
-	"\x04role\x18\x03 \x01(\tR\x04role\"\x96\x02\n" +
+	"\x04role\x18\x03 \x01(\tR\x04role\x12\x18\n" +
+	"\aversion\x18\x04 \x01(\rR\aversion\"\x96\x02\n" +
 	"\x0fArtifactVersion\x12\x16\n" +
 	"\x06number\x18\x01 \x01(\rR\x06number\x123\n" +
 	"\x16created_at_unix_millis\x18\x02 \x01(\x03R\x13createdAtUnixMillis\x128\n" +
@@ -40607,7 +40623,7 @@ const file_api_proto_rawDesc = "" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12\x1f\n" +
 	"\vartifact_id\x18\x02 \x01(\tR\n" +
 	"artifactId\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\rR\aversion\"\xf1\x02\n" +
+	"\aversion\x18\x03 \x01(\rR\aversion\"\x94\x03\n" +
 	"\x12PutArtifactRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12\x1f\n" +
 	"\vartifact_id\x18\x02 \x01(\tR\n" +
@@ -40622,7 +40638,8 @@ const file_api_proto_rawDesc = "" +
 	"supersedes\x18\t \x03(\tR\n" +
 	"supersedes\x12\x16\n" +
 	"\x06format\x18\n" +
-	" \x01(\tR\x06format\"}\n" +
+	" \x01(\tR\x06format\x12!\n" +
+	"\fcreation_key\x18\v \x01(\tR\vcreationKey\"}\n" +
 	"\x18TrackArtifactFileRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x14\n" +

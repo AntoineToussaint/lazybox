@@ -7,6 +7,7 @@ import { RichContent } from './RichContent';
 import { Icon } from './Icons';
 import { useRunner } from './RunnerContext';
 import { ARTIFACT_KINDS, asKind, diffStats, guessKind, hunks, kindIcon, kindLabel, lineDiff, suggestedPath, titleFromMarkdown, type ArtifactKind, type DiffLine } from './artifact-model';
+import { extractToc } from './artifact-reader';
 import './artifacts.css';
 
 export { errorText } from './artifact-client';
@@ -80,6 +81,48 @@ export function TrackArtifactDialog({ collectionId, content, source, existing = 
       </>}
       {error && <p className="artifact-error" role="alert">{error}</p>}
       <footer><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button type="submit" className="primary" disabled={busy || (!file && !title.trim())}>{busy ? 'Tracking…' : file ? 'Track file' : 'Track artifact'}</button></footer>
+    </form>
+  </DraggableDialog>;
+}
+
+export function RoadmapDialog({ source, version, markdown, reviews, onClose, onSaved }: {
+  source: Artifact; version: number; markdown: string; reviews: Artifact[]; onClose(): void; onSaved(plan: Artifact): void;
+}) {
+  const { api } = useRunner();
+  const [creationKey] = useState(() => crypto.randomUUID());
+  const [title, setTitle] = useState(() => `Implementation roadmap · ${source.title}`.slice(0, 200));
+  const [body, setBody] = useState(() => {
+    const sections = extractToc(markdown).filter(entry => entry.level === 2);
+    const milestones = sections.length ? sections.map(entry => entry.text) : [source.title];
+    return milestones.map(name => `## ${name}\n\n- Deliverable: \n- Dependencies: \n- Acceptance check: `).join('\n\n');
+  });
+  const [review, setReview] = useState<{ id: string; version: number }>();
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const modal = useModal(onClose, busy);
+  const save = async () => {
+    if (busy || !title.trim() || !body.trim()) return;
+    setBusy(true); setError('');
+    try {
+      const links = [{ kind: 'artifact', id: source.id, role: source.kind === 'report' ? 'review' : 'design', version }];
+      if (review) links.push({ kind: 'artifact', role: 'review', ...review });
+      const plan = await api.putArtifact({ collectionId: source.collectionId, creationKey, title: title.trim(), kind: 'plan', content: body, links });
+      artifactsChanged(source.collectionId); onSaved(plan);
+    } catch (e) { setBusy(false); setError(errorText(e)); }
+  };
+  return <DraggableDialog ref={modal.ref} className="artifact-dialog" aria-label="Create implementation roadmap" onCancel={modal.onCancel}>
+    <DialogHeader><h2>Create implementation roadmap</h2></DialogHeader>
+    <p>{source.title} · v{version}</p>
+    <form onSubmit={event => { event.preventDefault(); void save(); }}>
+      <fieldset disabled={busy}>
+        <label className="artifact-field">Title<input value={title} maxLength={200} onChange={e => setTitle(e.target.value)}/></label>
+        {source.kind !== 'report' && <label className="artifact-field">Include a review<select value={review?.id || ''} onChange={e => {
+          const item = reviews.find(candidate => candidate.id === e.target.value);
+          setReview(item ? { id: item.id, version: item.versions.at(-1)!.number } : undefined);
+        }}><option value="">No additional review</option>{reviews.map(item => <option key={item.id} value={item.id}>{item.title} · v{review?.id === item.id ? review.version : item.versions.at(-1)?.number}</option>)}</select></label>}
+        <label className="artifact-field">Milestones<textarea rows={12} value={body} onChange={e => setBody(e.target.value)}/></label>
+      </fieldset>
+      {error && <p role="alert">{error}</p>}
+      <footer><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary" disabled={busy || !title.trim() || !body.trim()}>Save roadmap</button></footer>
     </form>
   </DraggableDialog>;
 }

@@ -438,3 +438,74 @@ func TestReviewRoundsPublishOnceAcrossReopen(t *testing.T) {
 		t.Fatal(prior, err)
 	}
 }
+
+func TestRoadmapPinsWorkspaceInputAcrossEditsAndRestart(t *testing.T) {
+	root := t.TempDir()
+	s, _ := open(t, root)
+	input, err := s.Put("alpha", Put{Title: "Design", Kind: "spec", Content: "First"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Put("alpha", Put{ID: input.ID, Content: "Revised"}); err != nil {
+		t.Fatal(err)
+	}
+	link := Link{Kind: "artifact", Role: "design", ID: input.ID, Version: 1}
+	draft := Put{Title: "Roadmap", Kind: "plan", Content: "Deliver", Links: []Link{link}}
+	if _, err = s.Put("other", draft); err == nil {
+		t.Fatal("accepted foreign source")
+	}
+	draft.Links[0].Version = 3
+	if _, err = s.Put("alpha", draft); err == nil {
+		t.Fatal("accepted nonexistent revision")
+	}
+	draft.Links[0] = link
+	plan, err := s.Put("alpha", draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Put("alpha", Put{ID: plan.ID, Content: "Verify delivery"}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, _ := open(t, root)
+	got, err := reopened.Get("alpha", plan.ID, 0)
+	if err != nil || len(got.Links) != 1 || got.Links[0] != link {
+		t.Fatal(got, err)
+	}
+}
+
+func TestEngineeringStartersPublishAsSupportedTypes(t *testing.T) {
+	s, _ := open(t, t.TempDir())
+	for name, kind := range map[string]string{"incident-timeline": "report", "pr-walkthrough": "report", "release-checklist": "todo-list"} {
+		content, err := Template(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc, err := s.Put("alpha", Put{Title: name, Content: content})
+		if err != nil || doc.Kind != kind || doc.Format != "json" {
+			t.Fatal(name, doc, err)
+		}
+	}
+}
+
+func TestRoadmapCreateReplayAfterLostResponse(t *testing.T) {
+	root := t.TempDir()
+	s, _ := open(t, root)
+	request := Put{Title: "Roadmap", Kind: "plan", Content: "First draft", CreationKey: "operation-1", Author: person}
+	committed, err := s.Put("alpha", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The client lost the committed response. Another reader already edited the plan.
+	if _, err = s.Put("alpha", Put{ID: committed.ID, Content: "Newer draft"}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, _ := open(t, root)
+	recovered, err := reopened.Put("alpha", request)
+	if err != nil || recovered.ID != committed.ID || recovered.ContentVersion != 1 || recovered.Latest() != 2 {
+		t.Fatal(recovered, err)
+	}
+	request.Content = "Different request"
+	if _, err = reopened.Put("alpha", request); !errors.Is(err, ErrConflict) {
+		t.Fatal(err)
+	}
+}

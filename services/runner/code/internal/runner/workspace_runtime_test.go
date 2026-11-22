@@ -478,6 +478,11 @@ func TestManagedBuildActionUsesApprovedHomeAndRoot(t *testing.T) {
 		if _, err := b.toolWithEnv(ctx, e, "lazybox_command", []byte(`{"action":"cancel","id":"`+commandID+`"}`), nil); err == nil {
 			t.Fatal("reading the action must not grant cancellation")
 		}
+		for _, other := range builds {
+			if other.key != build.key && strings.Contains(log, "["+other.channel+"] skipped:") {
+				t.Fatalf("%s also attempted %s", build.key, other.channel)
+			}
+		}
 		if !strings.Contains(log, "["+build.channel+"] skipped: Repository home must be a clean checkout") {
 			t.Fatalf("missing %s outcome in %q", build.channel, log)
 		}

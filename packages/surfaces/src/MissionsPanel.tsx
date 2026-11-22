@@ -35,7 +35,7 @@ const selectedKey = 'missions:selected', profileKey = 'missions:assign-profile',
  * the evidence that backs it. A person creates missions and tasks, assigns a
  * task to a conversation, reports it done, and accepts it.
  */
-export function MissionsPanel({ workspaceId, collections, viewState, onShowSession, onShowPanel }: ModuleProps) {
+export function MissionsPanel({ workspaceId, collections, viewState, onShowSession, onShowPanel, onReturn }: Pick<ModuleProps, 'workspaceId' | 'collections' | 'viewState' | 'onShowSession' | 'onShowPanel'> & { onReturn?(): void }) {
   const missions = useMissions();
   const [selected, setSelected] = useState(() => readPreference(viewState, selectedKey) || '');
   const [creating, setCreating] = useState(false);
@@ -46,6 +46,7 @@ export function MissionsPanel({ workspaceId, collections, viewState, onShowSessi
   const open = missions.missions.filter(m => !m.canceled), closed = missions.missions.filter(m => m.canceled);
   return <section className="missions-panel" aria-label="Missions and tasks">
     <header className="missions-header">
+      {onReturn && <button type="button" className="quiet" onClick={onReturn}>Back to workspace</button>}
       {missions.missions.length > 0 && !creating && current && <ActionMenu className="mission-picker" align="start" label={`Mission: ${current.title}`} title="Choose the mission"
         summary={<><span className="mission-picker-title">{current.title}</span><small>{current.canceled ? 'Canceled' : missionSummary(current)}</small><Icon name="chevron" size={11}/></>}>
         <ActionMenuItems items={[
@@ -55,8 +56,8 @@ export function MissionsPanel({ workspaceId, collections, viewState, onShowSessi
       </ActionMenu>}
       {creating && <strong className="missions-heading">New mission</strong>}
       <div className="missions-tools">
-        {!creating && <button type="button" className="mission-new" onClick={() => setCreating(true)}><Icon name="plus" size={13}/> New mission</button>}
-        <button type="button" className="icon-button" aria-label="Open the missions board as a page" title="Open as a page: the board, timeline and messages with room" onClick={() => showMissionsPage()}><Icon name="maximize" size={14}/></button>
+        {!creating && missions.missions.length > 0 && <button type="button" className="mission-new" onClick={() => setCreating(true)}><Icon name="plus" size={13}/> New mission</button>}
+        {!onReturn && <button type="button" className="icon-button" aria-label="Open the missions board as a page" title="Open as a page: the board, timeline and messages with room" onClick={() => showMissionsPage()}><Icon name="maximize" size={14}/></button>}
         <button type="button" className="icon-button" aria-label="Refresh missions" title="Refresh" onClick={() => void missions.refresh()}><Icon name="refresh" size={14}/></button>
       </div>
     </header>
@@ -66,8 +67,8 @@ export function MissionsPanel({ workspaceId, collections, viewState, onShowSessi
       {creating && <NewMission onCancel={missions.missions.length ? () => setCreating(false) : undefined} onCreate={async (title, brief) => { const m = await missions.create(title, brief); choose(m.id); setCreating(false); }}/>}
       {!creating && missions.loaded && !missions.missions.length && <div className="missions-intro">
         <Icon name="target" size={26}/>
-        <h3>Track work you hand to agents</h3>
-        <p>A mission is an outcome you want. Split it into tasks, give each task to a conversation, and see what actually ran: every status says whether it is only <em>claimed</em>, <em>observed</em> by the Runner, <em>verified</em> by checks, or <em>accepted</em> by you.</p>
+        <h3>Create your first mission</h3>
+        <p>Describe the outcome. You can assign tasks to conversations in different workspaces on this Runner.</p>
         <NewMission onCreate={async (title, brief) => { const m = await missions.create(title, brief); choose(m.id); }}/>
       </div>}
       {!creating && current && <MissionBoard key={current.id} missionId={current.id} workspaceId={workspaceId} collections={collections} viewState={viewState} onShowSession={onShowSession} onShowPanel={onShowPanel}/>}
@@ -351,7 +352,7 @@ function AssignDialog({ task, mission, collections, workspaceId, viewState, onCl
   const conversations = useMemo(() => latestConversations(info?.sessions || []), [info?.sessions]);
   const profiles = info?.profiles || [];
   const [mode, setMode] = useState<'new' | 'existing'>(conversations.length && task.attempt ? 'existing' : 'new');
-  const [collectionId, setCollectionId] = useState(() => ready.find(c => c.id === (task.attempt?.collectionId || workspaceId))?.id || ready[0]?.id || '');
+  const [collectionId, setCollectionId] = useState(() => ready.find(c => c.id === (task.attempt?.collectionId || workspaceId))?.id || (ready.length === 1 ? ready[0].id : ''));
   const [profileId, setProfileId] = useState(() => { const saved = readPreference(viewState, profileKey); return profiles.find(p => p.id === saved)?.id || profiles[0]?.id || ''; });
   const [sessionId, setSessionId] = useState(() => conversations.find(s => s.collectionId === workspaceId && s.conversationId !== task.attempt?.conversationId)?.id || conversations[0]?.id || '');
   const [sendBrief, setSendBrief] = useState(true);
@@ -374,7 +375,7 @@ function AssignDialog({ task, mission, collections, workspaceId, viewState, onCl
       </fieldset>
       {mode === 'new' ? <>
         {!ready.length && <p className="missions-notice tone-warn">Create a workspace with the task's repositories first: a task works in a workspace's own branches.</p>}
-        <label>Workspace<select aria-label="Workspace" value={collectionId} onChange={e => setCollectionId(e.target.value)}>{ready.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
+        <label>Workspace<select aria-label="Workspace" value={collectionId} onChange={e => setCollectionId(e.target.value)}>{!collectionId && <option value="">Choose a workspace…</option>}{ready.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
         <label>Agent<select aria-label="Agent" value={profileId} onChange={e => setProfileId(e.target.value)}><SubscriptionOptions profiles={profiles} label={(p, _, grouped) => { const name = agentTitle(p.provider, profiles); return grouped ? p.label || name : `${name}${p.label && p.label !== name ? ' · ' + p.label : ''}`; }}/></select></label>
         <p className="mission-muted">Every conversation in a workspace shares its files. Give parallel tasks their own workspaces.</p>
       </> : <label>Conversation<select aria-label="Conversation" value={sessionId} onChange={e => setSessionId(e.target.value)}>{conversations.map(s => <option key={s.id} value={s.id}>{conversationName(s)} · {workspaceName(s.collectionId)}</option>)}</select></label>}

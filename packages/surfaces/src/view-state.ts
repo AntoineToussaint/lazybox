@@ -2,8 +2,8 @@ import type { ViewStateStore } from '@lazybox/platform';
 import type { InfoResponse } from '@lazybox/protocol';
 import { isAcp } from './providers';
 
-/** A file of a saved draft. A pasted text box keeps its text, so it comes back after a reload; any other file is attached again. */
-export type FileReference = { name: string; size: number; lastModified: number; text?: string };
+/** A file of a saved draft. A pasted text box keeps its text, so it comes back after a reload; other attachments reference bytes in local draft storage. */
+export type FileReference = { name: string; size: number; lastModified: number; text?: string; blobId?: string };
 export type Draft = { text: string; files: FileReference[]; operationId: string };
 /** A console's view of one command: its search, whether it follows the end, where it was read, and the sources it hides. */
 export type ConsoleState = { search: string; follow: boolean; scrollTop: number; hidden?: string[] };
@@ -22,7 +22,7 @@ export function readDraft(store: ViewStateStore | undefined, session: string): D
   for (const file of data.files) {
     if (!file || typeof file.name !== 'string' || !file.name || file.name.length > 255 || !Number.isSafeInteger(file.size) || file.size < 0 || !Number.isSafeInteger(file.lastModified)) return blank();
     if (file.text !== undefined && typeof file.text !== 'string') return blank();
-    files.push({ name: file.name, size: file.size, lastModified: file.lastModified, ...(typeof file.text === 'string' ? { text: file.text } : {}) });
+    files.push({ name: file.name, size: file.size, lastModified: file.lastModified, ...(typeof file.blobId === 'string' ? { blobId: file.blobId } : {}), ...(typeof file.text === 'string' ? { text: file.text } : {}) });
   }
   return { text: data.text, files, operationId: typeof data.operationId === 'string' && data.operationId.length <= 128 ? data.operationId : '' };
 }

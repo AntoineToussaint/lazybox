@@ -72,7 +72,11 @@ async function run(scheme) {
   await sheet.getByLabel(/Approve its plan first/).uncheck();
   await expect(sheet.locator('.grant-rules')).toContainText('Never approves, answers for you, passes a gate or accepts a task');
   await page.screenshot({ path: `${shots}orchestration-grant-${scheme}.png` });
+  await page.route('**/UpdateMission', route => route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({code:'unavailable',message:'Grant unavailable'})}), { times: 1 });
   await sheet.getByRole('button', { name: 'Let it run agents' }).click();
+  await expect(sheet.getByRole('alert')).toContainText('Grant unavailable');
+  await sheet.getByRole('button', { name: 'Let it run agents' }).click();
+  assert.equal(fixture.missions.missions.length,1,'retry grants the mission that was already created');
   await expect(sheet).toHaveCount(0);
   const granted = updates().find(u => u.grant);
   assert.equal(granted.grant.sessionId, 'alpha-session');
@@ -165,6 +169,7 @@ async function run(scheme) {
   await expect(panel.locator('.mission-card').filter({ hasText: 'Rank results' }).locator('.mission-lineage')).toContainText('researcher');
   await page.screenshot({ path: `${shots}orchestration-board-${scheme}.png` });
 
+  await panel.getByRole('button',{name:'Back to workspace'}).click();
   // Revoke from the badge: confirmed, then gone; its agents keep running.
   await chip.click();
   await card.getByRole('button', { name: 'Revoke grant…' }).click();
@@ -173,6 +178,8 @@ async function run(scheme) {
   await expect(chip).toHaveCount(0, { timeout: 15_000 });
   assert.ok(updates().some(u => u.revokeGrant?.grantId === granted.grant && true || u.revokeGrant), 'revoked through the Runner');
   await expect(chat.locator('.lineage-line.kind-orchestration_revoked')).toBeVisible();
+  await page.locator('summary[aria-label="Panels"]').click();
+  await page.getByRole('button',{name:'Show Missions',exact:true}).click();
   await expect(panel.locator('.mission-orchestrator')).toHaveCount(0, { timeout: 10_000 });
   await expect(panel.getByRole('button', { name: 'Let a conversation run agents…' })).toBeVisible();
   assert.deepEqual(errors, []);

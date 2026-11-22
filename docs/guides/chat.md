@@ -60,6 +60,10 @@ it did.
   after the paste, or the box's ⋯ → **Insert inline**, puts the text in the
   message instead. A pasted box counts as one of the four files, and it is
   kept with your draft if the window reloads.
+- Attached files, including screenshots, are saved with the draft on this device.
+  Reloading restores the files from local storage. If the stored bytes are
+  unavailable, the composer names the missing files so you can reattach or remove them.
+
 - **Every agent gets your attachments**, Claude, Codex and ACP agents alike,
   after your text and in the order of the boxes: an image as an image (when
   the agent sees images), text (a pasted box, a source file, up to 256 KiB)

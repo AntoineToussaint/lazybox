@@ -145,8 +145,7 @@ the cap, only new ones.
 
 ## The missions board
 
-⌘K → **Open the missions board** opens it as a page of its own (the expand
-button on the Missions panel does too). Under the mission, four tabs (←/→
+⌘K → **Open the missions board** opens the board for the connected Runner. Use **Back to workspace** to return. Under the mission, four tabs (←/→
 moves between them):
 
 - **Board**: the columns, the orchestrator with its agents, budget and

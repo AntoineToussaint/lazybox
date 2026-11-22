@@ -40,6 +40,7 @@ import { builtinPanels, sentence, type ExtensionPanelChoice, type ModuleProps, t
 import { WorkspaceHeader } from './WorkspaceHeader';
 import { OtherWindows, type OtherWindow } from './OtherWindows';
 import type { ConversationCopy } from './NewSessionForm';
+import { MissionsPanel } from './MissionsPanel';
 import { NewConversationDialog } from './NewConversationDialog';
 import { NewTaskHost } from './NewTaskSheet';
 import { useHandoffMenus, useTerminalAction } from './handoff';
@@ -209,7 +210,18 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const [navigatorOpen, setNavigatorOpen] = useState(false);
   const [mobilePanelId, setMobilePanelId] = useState('');
   const display = useDisplayDetail(viewState);
-  const [settings, setSettings] = useState(false);
+  const missionsKey = `${viewState?.key || 'window'}:missions-open`;
+  const [surface, setSurface] = useState<'workspace' | 'settings' | 'missions'>(() => {
+    try { return sessionStorage.getItem(missionsKey) === '1' ? 'missions' : 'workspace'; } catch { return 'workspace'; }
+  });
+  const settings = surface === 'settings';
+  const setSettings = (open: boolean) => setSurface(open ? 'settings' : 'workspace');
+  useEffect(() => {
+    try {
+      if (surface === 'missions') sessionStorage.setItem(missionsKey, '1');
+      else sessionStorage.removeItem(missionsKey);
+    } catch { /* navigation still works without browser storage */ }
+  }, [surface, missionsKey]);
   const [extensionRequest, setExtensionRequest] = useState<{ panelId: string; request: NonNullable<ModuleProps['extensionRequest']> }>();
   const [addSubscription, setAddSubscription] = useState(false);
   useEffect(() => { if (!settings) setAddSubscription(false); }, [settings]);
@@ -351,15 +363,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     const review: WorkspacePage = { id, name: 'Changes', selection: { ...page.selection, collectionId: workspaceID }, layout: { type: 'group', id: `g-${panel.id}`, panels: [panel], active: panel.id }, floating: [], popouts: [], detached: [] };
     if (commit({ ...current.current, selectedPage: id, pages: [...current.current.pages, review] })) setSettings(false);
   };
-  // The missions board is a page of its own: its columns, timeline and messages need the room.
-  const showMissionsPage = () => {
-    const existing = current.current.pages.find(value => shownPanels(value).some(panel => panel.kind === 'missions'));
-    if (existing) { commit({ ...current.current, selectedPage: existing.id }); setSettings(false); return; }
-    if (current.current.pages.length >= PAGE_LIMIT) { setError(pageFull('Missions')); return; }
-    const id = crypto.randomUUID(), panel: Panel = { id: crypto.randomUUID(), kind: 'missions', binding: { mode: 'follow' }, detached: false };
-    const board: WorkspacePage = { id, name: 'Missions', selection: { ...page.selection, collectionId: workspaceID }, layout: { type: 'group', id: `g-${panel.id}`, panels: [panel], active: panel.id }, floating: [], popouts: [], detached: [] };
-    if (commit({ ...current.current, selectedPage: id, pages: [...current.current.pages, board] })) setSettings(false);
-  };
+  const showMissionsPage = () => { setSurface('missions'); setBeside(undefined); };
   useMissionsPageHost(showMissionsPage);
   // A switch from another Runner asked for this conversation (or workspace): shown once the page is up.
   useEffect(() => { if (reveal?.sessionId) showSession(reveal); else if (reveal?.collectionId) select(reveal); }, []);
@@ -391,6 +395,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   }, [layout]);
   /** Show the page's panel of this kind, or dock a new one where this kind was last docked (or beside the group ⌘\ asked from). */
   const showModule = (kind: string) => {
+    if (kind === 'missions') { showMissionsPage(); return ''; }
     const live = livePage(), placement = beside;
     setBeside(undefined);
     if (kind === 'console') putConsoleAway(false);
@@ -566,6 +571,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
    * page's panel of that kind moves there, or a new one is made (always for Web).
    */
   const openHere = (groupID: string, kind: string) => {
+    if (kind === 'missions') { showMissionsPage(); return; }
     const live = livePage(), target = groupById(live, groupID);
     if (!target || sidebarKinds.has(kind)) return;
     const multiple = !!registry[kind]?.multiple;
@@ -1063,7 +1069,11 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         <button type="button" className="icon-button" aria-label="Dismiss" title="Dismiss" onClick={() => setError('')}><Icon name="close" size={14}/></button>
       </div>)}
     {!fixedWorkspaceId && <AccountNotices onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }}/>}
-    {settings
+    {surface === 'missions'
+      ? <MissionsPanel collections={collections} workspaceId="" viewState={viewState} onReturn={() => setSettings(false)}
+          onShowSession={target => { setSettings(false); showSession(target); }}
+          onShowPanel={(kind, target) => { setSettings(false); showPanelFor(kind, target); }}/>
+      : settings
       ? <SettingsPage initialAddSubscription={addSubscription} onOpenExtensionPanel={openExtensionPanel} app={host?.app} zoom={host?.zoom} tab={settingsTab} onTab={setSettingsTab} onShowProcesses={() => showModule('processes')} onRunInShell={runInShell} chooseRepositoryFolder={host?.chooseRepositoryFolder} viewState={viewState} openSignIn={host?.openSignIn} copySignInCode={host?.copySignInCode}/>
       : <>
         {locked && <div className="layout-locked" role="status">

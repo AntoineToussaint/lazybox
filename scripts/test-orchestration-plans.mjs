@@ -81,7 +81,7 @@ async function run(scheme) {
   await expect(panel.locator('.mission-orchestrator-ceiling')).toContainText('plan first');
 
   // The sheet: in order, the shared path flagged, the estimate, a cap.
-  await line.getByRole('button', { name: 'Review plan…' }).click();
+  await panel.getByRole('button', { name: 'Review plan…' }).click();
   const sheet = page.getByRole('dialog', { name: 'Plan for Ship search' });
   await expect(sheet).toBeVisible();
   await expect(sheet).toContainText('Spec search-spec · version 2');
@@ -113,8 +113,6 @@ async function run(scheme) {
   // Approved: three tasks, the line says so, the cap is the tree's.
   await expect(panel.locator('.mission-card')).toHaveCount(3, { timeout: 10_000 });
   await expect(panel.locator('.mission-plan-waiting')).toHaveCount(0);
-  await expect(chat.locator('.lineage-line.kind-plan_decided')).toContainText('You approved the plan: 3 tasks, $12.00 cap.');
-  await expect(line.locator('.lineage-state')).toHaveText('approved');
   await expect(panel.locator('.mission-orchestrator-budget')).toHaveText('$0 spent · $12 cap', { timeout: 10_000 });
 
   // A task's cost against its estimate.
@@ -132,6 +130,9 @@ async function run(scheme) {
   await stop.getByRole('button', { name: 'Raise budget' }).click();
   await expect(stop).toHaveCount(0, { timeout: 10_000 });
   assert.equal(updates().find(u => u.raiseBudget).raiseBudget.capUsd, 25);
+  await panel.getByRole('button',{name:'Back to workspace'}).click();
+  await expect(chat.locator('.lineage-line.kind-plan_decided')).toContainText('You approved the plan: 3 tasks, $12.00 cap.');
+  await expect(line.locator('.lineage-state')).toHaveText('approved');
   assert.deepEqual(errors, []);
   await context.close();
 }

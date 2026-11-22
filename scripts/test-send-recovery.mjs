@@ -1,6 +1,3 @@
-// Sending is never silently blocked: after a provider error the next message
-// continues the conversation, and a draft whose image was lost in a window
-// reload says so, offering "Attach again…" and "Send without it".
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
@@ -34,24 +31,25 @@ try{
  await composer.fill('I want to do MCP');
  await page.reload();
  const notice=page.getByRole('group',{name:'Files to attach again'});
- await expect(notice).toBeVisible();
- await expect(notice).toContainText('CleanShot.png');
- await expect(notice.getByRole('button',{name:'Attach again…'})).toBeVisible();
- // Enter explains instead of doing nothing.
- const before=applies();
- await composer.press('Enter');
- await expect(page.getByRole('alert').filter({hasText:'Attach CleanShot.png again, or remove it, to send.'})).toBeVisible();
- assert.equal(applies(),before,'nothing is sent while a file is missing');
- // Send without it: the notice goes and, despite the provider error, the message is sent.
- await notice.getByRole('button',{name:'Send without it'}).click();
+ await expect(page.getByRole('list',{name:'Attached files'}).getByRole('button',{name:/^Open CleanShot/})).toBeVisible();
  await expect(notice).toHaveCount(0);
- await expect(composer).toBeFocused();
+ const before=applies();
  await composer.press('Enter');
  await expect.poll(applies).toBe(before+1);
  const sent=fixture.mutations.filter(m=>m.method==='Apply').at(-1).body;
  assert.ok(JSON.stringify(sent).includes('I want to do MCP'),'the draft text is sent');
- assert.ok(!JSON.stringify(sent).includes('CleanShot'),'the removed file is not sent');
+ assert.equal(sent.message.attachments[0].data,png.toString('base64'),'the restored screenshot is sent');
  await expect(composer).toHaveValue('');
+ // Old drafts only have names; they still require explicit removal or reattachment.
+ await page.evaluate(id => {
+   const key = Object.keys(localStorage).find(key => key.endsWith(':draft:' + id));
+   localStorage.setItem(key, JSON.stringify({text:'legacy draft',files:[{name:'old.png',size:3,lastModified:1}],operationId:''}));
+ },session.id);
+ await page.reload();
+ await expect(notice).toContainText('old.png');
+ await expect(page.getByRole('button',{name:'Send message',exact:true})).toBeDisabled();
+ await notice.getByRole('button',{name:'Remove old.png'}).click();
+ await expect(notice).toHaveCount(0);
  // A conversation the Runner refuses says why instead of swallowing Enter.
  const other=fixture.sessions[1];Object.assign(other,{fault:'provider delivery failed; reconcile before continuing',busy:false,status:'failed'});
  await page.goto(url.replace(`collection=${session.collectionId}`,`collection=${other.collectionId}`).replace(`session=${session.id}`,`session=${other.id}`));
@@ -60,5 +58,5 @@ try{
  await expect(page.getByRole('alert').filter({hasText:'Resume it or start a new conversation to continue.'})).toBeVisible();
  assert.equal(applies(),refused,'a refused conversation sends nothing');
  assert.deepEqual(errors,[]);
- console.log('PASS: lost attachment after reload is explained (Enter → reason, Attach again…, Send without it); a provider error does not block the next message; a refused conversation says why.');
+ console.log('PASS: screenshot bytes survive a reload; a provider error does not block the next message; a refused conversation says why.');
 }finally{await browser?.close();await server.close();await fixture.close();}

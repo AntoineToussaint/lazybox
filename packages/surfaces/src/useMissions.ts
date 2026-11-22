@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import { ConnectError, type RunnerClient } from '@lazybox/client-core';
 import type { Mission } from '@lazybox/protocol';
 import { useRunner } from './RunnerContext';
@@ -67,8 +67,15 @@ export function useMissions() {
   const { api } = useRunner();
   const store = storeFor(api);
   const snapshot = useSyncExternalStore(store.subscribe, store.get);
+  const pendingCreate = useRef<{ api: RunnerClient; title: string; brief: string; key: string } | undefined>(undefined);
   const create = useCallback(async (title: string, brief: string) => {
-    const mission = await api.createMission({ requestKey: crypto.randomUUID(), title, brief }, { timeoutMs: 10000 });
+    let attempt = pendingCreate.current;
+    if (!attempt || attempt.api !== api || attempt.title !== title || attempt.brief !== brief) {
+      attempt = { api, title, brief, key: crypto.randomUUID() };
+      pendingCreate.current = attempt;
+    }
+    const mission = await api.createMission({ requestKey: attempt.key, title, brief }, { timeoutMs: 10000 });
+    if (pendingCreate.current === attempt) pendingCreate.current = undefined;
     store.put(mission); return mission;
   }, [api, store]);
   /** One typed change; a retry of the same change reuses its operation id. */

@@ -156,6 +156,7 @@ export function GrantDialog({ session: given, onClose, missionId, candidates }: 
     setBusy(true); setError('');
     try {
       const mission = chosen === 'new' ? await missions.create(title.trim(), '') : open.find(m => m.id === chosen)!;
+      if (chosen === 'new') setChoice(mission.id);
       await missions.update(mission.id, { case: 'grant', value: { sessionId: session.id, ceiling: { permission: draft.permission, profileIds: draft.profileIds, maxChildren: draft.maxChildren, depth: 1, budgetUsd: draft.budgetUsd, planRequired: draft.planRequired } } });
       onClose();
     } catch (e) { setError(message(e)); setBusy(false); }

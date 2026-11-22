@@ -400,6 +400,8 @@ yet (add one in Settings → Pricing), a provider that reports only a running
 total for the session (Codex without the metered gateway), a fee Lazybox does
 not price — and how many tokens that leaves out.
 
+Select text in a workspace shell beside your chat and click **Send to agent** to append the selection to the conversation draft. You can add a question before sending it.
+
 ## Reuse your prompts and snippets
 
 - **Recall:** `↑` in an empty message box brings back what you sent, newest

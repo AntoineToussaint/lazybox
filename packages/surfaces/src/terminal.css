@@ -11,7 +11,7 @@
 .terminal-new{display:inline-flex;align-items:center;gap:4px;margin-left:auto;flex-shrink:0}
 .workspace-shell .terminal-new select{font-size:calc(11px * var(--code-scale));padding:4px 6px;max-width:160px}
 .workspace-shell .terminal-new button{display:inline-flex;align-items:center;gap:5px;font-size:calc(11px * var(--code-scale));padding:4px 8px}
-.terminal-view{display:flex;flex-direction:column;flex:1;min-height:0}
+.terminal-view{position:relative;display:flex;flex-direction:column;flex:1;min-height:0}
 .terminal-host{flex:1;min-height:60px;padding:6px 4px 0 10px;overflow:hidden;background:var(--surface-sunken)}
 .terminal-host .xterm{height:100%}
 .terminal-host .xterm-viewport{background:var(--surface-sunken)!important}
@@ -21,3 +21,5 @@
 .workspace-shell .terminal-tab .terminal-close{min-width:24px;min-height:24px;display:inline-flex;align-items:center;justify-content:center}
 
 .terminal-handoff-argv { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.terminal-view .terminal-send-selection{position:absolute;bottom:28px;right:14px;z-index:2;display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface-raised);color:var(--text)}

@@ -88,7 +88,7 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
   // A terminal's selection goes to the work conversation's message box, as a block to review and send.
   const sendToAgent = (text: string) => {
     if (!conversation) { showMenuNotice('No conversation in this workspace yet'); return; }
-    composeInConversation({ sessionId: conversation.id, text: fencedCode(text) });
+    composeInConversation({ sessionId: conversation.id, text: fencedCode(text), api });
     showMenuNotice(`Added to the message box of “${conversationName(conversation, 'the conversation')}”`);
     onShowSession?.({ collectionId: workspaceId, sessionId: conversation.id, commandId: '' });
   };
@@ -207,6 +207,7 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
 
 function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError, onCleanExit, workspaceId, canSend, onSendToAgent, onNewTerminal, onCloseTerminal }: { api: RunnerClient; terminal: TerminalStatus; initialCommand?: { current: string | undefined }; focusRef: { current: (() => void) | null }; onSize(size: { cols: number; rows: number }): void; onError(error: string): void; onCleanExit?(): void; workspaceId: string; canSend: boolean; onSendToAgent(text: string): void; onNewTerminal?(): void; onCloseTerminal(): void }) {
   const xterm = useRef<Terminal | null>(null);
+  const [hasSelection, setHasSelection] = useState(false);
   /** The web link under the pointer, for the right-click menu. */
   const hovered = useRef('');
   const cleanExit = useRef(onCleanExit); cleanExit.current = onCleanExit;
@@ -221,6 +222,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
     const font = codeFont(getAppearance());
     const view = new Terminal({ theme: terminalTheme(getAppearance()), fontFamily: font.family, fontSize: font.size, lineHeight: 1.15, cursorBlink: true, scrollback: 5000, allowProposedApi: false, rightClickSelectsWord: false });
     xterm.current = view;
+    const selectionListener = view.onSelectionChange(() => setHasSelection(view.hasSelection()));
     const fit = new FitAddon(); view.loadAddon(fit); view.open(element);
     // Web links: underlined with a pointer on hover, opened by a click, offered by the right-click menu.
     // A drag that selects text, a right-click and a Mac's Ctrl+click never open one.
@@ -331,7 +333,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
         await new Promise<void>(resolve => { const timer = setTimeout(resolve, 1000); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
       }
     })();
-    return () => { unfollow(); if (focusRef.current === focus) focusRef.current = null; control.abort(); clearTimeout(stageTimeout); observer.disconnect(); input.dispose(); binary.dispose(); links.dispose(); element.removeEventListener('mousedown', press, true); hovered.current = ''; view.dispose(); };
+    return () => { unfollow(); if (focusRef.current === focus) focusRef.current = null; control.abort(); clearTimeout(stageTimeout); observer.disconnect(); selectionListener.dispose(); input.dispose(); binary.dispose(); links.dispose(); element.removeEventListener('mousedown', press, true); hovered.current = ''; view.dispose(); };
   }, [api, id]);
   return <div className="terminal-view">
     <div ref={host} className="terminal-host" data-testid="terminal" data-terminal-id={id} onContextMenu={contextMenu('terminal', (): MenuItem[] => {
@@ -355,6 +357,13 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
         { label: live ? 'Close terminal' : 'Remove terminal', icon: 'close', danger: live, run: onCloseTerminal },
       ];
     }, { terminalId: id, workspaceId })}/>
+    {hasSelection && terminal.place !== 'interactive-command' && <button type="button" className="terminal-send-selection"
+      disabled={!canSend} title={canSend ? 'Add the selected terminal text to the conversation draft' : 'No conversation in this workspace yet'}
+      onMouseDown={event => event.preventDefault()} onClick={() => {
+        const view = xterm.current;
+        const text = view?.getSelection();
+        if (text) { onSendToAgent(text); view?.clearSelection(); }
+      }}><Icon name="send" size={14}/>Send to agent</button>}
     <footer><span className="mono" title={status.shell}>{status.title}</span><span>{status.done ? exitText(status) : connection}</span></footer>
   </div>;
 }

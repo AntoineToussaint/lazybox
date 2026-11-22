@@ -154,3 +154,12 @@ func TestIncompleteVerificationCannotInheritGreenCITrust(t *testing.T) {
 		}
 	}
 }
+
+func TestPRDeliveryLinkPreservesExistingChecksAndReview(t *testing.T) {
+	pr := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidencePR, Repository: "team/api", Member: "api", Head: "abc", Outcome: OutcomePass, Number: 1}}
+	review := Recorded{Seq: 2, Evidence: Evidence{Kind: EvidenceReview, ContractDigest: "spec", Outcome: OutcomePass, Revisions: map[string]string{"api": "abc"}}}
+	link := Recorded{Seq: 3, Evidence: Evidence{Kind: EvidencePR, Ref: PullRequestLinkRef("team/api", 2), Repository: "team/api", Member: "api", Number: 2, Outcome: OutcomeUnknown}}
+	if trust, flags, _ := judge(&Task{Evidence: []Recorded{pr, review, link}}); trust != TrustVerified || slices.Contains(flags, FlagStale) {
+		t.Fatalf("delivery changed existing checks/review: %s %v", trust, flags)
+	}
+}

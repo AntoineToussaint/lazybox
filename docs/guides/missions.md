@@ -31,8 +31,7 @@ without anyone asking:
 - every **`lazybox run`** (or `lazybox log`) that finishes, with its exit
   status, the full output and what the agent saw;
 - **commits** made through the PR loop;
-- **pull requests** and their **checks**, re-read about once a minute while the
-  board is open.
+- **pull requests** explicitly delivered by the assigned conversation, and their **checks**. Run `lazybox link <PR URL>` in that conversation, or create the PR there with a supported tool such as `gh pr create`. Link it while the conversation has one active task so the Runner can identify the attempt. A workspace branch alone does not associate its PR with a mission. Previously recorded history remains visible.
 
 Click a run to open its output in the console; click a pull request to open it
 on GitHub.

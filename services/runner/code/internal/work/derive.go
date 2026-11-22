@@ -236,6 +236,9 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 				boundReview = r
 			}
 		case EvidencePR:
+			if r.IsPullRequestLink() {
+				continue
+			} // Delivery identifies the PR; it carries no check result.
 			if r.Member != "" && r.Head != "" && r.Outcome == OutcomePass {
 				// A passing PR head is the head the checks ran on; a later run
 				// at another head makes it stale.

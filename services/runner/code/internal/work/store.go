@@ -289,6 +289,10 @@ type Attachment struct {
 func (s *Store) Attempts() []Attachment {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.attemptsLocked()
+}
+
+func (s *Store) attemptsLocked() []Attachment {
 	var out []Attachment
 	for id, m := range s.missions {
 		if m.err != nil || m.state.Canceled {

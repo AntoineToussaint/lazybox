@@ -40,14 +40,17 @@
 
 .mission-head{margin-bottom:10px}
 .mission-orchestrators{display:grid;gap:6px;margin:0 0 12px}
-.mission-orchestrator{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px;padding:7px 10px;border:1px solid var(--accent-line);border-radius:8px;background:var(--accent-bg);font-size:calc(12px * var(--text-scale));color:var(--text-soft)}
-.mission-orchestrator>svg{color:var(--accent-strong)}
+.mission-orchestrator{display:grid;min-width:0;gap:6px;padding:7px 10px;border:1px solid var(--accent-line);border-radius:8px;background:var(--accent-bg);font-size:calc(12px * var(--text-scale));color:var(--text-soft)}
+.mission-orchestrator-heading{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:baseline;gap:8px}
+.mission-orchestrator-heading>svg{color:var(--accent-strong)}
 .missions-panel .mission-orchestrator .link-button{font-size:calc(12px * var(--text-scale));font-weight:600;text-decoration:none;color:var(--text)}
+.mission-orchestrator-heading .link-button{text-align:left;white-space:normal;overflow-wrap:anywhere;justify-self:start}
+.mission-orchestrator-accounting{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 12px}
 .mission-orchestrator-count{font-variant-numeric:tabular-nums;color:var(--accent-strong);font-weight:500}
-.mission-orchestrator-ceiling{flex:1;min-width:12em;color:var(--text-subtle)}
+.mission-orchestrator-ceiling{color:var(--text-subtle)}
 .missions-panel .mission-orchestrator button:not(.link-button){padding:3px 9px;font-size:calc(11px * var(--text-scale));width:auto}
 .missions-panel .mission-orchestrator-revoke{background:transparent;border:1px solid var(--line);color:var(--danger-strong)}
-.mission-orchestrator-confirm{display:inline-flex;align-items:center;gap:6px;color:var(--text-subtle)}
+.mission-orchestrator-confirm{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px;color:var(--text-subtle)}
 .missions-panel .mission-orchestrator-confirm .danger{background:var(--danger-solid);border:1px solid var(--danger-solid-hover);color:var(--on-danger-solid)}
 .missions-panel .mission-orchestrate{display:inline-flex;align-items:center;gap:6px;justify-self:start;padding:5px 10px;font-size:calc(12px * var(--text-scale));background:transparent;border:1px dashed var(--line-strong);color:var(--text-secondary)}
 .mission-lineage{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:0 6px;border-radius:8px;border:1px solid var(--accent-line);font-size:calc(10.5px * var(--text-scale));color:var(--text-soft);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}

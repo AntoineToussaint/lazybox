@@ -178,6 +178,9 @@ try {
   fixture.missions.recordRun(taskSession, { title: 'go test ./...', exitCode: 0 });
   await expect(split.locator('.trust-badge')).toHaveText('Observed', { timeout: 10_000 });
   await expect(split.locator('.mission-flag')).toHaveCount(0);
+  fixture.missions.recordPullRequest('alpha', { number: 1216, head: 'abcd123', outcome: 'pass' });
+  assert.ok(!fixture.missions.missions[0].tasks[0].evidence.some(e => e.kind === 'pr'));
+  fixture.missions.linkPullRequest(taskSession, 'fixture-team/api', 12);
   fixture.missions.recordPullRequest('alpha', { number: 12, head: '3f9c2e1aa0', outcome: 'pass' });
   await expect(split.locator('.trust-badge')).toHaveText('Verified', { timeout: 10_000 });
   await expect(split.locator('.evidence-chip').filter({ hasText: 'PR #12' })).toBeVisible();

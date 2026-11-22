@@ -38,8 +38,9 @@ import (
 type Service struct {
 	Inspector gitinspect.Inspector
 	pb.UnimplementedRunnerServiceServer
-	Bench     *runner.Bench
-	assigning sync.Map // mission/task -> channel closed when the assignment finishes
+	Bench       *runner.Bench
+	assigning   sync.Map // mission/task -> channel closed when the assignment finishes
+	prRefreshed sync.Map // workspace/delivered PR -> last mission refresh time
 	// Restart is the launcher that starts this Runner again after RestartRunner;
 	// nil when nothing would (a plain `codefly run`, a test, a Codefly service).
 	Restart Restarter

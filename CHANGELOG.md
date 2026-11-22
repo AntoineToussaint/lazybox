@@ -52,6 +52,8 @@ leave out.
 
 ### Workspaces and tabs
 
+- **Pull requests belong to the task that delivered them** Mission tasks receive PR checks after the assigned conversation links or creates the pull request. Sharing a workspace no longer attaches its PR checks to other tasks.
+- **Readable mission timelines** Narrow windows show who acted above each event, with conversation names you can open directly.
 - **Missions in the main navigation** Open an outcome across workspaces or detach it into its own window. Task assignments and orchestrator grants ask you to choose a destination. Mission budgets count usage during the grant.
 
 - **No separate title bar** On a Mac every window's own header is its title bar, as in VS Code or Slack: the close, minimize and zoom buttons sit at its left, its empty parts move the window, and a double-click there does what System Settings says. Full screen gives the room back.

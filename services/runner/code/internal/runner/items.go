@@ -19,6 +19,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 	workitems "github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/items"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sources/github"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 )
 
 // Tracked pull requests (GITHUB.md "Tracked pull requests",
@@ -499,6 +500,13 @@ func (b *Bench) itemsWorkspaceGone(id, name string) {
 // recorded as a mention: an agent cannot make Lazybox track, react to and
 // notify about any repository's pull requests.
 func (b *Bench) linkItem(l workitems.Link) (bool, error) {
+	return b.storeItemLink(l, false)
+}
+
+// conversationDelivery is true only for a link submitted by the conversation
+// or detected in its current tool output. Branch discovery guesses a recent
+// conversation, and history backfills may predate the current assignment.
+func (b *Bench) storeItemLink(l workitems.Link, conversationDelivery bool) (bool, error) {
 	store := b.workItems.store
 	if store == nil {
 		return false, errors.New("item tracking is unavailable")
@@ -524,6 +532,13 @@ func (b *Bench) linkItem(l workitems.Link) (bool, error) {
 		l.Role = workitems.RoleMentions
 	}
 	added, err := store.Link(l)
+	if err == nil && conversationDelivery && l.Conversation != "" && l.Role == workitems.RoleDelivers && b.Work != nil {
+		repository, number, ok := workitems.ParseGitHubKey(l.Ref.Key)
+		if l.Ref.Provider == "github" && ok {
+			evidence := work.Evidence{Kind: work.EvidencePR, Ref: work.PullRequestLinkRef(repository, number), Outcome: work.OutcomeUnknown, Title: fmt.Sprintf("%s#%d", repository, number), Repository: repository, Number: number, Workspace: l.Workspace, Member: l.Member, Execution: l.Session, URL: fmt.Sprintf("https://github.com/%s/pull/%d", repository, number)}
+			_, err = b.Work.Record(work.Origin{Conversation: l.Conversation}, work.Actor{Kind: work.ActorLazybox, Conversation: l.Conversation, Execution: l.Session}, evidence)
+		}
+	}
 	if err == nil && added && l.Role != workitems.RoleMentions {
 		b.wakeItems()
 	}
@@ -577,7 +592,7 @@ func (b *Bench) LinkItemURL(session, workspace, url, role, source string) (worki
 	if role == workitems.RoleDelivers && resolved.Kind != workitems.KindPullRequest {
 		return resolved, errors.New("only a pull request can be delivered; link an issue as a mention")
 	}
-	_, err := b.linkItem(workitems.Link{Ref: resolved.Ref, Workspace: workspace, Session: session, Conversation: conversation, Role: role, Source: source})
+	_, err := b.storeItemLink(workitems.Link{Ref: resolved.Ref, Workspace: workspace, Session: session, Conversation: conversation, Role: role, Source: source}, true)
 	return resolved, err
 }
 
@@ -681,7 +696,7 @@ func (b *Bench) itemToolEvent(e *Execution, ev agent.Event) {
 	}
 	// Linking reads the worktrees' origins and writes the store: off the
 	// engine's event path.
-	if found := workitems.Scan(call.output(), creates); len(found) > 0 {
+	if found := workitems.Scan(call.output(), creates && call.Status == "completed"); len(found) > 0 {
 		go b.linkFound(e, found)
 	}
 }
@@ -726,7 +741,7 @@ func (b *Bench) linkFound(e *Execution, found []workitems.Found) {
 				continue
 			}
 		}
-		_, _ = b.linkItem(workitems.Link{Ref: f.Ref, Workspace: e.CollectionID, Session: e.ID, Conversation: conversationOf(e), Role: f.Role, Source: workitems.SourceAgentOutput})
+		_, _ = b.storeItemLink(workitems.Link{Ref: f.Ref, Workspace: e.CollectionID, Session: e.ID, Conversation: conversationOf(e), Role: f.Role, Source: workitems.SourceAgentOutput}, true)
 	}
 }
 
@@ -744,7 +759,8 @@ func (b *Bench) itemPipeFinished(c *commands.Command) {
 	}
 	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
 	defer cancel()
-	b.linkFound(e, workitems.Scan(string(c.Tail(ctx, 64<<10)), true))
+	success := state.Report != nil && !state.Report.Piped && state.Report.ExitCode == 0 && state.Error == "" && state.Signal == ""
+	b.linkFound(e, workitems.Scan(string(c.Tail(ctx, 64<<10)), success))
 }
 
 // dispatchItemEvents sends each transition to the hooks that follow it, the

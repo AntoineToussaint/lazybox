@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
@@ -260,44 +259,38 @@ func briefMessage(m *work.State, t *work.Task) string {
 	return b.String()
 }
 
-// refreshPullRequests reads the pull request of every repository of the
-// mission's live attempts, at most once a minute each, in the background:
-// GetPullRequest records what it reads as evidence.
+// Refresh only PRs explicitly delivered on the selected mission's live attempts.
 func (s *Service) refreshPullRequests(state *work.State) {
-	if s.Bench.Collections == nil || !s.githubConnected() {
+	if !s.githubConnected() {
 		return
 	}
 	for _, t := range state.Tasks {
 		a := t.Current()
-		if a == nil || a.Ended || a.Workspace == "" {
+		if a == nil || a.Ended || state.Canceled || t.Canceled || state.Done(t) {
 			continue
 		}
-		workspace, err := s.Bench.Collections.Get(a.Workspace)
-		if err != nil {
-			continue
-		}
-		for _, m := range workspace.Members {
-			key := a.Workspace + "/" + m.Name
-			now := time.Now()
-			if last, ok := prRefreshed.Load(key); ok && now.Sub(last.(time.Time)) < time.Minute {
+		for _, entry := range t.Evidence {
+			if entry.Attempt != a.ID || !entry.IsPullRequestLink() {
 				continue
 			}
-			prRefreshed.Store(key, now)
-			go func(collection, member string) {
+			key := entry.Workspace + "/" + entry.Ref
+			now := time.Now()
+			last, loaded := s.prRefreshed.LoadOrStore(key, now)
+			if loaded && (now.Sub(last.(time.Time)) < time.Minute || !s.prRefreshed.CompareAndSwap(key, last, now)) {
+				continue
+			}
+			go func(link work.Evidence) {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				_, _ = s.GetPullRequest(ctx, &pb.GetPullRequestRequest{CollectionId: collection, Member: member})
-			}(a.Workspace, m.Name)
+				s.Bench.RefreshMissionPullRequest(ctx, link)
+			}(entry.Evidence)
 		}
 	}
 }
 
-// prRefreshed throttles background pull request reads per workspace repository.
-var prRefreshed sync.Map
-
 // observePullRequest records what the PR loop read about a member's branch:
 // the workspace delivers that pull request (a tracked item whose transitions
-// fire hooks), and it is evidence on the attempts in the workspace.
+// fire hooks). Checks reach only attempts explicitly linked to this PR.
 func (s *Service) observePullRequest(collection, member string, out *pb.PullRequestStatus) {
 	if out == nil || !out.Found {
 		return
@@ -504,7 +497,7 @@ func wireMissionEvent(state *work.State, e work.Event) *pb.MissionEvent {
 func eventSummary(state *work.State, e work.Event) string {
 	var p struct {
 		Title, Brief, Summary, Note, Reason, Gate, Outcome, Kind, Preset string
-		Task, Conversation                                               string
+		Task, Conversation, Ref, Repository                              string
 		ExitCode                                                         *int `json:"exit_code"`
 		Number                                                           int64
 		Head                                                             string
@@ -558,6 +551,9 @@ func eventSummary(state *work.State, e work.Event) string {
 			}
 			return "Piped " + p.Title
 		case work.EvidencePR:
+			if p.Ref == work.PullRequestLinkRef(p.Repository, p.Number) {
+				return fmt.Sprintf("Linked %s#%d to this task", p.Repository, p.Number)
+			}
 			return fmt.Sprintf("Pull request #%d · checks %s", p.Number, p.Outcome)
 		case work.EvidenceCommit:
 			return "Committed " + p.Title

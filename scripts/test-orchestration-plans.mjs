@@ -119,6 +119,13 @@ async function run(scheme) {
   fixture.missions.setCost(index.id, 2.1);
   await expect(panel.locator(`.mission-card[data-task="${index.id}"] .mission-cost`)).toHaveText('$2.10 / $4', { timeout: 10_000 });
 
+  // At phone width the financial figures have their own row and the cap appears once.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const grantCard = panel.locator('.mission-orchestrator').first();
+  assert.equal((await grantCard.innerText()).split('$12 cap').length - 1, 1);
+  assert.ok(await grantCard.evaluate(node => node.scrollWidth <= node.clientWidth + 1));
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   // The tree reaches its cap: new agents paused; the board raises it.
   fixture.missions.setBudget(fixture.missions.missions.find(v => v.id === m.id).grants[0].id, { spentUsd: 9.4, reservedUsd: 3, budgetState: 'exhausted' });
   const stop = panel.locator('.mission-budget-stop');

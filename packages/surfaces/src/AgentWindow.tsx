@@ -1,3 +1,4 @@
+import { Icon } from './Icons';
 import { useDisplayDetail } from './display-detail';
 import { ArtifactsChip } from './ArtifactCard';
 import { DetachedArtifacts } from './DetachedArtifacts';
@@ -69,7 +70,7 @@ import { Composer } from './Composer';
 import { ComposerInfo } from './ComposerInfo';
 import { ConsoleWindow, EventLog, SessionCommands } from './SessionCommands';
 import { faultSentence, sessionLimit, subscriptionName, turnFault } from './subscription-model';
-import { CurrentChatContext, useConversationActivity } from './activity-detail';
+import { ACTIVITY_LABELS, CurrentChatContext, useConversationActivity } from './activity-detail';
 import { bindings, displayBinding, useActions } from './actions';
 import { CodeRunContext, CodeRuns, type RunActions } from './code-runs';
 import { shellBlocksIn } from './code-run';
@@ -647,6 +648,9 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const inspection = <><BackgroundWorkButton/><SessionInspection sessionID={sessionID} session={session} activity={transcript.activity} activityTruncated={transcript.activityTruncated}/></>;
   const stats: HeaderStats = { background: <BackgroundWorkButton/>, usage: <TelemetryPanel executionId={sessionID} conversationId={session?.conversationId} compact/>, tools: <ToolActivity sessionId={sessionID} events={transcript.activity} truncated={transcript.activityTruncated}/>,
     artifacts: session?.collectionId ? <ArtifactsChip collectionId={session.collectionId} sessionId={sessionID} conversationId={session.conversationId} title={realTitle}/> : undefined };
+  const detailButton = sessionID && <button type="button" className="session-detail-button" title="Cycle conversation activity detail" onClick={() => activity.cycle()}>
+    <Icon name="activity" size={13}/> {ACTIVITY_LABELS[activity.detail].label}
+  </button>;
   const lifecycle = <SessionLifecycleButton session={session} allowStart={allowStart} onNewSession={newSession} onClose={() => void close()}/>;
 
   return <main className={'agent-window' + (embedded ? ' embedded-chat' : '') + (drop.dragging ? ' file-drag-active' : '')} {...drop.handlers} onFocusCapture={activity.mark} onPointerDownCapture={activity.mark}>
@@ -667,7 +671,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             ? <ChatHeader agentName={agentName} session={session} sessionID={sessionID} title={title} status={status} statusText={live.text + (session?.queued ? ` · ${session.queued} queued` : '')} statusBusy={live.tone === 'busy' || live.tone === 'waiting'}
               modelLabel={modelLabel} stats={stats} realTitle={realTitle} branch={branch} shownAccount={headerAccount} onOpenChat={onOpenChat} origin={assistant ? undefined : <ItemOriginChip workspace={workspace}/>}
               modelRequested={!!session?.model && !session.modelReported && !transcript.reportedModel}
-              review={!assistant && <ReviewChatButton review={chatReview} keys={keymap['review.start']}/>}
+              detailButton={detailButton} review={!assistant && <ReviewChatButton review={chatReview} keys={keymap['review.start']}/>}
               onContextMenu={contextMenu('session', () => [...chatReview.menuItems, onOpenChat && { label: 'Open in its own window', icon: 'external', run: onOpenChat }, 'separator', ...withHandoff(sessionMenuItems({ session, allowStart,
                 onChangePermission: mode => void changePermission(mode), onRestartWithPermission: setRestartTo, onSwitchSubscription: () => setSwitchingSubscription(true), onGiveBrowser: () => void giveBrowser(),
                 onNewSession: newSession, onClose: () => void close(), onDelete: () => setDeleting(true), activity, models: slash.models, sessionID }), conversationHandoffItems(api, session, info))], { sessionId: sessionID })}
@@ -678,7 +682,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
                 onSwitchSubscription={() => setSwitchingSubscription(true)} onGiveBrowser={() => void giveBrowser()}
                 onNewSession={newSession} onClose={() => void close()} onDelete={() => setDeleting(true)} activity={activity} models={slash.models} extra={chatReview.menuItems}/>}/>
             : <SessionHeader agentName={agentName} session={session} sessionID={sessionID} title={title} status={status} modelLabel={modelLabel} inspection={inspection}
-              accountName={shownAccount} lifecycle={lifecycle}/>}
+              accountName={shownAccount} lifecycle={<>{detailButton}{lifecycle}</>}/>}
           {drop.dragging && <div className="file-drop-hint" role="status">Drop files to attach</div>}
           {session?.closed && <ResumeBar session={session} canResumeOnSend={canResumeOnSend} onResume={resumeSession} onError={setError}/>}
           {deleting && session && <DeleteConversationDialog session={session} onClose={() => setDeleting(false)} onDeleted={() => { setDeleting(false); newSession(); }}/>}

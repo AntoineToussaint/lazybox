@@ -185,6 +185,14 @@ try{
  await expect(deltaCard).toContainText('No other Claude subscription is available right now.');
  await expect(deltaCard.getByRole('radio')).toHaveCount(0);
  await expect(deltaCard.getByRole('button',{name:/Switch to/})).toHaveCount(0);
+ await deltaCard.getByRole('button',{name:'Show all subscriptions'}).click();
+ const statusDialog=page.getByRole('dialog',{name:'All subscriptions'});
+ await expect(statusDialog.locator('dt')).toHaveCount(f.profiles.length);
+ await expect(statusDialog.getByRole('region',{name:'Claude'})).toContainText('Limit reached');
+ await expect(statusDialog.getByRole('region',{name:'Codex'})).toBeVisible();
+ await expect(statusDialog).toContainText('· current');
+ await statusDialog.getByRole('button',{name:'Close subscription status'}).click();
+ await expect(statusDialog).toHaveCount(0);
  const fallback=deltaCard.getByRole('button',{name:'Continue in a new Codex conversation'});
  await page.screenshot({path:'.cache/subscription-codex-fallback-light.png'});
  await page.emulateMedia({colorScheme:'dark'});

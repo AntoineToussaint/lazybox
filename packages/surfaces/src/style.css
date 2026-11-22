@@ -50,7 +50,7 @@ small{color:var(--text-muted);font-size:calc(11px * var(--text-scale));overflow-
 .messages{padding:24px 28px;overflow:auto;flex:1;min-height:100px}
 .message{padding:14px 0;max-width:100%}
 .message p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:var(--chat-font-size,14px);line-height:var(--chat-line-height,1.5);margin-top:calc(var(--chat-paragraph-gap,8px) - 2px)}
-.message.operation_accepted{background:var(--ok-bg);border-radius:8px;padding:15px;margin-bottom:10px}
+.message.operation_accepted{width:fit-content;max-width:100%;box-sizing:border-box;background:var(--ok-bg);border-radius:8px;padding:6px 10px;margin-bottom:10px}
 .message.notice{border-left:2px solid var(--info-solid-hover);padding:4px 12px;margin-bottom:10px;color:var(--text-tertiary);font-size:.92em}
 .empty{max-width:360px;margin:45px auto;color:var(--text-muted);text-align:center}
 .empty>span{font-family:var(--font-mono);color:var(--running);letter-spacing:2px;font-size:calc(10px * var(--code-scale))}

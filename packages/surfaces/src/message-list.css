@@ -19,3 +19,6 @@
 .failure-detail{margin-top:6px;color:var(--text-muted);font-size:calc(11.5px * var(--text-scale))}
 .failure-detail summary{cursor:pointer;width:fit-content}
 .failure-detail pre{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:calc(11px * var(--text-scale))/1.5 var(--font-mono,ui-monospace,monospace);color:var(--text-soft)}
+.message-byline select,.session-detail-button{color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.message-byline select{width:auto;background:var(--surface-active);border:0;padding:2px}
+.session-detail-button{display:inline-flex;align-items:center;gap:4px}

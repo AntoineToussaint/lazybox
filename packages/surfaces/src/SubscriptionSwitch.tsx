@@ -5,8 +5,8 @@ import { useRunner } from './RunnerContext';
 import { DraggableDialog, DialogHeader } from './DraggableDialog';
 import { readPreference, writePreference } from './view-state';
 import { useRunnerSettings } from './RunnerSettings';
-import { backWhen, bestChoice, limitHeadline, resetTime, sessionLimit, subscriptionChoices, subscriptionName, subscriptionReady, switchesItself, switchLabel, type SubscriptionChoice } from './subscription-model';
-import { groupByProvider } from './subscription-groups';
+import { backWhen, comeback, bestChoice, isLimitState, limitHeadline, resetTime, sessionLimit, subscriptionChoices, subscriptionDetail, subscriptionName, subscriptionReady, switchesItself, switchLabel, type SubscriptionChoice } from './subscription-model';
+import { cardStatus, groupByProvider, subscriptionGroups } from './subscription-groups';
 import { ProviderGroups } from './SubscriptionGroups';
 import './subscription-switch.css';
 
@@ -76,6 +76,20 @@ function ChoiceList({ choices, value, onChange, name, disabled }: { choices: Sub
   </div>;
 }
 
+function SubscriptionStatusDialog({ profiles, currentId, currentLimit, now, onClose }: { profiles: readonly Profile[]; currentId: string; currentLimit?: string; now: number; onClose(): void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => { dialog.current?.showModal(); }, []);
+  return <DraggableDialog ref={dialog} className="switch-subscription-dialog" aria-label="All subscriptions" onCancel={onClose}>
+    <DialogHeader><h2>All subscriptions</h2><button type="button" onClick={onClose} aria-label="Close subscription status">×</button></DialogHeader>
+    <ProviderGroups groups={subscriptionGroups(profiles, { currentId, now })}>{items => <dl className="subscription-status-list">{items.map(profile => {
+      const status = cardStatus(profile, comeback(profile, now));
+      return <div key={profile.id}><dt>{subscriptionName(profile, profile.id)}{profile.id === currentId && <small> · current</small>}</dt>
+        <dd>{profile.id === currentId && currentLimit || (status === 'Not checked' ? status : subscriptionDetail(profile, now))}</dd></div>;
+    })}</dl>}</ProviderGroups>
+    {!profiles.length && <p>No subscriptions reported.</p>}
+  </DraggableDialog>;
+}
+
 function LimitCard({ session, profiles, provider, automatic, viewState, switchTo, onError, onContinueInCodex }: Pick<Props, 'session' | 'profiles' | 'viewState' | 'onError' | 'onContinueInCodex'> & { provider: string; automatic: boolean; switchTo(id: string, always: boolean): Promise<void> }) {
   const { api, refresh } = useRunner();
   const [updated, setUpdated] = useState<Record<string, Profile>>({});
@@ -83,7 +97,9 @@ function LimitCard({ session, profiles, provider, automatic, viewState, switchTo
     const fresh = updated[profile.id];
     return fresh && (fresh.availability?.observedAtUnixMillis ?? 0n) >= (profile.availability?.observedAtUnixMillis ?? 0n) ? fresh : profile;
   }), [profiles, updated]);
-  const checkedCurrent = updated[session.profileId] && currentProfiles.find(profile => profile.id === session.profileId);
+  const [showStatus, setShowStatus] = useState(false);
+  const currentProfile = currentProfiles.find(profile => profile.id === session.profileId);
+  const checkedCurrent = updated[session.profileId] && currentProfile;
   const currentReady = !!checkedCurrent && checkedCurrent.availability?.state === 'available' && subscriptionReady(checkedCurrent, Date.now());
   const targets = profiles.filter(profile => profile.provider === provider && profile.managed && profile.isolation === 'environment');
   const limit = sessionLimit(session) as Exclude<ReturnType<typeof sessionLimit>, ''>;
@@ -147,10 +163,15 @@ function LimitCard({ session, profiles, provider, automatic, viewState, switchTo
   const continueWith = selected && <button type="button" className="primary" disabled={!!busy} onClick={() => void act('switch', async () => { forgetWait(); await switchTo(selected.id, automatic && always && !rotating); })}>{busy === 'switch' ? `Switching to ${selected.name}…` : switchLabel(selected.name)}</button>;
   const continueInCodex = codex && onContinueInCodex && <button type="button" className="primary" disabled={!!busy} onClick={() => void act('codex', async () => { forgetWait(); setWaiting(false); await onContinueInCodex(codex.id); })}>{busy === 'codex' ? 'Sending context to Codex…' : 'Continue in a new Codex conversation'}</button>;
   const queued = session.queued > 0 && <p className="limit-card-note">Your {session.queued === 1 ? 'message is' : `${session.queued} messages are`} saved and will be sent once, when the conversation continues.</p>;
+  const currentLimit = !checkedCurrent && !isLimitState(currentProfile?.availability?.state) ? headline : undefined;
+  const statusControl = <>
+    <button type="button" aria-haspopup="dialog" onClick={() => setShowStatus(true)}>Show all subscriptions</button>
+    {showStatus && <SubscriptionStatusDialog profiles={currentProfiles} currentId={session.profileId} currentLimit={currentLimit} now={now} onClose={() => setShowStatus(false)}/>}
+  </>;
   if (waiting && !currentReady) return <section className="limit-card is-waiting" aria-label="Subscription limit" data-limit={limit}>
     <p className="limit-card-line"><strong>Waiting for {current}: {backWhen(session.account?.resetAt, now)}.</strong> The conversation continues on its own then.</p>
     {queued}
-    <div className="limit-card-actions">{continueWith}{continueInCodex}{refreshButton}<button type="button" disabled={!!busy} onClick={() => { forgetWait(); setWaiting(false); }}>Don’t wait</button></div>
+    <div className="limit-card-actions">{continueWith}{continueInCodex}{refreshButton}{statusControl}<button type="button" disabled={!!busy} onClick={() => { forgetWait(); setWaiting(false); }}>Don’t wait</button></div>
   </section>;
   return <section className="limit-card" aria-label="Subscription limit" data-limit={limit}>
     <h3>{headline}</h3>
@@ -163,6 +184,7 @@ function LimitCard({ session, profiles, provider, automatic, viewState, switchTo
       {!currentReady && continueWith}
       {continueInCodex}
       {refreshButton}
+      {statusControl}
       {!currentReady && (waitable ? <button type="button" disabled={!!busy} onClick={() => { try { writePreference(viewState, waitKey(session.id), String(resetAt)); } catch { /* waits while open */ } resumed.current = false; setWaiting(true); }}>Wait for reset</button>
         : limit === 'throttled' || limit === 'exhausted' ? <button type="button" disabled={!!busy} onClick={() => void act('retry', () => switchTo(session.profileId, false))}>{busy === 'retry' ? 'Trying again…' : `Try again on ${current}`}</button> : null)}
     </div>

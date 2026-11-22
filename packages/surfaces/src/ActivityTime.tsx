@@ -30,11 +30,11 @@ export function relativeTime(at: number, now: number) {
   return relativeFormat.format(-Math.floor(minutes / 1440), 'day');
 }
 
-export function ActivityTime({ at, className = '' }: { at: number; className?: string }) {
+export function ActivityTime({ at, className = '', description }: { at: number; className?: string; description?: string }) {
   const now = useActivityClock();
   const [exact, setExact] = useState(false);
   const full = exactTime(at);
-  return <button className={`activity-time ${className}`} type="button" title={full} aria-label={`Show exact time: ${full}`} aria-pressed={exact} onClick={() => setExact(value => !value)}>
+  return <button className={`activity-time ${className}`} type="button" title={description || full} aria-description={description} aria-label={`Show exact time: ${full}`} aria-pressed={exact} onClick={() => setExact(value => !value)}>
     <time dateTime={new Date(at).toISOString()}>{exact ? full : relativeTime(at, now)}</time>
   </button>;
 }

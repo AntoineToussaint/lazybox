@@ -49,6 +49,26 @@ test('repository grouping sorts organization then repository and puts locals las
 });
 
 
+test('prompt metadata retains the last root observation at acceptance across journal batches', () => {
+ let state = emptyTranscript();
+ const add = (type: string, text = '', data = {}, agentId = 'root') => {
+  state = appendTranscript(state, create(JournalEventSchema, {
+   cursor: state.cursor + 1n, event: { type, text, agentId, providerDataJson: new TextEncoder().encode(JSON.stringify(data)) },
+  }));
+ };
+ add('operation_accepted', 'Before telemetry');
+ add('usage', '', {model: 'first', tokenUsage: {last: {totalTokens: 20}, modelContextWindow: 100}});
+ add('context', '', {model: 'child', used: 90, capacity: 200}, 'reviewer');
+ add('operation_accepted', 'First observation');
+ add('context', '', {model: 'second', used: 0, capacity: 300});
+ add('operation_accepted', 'Second observation');
+ assert.deepEqual(state.messages.map(m => [m.promptModel, m.promptContext]), [
+  [undefined, undefined],
+  ['first', {used: 20, capacity: 100}],
+  ['second', {used: 0, capacity: 300}],
+ ]);
+});
+
 test('main agent model survives diagnostic eviction and ignores child models',()=>{
  let state=emptyTranscript();
  const add=(type:string,model:string,agentId='root')=>state=appendTranscript(state,create(JournalEventSchema,{cursor:state.cursor+1n,event:{type,agentId,providerDataJson:new TextEncoder().encode(JSON.stringify({model}))}}));

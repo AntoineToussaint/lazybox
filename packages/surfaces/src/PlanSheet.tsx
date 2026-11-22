@@ -21,7 +21,9 @@ export function PlanSheet({ mission, plan, onClose }: { mission: Mission; plan: 
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { dialog.current?.showModal(); }, []);
   const grant = mission.grants.find(g => g.id === plan.grantId);
-  const [cap, setCap] = useState(() => defaultCap(plan.totalUsd, grant?.ceiling?.budgetUsd || 0));
+  const [useCap, setUseCap] = useState(false);
+  const [amount, setAmount] = useState(() => String(Math.min(10000, defaultCap(plan.totalUsd, grant?.ceiling?.budgetUsd || 0)) || ''));
+  const cap = useCap ? Number(amount) : 0;
   const [wip, setWip] = useState(() => Math.min(grant?.ceiling?.maxChildren || 3, Math.max(1, plan.tasks.length)));
   const [note, setNote] = useState(''), [rejecting, setRejecting] = useState(false);
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
@@ -41,7 +43,7 @@ export function PlanSheet({ mission, plan, onClose }: { mission: Mission; plan: 
   const overBudget = cap > 0 && plan.totalUsd > cap;
   return <DraggableDialog ref={dialog} className="mission-dialog plan-sheet" aria-label={`Plan for ${mission.title}`} onCancel={event => { if (busy) event.preventDefault(); else onClose(); }}>
     <DialogHeader><h2><Icon name="checklist" size={15}/> {grant?.title || 'The orchestrator'} proposes {plan.tasks.length} {plan.tasks.length === 1 ? 'agent' : 'agents'}</h2><button type="button" aria-label="Close" disabled={busy} onClick={onClose}>×</button></DialogHeader>
-    <form onSubmit={submit} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void decide(!rejecting); } }}>
+    <form onSubmit={submit} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.currentTarget.requestSubmit(); } }}>
       <p className="plan-for">For <b>{mission.title}</b>{plan.summary ? <> · {plan.summary}</> : null}</p>
       {plan.contract && <section><h3>Acceptance criteria</h3><p>Spec {plan.contract.artifactId} · version {plan.contract.version}</p><ul>{plan.contract.acceptanceCriteria.map((text, index) => <li key={index}>{text}</li>)}</ul></section>}
       {!!plan.baseline?.length && <section><h3>Starting revisions</h3><ul>{plan.baseline.map(member => <li key={member.name}>{member.name} <code title={member.commit}>{member.commit.slice(0, 12)}</code></li>)}</ul></section>}
@@ -69,9 +71,13 @@ export function PlanSheet({ mission, plan, onClose }: { mission: Mission; plan: 
         {grant && grant.spentUsd > 0 && <span>Spent so far {usd(grant.spentUsd)}</span>}
       </div>
       {!decided && !rejecting && <div className="grant-row plan-limits">
-        <label className="grant-number">Budget cap $<input type="number" min={0} step={1} value={cap || ''} placeholder="no cap" aria-label="Budget cap in dollars" onChange={e => setCap(Math.max(0, Number(e.target.value) || 0))}/></label>
         <label className="grant-number">At once<input type="number" min={1} max={16} value={wip} aria-label="Agents at once" onChange={e => setWip(Math.max(1, Math.min(16, Number(e.target.value) || 1)))}/></label>
-        <small className={overBudget ? 'plan-warn' : ''}>{overBudget ? `Below the estimate: the last tasks will pause for you` : cap > 0 ? 'New agents pause and ask you when the tree would pass it' : 'No cap: agents start as the plan says'}</small>
+        <label><input type="checkbox" checked={useCap} onChange={e => setUseCap(e.target.checked)}/> Set a budget cap</label>
+        {useCap && <>
+          <label className="grant-number">Budget cap $<input type="number" required min={0.01} max={10000} step="0.01" value={amount} aria-label="Budget cap in dollars" onChange={e => setAmount(e.target.value)}/></label>
+          <small className={overBudget ? 'plan-warn' : ''}>{overBudget ? 'Below the estimate. Later tasks may pause for approval.' : 'New agents pause when starting them would exceed the cap.'}</small>
+        </>}
+        {!useCap && !!grant?.ceiling?.budgetUsd && <small>Approval removes the current {usd(grant.ceiling.budgetUsd)} grant cap.</small>}
       </div>}
       {!decided && <label className="plan-note"><span>{rejecting ? 'Why (the orchestrator is told)' : 'Note to the orchestrator'} {!rejecting && <small>optional</small>}</span><textarea rows={2} value={note} maxLength={2048} onChange={e => setNote(e.target.value)} placeholder={rejecting ? 'What should change' : 'Anything it should know'}/></label>}
       {error && <p className="missions-error" role="alert">{error}</p>}
@@ -82,7 +88,7 @@ export function PlanSheet({ mission, plan, onClose }: { mission: Mission; plan: 
         </> : <>
           <button type="button" className="plan-reject" disabled={busy} onClick={() => setRejecting(true)}>Reject…</button>
           <span className="plan-shortcut">⌘↵</span>
-          <button className="primary" disabled={busy} autoFocus>{busy ? 'Approving…' : cap > 0 ? `Approve with ${usd(cap)} cap` : 'Approve'}</button>
+          <button className="primary" disabled={busy} autoFocus>{busy ? 'Approving…' : cap > 0 ? `Approve with ${usd(cap)} cap` : useCap ? 'Approve with cap' : 'Approve without cap'}</button>
         </>}
       </footer>
     </form>

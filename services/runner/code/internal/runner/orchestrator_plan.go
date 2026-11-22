@@ -24,7 +24,7 @@ var ErrPlanRequired = errors.New("the person asked to approve a plan before any 
 
 // planBriefing is the plan line of the orchestrator's briefing.
 func planBriefing(required bool) string {
-	how := "Propose your split as a plan: `lazybox mission plan -` reads YAML (summary; tasks: key, title, brief, role, permission, workspace same|new|pinned, paths, estimate_usd, after: [keys]). The person sees it on one sheet, with the paths two tasks share and the total, and approves it with a $ cap; then `lazybox agents ls` lists its tasks' ids and `lazybox agents spawn --task ID` starts each, in order."
+	how := "Propose your split as a plan: `lazybox mission plan -` reads YAML (summary; tasks: key, title, brief, role, permission, workspace same|new|pinned, paths, estimate_usd, after: [keys]). The person sees it on one sheet, with the paths two tasks share and the total, and approves it with an optional budget cap; then `lazybox agents ls` lists its tasks' ids and `lazybox agents spawn --task ID` starts each, in order."
 	if required {
 		return "The person asked to approve a plan before any agent starts. " + how
 	}

@@ -48,7 +48,8 @@ try {
   await server.listen();
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({headless: true});
-  const page = await browser.newPage({viewport: {width: 1500, height: 950}});
+  const desktop = await browser.newContext({viewport: {width: 1500, height: 950}});
+  const page = await desktop.newPage();
   page.setDefaultTimeout(10_000);
   const errors = []; page.on('pageerror', e => errors.push(String(e)));
   await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
@@ -157,15 +158,36 @@ try {
   // 5. The Inbox (the page's Agents panel, or its dialog where the page has none): a row per
   // pull request that needs the person, with its reaction.
   const inboxButton = page.locator('.inbox-action');
+  await page.reload();
+  await expect(inboxButton).toHaveAccessibleName(/1 pull request/);
+  await inboxButton.click();
+  const prior = page.locator('.pr-inbox-item', {hasText: 'acme/api#812'});
+  await expect(prior.getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
+  assert.equal(sent('SendPullRequestFailures').length, 1);
+  f.tracked.links[0].item.pullRequest.failingChecks[0].url = 'https://github.com/acme/api/actions/runs/42/job/lint';
+  await page.reload();
   await expect(inboxButton).toHaveAccessibleName(/2 pull requests need you/);
   await inboxButton.click();
   const pullRows = page.locator('.group-pulls .pr-inbox-item');
   await expect(pullRows).toHaveCount(2);
   await expect(pullRows.first()).toContainText('acme/api#812 checks failed · lint, unit-api (2 of 14)');
-  await expect(pullRows.first().getByRole('link', {name: 'Open checks'})).toHaveAttribute('href', 'https://github.com/acme/api/actions/runs/41/job/lint');
+  await expect(pullRows.first().getByRole('link', {name: 'Open checks'})).toHaveAttribute('href', 'https://github.com/acme/api/actions/runs/42/job/lint');
+  const sibling = await page.context().newPage();
+  await sibling.goto(page.url().split('#')[0] + '#token=' + f.token);
+  await sibling.locator('.inbox-action').click();
+  const siblingFailure = sibling.locator('.pr-inbox-item', {hasText: 'acme/api#812'});
+  const siblingSend = siblingFailure.getByRole('button', {name: 'Send the failures to Claude'});
+  await expect(siblingSend).toBeEnabled();
+  let releaseSend;
+  const release = new Promise(resolve => { releaseSend = resolve; });
+  await page.route('**/SendPullRequestFailures', async route => { await release; await route.continue(); });
   await page.screenshot({path: '.cache/pull-requests-inbox.png'});
   await pullRows.first().getByRole('button', {name: 'Send the failures to Claude'}).click();
+  try { await expect(siblingSend).toBeDisabled(); } finally { releaseSend(); }
   await expect.poll(() => sent('SendPullRequestFailures').length).toBe(2);
+  await expect(siblingFailure).toContainText('Auto-dismiss in');
+  await expect(siblingSend).toHaveCount(0);
+  await sibling.close();
   await expect(pullRows.first().locator('.pr-inbox-note')).toContainText('Sent 2 failing checks');
   await expect(pullRows.first().getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
   await expect(pullRows.first()).toContainText(/Auto-dismiss in \d+s/);
@@ -174,6 +196,11 @@ try {
   await reviewRow.getByRole('button', {name: 'Address the review'}).click();
   await expect(reviewRow.getByRole('alert')).toContainText('Review unavailable');
   await expect(reviewRow.getByRole('button', {name: 'Address the review'})).toBeEnabled();
+  await page.reload();
+  await inboxButton.click();
+  await expect(reviewRow.getByRole('alert')).toContainText('Review unavailable');
+  await expect(pullRows.first()).toContainText('Auto-dismiss in');
+  await expect(pullRows.first().getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
   f.tracked.refusal = '';
   f.tracked.externalReviewOnly = true;
   await reviewRow.getByRole('button', {name: 'Address the review'}).click();

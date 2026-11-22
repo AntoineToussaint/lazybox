@@ -148,12 +148,21 @@ export type PullInboxRow = TrackedPull & {
   action: 'send' | 'review' | 'merge' | 'open';
   line: string;
 };
+export function pullReactionKey(pull: TrackedPull): string {
+  const pr = pull.link.item?.pullRequest;
+  const base = `${pull.key}:${pull.status}:${pr?.headSha || ''}`;
+  if (pull.status === 'checks-failed' && pr?.failingChecks?.length) {
+    return base + ':' + JSON.stringify(pr.failingChecks.map(check => JSON.stringify([check.name, check.url])).sort());
+  }
+  if (pull.status === 'changes-requested') return base + ':' + (pull.link.item?.updatedAtUnixMillis || 0n);
+  return base;
+}
 export function pullInboxRows(links: readonly ItemLink[], dismissed: ReadonlySet<string>): PullInboxRow[] {
   const rows: PullInboxRow[] = [];
   for (const pull of deliveredPulls(links)) {
     if (!needsYou.has(pull.status) || pull.link.collectionDeleted) continue;
-    const dismissKey = `${pull.key}:${pull.status}:${pull.link.item?.pullRequest?.headSha || ''}`;
-    if (dismissed.has(dismissKey)) continue;
+    const dismissKey = pullReactionKey(pull);
+    if (dismissed.has(dismissKey) || dismissed.has(`${pull.key}:${pull.status}:${pull.link.item?.pullRequest?.headSha || ''}`)) continue;
     const action = pull.status === 'checks-failed' ? 'send' : pull.status === 'changes-requested' ? 'review' : pull.status === 'ready' ? 'merge' : 'open';
     const what = pull.status === 'checks-failed' ? `checks failed · ${pull.detail}` : pull.status === 'ready' ? 'approved · checks green' : statusLabel[pull.status].toLowerCase();
     rows.push({ ...pull, dismissKey, action, line: `${pull.repository}#${pull.number} ${what}` });

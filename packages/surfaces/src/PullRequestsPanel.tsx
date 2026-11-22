@@ -4,7 +4,7 @@ import { Icon } from './Icons';
 import { useRunner } from './RunnerContext';
 import { ageLabel } from './attention';
 import type { ModuleProps } from './PanelRegistry';
-import { agentName, confirmation, groupPulls, needsYou, pullWords, statusIcon, statusLabel, statusTone, workspacePulls, type PullTone, type TrackedPull } from './pull-requests-model';
+import { agentName, confirmation, groupPulls, needsYou, pullWords, pullReactionKey, statusIcon, statusLabel, statusTone, workspacePulls, type PullTone, type TrackedPull } from './pull-requests-model';
 import { usePullActions, useTrackedItems, type PullAction } from './useTrackedPulls';
 import './pull-requests.css';
 
@@ -19,7 +19,7 @@ export function reactionFor(pull: TrackedPull): PullAction | undefined {
 }
 export const reactionLabel = (action: PullAction, agent: string) => action === 'send' ? `Send the failures to ${agent}` : action === 'review' ? 'Address the review' : 'Merge';
 
-type Confirming = { key: string; action: PullAction };
+type Confirming = { key: string; eventKey: string; action: PullAction };
 
 /**
  * Every pull request the workspaces deliver, in three groups — needs you,
@@ -34,12 +34,18 @@ export function PullRequestsPanel({ collections, onShowSession }: Pick<ModulePro
   const actions = usePullActions();
   const [now, setNow] = useState(Date.now);
   const [confirming, setConfirming] = useState<Confirming>();
-  const [notes, setNotes] = useState<Record<string, { ok: boolean; text: string }>>({});
+
   const root = useRef<HTMLDivElement>(null);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(timer); }, []);
   useEffect(() => setNow(Date.now()), [tracked.links]);
   const groups = useMemo(() => groupPulls(tracked.links, now), [tracked.links, now]);
   const all = [...groups.needsYou, ...groups.waiting, ...groups.merged];
+  useEffect(() => {
+    if (!confirming) return;
+    const current = groups.needsYou.find(pull => pullReactionKey(pull) === confirming.eventKey);
+    const phase = actions.states.get(confirming.eventKey)?.phase;
+    if (!current || phase === 'sending' || phase === 'sent') setConfirming(undefined);
+  }, [confirming, groups, actions.states]);
   const workspaceName = (link: ItemLink) => collections.find(c => c.id === link.collectionId)?.name || link.collectionName || 'Deleted workspace';
   const agentOf = (pull: TrackedPull) => agentName(info?.sessions.find(s => s.id === pull.link.sessionId)?.provider);
   const rows = () => [...root.current?.querySelectorAll<HTMLButtonElement>('.pr-row') || []];
@@ -50,13 +56,13 @@ export function PullRequestsPanel({ collections, onShowSession }: Pick<ModulePro
   };
   const open = (pull: TrackedPull) => onShowSession?.({ collectionId: pull.link.collectionId, sessionId: pull.link.sessionId, commandId: '' });
   const ask = (pull: TrackedPull, action: PullAction) => {
-    if (pull.link.collectionDeleted) return;
-    setConfirming({ key: pull.key, action });
+    const phase = actions.states.get(pullReactionKey(pull))?.phase;
+    if (pull.link.collectionDeleted || phase === 'sent' || phase === 'sending') return;
+    setConfirming({ key: pull.key, eventKey: pullReactionKey(pull), action });
   };
   const confirm = async (pull: TrackedPull, action: PullAction) => {
     setConfirming(undefined);
-    const result = await actions.run(pull, action);
-    setNotes(previous => ({ ...previous, [pull.key]: result }));
+    await actions.run(pull, action);
     // Back to its row only if focus went nowhere when the confirmation closed: a person who moved on
     // while the action ran (another row, another panel) keeps their place. Taking it back made m or
     // Enter on the next row act on this one.
@@ -80,8 +86,8 @@ export function PullRequestsPanel({ collections, onShowSession }: Pick<ModulePro
   };
   const section = (id: string, title: string, list: TrackedPull[], empty: ReactNode) => <section className={`pr-group group-${id}`} aria-labelledby={`pr-group-${id}`}>
     <h3 id={`pr-group-${id}`}>{title}<span>{list.length}</span></h3>
-    {list.length ? <ul>{list.map(pull => <PullRow key={pull.key} pull={pull} now={now} workspace={workspaceName(pull.link)} agent={agentOf(pull)} busy={actions.busy.startsWith(pull.key + ':')}
-      confirming={confirming?.key === pull.key ? confirming.action : undefined} note={notes[pull.key]}
+    {list.length ? <ul>{list.map(pull => <PullRow key={pull.key} pull={pull} now={now} workspace={workspaceName(pull.link)} agent={agentOf(pull)} state={actions.states.get(pullReactionKey(pull))}
+      confirming={confirming?.eventKey === pullReactionKey(pull) ? confirming.action : undefined}
       onOpen={() => open(pull)} onAsk={action => ask(pull, action)} onConfirm={action => void confirm(pull, action)} onCancel={() => setConfirming(undefined)}/>)}</ul>
       : <p className="pr-empty">{empty}</p>}
   </section>;
@@ -107,13 +113,15 @@ export function PullRequestsPanel({ collections, onShowSession }: Pick<ModulePro
   </div>;
 }
 
-function PullRow({ pull, now, workspace, agent, busy, confirming, note, onOpen, onAsk, onConfirm, onCancel }: {
-  pull: TrackedPull; now: number; workspace: string; agent: string; busy: boolean; confirming?: PullAction; note?: { ok: boolean; text: string };
+function PullRow({ pull, now, workspace, agent, state, confirming, onOpen, onAsk, onConfirm, onCancel }: {
+  pull: TrackedPull; now: number; workspace: string; agent: string; state?: { phase: string; text: string }; confirming?: PullAction;
   onOpen(): void; onAsk(action: PullAction): void; onConfirm(action: PullAction): void; onCancel(): void;
 }) {
   const confirmButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (confirming) confirmButton.current?.focus(); }, [confirming]);
-  const reaction = pull.link.collectionDeleted ? undefined : reactionFor(pull);
+  const busy = state?.phase === 'sending';
+  const note = state && ['sent','error'].includes(state.phase) ? {ok: state.phase === 'sent', text: state.text} : undefined;
+  const reaction = pull.link.collectionDeleted || state?.phase === 'sent' ? undefined : reactionFor(pull);
   return <li className="pr-item" data-pull={pull.key} data-status={pull.status}>
     <button className="pr-row" onClick={onOpen} title={`Open ${workspace}${pull.link.sessionId ? ' at the conversation that delivered it' : ''}`}>
       <PullStatusIcon pull={pull}/>

@@ -36,7 +36,7 @@ export function PullRequestInboxSection({ collections, phone = false, canRespond
   onOpen(target: ViewTarget): void;
 }) {
   const tracked = useTrackedItems();
-  const { dismissed, dismiss, completed, complete } = useDismissedPulls();
+  const { dismissed, dismiss, completed } = useDismissedPulls();
   const rows = useMemo(() => {
     const hidden = new Set(dismissed);
     for (const key of completed.keys()) hidden.delete(key);
@@ -46,16 +46,17 @@ export function PullRequestInboxSection({ collections, phone = false, canRespond
   const Heading = phone ? 'h2' : 'h3';
   return <section className={`${phone ? 'remote-group' : 'inbox-group'} group-pulls`} aria-labelledby="inbox-group-pulls">
     <Heading id="inbox-group-pulls"><Icon name="pullRequest" size={13}/>Pull requests<span>{rows.length}</span></Heading>
-    <ul>{rows.map(row => <PullInboxItem key={row.dismissKey} row={row} pending={deferredStates?.[`${row.dismissKey}:${row.action}`]} phone={phone} canRespond={canRespond} defer={defer} onOpen={onOpen} receipt={completed.get(row.dismissKey)} onComplete={text => complete(row.dismissKey, text)} onDismiss={() => dismiss(row.dismissKey)}
+    <ul>{rows.map(row => <PullInboxItem key={row.dismissKey} row={row} pending={deferredStates?.[`${row.dismissKey}:${row.action}`]} phone={phone} canRespond={canRespond} defer={defer} onOpen={onOpen} receipt={completed.get(row.dismissKey)} onDismiss={() => dismiss(row.dismissKey)}
       workspace={collections.find(c => c.id === row.link.collectionId)?.name || row.link.collectionName}/>)}</ul>
   </section>;
 }
 
-function PullInboxItem({ row, workspace, phone, canRespond, defer, onOpen, onDismiss, receipt, pending, onComplete }: { pending?: { phase: string; text: string }; receipt?: { text: string; until: number }; onComplete(text: string): void; row: PullInboxRow; workspace: string; phone: boolean; canRespond: boolean; defer?(action: DeferredAction): void; onOpen(target: ViewTarget): void; onDismiss(): void }) {
+function PullInboxItem({ row, workspace, phone, canRespond, defer, onOpen, onDismiss, receipt, pending }: { pending?: { phase: string; text: string }; receipt?: { text: string; until: number }; row: PullInboxRow; workspace: string; phone: boolean; canRespond: boolean; defer?(action: DeferredAction): void; onOpen(target: ViewTarget): void; onDismiss(): void }) {
   const { info } = useRunner();
   const actions = usePullActions();
   const [confirmMerge, setConfirmMerge] = useState(false);
-  const [error, setError] = useState('');
+  const state = actions.states.get(row.dismissKey);
+  const error = state?.phase === 'error' && state.text;
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!receipt) return;
@@ -64,18 +65,15 @@ function PullInboxItem({ row, workspace, phone, canRespond, defer, onOpen, onDis
     return () => window.clearInterval(timer);
   }, [receipt]);
   const agent = agentName(info?.sessions.find(s => s.id === row.link.sessionId)?.provider);
-  const busy = actions.busy.startsWith(row.key + ':');
+  const busy = state?.phase === 'sending';
   const run = async (action: PullAction) => {
     setConfirmMerge(false);
-    setError('');
     if (defer && action !== 'merge') {
       defer({ id: `${row.dismissKey}:${action}`, label: `${reactionLabel(action, agent)} · #${row.number}`, waiting: action === 'send' ? 'Sending the failures…' : 'Sending the review…',
-        commit: async () => { const result = await actions.run(row, action); if (!result.ok) throw new Error(result.text); onComplete(result.text); } });
+        commit: async () => { const result = await actions.run(row, action); if (!result.ok) throw new Error(result.text); } });
       return;
     }
-    const result = await actions.run(row, action);
-    if (result.ok) onComplete(result.text);
-    else setError(result.text);
+    await actions.run(row, action);
   };
   const reaction: PullAction | undefined = row.action === 'send' || row.action === 'review' ? row.action : row.action === 'merge' && !phone ? 'merge' : undefined;
   const failing = row.link.item?.pullRequest?.failingChecks?.[0]?.url;
@@ -93,7 +91,7 @@ function PullInboxItem({ row, workspace, phone, canRespond, defer, onOpen, onDis
       {reaction && canRespond && !receipt && !pending && !confirmMerge && <button type="button" className="primary" disabled={busy} onClick={() => reaction === 'merge' ? setConfirmMerge(true) : void run(reaction)}>
         <Icon name={reaction === 'merge' ? 'merge' : reaction === 'review' ? 'review' : 'send'} size={13}/>{reaction === 'merge' ? 'Merge…' : reactionLabel(reaction, agent)}
       </button>}
-      {confirmMerge && <span role="group" aria-label="Confirm merge" className="pr-inbox-confirm">
+      {confirmMerge && !receipt && !busy && <span role="group" aria-label="Confirm merge" className="pr-inbox-confirm">
         <button type="button" className="primary" autoFocus disabled={busy} onClick={() => void run('merge')}>Merge #{row.number}</button>
         <button type="button" onClick={() => setConfirmMerge(false)}>Cancel</button>
       </span>}

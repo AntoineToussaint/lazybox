@@ -15,6 +15,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitpublish"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
+	workitems "github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/items"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/snippets"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 )
@@ -254,8 +255,22 @@ type PullRequestObservation struct {
 	Total                                                          int
 }
 
-// RecordPullRequest attaches a pull request and its checks to the attempts in
-// its workspace, once per head and state: success verifies the head it ran on.
+// RefreshMissionPullRequest reads the explicitly delivered PR by identity, even
+// if the workspace has switched branches since the task linked it.
+func (b *Bench) RefreshMissionPullRequest(ctx context.Context, link work.Evidence) {
+	ref := workitems.GitHubRef(link.Repository, link.Number)
+	if _, err := b.DeliveredLink(link.Workspace, ref); err != nil {
+		return
+	}
+	item := b.refreshNow(ctx, ref)
+	if item.PR == nil || item.Ref != ref {
+		return
+	}
+	b.RecordPullRequest(PullRequestObservation{Workspace: link.Workspace, Member: link.Member, Repository: link.Repository, Number: link.Number, Title: item.Title, URL: item.URL, State: item.RawState, Head: item.PR.HeadSHA, Checks: item.PR.Checks, Total: len(item.PR.CheckRuns), Failed: item.PR.FailingNames()})
+}
+
+// RecordPullRequest updates checks for attempts linked to this pull request.
+// A workspace or branch match alone carries no task attribution.
 func (b *Bench) RecordPullRequest(pr PullRequestObservation) {
 	if b.Work == nil || pr.Number == 0 || pr.Head == "" {
 		return

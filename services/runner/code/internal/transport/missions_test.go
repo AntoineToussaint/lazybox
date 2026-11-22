@@ -145,7 +145,16 @@ func TestMissionEvidenceAttachesAutomatically(t *testing.T) {
 	if task.Evidence[0].Kind != work.EvidenceCommit || task.Evidence[0].Head != committed.Commit || task.Evidence[0].Title != "Split the parser" {
 		t.Fatalf("commit evidence: %+v", task.Evidence[0])
 	}
-	// Checks passing on that head verify it; checks on an older head would not.
+	// A branch observation, even on the same commit, is not a task delivery.
+	observation := &pb.PullRequestStatus{Found: true, GithubRepository: "team/api", Number: 7, HeadSha: committed.Commit, State: "open", ChecksState: "success"}
+	f.service.observePullRequest(f.mine.Id, "api", observation)
+	if current := taskOf(t, getMission(t, f, owner, missionID), taskID); current.Evidence[0].Kind == work.EvidencePR {
+		t.Fatalf("unlinked PR attached: %+v", current)
+	}
+	if _, err := f.client.LinkItem(owner, &pb.LinkItemRequest{SessionId: f.conversation.ID, Url: "https://github.com/team/api/pull/7", Role: "delivers"}); err != nil {
+		t.Fatal(err)
+	}
+	// Checks passing on that linked head verify it; checks on an older head would not.
 	f.service.observePullRequest(f.mine.Id, "api", &pb.PullRequestStatus{Found: true, GithubRepository: "team/api", Number: 7, HeadSha: committed.Commit, State: "open", ChecksState: "success", Checks: []*pb.PullRequestCheck{{Name: "test", Status: "completed", Conclusion: "success"}}})
 	task = taskOf(t, getMission(t, f, owner, missionID), taskID)
 	if task.Trust != work.TrustVerified || task.Evidence[0].Kind != work.EvidencePR || task.Evidence[0].Number != 7 {

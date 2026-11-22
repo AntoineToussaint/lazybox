@@ -226,6 +226,12 @@ type Evidence struct {
 	Findings int `json:"findings,omitempty"`
 }
 
+// IsPullRequestLink distinguishes the conversation's explicit delivery from
+// check observations, including ones recorded by older Runner versions.
+func (e Evidence) IsPullRequestLink() bool {
+	return e.Kind == EvidencePR && e.Number > 0 && e.Repository != "" && e.Ref == PullRequestLinkRef(e.Repository, e.Number)
+}
+
 // Subjects.
 func TaskSubject(id string) string { return "task:" + id }
 func GoalSubject(id string) string { return "goal:" + id }

@@ -151,11 +151,18 @@ func TestTrackingFindsWhatAgentsOpenAndEmitsTransitionsOnce(t *testing.T) {
 	call := func(data string) { f.agent.Events <- agent.Event{Type: "tool_activity", Data: json.RawMessage(data)} }
 	call(`{"type":"tool_call","id":"t1","name":"Bash","status":"running","input":{"command":"gh pr create --fill"}}`)
 	call(`{"type":"tool_call","id":"t1","status":"completed","output":"Creating pull request for agent/two into main in team/api\n\nhttps://github.com/team/api/pull/2\n"}`)
+	call(`{"type":"tool_call","id":"failed","name":"Bash","status":"failed","input":{"command":"gh pr create"},"output":"a pull request already exists: https://github.com/team/api/pull/33"}`)
 	call(`{"type":"tool_call","id":"t2","name":"Bash","status":"completed","input":{"command":"gh issue view 9"},"output":"see https://github.com/team/api/issues/9"}`)
-	until(t, "agent output never linked", func() bool { l := f.links(t); return l["team/api#2"] != nil && l["team/api#9"] != nil })
+	until(t, "agent output never linked", func() bool {
+		l := f.links(t)
+		return l["team/api#2"] != nil && l["team/api#9"] != nil && l["team/api#33"] != nil
+	})
 	links := f.links(t)
 	if two := links["team/api#2"]; two.Role != "delivers" || two.Source != "agent-output" || two.SessionId != f.session.ID {
 		t.Fatalf("agent output: %+v", two)
+	}
+	if failed := links["team/api#33"]; failed.Role != "mentions" {
+		t.Fatalf("failed creation linked a delivery: %+v", failed)
 	}
 	if nine := links["team/api#9"]; nine.Role != "mentions" {
 		t.Fatalf("mention: %+v", nine)
@@ -485,4 +492,33 @@ func TestAgentLinksAreBounded(t *testing.T) {
 	if _, err = f.service.LinkItem(context.Background(), &pb.LinkItemRequest{CollectionId: f.mine.Id, Url: "https://github.com/team/api/pull/200"}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A Mission refresh reads its explicitly linked PR even after the workspace's branch changes.
+func TestMissionRefreshesDeliveredPRByNumber(t *testing.T) {
+	f := newItemsFixture(t)
+	ctx := bearer(timeout(t), ownerToken)
+	mission, task := missionWithTask(t, f.terminalFixture, ctx)
+	if _, err := f.client.UpdateMission(ctx, &pb.UpdateMissionRequest{MissionId: mission, OperationId: "assign", Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: task, SessionId: f.session.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	f.github.Update(func(s *githubtest.Server) {
+		s.Pulls["team/api"] = []*githubtest.PR{{Number: 7, Title: "Linked delivery", Head: "other-branch", Base: "main", HeadSHA: "linked-head", State: "open"}}
+		s.Checks["linked-head"] = []githubtest.Check{{Name: "test", Status: "completed", Conclusion: "success"}}
+	})
+	if _, err := f.client.LinkItem(ctx, &pb.LinkItemRequest{SessionId: f.session.ID, Url: "https://github.com/team/api/pull/7", Role: "delivers"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.GetMission(ctx, &pb.GetMissionRequest{MissionId: mission, RefreshEvidence: true}); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "checks from linked PR did not arrive", func() bool {
+		m := getMission(t, f.terminalFixture, ctx, mission)
+		for _, e := range taskOf(t, m, task).Evidence {
+			if e.Head == "linked-head" && e.Number == 7 && e.Outcome == "pass" {
+				return true
+			}
+		}
+		return false
+	})
 }

@@ -18,6 +18,8 @@ can tell *claimed* from *verified* at a glance, across many agents.
    hand it to one you already have), optionally sending the task's brief as the
    first message.
 
+Choose **Detach mission** to keep the selected mission in its own window while you switch workspaces. The detached window stays on that mission across reloads. Opening the same mission again focuses its window.
+
 The board has four columns — **Ready**, **Working**, **Needs you**, **Done** —
 and each card shows the task's status, its trust, its evidence, the
 conversation working on it and whether that agent is alive.

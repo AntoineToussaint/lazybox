@@ -238,6 +238,15 @@ try {
   assert.ok(await body.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'no sideways scroll on a phone');
   await page.screenshot({ path: '/tmp/lazybox-missions-phone.png', fullPage: false });
   assert.deepEqual(errors, []);
+  const popup = page.waitForEvent('popup');
+  await panel.getByRole('button', {name: 'Detach mission'}).click();
+  const detached = await popup;
+  const missionHeading = detached.getByRole('heading', {name: 'Ship the parser split'});
+  await expect(missionHeading).toBeVisible();
+  await expect(panel).toHaveCount(0);
+  await detached.reload();
+  await expect(missionHeading).toBeVisible();
+  await expect(detached.getByRole('button', {name: 'New mission'})).toHaveCount(0);
   console.log('missions: create, assign, evidence, report, accept and changes requested pass');
 } finally {
   await browser?.close();

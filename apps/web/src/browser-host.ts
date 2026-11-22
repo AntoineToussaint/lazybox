@@ -1,6 +1,6 @@
 import type { AddComputerStep, AttentionDestination, AttentionHost, ChatReturn, ChatTarget, NotificationPermission, RunnerDirectoryHost, RunnerListing, SshHost, WorkspaceHost } from '@lazybox/platform';
 
-function detachedKey(kind: 'artifact' | 'web' | 'workspace', collectionId: string, id = '') {
+function detachedKey(kind: 'mission' | 'artifact' | 'web' | 'workspace', collectionId: string, id = '') {
   return JSON.stringify([kind, collectionId, id]);
 }
 
@@ -8,6 +8,7 @@ function currentDetachedKey(search: URLSearchParams) {
   const collection = search.get('collection') || '';
   const view = search.get('view');
   if (view === 'workspace' && search.get('workspaceWindow')) return detachedKey(view, collection);
+  if (view === 'mission') return detachedKey(view, '', search.get('mission') || '');
   if (view === 'artifact') return detachedKey(view, collection, search.get('artifact') || '');
   if (view === 'web') return detachedKey(view, collection, search.get('web') || '');
 }
@@ -125,6 +126,9 @@ export function browserWorkspaceHost(scope: string, token: string, chat?: ChatTa
       const child = window.open(url, `chat-${target.panelId}`);
       if (!child) throw new Error('The chat window was blocked by the browser');
       windows.set(target.panelId, child); child.focus();
+    },
+    openMission(missionId) {
+      return openDetached(detachedKey('mission', '', missionId), {view: 'mission', mission: missionId}, 'The Mission window was blocked by the browser');
     },
     openArtifact(target) {
       return openDetached(detachedKey('artifact', target.collectionId, target.artifactId),

@@ -781,7 +781,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const navigator = useWorkspaceCommands({
     root: viewState?.root || '', main: !fixedWorkspaceId && ownWindows, collections, selection: page.selection, workspaceId: workspaceID, workbench, registry,
     windows: otherWindows, canStartConversation: !!info && !pending && canShowNewSession, terminalReady, canOpenWorkspaceWindow: !!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId,
-    showSession, selectWorkspace: select, closeSettings: () => setSettings(false),
+    showRun: target => showPanelFor('console', target), showSession, selectWorkspace: select, closeSettings: () => setSettings(false),
     showPanel: kind => kind === 'terminal' ? showTerminal() : kind === 'changes' ? showChanges() : kind === 'agents' ? void bringBackAgents() : void showModule(kind),
     openSettings: tab => { setAddSubscription(tab === 'add-subscription'); setSettingsTab(tab === 'add-subscription' ? 'subscriptions' : tab as SettingsTab); setSettings(true); },
     newConversation: () => beginConversation(), openWorkspaceWindow: () => void host?.openWorkspace?.(workspaceID),
@@ -998,7 +998,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     dock: panel => void bringBack(panel),
   };
   const moduleProps: SharedModuleProps = {
-    workspaceId: workspaceID, chooseRepositoryFolder: host?.chooseRepositoryFolder, collections, error: catalogError, loaded: catalogLoaded, refresh: refreshCatalog,
+    workspaceId: workspaceID, openMission: host?.openMission, chooseRepositoryFolder: host?.chooseRepositoryFolder, collections, error: catalogError, loaded: catalogLoaded, refresh: refreshCatalog,
     onWorkspaceCreated: (id: string) => beginConversation(id, undefined, true),
     onNewConversation: beginConversation, onShowSession: showSession,
     onOpenHandoff: target => {
@@ -1070,7 +1070,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       </div>)}
     {!fixedWorkspaceId && <AccountNotices onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }}/>}
     {surface === 'missions'
-      ? <MissionsPanel collections={collections} workspaceId="" viewState={viewState} onReturn={() => setSettings(false)}
+      ? <MissionsPanel openMission={host?.openMission} collections={collections} workspaceId="" viewState={viewState} onReturn={() => setSettings(false)}
           onShowSession={target => { setSettings(false); showSession(target); }}
           onShowPanel={(kind, target) => { setSettings(false); showPanelFor(kind, target); }}/>
       : settings

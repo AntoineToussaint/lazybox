@@ -26,6 +26,7 @@ type Commands = {
   showSession(target: ViewTarget): void;
   selectWorkspace(target: ViewTarget): void;
   showPanel(kind: string): void;
+  showRun(target: ViewTarget): void;
   openSettings(tab: string): void;
   closeSettings(): void;
   newConversation(): void;
@@ -58,6 +59,7 @@ export function useWorkspaceCommands(commands: Commands): CommandNavigator {
   });
   // A detached chat window asks this window to show a conversation, or an artifact (its Open in main window).
   useNavigationRequests(commands.root, commands.main, target => {
+    if (target.commandId) { latest.current.closeSettings(); latest.current.showRun(target); return; }
     if (target.artifactId === undefined) { goTo(target); return; }
     const request = { collectionId: target.collectionId, artifactId: target.artifactId };
     latest.current.closeSettings();

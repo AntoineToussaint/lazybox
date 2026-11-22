@@ -50,6 +50,7 @@ export type ModuleProps = {
   onOpenChat?(): void;
   onWorkspaceCreated?(workspaceId: string): void;
   onNewConversation?(workspaceId: string): void;
+  openMission?(id: string): Promise<void>;
   onShowSession?(target: ViewTarget): void;
   onOpenHandoff?: OpenHandoffConversation;
   onShowPanel?(kind: string, target?: ViewTarget): void;

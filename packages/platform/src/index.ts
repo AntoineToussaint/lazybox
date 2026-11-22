@@ -1,5 +1,5 @@
 /** Navigation belongs to a particular native window, not to its execution. */
-export type SurfaceTarget = { sessionId: string; commandId: string; commandsOpen: boolean; collectionId?: string; panelId?: string; artifactId?: string; webId?: string; webUrl?: string };
+export type SurfaceTarget = { sessionId: string; commandId: string; commandsOpen: boolean; collectionId?: string; panelId?: string; artifactId?: string; missionId?: string; webId?: string; webUrl?: string };
 export type ChatTarget = { panelId: string; collectionId: string; sessionId: string };
 /**
  * A chat window going back into the window it was detached from: the person
@@ -228,7 +228,7 @@ export type WorkspaceHost = AttentionHost & PowerHost & {
   webViews?: NativeWebViews;
   /** Opens a web page in its own window, with the viewer's toolbar. */
   openWebWindow?(target: WebWindowTarget): Promise<void>;
- reconnect?(): Promise<void>; /** Before Restart Runner: follow the restarted Runner, even on a new port, without reloading. */ expectRunnerRestart?(): Promise<void>;  openWorkspace?(collectionId: string): Promise<void>; chooseRepositoryFolder?(): Promise<string | null>; openSignIn?(url: string): Promise<void>; copySignInCode?(code: string): Promise<void>; openChat(target: ChatTarget): Promise<void>; /** An artifact page in its own window; reuses that artifact's window when open. */ openArtifact?(target: ArtifactTarget): Promise<void>;
+ reconnect?(): Promise<void>; /** Before Restart Runner: follow the restarted Runner, even on a new port, without reloading. */ expectRunnerRestart?(): Promise<void>;  openWorkspace?(collectionId: string): Promise<void>; chooseRepositoryFolder?(): Promise<string | null>; openSignIn?(url: string): Promise<void>; copySignInCode?(code: string): Promise<void>; openChat(target: ChatTarget): Promise<void>; /** An artifact page in its own window; reuses that artifact's window when open. */ openMission?(missionId: string): Promise<void>; openArtifact?(target: ArtifactTarget): Promise<void>;
   /** Closes a chat's own window and brings this window forward, where the chat now is. */
   dockChat(panelId: string): Promise<void>;
   /** Chats of this window whose own window asks to come back, or closed; returns the unsubscribe. */

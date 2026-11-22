@@ -35,19 +35,22 @@ const selectedKey = 'missions:selected', profileKey = 'missions:assign-profile',
  * the evidence that backs it. A person creates missions and tasks, assigns a
  * task to a conversation, reports it done, and accepts it.
  */
-export function MissionsPanel({ workspaceId, collections, viewState, onShowSession, onShowPanel, onReturn }: Pick<ModuleProps, 'workspaceId' | 'collections' | 'viewState' | 'onShowSession' | 'onShowPanel'> & { onReturn?(): void }) {
+export function MissionsPanel({ workspaceId, collections, viewState, onShowSession, onShowPanel, onReturn, openMission, pinned }: Pick<ModuleProps, 'workspaceId' | 'collections' | 'viewState' | 'onShowSession' | 'onShowPanel' | 'openMission'> & { pinned?: string; onReturn?(): void }) {
   const missions = useMissions();
   const [selected, setSelected] = useState(() => readPreference(viewState, selectedKey) || '');
   const [creating, setCreating] = useState(false);
   const choose = (id: string) => { setSelected(id); try { writePreference(viewState, selectedKey, id); } catch { /* a convenience */ } };
   // A mission chosen in the command palette.
   useMissionSelection(id => { setCreating(false); choose(id); });
-  const current = missions.missions.find(m => m.id === selected) || missions.missions.find(m => !m.canceled) || missions.missions[0];
+  const [detachError, setDetachError] = useState('');
+  const current = pinned !== undefined ? missions.missions.find(m => m.id === pinned) : missions.missions.find(m => m.id === selected) || missions.missions.find(m => !m.canceled) || missions.missions[0];
+  useEffect(() => { if (pinned && current) document.title = current.title + ' · Missions'; }, [pinned, current?.title]);
   const open = missions.missions.filter(m => !m.canceled), closed = missions.missions.filter(m => m.canceled);
   return <section className="missions-panel" aria-label="Missions and tasks">
     <header className="missions-header">
       {onReturn && <button type="button" className="quiet" onClick={onReturn}>Back to workspace</button>}
-      {missions.missions.length > 0 && !creating && current && <ActionMenu className="mission-picker" align="start" label={`Mission: ${current.title}`} title="Choose the mission"
+      {pinned !== undefined && <strong className="missions-heading">{current?.title || "Mission"}</strong>}
+      {pinned === undefined && missions.missions.length > 0 && !creating && current && <ActionMenu className="mission-picker" align="start" label={`Mission: ${current.title}`} title="Choose the mission"
         summary={<><span className="mission-picker-title">{current.title}</span><small>{current.canceled ? 'Canceled' : missionSummary(current)}</small><Icon name="chevron" size={11}/></>}>
         <ActionMenuItems items={[
           ...open.map(m => ({ label: m.title, note: missionSummary(m), checked: m.id === current.id, run: () => choose(m.id) })),
@@ -56,16 +59,22 @@ export function MissionsPanel({ workspaceId, collections, viewState, onShowSessi
       </ActionMenu>}
       {creating && <strong className="missions-heading">New mission</strong>}
       <div className="missions-tools">
-        {!creating && missions.missions.length > 0 && <button type="button" className="mission-new" onClick={() => setCreating(true)}><Icon name="plus" size={13}/> New mission</button>}
-        {!onReturn && <button type="button" className="icon-button" aria-label="Open the missions board as a page" title="Open as a page: the board, timeline and messages with room" onClick={() => showMissionsPage()}><Icon name="maximize" size={14}/></button>}
+        {pinned === undefined && !creating && missions.missions.length > 0 && <button type="button" className="mission-new" onClick={() => setCreating(true)}><Icon name="plus" size={13}/> New mission</button>}
+        {openMission && current && !creating && <button type="button" className="quiet" onClick={() => {
+          setDetachError('');
+          void openMission(current.id).then(() => onReturn?.()).catch(error => setDetachError(message(error)));
+        }}>Detach mission</button>}
+        {pinned === undefined && !onReturn && <button type="button" className="icon-button" aria-label="Open the missions board as a page" title="Open as a page: the board, timeline and messages with room" onClick={() => showMissionsPage()}><Icon name="maximize" size={14}/></button>}
         <button type="button" className="icon-button" aria-label="Refresh missions" title="Refresh" onClick={() => void missions.refresh()}><Icon name="refresh" size={14}/></button>
       </div>
     </header>
     <div className="missions-body">
+      {detachError && <p role="alert">{detachError}</p>}
+      {pinned !== undefined && missions.loaded && !current && <p role="status">This Mission is unavailable on this Runner.</p>}
       {missions.error && <p className="missions-notice tone-warn" role="status">Missions unavailable; retrying. {missions.error}</p>}
       {!missions.loaded && !missions.error && <p className="missions-empty" role="status">Loading missions…</p>}
       {creating && <NewMission onCancel={missions.missions.length ? () => setCreating(false) : undefined} onCreate={async (title, brief) => { const m = await missions.create(title, brief); choose(m.id); setCreating(false); }}/>}
-      {!creating && missions.loaded && !missions.missions.length && <div className="missions-intro">
+      {pinned === undefined && !creating && missions.loaded && !missions.missions.length && <div className="missions-intro">
         <Icon name="target" size={26}/>
         <h3>Create your first mission</h3>
         <p>Describe the outcome. You can assign tasks to conversations in different workspaces on this Runner.</p>

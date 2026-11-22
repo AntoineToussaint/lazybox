@@ -27,7 +27,7 @@ export function useNavigationRequests(root: string, enabled: boolean, show: (tar
       try {
         const value = JSON.parse(event.newValue);
         if (typeof value?.collectionId !== 'string' || typeof value.sessionId !== 'string' || !(Date.now() - value.at < fresh)) return;
-        ref.current({ collectionId: value.collectionId, sessionId: value.sessionId, commandId: '', ...(typeof value.artifactId === 'string' ? { artifactId: value.artifactId } : {}) });
+        ref.current({ collectionId: value.collectionId, sessionId: value.sessionId, commandId: typeof value.commandId === 'string' ? value.commandId : '', ...(typeof value.artifactId === 'string' ? { artifactId: value.artifactId } : {}) });
       } catch { /* a malformed request is ignored */ }
     };
     window.addEventListener('storage', listener);

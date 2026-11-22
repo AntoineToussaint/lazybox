@@ -20,6 +20,7 @@ pub struct Target {
     pub panel_id: String,
     /// An artifact page in its own window (with its workspace's collection_id).
     pub artifact_id: String,
+    pub mission_id: String,
     /// A web page in its own window (a detached Web panel), and the page it opened on.
     pub web_id: String,
     pub web_url: String,
@@ -34,7 +35,14 @@ pub fn valid_id(id: &str) -> bool {
 }
 impl Target {
     pub fn validate(&self) -> Result<(), String> {
-        if (!self.session_id.is_empty() && !valid_id(&self.session_id))
+        if (!self.mission_id.is_empty()
+            && (!valid_id(&self.mission_id)
+                || !self.collection_id.is_empty()
+                || !self.session_id.is_empty()
+                || !self.web_id.is_empty()
+                || !self.artifact_id.is_empty()
+                || self.commands_open))
+            || (!self.session_id.is_empty() && !valid_id(&self.session_id))
             || (!self.collection_id.is_empty() && !valid_id(&self.collection_id))
             || (!self.panel_id.is_empty()
                 && (!valid_id(&self.panel_id) || self.session_id.is_empty()))
@@ -144,6 +152,15 @@ mod web_window_tests {
 mod artifact_tests {
     use super::*;
     #[test]
+    fn mission_windows_are_pinned_and_reused() {
+        let mut layout = Layout::default();
+        let label = layout.mission("alpha".into()).unwrap();
+        assert_eq!(layout.mission("alpha".into()).unwrap(), label);
+        assert_ne!(layout.mission("beta".into()).unwrap(), label);
+        assert!(layout.mission("../alpha".into()).is_err());
+        assert!(layout.validate().is_ok());
+    }
+    #[test]
     fn artifact_window_is_one_per_artifact_and_keeps_its_identity() {
         let mut layout = Layout::default();
         let target = Target {
@@ -220,7 +237,13 @@ impl Layout {
         for (label, surface) in &self.surfaces {
             surface.target.validate()?;
             let identity_matches = match label.as_str() {
-                "main" => surface.target.panel_id.is_empty(),
+                "main" => {
+                    surface.target.panel_id.is_empty() && surface.target.mission_id.is_empty()
+                }
+                _ if label.starts_with("mission-") => {
+                    !surface.target.mission_id.is_empty()
+                        && label == &format!("mission-{}", surface.target.mission_id)
+                }
                 _ if label.starts_with("workspace-") => {
                     !surface.target.collection_id.is_empty()
                         && surface.target.panel_id.is_empty()
@@ -280,6 +303,7 @@ impl Layout {
                 || target.command_id != current.target.command_id
                 || target.collection_id != current.target.collection_id
                 || target.panel_id != current.target.panel_id
+                || target.mission_id != current.target.mission_id
                 || target.artifact_id != current.target.artifact_id
                 || target.web_id != current.target.web_id)
         {
@@ -394,6 +418,22 @@ impl Layout {
             },
         );
         Ok(label)
+    }
+    pub fn mission(&mut self, id: String) -> Result<String, String> {
+        if !valid_id(&id) {
+            return Err("Invalid Mission identity".into());
+        }
+        let label = format!("mission-{id}");
+        if self.surfaces.contains_key(&label) {
+            return Ok(label);
+        }
+        self.insert(
+            label,
+            Target {
+                mission_id: id,
+                ..Target::default()
+            },
+        )
     }
     /// The window of one detached Web panel; opening it again reuses that window.
     pub fn web(&mut self, target: Target) -> Result<String, String> {

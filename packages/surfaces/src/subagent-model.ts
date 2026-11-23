@@ -885,12 +885,17 @@ export function backgroundCommands(state: Subagents, runner?: Readonly<Record<st
   return out.sort((a, b) => Number(activeSubagent(mergedStatus(b, runner))) - Number(activeSubagent(mergedStatus(a, runner))));
 }
 
+/** A panel can already be open when the provider links its task ID to the spawn card. */
+export function panelAgent(state: Subagents, id: string): Subagent | undefined {
+  return state.byId[state.aliases[id] ?? id];
+}
+
 /** Sub-agents in tree order: each followed by the ones it spawned. Background commands are not sub-agents. */
 export function subagentTree(state: Subagents): { agent: Subagent; depth: number }[] {
   const out: { agent: Subagent; depth: number }[] = [];
   const visit = (id: string, depth: number) => {
     const agent = state.byId[id];
-    if (!agent || agent.kind === 'command' || depth > 16) return;
+    if (!agent || state.aliases[id] || agent.kind === 'command' || depth > 16) return;
     out.push({ agent, depth });
     for (const child of agent.children) visit(child, depth + 1);
   };

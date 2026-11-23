@@ -86,6 +86,9 @@ func fixtureWorker() {
 			note("message " + r.Params.Text)
 			send(map[string]any{"id": r.ID, "result": map[string]string{"delivery": "submitted"}})
 			event(map[string]any{"type": "turn_started"})
+			if r.Params.Text == "hold until reboot" {
+				continue
+			}
 			if r.Params.Text == "report context" {
 				// What the Runner meters: a write to its telemetry database.
 				event(map[string]any{"type": "context", "data": map[string]any{"model": "fixture", "used": 1000, "capacity": 200000}})

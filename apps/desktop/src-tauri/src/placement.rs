@@ -74,7 +74,16 @@ pub fn fit(saved: Option<&Geometry>, displays: &[Display]) -> Result<Placement, 
     let same = saved.and_then(|g| {
         displays
             .iter()
-            .find(|d| d.valid() && d.name.is_some() && d.name == g.display.name)
+            .filter(|d| {
+                d.valid()
+                    && d.name == g.display.name
+                    && (d.name.is_some() || d.work == g.display.work)
+            })
+            .min_by(|a, b| {
+                let distance =
+                    |d: &Display| (d.work.x - g.display.work.x).hypot(d.work.y - g.display.work.y);
+                distance(a).total_cmp(&distance(b))
+            })
     });
     let target = same.unwrap_or(fallback);
     let (width, height, frame_width, frame_height) = saved
@@ -89,8 +98,8 @@ pub fn fit(saved: Option<&Geometry>, displays: &[Display]) -> Result<Placement, 
         .unwrap_or((980.0, 850.0, 0.0, 28.0));
     let max_width = (target.work.width / target.scale - frame_width).max(1.0);
     let max_height = (target.work.height / target.scale - frame_height).max(1.0);
-    let min_width = 580.0_f64.min(max_width);
-    let min_height = 600.0_f64.min(max_height);
+    let min_width = width.clamp(320.0, 580.0).min(max_width);
+    let min_height = height.clamp(240.0, 600.0).min(max_height);
     let width = width.clamp(min_width, max_width);
     let height = height.clamp(min_height, max_height);
     let outer_width = (width + frame_width) * target.scale;
@@ -123,6 +132,45 @@ pub fn fit(saved: Option<&Geometry>, displays: &[Display]) -> Result<Placement, 
     })
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum Pattern {
+    Columns,
+    Focus,
+    Grid,
+}
+
+/// Work-area cells are physical pixels, including window decorations.
+pub fn cell(work: &Rect, pattern: Pattern, i: usize, count: usize) -> Rect {
+    debug_assert!(i < count);
+    let (cols, rows, col, row) = match pattern {
+        Pattern::Grid => {
+            let cols = (count as f64).sqrt().ceil() as usize;
+            (cols, count.div_ceil(cols), i % cols, i / cols)
+        }
+        Pattern::Focus if count > 1 => {
+            if i == 0 {
+                (3, 1, 0, 0)
+            } else {
+                (3, count - 1, 2, i - 1)
+            }
+        }
+        _ => (count, 1, i, 0),
+    };
+    let span = if pattern == Pattern::Focus && i == 0 && count > 1 {
+        2
+    } else {
+        1
+    };
+    let x = (work.width * col as f64 / cols as f64).round();
+    let y = (work.height * row as f64 / rows as f64).round();
+    Rect {
+        x: work.x + x,
+        y: work.y + y,
+        width: (work.width * (col + span) as f64 / cols as f64).round() - x,
+        height: (work.height * (row + 1) as f64 / rows as f64).round() - y,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +200,42 @@ mod tests {
             display,
         }
     }
+    #[test]
+    fn identical_displays_and_tile_edges() {
+        let left = display("External", -1920.0, 1.0);
+        let right = display("External", 0.0, 1.0);
+        let saved = geometry(left.clone());
+        let p = fit(Some(&saved), &[right, left.clone()]).unwrap();
+        assert_eq!(p.x, -1820);
+        for pattern in [Pattern::Columns, Pattern::Focus, Pattern::Grid] {
+            let tiles: Vec<_> = (0..4).map(|i| cell(&left.work, pattern, i, 4)).collect();
+            assert_eq!(
+                tiles.iter().map(|r| r.width * r.height).sum::<f64>(),
+                left.work.width * left.work.height
+            );
+            for (i, a) in tiles.iter().enumerate() {
+                for b in &tiles[i + 1..] {
+                    assert!(
+                        a.x + a.width <= b.x
+                            || b.x + b.width <= a.x
+                            || a.y + a.height <= b.y
+                            || b.y + b.height <= a.y
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn compact_grid_cell_keeps_its_saved_height_after_restart() {
+        let monitor = display("desk", 0.0, 1.0);
+        let mut saved = geometry(monitor.clone());
+        saved.outer.height = 520.0;
+        saved.inner_height = 492.0;
+        let p = fit(Some(&saved), &[monitor]).expect("restore compact tile");
+        assert_eq!(p.height, 492.0);
+        assert!(p.min_height <= p.height);
+    }
+
     #[test]
     fn preserves_logical_size_and_relative_position_across_scale_changes() {
         let old = geometry(display("external", -3840.0, 2.0));

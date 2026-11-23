@@ -378,9 +378,10 @@ The page follows new versions by itself.
   the kind, the version, an outline of the headings, and the
   `lazybox artifact get ID` command so the agent can read the whole text. In
   its own window, **Discuss in chat** opens a resizable chat beside the
-  artifact and puts a reference to the selected version or excerpt in the
-  draft. It starts with the source conversation when available, and you can
-  switch to another conversation in the workspace or start one explicitly.
+  artifact. Its draft contains one line naming the artifact and the command
+  to read that revision. Selecting a passage also includes the quotation.
+  The companion starts a fresh conversation by default and remembers an
+  explicit conversation choice for that artifact.
   **Copy artifact reference** is also available in the artifact actions menu.
 - **Open in its own window** opens the page in its own native window on
   desktop (`open_artifact`, one window per artifact) or browser window on

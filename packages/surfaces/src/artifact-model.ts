@@ -169,6 +169,10 @@ export function updatedLine(artifact: Artifact, now = Date.now()): string {
   return [`v${latest?.number ?? 1}`, versionOrigin(latest), when].filter(Boolean).join(' · ');
 }
 
+export function pinnedArtifactReference(artifact: Pick<Artifact, 'id' | 'title' | 'kind'>, version: number): string {
+  return `Artifact “${artifact.title}” (${kindLabel[asKind(artifact.kind)].toLowerCase()}, v${version}). Read it in full with \`lazybox artifact get ${artifact.id} --version ${version}\`.`;
+}
+
 /**
  * What "Send to agent" puts in a message box: the reference an agent can fetch
  * with the CLI, and a short outline so the person sees what they are sending.
@@ -184,7 +188,7 @@ export function agentReference(artifact: Pick<Artifact, 'id' | 'title' | 'kind' 
     if (!item || used + item.length > budget) continue;
     outline.push(item); used += item.length + 1;
   }
-  const lines = [`Artifact “${artifact.title}” (${kindLabel[asKind(artifact.kind)].toLowerCase()}, v${version}). Read it in full with \`lazybox artifact get ${artifact.id} --version ${version}\`.`];
+  const lines = [pinnedArtifactReference(artifact, version)];
   for (const input of artifact.links ?? []) {
     if (input.kind === 'artifact') lines.push(`Source ${input.role}: \`lazybox artifact get ${input.id} --version ${input.version}\`.`);
   }

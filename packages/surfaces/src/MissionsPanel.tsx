@@ -23,6 +23,8 @@ import { useOpenConversation } from './AgentMessages';
 import { budgetLine, overlapsOfTask, permissionLabel, reviewHeld, usd } from './orchestration-model';
 import { MissionLeases, MissionMessages, MissionTabs, MissionTimeline, type MissionTab } from './MissionViews';
 import { ReviewPlanButton } from './PlanSheet';
+import { DeliveryVerdict } from './DeliveryVerdict';
+import { useDeliveryOutcome } from './useDeliveryOutcome';
 import './missions.css';
 
 const message = (error: unknown) => ConnectError.from(error).rawMessage || String(error);
@@ -134,6 +136,8 @@ function MissionBoard({ missionId, collections, viewState, onShowSession, onShow
   const attention = mission.tasks.find(t => t.gate && t.status === 'needs_you')
     || mission.tasks.find(t => ['failed', 'needs_you', 'changes_requested', 'blocked'].includes(t.status));
   const goals = new Map(mission.goals.map(g => [g.id, g.title]));
+  // A delivery verdict exists only under an approved plan that pins a spec.
+  const contracted = mission.plans.some(p => p.state === 'approved' && !!p.contract);
   return <div ref={boardRef} className="mission-board" data-mission={mission.id}>
     <div className="mission-head">
       <div className="mission-title"><h3>{mission.title}</h3>
@@ -174,8 +178,9 @@ function MissionBoard({ missionId, collections, viewState, onShowSession, onShow
       {columns.map(column => <section key={column.key} className={`mission-column column-${column.key}`} aria-labelledby={`column-${mission.id}-${column.key}`}>
         <h4 id={`column-${mission.id}-${column.key}`}>{column.title}<span>{board[column.key].length}</span></h4>
         {!board[column.key].length && <p className="mission-column-empty">{column.empty}</p>}
-        <ul>{board[column.key].map(task => <TaskCard key={task.id} task={task} goal={goals.get(task.goalId)} now={now} collections={collections} titles={mission.tasks} orchestrators={mission.grants} overlaps={overlapsOfTask(mission, task.id)}
+        <ul>{board[column.key].map(task => <TaskCard key={task.id} task={task} missionId={mission.id} contracted={contracted} goal={goals.get(task.goalId)} now={now} collections={collections} titles={mission.tasks} orchestrators={mission.grants} overlaps={overlapsOfTask(mission, task.id)}
           onOpen={() => openConversation(task)} onEvidence={e => openEvidence(task, e)}
+          onDeliveryEvidence={commandId => onShowPanel?.('console', { collectionId: task.attempt?.collectionId || '', sessionId: task.attempt?.sessionId || '', commandId })}
           onAssign={() => setDialog({ kind: 'assign', task })} onReport={() => setDialog({ kind: 'report', task })}
           onAccept={() => void change({ case: 'accept', value: { taskId: task.id, note: '' } }, `Accepted “${task.title}”.`).catch(() => {})}
           onReject={() => setDialog({ kind: 'reject', task })} onCancel={() => setDialog({ kind: 'cancel', task })}
@@ -222,9 +227,9 @@ function AddTask({ onAdd, onClose, mission }: { mission: Mission; onAdd(title: s
   </form>;
 }
 
-type CardProps = { task: MissionTask; goal?: string; now: number; collections: Collection[]; titles: MissionTask[]; orchestrators: Mission['grants']; overlaps: ReturnType<typeof overlapsOfTask>; onOpen(): void; onEvidence(e: MissionEvidence): void; onAssign(): void; onReport(): void; onAccept(): void; onReject(): void; onCancel(): void; onNotice(text: string): void; onError(text: string): void };
+type CardProps = { task: MissionTask; missionId: string; contracted: boolean; onDeliveryEvidence(commandId: string): void; goal?: string; now: number; collections: Collection[]; titles: MissionTask[]; orchestrators: Mission['grants']; overlaps: ReturnType<typeof overlapsOfTask>; onOpen(): void; onEvidence(e: MissionEvidence): void; onAssign(): void; onReport(): void; onAccept(): void; onReject(): void; onCancel(): void; onNotice(text: string): void; onError(text: string): void };
 
-function TaskCard({ task, goal, now, collections, titles, orchestrators, overlaps, onOpen, onEvidence, onAssign, onReport, onAccept, onReject, onCancel, onNotice, onError }: CardProps) {
+function TaskCard({ task, missionId, contracted, onDeliveryEvidence, goal, now, collections, titles, orchestrators, overlaps, onOpen, onEvidence, onAssign, onReport, onAccept, onReject, onCancel, onNotice, onError }: CardProps) {
   const [expanded, setExpanded] = useState(false);
   const actions = taskActions(task);
   const attempt = task.attempt;
@@ -233,6 +238,7 @@ function TaskCard({ task, goal, now, collections, titles, orchestrators, overlap
   const label: Record<string, string> = { assign: task.attempts.length ? 'Assign again…' : 'Assign…', report: 'Report done…', accept: 'Accept', reject: 'Ask for changes…', open: 'Open conversation' };
   const run: Record<string, () => void> = { assign: onAssign, report: onReport, accept: onAccept, reject: onReject, open: onOpen };
   const blockedBy = task.blockedBy.map(id => titles.find(t => t.id === id)?.title || id);
+  const outcome = useDeliveryOutcome(contracted && attempt ? { missionId, taskId: task.id } : undefined);
   return <li className={`mission-card status-${task.status}`} data-task={task.id} tabIndex={0} {...peekProps({ kind: 'mission-task', taskId: task.id, title: task.title })} aria-label={`${task.title}, ${statusLabel[task.status] || task.status}${task.trust ? ', ' + trustLabel[task.trust] : ''}`}>
     <div className="mission-card-head">
       <button type="button" className="mission-card-title" aria-expanded={expanded} onClick={() => setExpanded(v => !v)}><strong>{task.title}</strong></button>
@@ -250,6 +256,7 @@ function TaskCard({ task, goal, now, collections, titles, orchestrators, overlap
         <Icon name="subagent" size={11}/>{orchestrators.find(g => g.conversationId === attempt.parentConversationId)?.title || 'Orchestrator'}<small>{attempt.role || 'worker'}</small></span>}
     </div>
     <p className="mission-reason">{task.reason}</p>
+    {outcome && <DeliveryVerdict outcome={outcome} compact={!expanded} onEvidence={e => onDeliveryEvidence(e.commandId)}/>}
     {attempt && <button type="button" className="mission-conversation" disabled={!attempt.sessionId || attempt.live === 'missing' || attempt.live === 'reserved'} onClick={onOpen} title={attempt.live === 'reserved' ? 'The worker conversation is being prepared' : attempt.sessionId ? 'Open the conversation working on this task' : 'This conversation was deleted'}>
       <Icon name="chat" size={13}/><span className="mission-conversation-title">{attempt.title || 'Conversation'}</span>
       {workspace && <span className="mission-conversation-where">{workspace}</span>}

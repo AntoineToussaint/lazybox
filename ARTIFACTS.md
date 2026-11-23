@@ -425,7 +425,7 @@ The mission planner accepts proposed tasks and dependencies. Approving that prop
 
 Agents can publish a derived roadmap with `lazybox artifact put plan.md --title "Implementation roadmap" --kind plan --design ID@VERSION --review ID@VERSION`. Either input can be used alone. To continue work, update the saved plan by ID; later revisions keep its original inputs.
 
-Use `lazybox artifact template pr-walkthrough`, `incident-timeline`, or `release-checklist` for editable JSON starters. The first two use the report schema. The checklist uses the existing interactive to-do renderer. `lazybox artifact template delivery-spec` starts a `spec.v2` spec whose acceptance criteria each carry a stable ID and a required flag; a Mission plan pinned to it keeps those IDs. A version records the schema its body declares, so a `spec.v2` version reads as `spec.v2`. Fill in real evidence and publish the file with the normal artifact command.
+Use `lazybox artifact template pr-walkthrough`, `incident-timeline`, or `release-checklist` for editable JSON starters. The first two use the report schema. The checklist uses the existing interactive to-do renderer. `lazybox artifact template delivery-spec` starts a `spec.v2` spec whose acceptance criteria each carry a stable ID and a required flag; a Mission plan pinned to it keeps those IDs. A version records the schema its body declares, so a `spec.v2` version reads as `spec.v2`. `lazybox delivery publish` creates a report whose body is a delivery outcome (`delivery-outcome.v1`): the Runner validates it strictly, and the reader shows its verdict per candidate with a table of criteria and evidence. Fill in real evidence and publish the file with the normal artifact command.
 
 ## Known limits
 

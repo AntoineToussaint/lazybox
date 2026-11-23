@@ -120,6 +120,9 @@ const (
 	RunnerService_Publish_FullMethodName                      = "/lazybox.bench.v1.RunnerService/Publish"
 	RunnerService_FinishPipe_FullMethodName                   = "/lazybox.bench.v1.RunnerService/FinishPipe"
 	RunnerService_BindDelivery_FullMethodName                 = "/lazybox.bench.v1.RunnerService/BindDelivery"
+	RunnerService_GetDeliveryOutcome_FullMethodName           = "/lazybox.bench.v1.RunnerService/GetDeliveryOutcome"
+	RunnerService_PublishDeliveryOutcome_FullMethodName       = "/lazybox.bench.v1.RunnerService/PublishDeliveryOutcome"
+	RunnerService_RecordReviewCriterion_FullMethodName        = "/lazybox.bench.v1.RunnerService/RecordReviewCriterion"
 	RunnerService_ListCommands_FullMethodName                 = "/lazybox.bench.v1.RunnerService/ListCommands"
 	RunnerService_ClaimCommandShare_FullMethodName            = "/lazybox.bench.v1.RunnerService/ClaimCommandShare"
 	RunnerService_ReadCommand_FullMethodName                  = "/lazybox.bench.v1.RunnerService/ReadCommand"
@@ -441,6 +444,15 @@ type RunnerServiceClient interface {
 	// `lazybox run --check` and `--needs` runs record delivery observations.
 	// Binding another revision starts a new attempt (delivery.Store.Bind).
 	BindDelivery(ctx context.Context, in *BindDeliveryRequest, opts ...grpc.CallOption) (*DeliveryBinding, error)
+	// The delivery outcome of a conversation, or of a Mission task: the same
+	// projection (delivery.Project) through either lookup.
+	GetDeliveryOutcome(ctx context.Context, in *GetDeliveryOutcomeRequest, opts ...grpc.CallOption) (*DeliveryOutcome, error)
+	// Publishes the outcome as an immutable verdict snapshot: a report
+	// artifact (schema delivery-outcome.v1), or the next version of one.
+	PublishDeliveryOutcome(ctx context.Context, in *PublishDeliveryOutcomeRequest, opts ...grpc.CallOption) (*Artifact, error)
+	// A contract-bound reviewer's verdict on one criterion
+	// (`lazybox delivery review <criterion> passed|failed`).
+	RecordReviewCriterion(ctx context.Context, in *RecordReviewCriterionRequest, opts ...grpc.CallOption) (*RecordReviewCriterionResponse, error)
 	ListCommands(ctx context.Context, in *ListCommandsRequest, opts ...grpc.CallOption) (*ListCommandsResponse, error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -1808,6 +1820,36 @@ func (c *runnerServiceClient) BindDelivery(ctx context.Context, in *BindDelivery
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DeliveryBinding)
 	err := c.cc.Invoke(ctx, RunnerService_BindDelivery_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) GetDeliveryOutcome(ctx context.Context, in *GetDeliveryOutcomeRequest, opts ...grpc.CallOption) (*DeliveryOutcome, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeliveryOutcome)
+	err := c.cc.Invoke(ctx, RunnerService_GetDeliveryOutcome_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) PublishDeliveryOutcome(ctx context.Context, in *PublishDeliveryOutcomeRequest, opts ...grpc.CallOption) (*Artifact, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Artifact)
+	err := c.cc.Invoke(ctx, RunnerService_PublishDeliveryOutcome_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) RecordReviewCriterion(ctx context.Context, in *RecordReviewCriterionRequest, opts ...grpc.CallOption) (*RecordReviewCriterionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordReviewCriterionResponse)
+	err := c.cc.Invoke(ctx, RunnerService_RecordReviewCriterion_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3321,6 +3363,15 @@ type RunnerServiceServer interface {
 	// `lazybox run --check` and `--needs` runs record delivery observations.
 	// Binding another revision starts a new attempt (delivery.Store.Bind).
 	BindDelivery(context.Context, *BindDeliveryRequest) (*DeliveryBinding, error)
+	// The delivery outcome of a conversation, or of a Mission task: the same
+	// projection (delivery.Project) through either lookup.
+	GetDeliveryOutcome(context.Context, *GetDeliveryOutcomeRequest) (*DeliveryOutcome, error)
+	// Publishes the outcome as an immutable verdict snapshot: a report
+	// artifact (schema delivery-outcome.v1), or the next version of one.
+	PublishDeliveryOutcome(context.Context, *PublishDeliveryOutcomeRequest) (*Artifact, error)
+	// A contract-bound reviewer's verdict on one criterion
+	// (`lazybox delivery review <criterion> passed|failed`).
+	RecordReviewCriterion(context.Context, *RecordReviewCriterionRequest) (*RecordReviewCriterionResponse, error)
 	ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -3975,6 +4026,15 @@ func (UnimplementedRunnerServiceServer) FinishPipe(context.Context, *FinishPipeR
 }
 func (UnimplementedRunnerServiceServer) BindDelivery(context.Context, *BindDeliveryRequest) (*DeliveryBinding, error) {
 	return nil, status.Error(codes.Unimplemented, "method BindDelivery not implemented")
+}
+func (UnimplementedRunnerServiceServer) GetDeliveryOutcome(context.Context, *GetDeliveryOutcomeRequest) (*DeliveryOutcome, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetDeliveryOutcome not implemented")
+}
+func (UnimplementedRunnerServiceServer) PublishDeliveryOutcome(context.Context, *PublishDeliveryOutcomeRequest) (*Artifact, error) {
+	return nil, status.Error(codes.Unimplemented, "method PublishDeliveryOutcome not implemented")
+}
+func (UnimplementedRunnerServiceServer) RecordReviewCriterion(context.Context, *RecordReviewCriterionRequest) (*RecordReviewCriterionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordReviewCriterion not implemented")
 }
 func (UnimplementedRunnerServiceServer) ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListCommands not implemented")
@@ -6163,6 +6223,60 @@ func _RunnerService_BindDelivery_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).BindDelivery(ctx, req.(*BindDeliveryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_GetDeliveryOutcome_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDeliveryOutcomeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).GetDeliveryOutcome(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_GetDeliveryOutcome_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).GetDeliveryOutcome(ctx, req.(*GetDeliveryOutcomeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_PublishDeliveryOutcome_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishDeliveryOutcomeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).PublishDeliveryOutcome(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_PublishDeliveryOutcome_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).PublishDeliveryOutcome(ctx, req.(*PublishDeliveryOutcomeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_RecordReviewCriterion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordReviewCriterionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).RecordReviewCriterion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_RecordReviewCriterion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).RecordReviewCriterion(ctx, req.(*RecordReviewCriterionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -8841,6 +8955,18 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BindDelivery",
 			Handler:    _RunnerService_BindDelivery_Handler,
+		},
+		{
+			MethodName: "GetDeliveryOutcome",
+			Handler:    _RunnerService_GetDeliveryOutcome_Handler,
+		},
+		{
+			MethodName: "PublishDeliveryOutcome",
+			Handler:    _RunnerService_PublishDeliveryOutcome_Handler,
+		},
+		{
+			MethodName: "RecordReviewCriterion",
+			Handler:    _RunnerService_RecordReviewCriterion_Handler,
 		},
 		{
 			MethodName: "ListCommands",

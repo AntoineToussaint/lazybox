@@ -329,6 +329,15 @@ const (
 	// RunnerServiceBindDeliveryProcedure is the fully-qualified name of the RunnerService's
 	// BindDelivery RPC.
 	RunnerServiceBindDeliveryProcedure = "/lazybox.bench.v1.RunnerService/BindDelivery"
+	// RunnerServiceGetDeliveryOutcomeProcedure is the fully-qualified name of the RunnerService's
+	// GetDeliveryOutcome RPC.
+	RunnerServiceGetDeliveryOutcomeProcedure = "/lazybox.bench.v1.RunnerService/GetDeliveryOutcome"
+	// RunnerServicePublishDeliveryOutcomeProcedure is the fully-qualified name of the RunnerService's
+	// PublishDeliveryOutcome RPC.
+	RunnerServicePublishDeliveryOutcomeProcedure = "/lazybox.bench.v1.RunnerService/PublishDeliveryOutcome"
+	// RunnerServiceRecordReviewCriterionProcedure is the fully-qualified name of the RunnerService's
+	// RecordReviewCriterion RPC.
+	RunnerServiceRecordReviewCriterionProcedure = "/lazybox.bench.v1.RunnerService/RecordReviewCriterion"
 	// RunnerServiceListCommandsProcedure is the fully-qualified name of the RunnerService's
 	// ListCommands RPC.
 	RunnerServiceListCommandsProcedure = "/lazybox.bench.v1.RunnerService/ListCommands"
@@ -900,6 +909,15 @@ type RunnerServiceClient interface {
 	// `lazybox run --check` and `--needs` runs record delivery observations.
 	// Binding another revision starts a new attempt (delivery.Store.Bind).
 	BindDelivery(context.Context, *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error)
+	// The delivery outcome of a conversation, or of a Mission task: the same
+	// projection (delivery.Project) through either lookup.
+	GetDeliveryOutcome(context.Context, *connect.Request[gen.GetDeliveryOutcomeRequest]) (*connect.Response[gen.DeliveryOutcome], error)
+	// Publishes the outcome as an immutable verdict snapshot: a report
+	// artifact (schema delivery-outcome.v1), or the next version of one.
+	PublishDeliveryOutcome(context.Context, *connect.Request[gen.PublishDeliveryOutcomeRequest]) (*connect.Response[gen.Artifact], error)
+	// A contract-bound reviewer's verdict on one criterion
+	// (`lazybox delivery review <criterion> passed|failed`).
+	RecordReviewCriterion(context.Context, *connect.Request[gen.RecordReviewCriterionRequest]) (*connect.Response[gen.RecordReviewCriterionResponse], error)
 	ListCommands(context.Context, *connect.Request[gen.ListCommandsRequest]) (*connect.Response[gen.ListCommandsResponse], error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -1858,6 +1876,24 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("BindDelivery")),
 			connect.WithClientOptions(opts...),
 		),
+		getDeliveryOutcome: connect.NewClient[gen.GetDeliveryOutcomeRequest, gen.DeliveryOutcome](
+			httpClient,
+			baseURL+RunnerServiceGetDeliveryOutcomeProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("GetDeliveryOutcome")),
+			connect.WithClientOptions(opts...),
+		),
+		publishDeliveryOutcome: connect.NewClient[gen.PublishDeliveryOutcomeRequest, gen.Artifact](
+			httpClient,
+			baseURL+RunnerServicePublishDeliveryOutcomeProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("PublishDeliveryOutcome")),
+			connect.WithClientOptions(opts...),
+		),
+		recordReviewCriterion: connect.NewClient[gen.RecordReviewCriterionRequest, gen.RecordReviewCriterionResponse](
+			httpClient,
+			baseURL+RunnerServiceRecordReviewCriterionProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("RecordReviewCriterion")),
+			connect.WithClientOptions(opts...),
+		),
 		listCommands: connect.NewClient[gen.ListCommandsRequest, gen.ListCommandsResponse](
 			httpClient,
 			baseURL+RunnerServiceListCommandsProcedure,
@@ -2731,6 +2767,9 @@ type runnerServiceClient struct {
 	publish                      *connect.Client[gen.PublishRequest, gen.CommandStatus]
 	finishPipe                   *connect.Client[gen.FinishPipeRequest, gen.CommandStatus]
 	bindDelivery                 *connect.Client[gen.BindDeliveryRequest, gen.DeliveryBinding]
+	getDeliveryOutcome           *connect.Client[gen.GetDeliveryOutcomeRequest, gen.DeliveryOutcome]
+	publishDeliveryOutcome       *connect.Client[gen.PublishDeliveryOutcomeRequest, gen.Artifact]
+	recordReviewCriterion        *connect.Client[gen.RecordReviewCriterionRequest, gen.RecordReviewCriterionResponse]
 	listCommands                 *connect.Client[gen.ListCommandsRequest, gen.ListCommandsResponse]
 	claimCommandShare            *connect.Client[gen.CommandRequest, gen.ClaimCommandShareResponse]
 	readCommand                  *connect.Client[gen.ReadCommandRequest, gen.ReadCommandResponse]
@@ -3359,6 +3398,21 @@ func (c *runnerServiceClient) FinishPipe(ctx context.Context, req *connect.Reque
 // BindDelivery calls lazybox.bench.v1.RunnerService.BindDelivery.
 func (c *runnerServiceClient) BindDelivery(ctx context.Context, req *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error) {
 	return c.bindDelivery.CallUnary(ctx, req)
+}
+
+// GetDeliveryOutcome calls lazybox.bench.v1.RunnerService.GetDeliveryOutcome.
+func (c *runnerServiceClient) GetDeliveryOutcome(ctx context.Context, req *connect.Request[gen.GetDeliveryOutcomeRequest]) (*connect.Response[gen.DeliveryOutcome], error) {
+	return c.getDeliveryOutcome.CallUnary(ctx, req)
+}
+
+// PublishDeliveryOutcome calls lazybox.bench.v1.RunnerService.PublishDeliveryOutcome.
+func (c *runnerServiceClient) PublishDeliveryOutcome(ctx context.Context, req *connect.Request[gen.PublishDeliveryOutcomeRequest]) (*connect.Response[gen.Artifact], error) {
+	return c.publishDeliveryOutcome.CallUnary(ctx, req)
+}
+
+// RecordReviewCriterion calls lazybox.bench.v1.RunnerService.RecordReviewCriterion.
+func (c *runnerServiceClient) RecordReviewCriterion(ctx context.Context, req *connect.Request[gen.RecordReviewCriterionRequest]) (*connect.Response[gen.RecordReviewCriterionResponse], error) {
+	return c.recordReviewCriterion.CallUnary(ctx, req)
 }
 
 // ListCommands calls lazybox.bench.v1.RunnerService.ListCommands.
@@ -4190,6 +4244,15 @@ type RunnerServiceHandler interface {
 	// `lazybox run --check` and `--needs` runs record delivery observations.
 	// Binding another revision starts a new attempt (delivery.Store.Bind).
 	BindDelivery(context.Context, *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error)
+	// The delivery outcome of a conversation, or of a Mission task: the same
+	// projection (delivery.Project) through either lookup.
+	GetDeliveryOutcome(context.Context, *connect.Request[gen.GetDeliveryOutcomeRequest]) (*connect.Response[gen.DeliveryOutcome], error)
+	// Publishes the outcome as an immutable verdict snapshot: a report
+	// artifact (schema delivery-outcome.v1), or the next version of one.
+	PublishDeliveryOutcome(context.Context, *connect.Request[gen.PublishDeliveryOutcomeRequest]) (*connect.Response[gen.Artifact], error)
+	// A contract-bound reviewer's verdict on one criterion
+	// (`lazybox delivery review <criterion> passed|failed`).
+	RecordReviewCriterion(context.Context, *connect.Request[gen.RecordReviewCriterionRequest]) (*connect.Response[gen.RecordReviewCriterionResponse], error)
 	ListCommands(context.Context, *connect.Request[gen.ListCommandsRequest]) (*connect.Response[gen.ListCommandsResponse], error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -5142,6 +5205,24 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceBindDeliveryProcedure,
 		svc.BindDelivery,
 		connect.WithSchema(runnerServiceMethods.ByName("BindDelivery")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceGetDeliveryOutcomeHandler := connect.NewUnaryHandler(
+		RunnerServiceGetDeliveryOutcomeProcedure,
+		svc.GetDeliveryOutcome,
+		connect.WithSchema(runnerServiceMethods.ByName("GetDeliveryOutcome")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServicePublishDeliveryOutcomeHandler := connect.NewUnaryHandler(
+		RunnerServicePublishDeliveryOutcomeProcedure,
+		svc.PublishDeliveryOutcome,
+		connect.WithSchema(runnerServiceMethods.ByName("PublishDeliveryOutcome")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceRecordReviewCriterionHandler := connect.NewUnaryHandler(
+		RunnerServiceRecordReviewCriterionProcedure,
+		svc.RecordReviewCriterion,
+		connect.WithSchema(runnerServiceMethods.ByName("RecordReviewCriterion")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceListCommandsHandler := connect.NewUnaryHandler(
@@ -6114,6 +6195,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceFinishPipeHandler.ServeHTTP(w, r)
 		case RunnerServiceBindDeliveryProcedure:
 			runnerServiceBindDeliveryHandler.ServeHTTP(w, r)
+		case RunnerServiceGetDeliveryOutcomeProcedure:
+			runnerServiceGetDeliveryOutcomeHandler.ServeHTTP(w, r)
+		case RunnerServicePublishDeliveryOutcomeProcedure:
+			runnerServicePublishDeliveryOutcomeHandler.ServeHTTP(w, r)
+		case RunnerServiceRecordReviewCriterionProcedure:
+			runnerServiceRecordReviewCriterionHandler.ServeHTTP(w, r)
 		case RunnerServiceListCommandsProcedure:
 			runnerServiceListCommandsHandler.ServeHTTP(w, r)
 		case RunnerServiceClaimCommandShareProcedure:
@@ -6777,6 +6864,18 @@ func (UnimplementedRunnerServiceHandler) FinishPipe(context.Context, *connect.Re
 
 func (UnimplementedRunnerServiceHandler) BindDelivery(context.Context, *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.BindDelivery is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) GetDeliveryOutcome(context.Context, *connect.Request[gen.GetDeliveryOutcomeRequest]) (*connect.Response[gen.DeliveryOutcome], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.GetDeliveryOutcome is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) PublishDeliveryOutcome(context.Context, *connect.Request[gen.PublishDeliveryOutcomeRequest]) (*connect.Response[gen.Artifact], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.PublishDeliveryOutcome is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) RecordReviewCriterion(context.Context, *connect.Request[gen.RecordReviewCriterionRequest]) (*connect.Response[gen.RecordReviewCriterionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.RecordReviewCriterion is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) ListCommands(context.Context, *connect.Request[gen.ListCommandsRequest]) (*connect.Response[gen.ListCommandsResponse], error) {

@@ -57,6 +57,9 @@ func (c Check) Observe(id, reference, candidate string, exit *int, signalled boo
 // Summary is the one line a run's output ends with: what it recorded.
 func (o Observation) Summary(c Check) string {
 	state, role := o.Classify(), "check"
+	if o.Source == SourceReview {
+		role = "review"
+	}
 	if c.Prerequisite {
 		role = "prerequisite"
 		if o.Prerequisite == Passed {

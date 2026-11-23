@@ -7,6 +7,7 @@ import (
 	"log"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/delivery"
@@ -144,30 +145,40 @@ func (b *Bench) resolveCheck(e *Execution, criterion string, prerequisite bool) 
 // is not ready or cannot be read refuses it: a candidate never names part of
 // the workspace.
 func (b *Bench) candidate(workspace string) (string, error) {
-	if b.Collections == nil || b.Checkpoints == nil {
-		return "", errors.New("workspace fingerprints are unavailable on this Runner")
-	}
-	w, err := b.Collections.Get(workspace)
+	revisions, err := b.candidateRevisions(workspace)
 	if err != nil {
 		return "", err
 	}
+	return delivery.CandidateID(revisions), nil
+}
+
+// candidateRevisions is each repository's fingerprint: its commit, then "+"
+// and its tree when it has uncommitted changes.
+func (b *Bench) candidateRevisions(workspace string) (map[string]string, error) {
+	if b.Collections == nil || b.Checkpoints == nil {
+		return nil, errors.New("workspace fingerprints are unavailable on this Runner")
+	}
+	w, err := b.Collections.Get(workspace)
+	if err != nil {
+		return nil, err
+	}
 	if len(w.Members) == 0 {
-		return "", errors.New("the workspace has no repository")
+		return nil, errors.New("the workspace has no repository")
 	}
 	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
 	defer cancel()
 	revisions := map[string]string{}
 	for _, m := range w.Members {
 		if !m.Ready {
-			return "", fmt.Errorf("repository %s is not ready", m.Name)
+			return nil, fmt.Errorf("repository %s is not ready", m.Name)
 		}
 		revision, err := b.Checkpoints.Fingerprint(ctx, m.Path)
 		if err != nil {
-			return "", fmt.Errorf("repository %s: %w", m.Name, err)
+			return nil, fmt.Errorf("repository %s: %w", m.Name, err)
 		}
 		revisions[m.Name] = revision
 	}
-	return delivery.CandidateID(revisions), nil
+	return revisions, nil
 }
 
 // BindDelivery pins a published spec.v2 revision to e's conversation. A
@@ -286,4 +297,79 @@ func (b *Bench) DeliveryNote(state commands.Status) string {
 		return o.Summary(*check) + "; not recorded: a different observation is already recorded for this run"
 	}
 	return o.Summary(*check) + "; not yet in the delivery journal (" + err.Error() + "), the Runner retries"
+}
+
+// RecordReviewCriterion records a contract-bound reviewer's verdict on one
+// criterion (`lazybox delivery review <criterion> passed|failed`), for the
+// attempt and the files under review. It is refused once the reviewed work
+// has moved past the commits the review was bound to.
+func (b *Bench) RecordReviewCriterion(session, criterion, result string) (delivery.Observation, delivery.Check, error) {
+	var none delivery.Observation
+	if b.Delivery == nil || b.Reviews == nil || b.Work == nil {
+		return none, delivery.Check{}, errors.New("delivery evidence is unavailable on this Runner")
+	}
+	if result != delivery.Passed && result != delivery.Failed {
+		return none, delivery.Check{}, errors.New("a review records passed or failed")
+	}
+	e, err := b.Get(session)
+	if err != nil {
+		return none, delivery.Check{}, err
+	}
+	m, ok := b.Reviews.ReviewerRun(e.ID, conversationOf(e))
+	if !ok {
+		return none, delivery.Check{}, ErrNotReviewer
+	}
+	run := m.Run
+	if run.ContractDigest == "" || run.ReviewAttempt == "" || run.Mission == "" {
+		return none, delivery.Check{}, errors.New("this review is not bound to an approved Mission contract")
+	}
+	state, err := b.Work.Mission(run.Mission)
+	if err != nil {
+		return none, delivery.Check{}, err
+	}
+	t := state.Task(run.Task)
+	if t == nil {
+		return none, delivery.Check{}, errors.New("the reviewed task is gone")
+	}
+	var grant string
+	for _, at := range t.Attempts {
+		if at.ID == run.ReviewAttempt {
+			grant = at.Grant
+		}
+	}
+	_, plan := state.ApprovedTaskPlan(grant, t.ID)
+	if plan == nil || plan.Contract == nil || plan.Contract.Digest != run.ContractDigest {
+		return none, delivery.Check{}, errors.New("the review's contract is no longer the task's approved one")
+	}
+	contract := fromPlanContract(plan.Contract)
+	if !slices.ContainsFunc(contract.Criteria, func(c delivery.Criterion) bool { return c.ID == criterion }) {
+		return none, delivery.Check{}, fmt.Errorf("spec %s v%d has no criterion %q", contract.Artifact, contract.Version, criterion)
+	}
+	revisions, err := b.candidateRevisions(run.ReviewWorkspace)
+	if err != nil {
+		return none, delivery.Check{}, fmt.Errorf("cannot say which files were reviewed: %w", err)
+	}
+	for member, head := range run.MemberHeads {
+		if commit, _, _ := strings.Cut(revisions[member], "+"); commit != head {
+			return none, delivery.Check{}, errors.New("the reviewed work has new commits since the review began: review it again")
+		}
+	}
+	candidate := delivery.CandidateID(revisions)
+	reference := fmt.Sprintf("review:%s@%d", run.ID, run.Round)
+	prefix := reference + "/" + criterion + "/"
+	n := 1
+	for _, o := range b.Delivery.Observations() {
+		if strings.HasPrefix(o.ID, prefix) {
+			n++
+		}
+	}
+	o := delivery.Observation{Schema: delivery.ObservationSchema, ID: fmt.Sprintf("%s%d", prefix, n),
+		Scope:       delivery.Scope{ContractDigest: run.ContractDigest, Candidate: candidate, Attempt: run.ReviewAttempt},
+		Subject:     delivery.Subject{Conversation: run.SourceConversation, Mission: run.Mission, Task: run.Task},
+		CriterionID: criterion, Source: delivery.SourceReview, Reference: reference, Assertion: result}
+	if _, err := b.Delivery.Record(o); err != nil {
+		return none, delivery.Check{}, err
+	}
+	check := delivery.Check{CriterionID: criterion, ContractDigest: run.ContractDigest, Attempt: run.ReviewAttempt, Subject: o.Subject, Artifact: contract.Artifact, Version: contract.Version, Candidate: candidate}
+	return o, check, nil
 }

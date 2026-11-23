@@ -50,6 +50,21 @@ type AgentCredentials interface {
 // workspace and list that workspace's links (never to unlink, react or merge).
 // Every other RPC, including any added later, is the owner's.
 var agentRPCs = map[string]func(agents AgentCredentials, who principal, req any) bool{
+	// An agent reads and publishes only its own conversation's delivery
+	// outcome (never a task lookup), and records a review verdict only as the
+	// reviewer of its own review (runner.ErrNotReviewer otherwise).
+	pb.RunnerService_GetDeliveryOutcome_FullMethodName: func(_ AgentCredentials, who principal, req any) bool {
+		r, ok := req.(*pb.GetDeliveryOutcomeRequest)
+		return ok && r.SessionId != "" && r.SessionId == who.session && r.MissionId == "" && r.TaskId == ""
+	},
+	pb.RunnerService_PublishDeliveryOutcome_FullMethodName: func(_ AgentCredentials, who principal, req any) bool {
+		r, ok := req.(*pb.PublishDeliveryOutcomeRequest)
+		return ok && r.SessionId != "" && r.SessionId == who.session && r.MissionId == "" && r.TaskId == ""
+	},
+	pb.RunnerService_RecordReviewCriterion_FullMethodName: func(_ AgentCredentials, who principal, req any) bool {
+		r, ok := req.(*pb.RecordReviewCriterionRequest)
+		return ok && r.SessionId != "" && r.SessionId == who.session
+	},
 	// An agent binds a spec only to its own conversation.
 	pb.RunnerService_BindDelivery_FullMethodName: func(_ AgentCredentials, who principal, req any) bool {
 		r, ok := req.(*pb.BindDeliveryRequest)

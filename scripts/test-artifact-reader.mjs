@@ -35,6 +35,13 @@ const road = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: sess
     { id: 'alpha', title: 'Prototype', phase: 'Build', owner: 'Ada', status: 'accepted', deliverable: 'Prototype', dependsOn: [], definitionOfDone: ['Build passes'], evidence: ['Build 42'], openDecisions: [] },
     { id: 'beta', title: 'Release', phase: 'Launch', owner: 'Lin', status: 'blocked', deliverable: 'Package available', dependsOn: ['alpha'], definitionOfDone: ['Installer tested'], evidence: [], openDecisions: ['Which signing key?'] },
   ] }) });
+// A published delivery verdict (lazybox delivery publish): schema delivery-outcome.v1.
+const verdict = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Delivery outcome · spec spec-catalog v3', kind: 'report', format: 'json',
+  content: JSON.stringify({ schema: 'delivery-outcome.v1', contract: { artifact: 'spec-catalog', version: 3, schema: 'spec.v2', digest: 'sha256:spec', criteria: [] }, attempt: 'conversation:c/1', subject: { conversation: 'c' }, current: 'candidate:2a7f9c11', decision: 'accepted',
+    candidates: [{ candidate: 'candidate:2a7f9c11', current: true, verdict: 'blocked', criteria: [
+      { id: 'storage', expected: 'Duplicate inserts keep one item', required: true, state: 'passed', evidence: [{ id: 'run:e/1', source: 'command', reference: 'run:e/1', command: '1', exitCode: 0, assertion: 'passed', state: 'passed', output: 'available' }] },
+      { id: 'generate', expected: 'The catalog service is generated', required: true, state: 'blocked', evidence: [{ id: 'run:e/2', source: 'command', reference: 'run:e/2', command: '2', exitCode: 1, prerequisite: 'failed', state: 'blocked', output: 'unavailable' }] },
+    ] }] }) });
 const structuredDocs = [];
 for (const kind of ['plan', 'spec', 'report', 'notes', 'other']) {
   const content = await readFile(new URL('../services/runner/code/internal/runner/artifacts/templates/' + kind + '.json', import.meta.url), 'utf8');
@@ -112,6 +119,11 @@ try {
   await launch.getByRole('link', { name: 'Prototype' }).click();
   await expect(page.getByRole('heading', { name: 'Prototype', exact: true })).toBeFocused();
   await expect(page.getByRole('region', { name: 'Verification evidence' })).toContainText('Build 42');
+  await page.goto(standalone.replace(doc.id, verdict.id));
+  await expect(page.getByRole('heading', { name: /Blocked on the workspace files when published \(2a7f9c11\)/ })).toBeVisible();
+  await expect(page.getByText('The technical verdict below is unchanged.')).toBeVisible();
+  await expect(page.getByRole('row').filter({ hasText: 'generate' })).toContainText('blocked run:e/2 (exit 1), output no longer kept');
+  await expect(page.getByRole('row').filter({ hasText: 'storage' })).toContainText('passed');
   for (const { record, field } of structuredDocs) {
     await page.goto(standalone.replace(doc.id, record.id));
     await expect(page.getByRole('heading', { name: field[0].toUpperCase() + field.slice(1), exact: true })).toBeVisible();

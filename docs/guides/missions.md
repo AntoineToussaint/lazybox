@@ -170,4 +170,29 @@ A worker on a Mission task checks against the plan's approved contract. An ordin
 lazybox delivery bind spec-catalog@3
 ```
 
-Each bind of a different version, even one bound before, starts a new attempt with no results yet; earlier results stay with the attempt they were checked in. A check is refused before it runs when no contract names its criterion, and in a conversation that works more than one Mission task at once. The Runner saves each result with the run's completion and records it once, including after a restart. The verdict on the Mission card and in the conversation is not shown yet.
+Each bind of a different version, even one bound before, starts a new attempt with no results yet; earlier results stay with the attempt they were checked in. A check is refused before it runs when no contract names its criterion, and in a conversation that works more than one Mission task at once. The Runner saves each result with the run's completion and records it once, including after a restart.
+
+### Reading the delivery outcome
+
+The Runner keeps one outcome per attempt and serves it everywhere: the Mission card and the acceptance inbox show it in one line, and the conversation shows it under its messages once a turn ends (open it for every criterion). From an agent, or from your terminal with `--mission ID --task ID`:
+
+```bash
+lazybox delivery status          # the verdict, what blocks it, each criterion's evidence
+lazybox delivery status --json   # the same, machine-readable
+```
+
+| Verdict | Means |
+|---|---|
+| Delivered | every required criterion passed on the workspace's current files |
+| Failing | a required check failed |
+| Blocked | a required criterion's prerequisite failed |
+| Incomplete | a required criterion is not yet proven on these files |
+| Unverified | nothing names required criteria (no spec, or a text-only spec.v1) |
+
+The verdict is for the workspace's current files, uncommitted changes included. Files nobody checked yet read Incomplete, and the files checked earlier are listed with their own verdicts. A failure a later check resolved stays in the evidence, marked resolved. Select a run to open its output; output the Runner no longer keeps says so. Accepting a task, or asking for changes, is shown beside the verdict and never changes it: accepting with a criterion still open leaves that gap visible.
+
+A reviewer of a contract-bound Mission review records its verdict on each criterion with `lazybox delivery review <criterion> passed|failed`. It counts for the files under review and is refused once the work has new commits.
+
+### Publishing a verdict
+
+`lazybox delivery publish` keeps the outcome as a report artifact (schema `delivery-outcome.v1`); `lazybox delivery publish --id ID` publishes the next version. Each version keeps the verdict it was published with: publish while blocked, repair, publish again, and the first version still reads Blocked. The reader shows a verdict per candidate with each criterion's state and evidence, and says which run outputs were no longer kept when it was published.

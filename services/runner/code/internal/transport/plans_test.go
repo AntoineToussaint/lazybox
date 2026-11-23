@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"google.golang.org/protobuf/proto"
 	"os"
 	"path/filepath"
 	"strings"
@@ -295,7 +296,39 @@ func testPinnedPlanSpawnsFromReviewedBaseline(t *testing.T, content, want string
 	if !strings.Contains(reviewerBrief.Text, "Approved Mission contract") || !strings.Contains(reviewerBrief.Text, plan.Contract.Digest) || !strings.Contains(reviewerBrief.Text, want) || strings.Contains(reviewerBrief.Text, "Unapproved local criteria") {
 		t.Fatalf("wrong reviewer contract: %s", reviewerBrief.Text)
 	}
+	// The contract-bound reviewer's verdict on a criterion joins the worker's
+	// check in the task's outcome; only the reviewer may record one.
+	if _, err := o.client.RecordReviewCriterion(owner, &pb.RecordReviewCriterionRequest{SessionId: view.Spawned.SessionId, Criterion: "reconnect", Result: "passed"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("the worker recorded a review verdict: %v", err)
+	}
+	verdict, err := o.client.RecordReviewCriterion(owner, &pb.RecordReviewCriterionRequest{SessionId: review.Session.Id, Criterion: "reconnect", Result: "failed"})
+	if !strings.HasPrefix(want, "[") {
+		if err == nil {
+			t.Fatal("a review verdict on a text-only contract")
+		}
+	} else {
+		if err != nil || !strings.HasPrefix(verdict.Note, "review reconnect: failed on candidate:") {
+			t.Fatalf("review verdict: %v %v", verdict, err)
+		}
+		outcome, err := o.client.GetDeliveryOutcome(owner, &pb.GetDeliveryOutcomeRequest{MissionId: o.mission, TaskId: task})
+		if err != nil {
+			t.Fatal(err)
+		}
+		criterion := outcome.Candidates[0].Criteria[0]
+		if criterion.State != "failed" || len(criterion.Evidence) != 2 || criterion.Evidence[0].Source != "command" || criterion.Evidence[1].Source != "review" {
+			t.Fatalf("the review verdict is not in the outcome: %+v", outcome)
+		}
+		byWorker, err := o.client.GetDeliveryOutcome(owner, &pb.GetDeliveryOutcomeRequest{SessionId: view.Spawned.SessionId})
+		if err != nil || !proto.Equal(byWorker, outcome) {
+			t.Fatalf("the worker's outcome differs from the task's: %v\n%v\n%v", byWorker, outcome, err)
+		}
+	}
 	git(t, child.Members[0].Path, "commit", "--allow-empty", "-m", "new candidate head")
+	if strings.HasPrefix(want, "[") {
+		if _, err := o.client.RecordReviewCriterion(owner, &pb.RecordReviewCriterionRequest{SessionId: review.Session.Id, Criterion: "reconnect", Result: "passed"}); err == nil || !strings.Contains(err.Error(), "new commits") {
+			t.Fatalf("a verdict on work that moved on: %v", err)
+		}
+	}
 	reviewer := o.fake.session(review.Session.Id)
 	reviewer.Events <- agent.Event{Type: "turn_started"}
 	reviewer.Events <- agent.Event{Type: "turn_ended", Status: "completed"}

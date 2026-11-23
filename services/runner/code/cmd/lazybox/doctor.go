@@ -376,7 +376,11 @@ func diskCheck(dir string) check {
 	if err := unix.Statfs(dir, &fs); err != nil {
 		return check{ID: "disk", Title: "Disk", Status: checkWarn, Detail: "could not read free space: " + err.Error()}
 	}
-	free := fs.Bavail * uint64(fs.Bsize)
+	return diskStatus(fs.Bavail * uint64(fs.Bsize))
+}
+
+// diskStatus judges free bytes: under 1 GB fails, under 5 GB warns.
+func diskStatus(free uint64) check {
 	detail := humanBytes(free) + " free"
 	switch {
 	case free < 1<<30:

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PendingFocus, focusUnmoved } from '../packages/surfaces/src/pending-focus.ts';
+import { PendingFocus, focusIntent, restoreFocus } from '../packages/surfaces/src/pending-focus.ts';
 
 // Regression: a task started on another Runner asked for its message box's
 // focus, which ran once that Runner's page settled; focus the person had moved
@@ -25,9 +25,18 @@ test('a focus request runs once, and a later ask replaces it', () => {
   assert.equal(focus.take(second), false, 'already run');
 });
 
-test('a focus scheduled for a later frame applies only where focus still is', () => {
-  const box = {} as Element, header = {} as Element;
-  assert.equal(focusUnmoved(box, box), true);
-  assert.equal(focusUnmoved(box, header), false);
-  assert.equal(focusUnmoved(null, header), false, 'from nowhere to a control the person chose');
+// A closing palette gives focus back a frame later; the action chosen in it
+// (focus a panel, show a conversation) asked for focus too, and wins.
+test('giving focus back yields to a focus the app asked for', () => {
+  let focused = 0;
+  const previous = { isConnected: true, focus: () => { focused++; } } as unknown as HTMLElement;
+  const request = { panel: 'console' };
+  focusIntent.ask(request);
+  restoreFocus(previous);
+  assert.equal(focused, 0, 'the action\'s focus is waiting: the palette stands aside');
+  assert.equal(focusIntent.take(request), true, 'and the request still runs');
+  restoreFocus(previous);
+  assert.equal(focused, 1, 'nothing waiting: focus goes back');
+  restoreFocus({ isConnected: false, focus: () => { focused++; } } as unknown as HTMLElement);
+  assert.equal(focused, 1, 'an element gone from the page is not focused');
 });

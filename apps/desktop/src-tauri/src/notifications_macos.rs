@@ -19,15 +19,41 @@ use objc2_user_notifications::{
 };
 use std::collections::HashMap;
 use std::ptr::NonNull;
-use std::sync::mpsc::Sender;
+use std::sync::{Mutex, OnceLock};
+use tokio::sync::oneshot;
+
+/// The sending half of one answer; the center's callback may run once.
+pub type Answer<T> = Mutex<Option<oneshot::Sender<Result<T, String>>>>;
+fn reply<T>(answer: &Answer<T>, value: Result<T, String>) {
+    if let Some(send) = answer.lock().ok().and_then(|mut s| s.take()) {
+        let _ = send.send(value);
+    }
+}
 
 /// The keys a notification carries to its click (attention.rs `destination`).
 pub const KEYS: [&str; 3] = ["collectionId", "sessionId", "runner"];
 
-/// Whether this process is an app bundle the notification center serves.
+/// Whether this process is an app bundle the notification center serves
+/// (asked once: it cannot change while the app runs).
 pub fn available() -> bool {
-    let bundle = NSBundle::mainBundle();
-    bundle.bundleIdentifier().is_some() && bundle.bundlePath().to_string().ends_with(".app")
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let bundle = NSBundle::mainBundle();
+        bundle.bundleIdentifier().is_some() && bundle.bundlePath().to_string().ends_with(".app")
+    })
+}
+
+/// A part of each notification's identifier unique to this launch: the
+/// center replaces a delivered notification with the same identifier, and
+/// one still in Notification Center from before a restart must stay.
+fn launch() -> u128 {
+    static LAUNCH: OnceLock<u128> = OnceLock::new();
+    *LAUNCH.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default()
+    })
 }
 
 /// What macOS lets this app do, in the web's words: granted, denied, or
@@ -42,10 +68,10 @@ pub fn permission_word(status: UNAuthorizationStatus) -> &'static str {
     }
 }
 
-pub fn permission(send: Sender<Result<String, String>>) {
+pub fn permission(answer: Answer<String>) {
     let done = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
         let status = unsafe { settings.as_ref() }.authorizationStatus();
-        let _ = send.send(Ok(permission_word(status).to_string()));
+        reply(&answer, Ok(permission_word(status).to_string()));
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .getNotificationSettingsWithCompletionHandler(&done);
@@ -53,9 +79,9 @@ pub fn permission(send: Sender<Result<String, String>>) {
 
 /// Asks macOS once (it remembers the answer and never asks again; the person
 /// changes it in System Settings → Notifications).
-pub fn request(send: Sender<Result<String, String>>) {
+pub fn request(answer: Answer<String>) {
     let done = RcBlock::new(move |granted: Bool, error: *mut NSError| {
-        let answer = match unsafe { error.as_ref() } {
+        let value = match unsafe { error.as_ref() } {
             Some(error) => Err(error.localizedDescription().to_string()),
             None => Ok(if granted.as_bool() {
                 "granted"
@@ -64,7 +90,7 @@ pub fn request(send: Sender<Result<String, String>>) {
             }
             .to_string()),
         };
-        let _ = send.send(answer);
+        reply(&answer, value);
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .requestAuthorizationWithOptions_completionHandler(
@@ -75,13 +101,7 @@ pub fn request(send: Sender<Result<String, String>>) {
 
 /// Posts a notification; the answer is macOS's: delivered, or why not (not
 /// allowed for this app, for one).
-pub fn show(
-    id: i32,
-    title: &str,
-    body: &str,
-    extra: &[(&str, String)],
-    send: Sender<Result<(), String>>,
-) {
+pub fn show(id: i32, title: &str, body: &str, extra: &[(&str, String)], answer: Answer<()>) {
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
@@ -94,16 +114,16 @@ pub fn show(
     // userInfo is untyped; its keys and values are strings.
     unsafe { content.setUserInfo(&*(Retained::as_ptr(&info) as *const NSDictionary)) };
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-        &NSString::from_str(&format!("lazybox-attention-{id}")),
+        &NSString::from_str(&format!("lazybox-attention-{}-{id}", launch())),
         &content,
         None,
     );
     let done = RcBlock::new(move |error: *mut NSError| {
-        let answer = match unsafe { error.as_ref() } {
+        let value = match unsafe { error.as_ref() } {
             Some(error) => Err(error.localizedDescription().to_string()),
             None => Ok(()),
         };
-        let _ = send.send(answer);
+        reply(&answer, value);
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .addNotificationRequest_withCompletionHandler(&request, Some(&done));

@@ -153,21 +153,20 @@ pub fn setup(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Waits for the notification center's answer off the calling thread.
+/// Awaits the notification center's answer, which arrives on its own thread,
+/// without holding a thread meanwhile.
 #[cfg(target_os = "macos")]
 async fn answer<T: Send + 'static>(
     wait: std::time::Duration,
-    ask: impl FnOnce(std::sync::mpsc::Sender<Result<T, String>>),
+    ask: impl FnOnce(crate::notifications_macos::Answer<T>),
 ) -> Result<T, String> {
-    let (send, receive) = std::sync::mpsc::channel();
-    ask(send);
-    tauri::async_runtime::spawn_blocking(move || {
-        receive
-            .recv_timeout(wait)
-            .map_err(|_| "macOS did not answer in time.".to_string())?
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let (send, receive) = tokio::sync::oneshot::channel();
+    ask(std::sync::Mutex::new(Some(send)));
+    match tokio::time::timeout(wait, receive).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) => Err("macOS did not answer.".into()),
+        Err(_) => Err("macOS did not answer in time.".into()),
+    }
 }
 
 /// What the system lets Lazybox show: granted, denied, or default (never

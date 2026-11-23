@@ -27,6 +27,9 @@ tauri-plugin-dialog = "=2.8.4"
 tauri-plugin-notification = "=2.8.0"
 tauri-plugin-updater = "=2.14.0"
 base64 = "0.22"
+# The notification center answers on its own threads: a oneshot and a timeout
+# await it without holding a blocking thread (src/attention.rs). Tauri's runtime.
+tokio = { version = "1", default-features = false, features = ["sync", "time"] }
 
 [dev-dependencies]
 glob = "0.3"

@@ -168,7 +168,7 @@ export function pullInboxRows(links: readonly ItemLink[], dismissed: ReadonlySet
     const dismissKey = pullReactionKey(pull);
     if (dismissed.has(dismissKey)) continue;
     const action = pull.status === 'checks-failed' ? 'send' : pull.status === 'changes-requested' ? 'review' : pull.status === 'behind' ? 'update' : pull.status === 'ready' ? 'merge' : 'open';
-    const what = pull.status === 'checks-failed' ? `checks failed · ${pull.detail}` : pull.status === 'ready' ? 'approved · checks green' : pull.status === 'behind' ? `checks green · ${pull.detail.toLowerCase()}` : statusLabel[pull.status].toLowerCase();
+    const what = pull.status === 'checks-failed' ? `checks failed · ${pull.detail}` : pull.status === 'ready' ? 'approved · checks green' : pull.status === 'behind' ? `checks green · out of date with ${pull.link.item?.pullRequest?.base || 'its base'}` : statusLabel[pull.status].toLowerCase();
     rows.push({ ...pull, dismissKey, action, line: `${pull.repository}#${pull.number} ${what}` });
   }
   return rows.sort(byUrgency);

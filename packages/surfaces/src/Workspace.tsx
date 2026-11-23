@@ -1,6 +1,6 @@
 import { useDisplayDetail } from './display-detail';
 import { agentIcon, agentTitle } from './providers';
-import { PendingFocus } from './pending-focus';
+import { focusIntent, type PendingFocus } from './pending-focus';
 import { conversationProvider, conversationTitle } from './conversation-model';
 import { LeaderMenu } from './LeaderMenu';
 import { WorkspaceNavigator } from './WorkspaceNavigator';
@@ -380,13 +380,12 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const dockKey = (kind: string) => `${viewState?.root || viewState?.key}:dock:${kind}`;
   const rememberedDock = (kind: string): DockSide => { try { const side = viewState?.getItem(dockKey(kind)); return isDockSide(side) ? side : defaultDock(kind); } catch { return defaultDock(kind); } };
   // Focus follows a panel that moved or was asked for, or returns to the conversation when one closes.
-  const [focusAfter] = useState(() => new PendingFocus<{ panel: string } | 'content'>());
-  // Focus the person moves while a request waits drops it (pending-focus.ts).
-  useEffect(() => {
-    const moved = () => focusAfter.moved();
-    document.addEventListener('focusin', moved);
-    return () => document.removeEventListener('focusin', moved);
-  }, []);
+  // The page's focus intent (pending-focus.ts): focus moved elsewhere while a request waits drops it.
+  // Asking also schedules the request's run: a panel already in view changes no layout, and a
+  // request left waiting for some later, unrelated layout change would fire at a moment nobody chose.
+  const intent = focusIntent as PendingFocus<{ panel: string } | 'content'>;
+  const [focusAsked, setFocusAsked] = useState(0);
+  const focusAfter = { ask: (request: { panel: string } | 'content') => { intent.ask(request); setFocusAsked(value => value + 1); }, get waiting() { return intent.waiting; }, take: (request: { panel: string } | 'content') => intent.take(request) };
   /** A panel navigated to (a conversation opened): a maximized group gives it the zoom, without taking the focus. */
   const revealAfter = useRef('');
   useEffect(() => {
@@ -402,7 +401,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       [...document.querySelectorAll<HTMLElement>('.page-layout .panel-chat textarea:not(:disabled)')].find(box => box.getClientRects().length > 0)?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
-  }, [layout]);
+  }, [layout, focusAsked]);
   /** Show the page's panel of this kind, or dock a new one where this kind was last docked (or beside the group ⌘\ asked from). */
   const showModule = (kind: string) => {
     if (kind === 'missions') { showMissionsPage(); return ''; }

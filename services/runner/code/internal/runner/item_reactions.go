@@ -605,7 +605,7 @@ func (b *Bench) MergeTrackedPullRequest(ctx context.Context, workspace string, r
 	readAt := b.ItemReadStart()
 	return b.actOnTrackedPullRequest(ctx, workspace, link.Member, repository, tracked, readAt, func(token string) error {
 		return b.GitHubPulls.MergePullRequest(ctx, token, repository, tracked, method, expectedHead)
-	})
+	}, nil)
 }
 
 // UpdateTrackedPullRequestBranch brings a delivered pull request up to date
@@ -630,20 +630,44 @@ func (b *Bench) UpdateTrackedPullRequestBranch(ctx context.Context, workspace st
 	readAt := b.ItemReadStart()
 	return b.actOnTrackedPullRequest(ctx, workspace, link.Member, repository, tracked, readAt, func(token string) error {
 		return b.GitHubPulls.UpdatePullRequestBranch(ctx, token, repository, tracked, expectedHead)
-	})
+	}, func(status github.PullRequestStatus) bool { return status.HeadSHA != expectedHead })
 }
+
+// branchUpdateWait bounds how long an accepted branch update is read again
+// until it shows: GitHub updates in the background, usually within seconds.
+var branchUpdateWait = struct {
+	tries    int
+	interval time.Duration
+}{10, time.Second}
 
 // actOnTrackedPullRequest runs a write, then reads the pull request again and
 // records it, also when GitHub refused: the person then sees why (behind its
-// base, a moved head) instead of the state they acted on.
-func (b *Bench) actOnTrackedPullRequest(ctx context.Context, workspace, member, repository string, number int64, readAt time.Time, write func(token string) error) (github.PullRequestStatus, string, error) {
+// base, a moved head) instead of the state they acted on. A write GitHub
+// completes in the background (an update) is read again until settled says
+// it shows, within branchUpdateWait.
+func (b *Bench) actOnTrackedPullRequest(ctx context.Context, workspace, member, repository string, number int64, readAt time.Time, write func(token string) error, settled func(github.PullRequestStatus) bool) (github.PullRequestStatus, string, error) {
 	var status github.PullRequestStatus
 	var writeErr error
 	err := b.githubCredential(ctx, func(token string) error {
 		writeErr = write(token)
+		// A sign-in GitHub refused is the connection's problem: report it as such.
+		if errors.Is(writeErr, github.ErrUnauthorized) {
+			return writeErr
+		}
 		var err error
-		status, err = b.githubItems().PullRequestByNumber(ctx, token, repository, number)
-		return err
+		for try := 0; ; try++ {
+			if status, err = b.githubItems().PullRequestByNumber(ctx, token, repository, number); err != nil {
+				return err
+			}
+			if writeErr != nil || settled == nil || settled(status) || try+1 >= branchUpdateWait.tries {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(branchUpdateWait.interval):
+			}
+		}
 	})
 	if err == nil {
 		b.ObservePullRequestLoop(workspace, member, repository, status, false, readAt)

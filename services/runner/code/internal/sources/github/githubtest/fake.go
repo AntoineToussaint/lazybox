@@ -50,6 +50,7 @@ type PR struct {
 	MergeMethod, MergeCommit string
 	// BranchUpdates counts update-branch requests GitHub accepted.
 	BranchUpdates int
+	pendingUpdate int
 	Reviews       []string // "login:STATE" or "login:STATE:body"
 	Requested     int
 	Comments      []Comment
@@ -60,7 +61,13 @@ type PR struct {
 // as branch protection does (HTTP 405 with GitHub's message).
 type Server struct {
 	*httptest.Server
-	Token        string
+	Token string
+	// UnauthorizedPath answers 401 to requests whose path ends with it, as
+	// GitHub does to a write a token may no longer make; others succeed.
+	UnauthorizedPath string
+	// UpdateLag is how many reads of a pull request pass before an accepted
+	// branch update shows (GitHub updates in the background); 0 is at once.
+	UpdateLag    int
 	mu           sync.Mutex
 	Repos        map[string]string // full name → default branch
 	Heads        map[string]string // "owner/name:branch" → pushed head
@@ -202,7 +209,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		write(w, 404, map[string]any{"message": "Not Found"})
 		return
 	}
-	if r.Header.Get("Authorization") != "Bearer "+s.Token {
+	if r.Header.Get("Authorization") != "Bearer "+s.Token || (s.UnauthorizedPath != "" && strings.HasSuffix(r.URL.Path, s.UnauthorizedPath)) {
 		s.Unauthorized++
 		write(w, 401, map[string]any{"message": "Bad credentials"})
 		return
@@ -278,6 +285,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		switch {
 		case len(rest) == 2 && r.Method == "GET":
+			// An accepted branch update lands after UpdateLag reads, as GitHub's does in the background.
+			if pr.pendingUpdate > 0 {
+				if pr.pendingUpdate--; pr.pendingUpdate == 0 {
+					pr.HeadSHA, pr.MergeableState = pr.HeadSHA+"-updated", "clean"
+				}
+			}
 			s.read(w, r, s.wire(full, pr))
 		case len(rest) == 3 && rest[2] == "reviews" && r.Method == "GET":
 			out := []map[string]any{}
@@ -338,7 +351,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// GitHub merges the base into the branch in the background: a new head, checks to run again.
-			pr.HeadSHA, pr.MergeableState, pr.BranchUpdates = pr.HeadSHA+"-updated", "clean", pr.BranchUpdates+1
+			pr.BranchUpdates++
+			if s.UpdateLag > 0 {
+				pr.pendingUpdate = s.UpdateLag
+			} else {
+				pr.HeadSHA, pr.MergeableState = pr.HeadSHA+"-updated", "clean"
+			}
 			write(w, 202, map[string]any{"message": "Updating pull request branch.", "url": "https://github.com/" + full + "/pull/" + strconv.Itoa(pr.Number)})
 		default:
 			write(w, 404, map[string]any{"message": "Not Found"})

@@ -3,7 +3,7 @@ import type { Collection } from '@lazybox/protocol';
 import { Icon } from './Icons';
 import { useRunner } from './RunnerContext';
 import { agentName, confirmation, pullInboxRows, type PullInboxRow } from './pull-requests-model';
-import { PullStatusIcon, reactionLabel } from './PullRequestsPanel';
+import { PullStatusIcon, reactionLabel, reactionParts, writesToGitHub } from './PullRequestsPanel';
 import { useDismissedPulls, usePullActions, useTrackedItems, type PullAction } from './useTrackedPulls';
 import type { ViewTarget } from './workspace-model';
 import './pull-requests.css';
@@ -91,9 +91,9 @@ function PullInboxItem({ row, workspace, phone, canRespond, defer, onOpen, onDis
     </button>
     <div className="pr-inbox-actions">
       {reaction && canRespond && !receipt && !pending && !confirming && <button type="button" className="primary" disabled={busy} onClick={() => reaction === 'merge' || reaction === 'update' ? setConfirming(reaction) : void run(reaction)}>
-        <Icon name={reaction === 'merge' ? 'merge' : reaction === 'update' ? 'refresh' : reaction === 'review' ? 'review' : 'send'} size={13}/>{reaction === 'merge' ? 'Merge…' : reaction === 'update' ? 'Update branch…' : reactionLabel(reaction, agent)}
+        <Icon name={reactionParts[reaction].icon} size={13}/>{writesToGitHub(reaction) ? `${reactionParts[reaction].short}…` : reactionLabel(reaction, agent)}
       </button>}
-      {confirming && !receipt && !busy && <span role="group" aria-label={confirming === 'merge' ? 'Confirm merge' : 'Confirm updating the branch'} className="pr-inbox-confirm">
+      {confirming && !receipt && !busy && <span role="group" aria-label={`Confirm ${reactionParts[confirming].confirmName}`} className="pr-inbox-confirm">
         <span className="pr-inbox-ask">{confirmation(row, confirming, agent)}</span>
         <button type="button" className="primary" autoFocus disabled={busy} onClick={() => void run(confirming)}>{confirming === 'merge' ? `Merge #${row.number}` : `Update #${row.number}`}</button>
         <button type="button" onClick={() => setConfirming(undefined)}>Cancel</button>

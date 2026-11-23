@@ -21,7 +21,17 @@ export class PendingFocus<T> {
   }
 }
 
-/** A focus scheduled for a later frame still applies only if focus is where it was when scheduled. */
-export function focusUnmoved(before: Element | null, now: Element | null): boolean {
-  return before === now;
+/**
+ * The page's one focus intent: every deferred focus (Workspace's focus after a
+ * layout change, the dock's focus into a panel) waits here, so one rule
+ * decides them all. Focus moved by anything else drops it; the app's own
+ * "give focus back" (a closing palette) yields to it instead of cancelling it.
+ */
+export const focusIntent = new PendingFocus<unknown>();
+if (typeof document !== 'undefined') document.addEventListener('focusin', () => focusIntent.moved());
+
+/** Gives focus back to `element` (a palette or overlay closing), unless a focus the app asked for is waiting: that one wins. */
+export function restoreFocus(element: HTMLElement | null | undefined) {
+  if (!element?.isConnected || focusIntent.waiting) return;
+  element.focus?.({ preventScroll: true });
 }

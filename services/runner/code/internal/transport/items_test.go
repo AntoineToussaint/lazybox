@@ -421,6 +421,9 @@ func TestPullRequestReactions(t *testing.T) {
 	if _, err = f.client.UpdatePullRequestBranch(owner, &pb.UpdatePullRequestBranchRequest{CollectionId: f.mine.Id, Item: ref, Number: 3, ExpectedHead: "moved"}); err == nil {
 		t.Fatal("updated a branch whose head moved since the person saw it")
 	}
+	// GitHub answers 202 and updates the branch in the background: the Runner reads it
+	// again until the update shows, so the row does not offer Update branch again.
+	f.github.Update(func(s *githubtest.Server) { s.UpdateLag = 2 })
 	updated, err := f.client.UpdatePullRequestBranch(owner, &pb.UpdatePullRequestBranchRequest{CollectionId: f.mine.Id, Item: ref, Number: 3, ExpectedHead: "sha-three"})
 	if err != nil || updated.MergeableState != "clean" || updated.HeadSha == "sha-three" || f.github.Pull("team/api", 3).BranchUpdates != 1 {
 		t.Fatalf("update branch: %+v %v", updated, err)
@@ -672,5 +675,27 @@ func TestMissionDropsOvertakenCheckRead(t *testing.T) {
 	}
 	if got := f.links(t)["team/api#7"].Item.PullRequest.Checks; got != "failure" {
 		t.Fatalf("item tracker and mission disagree about the latest check: %s", got)
+	}
+}
+
+// GitHub refusing the sign-in on the write itself (the update, the merge) is
+// the connection's problem, reported as such, even when reading it back works.
+func TestRefusedSignInOnAPullRequestWriteIsReported(t *testing.T) {
+	f := newItemsFixture(t)
+	owner := bearer(timeout(t), ownerToken)
+	agentCredential := bearer(timeout(t), agentToken(t, f.agent.Open.Env))
+	f.github.Update(func(s *githubtest.Server) {
+		s.Pulls["team/api"] = []*githubtest.PR{{Number: 3, Title: "Fix refunds", Head: "agent/fix", Base: "main", HeadSHA: "sha-three", State: "open", MergeableState: "behind"}}
+	})
+	if _, err := f.client.LinkItem(agentCredential, &pb.LinkItemRequest{SessionId: f.session.ID, Url: "https://github.com/team/api/pull/3"}); err != nil {
+		t.Fatal(err)
+	}
+	f.github.Update(func(s *githubtest.Server) { s.UnauthorizedPath = "/update-branch" })
+	_, err := f.client.UpdatePullRequestBranch(owner, &pb.UpdatePullRequestBranchRequest{CollectionId: f.mine.Id, Item: &pb.ItemRef{Provider: "github", Key: "team/api#3"}, Number: 3, ExpectedHead: "sha-three"})
+	if err == nil || !strings.Contains(err.Error(), "reconnect") {
+		t.Fatalf("a refused sign-in on the update: %v", err)
+	}
+	if problem := f.bench.GitHub.Status().Error; !strings.Contains(problem, "reconnect") {
+		t.Fatalf("the connection does not say its sign-in was refused: %q", problem)
 	}
 }

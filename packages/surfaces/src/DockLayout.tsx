@@ -5,7 +5,7 @@ import { createDockview, type DockviewApi, type DockviewGroupPanel, type Dockvie
 import 'dockview/dist/styles/dockview.css';
 import './dock.css';
 import { iconElement } from './Icons';
-import { focusUnmoved } from './pending-focus';
+import { focusIntent } from './pending-focus';
 import { focusWhenShown } from './focus';
 import { beginDrag, type DragAxis } from './drag-gesture';
 import { refreshNativeWebViews } from './native-web-view';
@@ -691,10 +691,11 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
   };
   /** Focus into a panel: where the person last was in it, else its message box, else its first field or control. */
   const focusInto = (panel: IDockviewPanel) => {
-    // Focus that moves before the next frame was moved by the person (or another request): it stays there.
-    const before = document.activeElement;
+    // Waits as the page's focus intent: focus moved elsewhere before the next frame stays there.
+    const request = { panel: panel.id };
+    focusIntent.ask(request);
     requestAnimationFrame(() => {
-      if (!focusUnmoved(before, document.activeElement)) return;
+      if (!focusIntent.take(request)) return;
       const host = latest.current.hostFor(panelFrom(panel.id, panel.params));
       const last = lastFocus.current.get(panel.id);
       // Not an element of a window that has closed since (a group popped out and put back), and not

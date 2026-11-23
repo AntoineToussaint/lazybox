@@ -958,7 +958,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
    */
   const resetEverything = () => {
     // A retained layout that could not be read is kept as saved, so Undo can put it back untouched.
-    const before = { layout: current.current, workspace: workspaceID, sidebar: sidebarWidth, agents: agentsChoice.current, locked, error, saved: locked ? viewState?.getItem(key) : undefined };
+    const before = { surface, layout: current.current, workspace: workspaceID, sidebar: sidebarWidth, agents: agentsChoice.current, locked, error, saved: locked ? viewState?.getItem(key) : undefined };
     dock.current?.restore();
     const restoreKeys = resetKeymap(viewState);
     saveSidebarWidth(SIDEBAR_DEFAULT);
@@ -976,6 +976,8 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         restoreKeys();
         saveSidebarWidth(before.sidebar);
         chooseAgents(before.agents);
+        // Back to the page the reset was run from (Settings, Missions).
+        setSurface(before.surface);
         // Another workspace shown since: its layout is not the one that was reset.
         if (shownWorkspace.current !== before.workspace) return;
         if (!before.locked) { commit(before.layout); return; }

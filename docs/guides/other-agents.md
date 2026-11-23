@@ -66,8 +66,8 @@ Subscriptions** groups the two under **Google**. For each one it shows where
 its key comes from (names only, never values) and the command that signs it in.
 
 For **Hermes Agent**, run `hermes model` to choose and authenticate its model
-provider. New conversations use those credentials through `agy acp` and
-`hermes acp`, respectively. Neither has been run through a real conversation
+provider; new conversations use it through `hermes acp`. Neither Antigravity
+nor Hermes has been run through a real conversation
 in Lazybox yet ([runtime evidence](../../RUNTIME_EVIDENCE.md)), so both are
 **Preview**, like every ACP agent.
 

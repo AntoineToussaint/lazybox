@@ -1,4 +1,4 @@
-import { keySource, sharedCredentialGroups } from './providers';
+import { keySource, sharedCredentialGroups, sharedKeyNames } from './providers';
 import { SettingsGroup } from './settings-parts';
 import { useProviderAvailability } from './useProviderAvailability';
 import './acp-agents.css';
@@ -17,7 +17,7 @@ export function SharedCredentials({ enabled }: { enabled: boolean }) {
       {group.agents.map(a => <li key={a.provider} className="acp-agent shared-credential" aria-label={a.title}>
         <div className="acp-agent-text">
           <div className="acp-agent-name"><strong>{a.title}</strong>{!a.installed && !a.acp?.custom && <span className="acp-agent-state tone-muted">Not installed</span>}</div>
-          <small className="shared-credential-key">{keySource(a, group.source)}</small>
+          <small className="shared-credential-key">{keySource(a, group.source, sharedKeyNames(group))}</small>
           {a.acp?.signInCommand && <small>Sign in on the Runner: <code className="acp-agent-command">{a.acp.signInCommand}</code></small>}
           {a.acp?.credentialsNote && <small className="shared-credential-note">{a.acp.credentialsNote}</small>}
         </div>

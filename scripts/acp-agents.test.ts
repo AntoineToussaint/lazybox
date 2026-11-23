@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ProviderAvailability, ProviderStatus } from '@lazybox/protocol';
-import { agentChoices, agentIcon, agentTitle, commandLine, isAcp, keySource, parseCommandLine, parseEnvLines, sharedCredentialGroups } from '../packages/surfaces/src/providers.ts';
+import { agentChoices, agentIcon, agentTitle, commandLine, isAcp, keySource, parseCommandLine, parseEnvLines, sharedCredentialGroups, sharedKeyNames } from '../packages/surfaces/src/providers.ts';
 import { conversationDetails } from '../packages/surfaces/src/conversation-model.ts';
 import { lazyboxCommands, type SlashContext } from '../packages/surfaces/src/slash-commands.ts';
 import { helpChoices, providerNeeds } from '../packages/surfaces/src/help-availability.ts';
@@ -70,18 +70,23 @@ test('Ask Lazybox never needs or picks an ACP agent', () => {
 });
 
 test('Antigravity is grouped with the Gemini CLI key it shares, by name only', () => {
-  const acp = (id: string, extra: Record<string, unknown> = {}) => ({ id, icon: 'agent-gemini', command: id, args: [], envNames: [], homepage: '', custom: false, launchProblem: '', sharesCredentialsWith: '', inheritedEnvNames: [], signInCommand: '', credentialsNote: '', ...extra }) as never;
+  const acp = (id: string, extra: Record<string, unknown> = {}) => ({ id, icon: 'agent-gemini', command: id, args: [], envNames: [], homepage: '', custom: false, launchProblem: '', sharesCredentialsWith: '', inheritedEnvNames: [], sharedEnvNames: [], signInCommand: '', credentialsNote: '', ...extra }) as never;
   const gemini = status('acp:gemini', { title: 'Gemini CLI', installed: false, acp: acp('gemini', { envNames: ['GEMINI_API_KEY'] }) });
-  const agy = status('acp:antigravity', { title: 'Google Antigravity', acp: acp('antigravity', { sharesCredentialsWith: 'gemini', inheritedEnvNames: ['GEMINI_API_KEY'] }) });
+  const agy = status('acp:antigravity', { title: 'Google Antigravity', acp: acp('antigravity', { sharesCredentialsWith: 'gemini', inheritedEnvNames: ['GEMINI_API_KEY'], sharedEnvNames: ['GEMINI_API_KEY'] }) });
   const goose = status('acp:goose', { title: 'Goose', acp: acp('goose') });
   const groups = sharedCredentialGroups([gemini, agy, goose]);
   assert.deepEqual(groups.map(g => [g.title, g.agents.map(a => a.title)]), [['Google', ['Gemini CLI', 'Google Antigravity']]]);
-  assert.equal(keySource(agy, gemini), 'Uses Gemini CLI’s GEMINI_API_KEY');
-  assert.equal(keySource(gemini, gemini), 'Its own GEMINI_API_KEY');
-  const own = status('acp:antigravity', { title: 'Google Antigravity', acp: acp('antigravity', { sharesCredentialsWith: 'gemini', envNames: ['GEMINI_API_KEY'] }) });
-  assert.equal(keySource(own, gemini), 'Its own GEMINI_API_KEY');
-  const none = status('acp:antigravity', { title: 'Google Antigravity', acp: acp('antigravity', { sharesCredentialsWith: 'gemini' }) });
-  assert.match(keySource(none, gemini), /^No API key: set one on Gemini CLI/);
+  const keys = sharedKeyNames(groups[0]);
+  assert.deepEqual(keys, ['GEMINI_API_KEY']);
+  assert.equal(keySource(agy, gemini, keys), 'Uses Gemini CLI’s GEMINI_API_KEY');
+  assert.equal(keySource(gemini, gemini, keys), 'Its own GEMINI_API_KEY');
+  // A variable that is not the key is not called one.
+  const modelOnly = status('acp:gemini', { title: 'Gemini CLI', acp: acp('gemini', { envNames: ['GEMINI_MODEL'] }) });
+  assert.match(keySource(modelOnly, modelOnly, keys), /^No API key set/);
+  const own = status('acp:antigravity', { title: 'Google Antigravity', acp: acp('antigravity', { sharesCredentialsWith: 'gemini', envNames: ['GEMINI_API_KEY'], sharedEnvNames: ['GEMINI_API_KEY'] }) });
+  assert.equal(keySource(own, gemini, keys), 'Its own GEMINI_API_KEY');
+  const none = status('acp:antigravity', { title: 'Google Antigravity', acp: acp('antigravity', { sharesCredentialsWith: 'gemini', sharedEnvNames: ['GEMINI_API_KEY'] }) });
+  assert.match(keySource(none, gemini, keys), /^No API key: set one on Gemini CLI/);
   // Neither on the Runner: nothing to show.
   assert.deepEqual(sharedCredentialGroups([gemini, { ...none, installed: false } as ProviderStatus]), []);
 });

@@ -336,8 +336,9 @@ func adminDir(t *testing.T, member Member) string {
 	return dir
 }
 
-// Regression: "member is not the expected worktree root" when the workspaces
-// root lives inside another repository and the member's .git is gone.
+// Regression test for #64's fix: "member is not the expected worktree root"
+// when the workspaces root lives inside another repository and the member's
+// .git is gone. Without missingWorktreeLink it fails with exactly that error.
 func TestDeleteNestedWorkspaceWithoutGitLink(t *testing.T) {
 	for _, prune := range []bool{false, true} {
 		t.Run(map[bool]string{false: "registered", true: "pruned"}[prune], func(t *testing.T) {

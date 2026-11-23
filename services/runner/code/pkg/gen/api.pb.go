@@ -3170,6 +3170,9 @@ type AcpAgentInfo struct {
 	// The names it takes from that agent now, because that agent has them and
 	// it does not. Their values never leave the Runner.
 	InheritedEnvNames []string `protobuf:"bytes,10,rep,name=inherited_env_names,json=inheritedEnvNames,proto3" json:"inherited_env_names,omitempty"`
+	// The names it takes from that agent when it has none of its own
+	// ("GEMINI_API_KEY"): which of either agent's names are the shared key.
+	SharedEnvNames []string `protobuf:"bytes,13,rep,name=shared_env_names,json=sharedEnvNames,proto3" json:"shared_env_names,omitempty"`
 	// The command that signs a built-in agent in on the Runner ("agy acp
 	// --login"), and what else its credentials need; empty when unknown.
 	SignInCommand   string `protobuf:"bytes,11,opt,name=sign_in_command,json=signInCommand,proto3" json:"sign_in_command,omitempty"`
@@ -3274,6 +3277,13 @@ func (x *AcpAgentInfo) GetSharesCredentialsWith() string {
 func (x *AcpAgentInfo) GetInheritedEnvNames() []string {
 	if x != nil {
 		return x.InheritedEnvNames
+	}
+	return nil
+}
+
+func (x *AcpAgentInfo) GetSharedEnvNames() []string {
+	if x != nil {
+		return x.SharedEnvNames
 	}
 	return nil
 }
@@ -38329,7 +38339,7 @@ const file_api_proto_rawDesc = "" +
 	"\x05value\x18\x01 \x01(\tR\x05value\x12!\n" +
 	"\fdisplay_name\x18\x02 \x01(\tR\vdisplayName\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12#\n" +
-	"\reffort_levels\x18\x04 \x03(\tR\feffortLevels\"\x93\x03\n" +
+	"\reffort_levels\x18\x04 \x03(\tR\feffortLevels\"\xbd\x03\n" +
 	"\fAcpAgentInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04icon\x18\x02 \x01(\tR\x04icon\x12\x18\n" +
@@ -38341,7 +38351,8 @@ const file_api_proto_rawDesc = "" +
 	"\x0elaunch_problem\x18\b \x01(\tR\rlaunchProblem\x126\n" +
 	"\x17shares_credentials_with\x18\t \x01(\tR\x15sharesCredentialsWith\x12.\n" +
 	"\x13inherited_env_names\x18\n" +
-	" \x03(\tR\x11inheritedEnvNames\x12&\n" +
+	" \x03(\tR\x11inheritedEnvNames\x12(\n" +
+	"\x10shared_env_names\x18\r \x03(\tR\x0esharedEnvNames\x12&\n" +
 	"\x0fsign_in_command\x18\v \x01(\tR\rsignInCommand\x12)\n" +
 	"\x10credentials_note\x18\f \x01(\tR\x0fcredentialsNote\"5\n" +
 	"\tAcpEnvVar\x12\x12\n" +

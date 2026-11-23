@@ -76,7 +76,7 @@ export function AcpAgentsSettings() {
             <div className="acp-agent-name"><strong>{a.title}</strong>{a.version && <small className="mono">{a.version}</small>}{a.acp?.custom && <span className="acp-agent-tag">{a.acp.icon === 'agent' ? 'Added by you' : 'Your command'}</span>}<span className={`acp-agent-state tone-${stateLabel(a).tone}`}>{stateLabel(a).text}</span></div>
             <code className="acp-agent-command" title={a.path || undefined}>{commandLine(a)}</code>
             {a.acp?.envNames.length ? <small>Environment: {a.acp.envNames.join(', ')}</small> : null}
-            {a.acp?.inheritedEnvNames.length ? <small className="acp-agent-shared">{keySource(a, agents.find(s => s.acp?.id === a.acp?.sharesCredentialsWith) || a)}</small> : null}
+            {a.acp?.inheritedEnvNames.length ? <small className="acp-agent-shared">{keySource(a, agents.find(s => s.acp?.id === a.acp?.sharesCredentialsWith) || a, a.acp.sharedEnvNames)}</small> : null}
             {a.error && <small className="acp-agent-error">{a.error}</small>}
             {!a.error && a.acp?.launchProblem && <small className="acp-agent-error" role="note"><Icon name="alert" size={11}/> {a.acp.launchProblem}</small>}
           </div>

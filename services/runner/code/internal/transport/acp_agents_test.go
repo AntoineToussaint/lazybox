@@ -82,7 +82,7 @@ func TestReportNamesTheSharedGeminiKey(t *testing.T) {
 			found = p.Acp
 		}
 	}
-	if found.GetSharesCredentialsWith() != "gemini" || len(found.GetInheritedEnvNames()) != 1 || found.InheritedEnvNames[0] != "GEMINI_API_KEY" || len(found.EnvNames) != 0 || found.SignInCommand != "agy acp --login" || found.CredentialsNote == "" {
+	if found.GetSharesCredentialsWith() != "gemini" || len(found.GetInheritedEnvNames()) != 1 || found.InheritedEnvNames[0] != "GEMINI_API_KEY" || len(found.EnvNames) != 0 || found.SignInCommand != "agy acp --login" || len(found.SharedEnvNames) != 1 || found.CredentialsNote == "" {
 		t.Fatalf("antigravity: %+v", found)
 	}
 	if strings.Contains(report.String(), "gemini-secret") {

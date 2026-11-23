@@ -155,11 +155,16 @@ export function sharedCredentialGroups(providers: ProviderStatus[]): SharedCrede
   return groups;
 }
 
+/** The names a group's agents share (GEMINI_API_KEY): the only names that are its key. */
+export function sharedKeyNames(group: SharedCredentialGroup): string[] {
+  return [...new Set(group.agents.flatMap(a => a.acp?.sharedEnvNames || []))].sort();
+}
+
 /** "Uses Gemini CLI’s GEMINI_API_KEY": where an agent's API key comes from, by name only. */
-export function keySource(agent: ProviderStatus, source: ProviderStatus): string {
-  const inherited = agent.acp?.inheritedEnvNames || [];
+export function keySource(agent: ProviderStatus, source: ProviderStatus, keys: string[]): string {
+  const inherited = (agent.acp?.inheritedEnvNames || []).filter(name => keys.includes(name));
   if (inherited.length) return `Uses ${source.title}’s ${inherited.join(', ')}`;
-  const own = agent.acp?.envNames || [];
+  const own = (agent.acp?.envNames || []).filter(name => keys.includes(name));
   if (own.length) return `Its own ${own.join(', ')}`;
   return agent === source ? 'No API key set: signs in with its own Google account' : `No API key: set one on ${source.title}, or sign in with its own Google account`;
 }

@@ -403,14 +403,16 @@ func (a Agent) InheritedEnvNames() []string { return sortedNames(a.Inherited) }
 // LaunchEnv is the environment added when the agent starts: what it shares,
 // then its own, so its own value wins.
 func (a Agent) LaunchEnv() []string {
+	// Inherited holds only names the agent has no value of its own for
+	// (inherited), so the report and the launch agree.
 	env := []string{}
 	for _, name := range a.InheritedEnvNames() {
-		if _, own := a.Env[name]; !own {
-			env = append(env, name+"="+a.Inherited[name])
-		}
+		env = append(env, name+"="+a.Inherited[name])
 	}
 	for _, name := range a.EnvNames() {
-		env = append(env, name+"="+a.Env[name])
+		if _, shared := a.Inherited[name]; !shared {
+			env = append(env, name+"="+a.Env[name])
+		}
 	}
 	return env
 }

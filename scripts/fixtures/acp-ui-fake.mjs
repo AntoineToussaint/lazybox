@@ -40,7 +40,7 @@ export function createAcpFake({ profiles, mutations }) {
       path: present ? `/fixture/bin/${a.command.split('/').pop()}` : '', version: installed.get(a.id) || '', source: a.custom ? 'configured' : 'path',
       error: present ? '' : `${a.title} is not installed on the Runner's computer (no ${a.command} on its PATH).`, installCommand: present ? '' : a.install,
       subscriptions: profile ? [{ profileId: profile.id, label: a.title, state: 'unverified', resetAt: '0', detail: 'Signs in with its own account', managed: false, isolation: 'inherited' }] : [],
-      acp: { id: a.id, icon: a.icon, command: a.command, args: a.args, envNames: Object.keys(a.env || {}).sort(), homepage: a.homepage, custom: a.custom, sharesCredentialsWith: a.sharesCredentialsWith || '', inheritedEnvNames: inherited(a, all), signInCommand: a.signInCommand || '', credentialsNote: a.credentialsNote || '', launchProblem: present && !a.custom ? launchProblems.get(a.id) || '' : '' },
+      acp: { id: a.id, icon: a.icon, command: a.command, args: a.args, envNames: Object.keys(a.env || {}).sort(), homepage: a.homepage, custom: a.custom, sharesCredentialsWith: a.sharesCredentialsWith || '', inheritedEnvNames: inherited(a, all), sharedEnvNames: a.sharedEnv || [], signInCommand: a.signInCommand || '', credentialsNote: a.credentialsNote || '', launchProblem: present && !a.custom ? launchProblems.get(a.id) || '' : '' },
     };
   });
   return {

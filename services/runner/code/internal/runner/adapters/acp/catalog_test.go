@@ -113,6 +113,14 @@ func TestAntigravitySharesGeminisAPIKey(t *testing.T) {
 	if a, _ = r.Get("antigravity"); len(a.LaunchEnv()) != 2 || a.LaunchEnv()[0] != "GEMINI_API_KEY=gemini-key" {
 		t.Fatalf("back to Gemini's key: %v", a.LaunchEnv())
 	}
+	// An empty value of its own (a hand-edited registry; Save drops them) is
+	// no key: the report and the launch both use Gemini's.
+	blank := a
+	blank.Env = map[string]string{"GEMINI_API_KEY": ""}
+	blank.Inherited = inherited(blank, r.Agents())
+	if got := blank.LaunchEnv(); len(got) != 1 || got[0] != "GEMINI_API_KEY=gemini-key" || len(blank.InheritedEnvNames()) != 1 {
+		t.Fatalf("an empty own value: launch %v, report %v", got, blank.InheritedEnvNames())
+	}
 	// Nothing is shared once Gemini has no key; other agents share nothing.
 	if err = r.Remove("gemini"); err != nil {
 		t.Fatal(err)

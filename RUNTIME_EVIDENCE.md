@@ -1095,3 +1095,32 @@ The real binary passed the coding, help and authentication gateway fixtures
 against a local HTTP endpoint and started and cancelled a browser sign-in
 in a temporary profile. The adapter suite and transcript tests passed.
 These checks exercised neither a completed account login nor live inference.
+
+## 2026-11-23 — Antigravity and Hermes launch details
+
+Checked for the review of #64, on the person's Mac (macOS arm64).
+
+- **Google Antigravity**: checked against Google's own documentation, not run.
+  - The [CLI ACP page](https://antigravity.google/docs/cli/acp) says `agy acp`
+    starts the ACP server and `agy acp --login` signs in.
+  - The [getting-started page](https://antigravity.google/docs/getting-started?tab=cli)
+    installs with `curl -fsSL https://antigravity.google/cli/install.sh | bash`
+    (to `~/.local/bin/agy`). The script was served, but not run.
+  - The [authentication page](https://antigravity.google/docs/install?tab=cli)
+    says the CLI reads only `GEMINI_API_KEY` (not `GOOGLE_API_KEY`), and only
+    with `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`.
+  - The catalog command, install command and homepage agree with those pages, and
+    so does `docs/guides/other-agents.md`.
+  - **Not run:** `agy` is not installed on this machine, so no login, no
+    `agy acp --help` launch check and no conversation. The shared Gemini key is
+    covered only by `TestAntigravitySharesGeminisAPIKey`,
+    `TestSharedKeyReachesTheAgent` (the fake ACP agent sees the value) and
+    `TestReportNamesTheSharedGeminiKey`. Antigravity stays **Preview** like
+    every ACP agent.
+- **Hermes Agent**: installed at `/opt/homebrew/bin/hermes` (Homebrew
+  `hermes-agent` 0.22.4, `hermes --version`: 2026.9.24).
+  - `hermes acp --help` documents `hermes acp`: "Start Hermes Agent in ACP mode
+    for editor integration".
+  - `hermes acp --check` printed "Hermes ACP check OK".
+  - **Not verified:** a conversation or model turn through Lazybox.
+    `TestRealACPAgent` was not run. Hermes stays **Preview**.

@@ -105,14 +105,15 @@ try {
   // 4. Half a laptop screen: the header fits. Page tabs and the page menu stay on screen, nothing scrolls sideways.
   for (const width of [800, 900, 1024, 1100]) {
     const page = await open({ width, height: 900 });
+    if (width === 800) await page.screenshot({ path: '.cache/polish-pass-half-screen.png' });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `no sideways page scroll at ${width}px`);
     for (const control of [page.locator('.workspace-header > nav').getByRole('button', { name: 'Work', exact: true }), page.locator('.workspace-header > nav').getByRole('button', { name: 'Settings', exact: true }), page.locator('.workspace-header-actions summary[aria-label="Page actions"]'), page.getByRole('button', { name: 'New conversation', exact: true }).first()]) {
       const bounds = await control.boundingBox();
       assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width + 1, `a header control is on screen at ${width}px`);
       // Nothing lies on top of it.
-      assert.ok(await control.evaluate(node => { const r = node.getBoundingClientRect(), top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!top && (node === top || node.contains(top)); }), `a header control is not covered at ${width}px`);
+      const cover = await control.evaluate(node => { const r = node.getBoundingClientRect(), top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!top && (node === top || node.contains(top)) ? '' : `${node.getAttribute('aria-label') || node.textContent?.trim()} under ${top ? `${top.tagName.toLowerCase()}.${[...top.classList].join('.')} “${(top.getAttribute('aria-label') || top.textContent || '').trim().slice(0, 40)}”` : 'nothing'}`; });
+      assert.equal(cover, '', `a header control is not covered at ${width}px`);
     }
-    if (width === 800) await page.screenshot({ path: '.cache/polish-pass-half-screen.png' });
     await page.context().close();
   }
 

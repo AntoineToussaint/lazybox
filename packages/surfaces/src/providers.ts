@@ -131,3 +131,40 @@ export function parseEnvLines(text: string): { entries: { name: string; value: s
   }
   return { entries, error: '' };
 }
+
+/** What people call the account an agent signs in with, by the agent that owns it. */
+const ACCOUNT_FAMILIES: Record<string, string> = { gemini: 'Google' };
+
+export type SharedCredentialGroup = { title: string; source: ProviderStatus; agents: ProviderStatus[] };
+
+/**
+ * Settings → Subscriptions: each agent other agents share credentials with
+ * (Antigravity uses Gemini CLI's API key), with those agents, shown when any
+ * of them is on the Runner.
+ */
+export function sharedCredentialGroups(providers: ProviderStatus[]): SharedCredentialGroup[] {
+  const present = (p: ProviderStatus) => p.installed || !!p.acp?.custom;
+  const groups: SharedCredentialGroup[] = [];
+  for (const source of providers) {
+    const id = source.acp?.id;
+    if (!id) continue;
+    const sharers = providers.filter(p => p.acp?.sharesCredentialsWith === id);
+    const agents = [source, ...sharers];
+    if (sharers.length && agents.some(present)) groups.push({ title: ACCOUNT_FAMILIES[id] || source.title, source, agents });
+  }
+  return groups;
+}
+
+/** The names a group's agents share (GEMINI_API_KEY): the only names that are its key. */
+export function sharedKeyNames(group: SharedCredentialGroup): string[] {
+  return [...new Set(group.agents.flatMap(a => a.acp?.sharedEnvNames || []))].sort();
+}
+
+/** "Uses Gemini CLI’s GEMINI_API_KEY": where an agent's API key comes from, by name only. */
+export function keySource(agent: ProviderStatus, source: ProviderStatus, keys: string[]): string {
+  const inherited = (agent.acp?.inheritedEnvNames || []).filter(name => keys.includes(name));
+  if (inherited.length) return `Uses ${source.title}’s ${inherited.join(', ')}`;
+  const own = (agent.acp?.envNames || []).filter(name => keys.includes(name));
+  if (own.length) return `Its own ${own.join(', ')}`;
+  return agent === source ? 'No API key set: signs in with its own Google account' : `No API key: set one on ${source.title}, or sign in with its own Google account`;
+}

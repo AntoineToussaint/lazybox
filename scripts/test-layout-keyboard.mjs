@@ -329,6 +329,9 @@ async function scenario(browser,scheme){
  const keymap=()=>page.evaluate(()=>{for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(/keyboard:v2$/.test(k))return JSON.parse(localStorage.getItem(k))['inbox.open'];}return null;});
  await expect.poll(keymap).toBe('] ] i');
  await toast.getByRole('button',{name:'Undo'}).click();
+ // Undo goes back to Settings, where the chord was pressed, with the arrangement restored.
+ await expect(page.getByRole('tab',{name:'Shortcuts'})).toBeVisible();
+ await page.getByRole('navigation',{name:'Pages'}).getByRole('button',{name:'Work',exact:true}).click();
  await expect(titles()).toHaveText(arranged);
  await expect.poll(keymap).toBe('] ] x');
  await expect(toast).toHaveCount(0);

@@ -842,6 +842,19 @@ message AcpAgentInfo {
   // flags Lazybox starts it with: a sentence for Settings, empty when they
   // are all named or it was not checked. A hint; the agent may still start.
   string launch_problem = 8;
+  // The agent whose credentials it uses when it has none of its own
+  // ("gemini" for Antigravity); empty when it shares none.
+  string shares_credentials_with = 9;
+  // The names it takes from that agent now, because that agent has them and
+  // it does not. Their values never leave the Runner.
+  repeated string inherited_env_names = 10;
+  // The names it takes from that agent when it has none of its own
+  // ("GEMINI_API_KEY"): which of either agent's names are the shared key.
+  repeated string shared_env_names = 13;
+  // The command that signs a built-in agent in on the Runner ("agy acp
+  // --login"), and what else its credentials need; empty when unknown.
+  string sign_in_command = 11;
+  string credentials_note = 12;
 }
 message AcpEnvVar {
   string name = 1;

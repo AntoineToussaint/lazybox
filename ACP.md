@@ -108,6 +108,16 @@ a built-in id replaces that built-in's command; removing it restores the
 default. Environment values never leave the Runner: the wire carries names
 only, and an empty value on save keeps the stored one.
 
+A built-in agent can share another's credentials (`Agent.SharesCredentialsWith`,
+`SharedEnv`). Google Antigravity shares Gemini CLI's `GEMINI_API_KEY`. When
+Antigravity's own environment lacks that name, the registry copies the value
+from Gemini CLI's environment (`Agent.Inherited`, as private as `Env`). At
+launch the shared values go first and the agent's own go after, so its own
+value wins, and both come after the Runner's environment. The registry file
+never records shared values. The wire carries only `shares_credentials_with`
+and `inherited_env_names`, with `sign_in_command` and `credentials_note` for
+Settings → Subscriptions.
+
 Detection runs through `Config.ACPLookPath` (the service sets
 `exec.LookPath`); left nil, only the person's agents are offered, so a test
 machine's installed agents never change a test's providers.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 )
 
 type DeletionPreview struct {
@@ -45,7 +46,7 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 			repo, ok := m.repos[member.RepositoryID]
 			verified := ok && m.common[repo.ID] == member.CommonDir
 			m.mu.Unlock()
-			if verified && member.Path == filepath.Join(c.Root, member.Name) && missingWorktreeLink(member.Path) {
+			if verified && member.Path == filepath.Join(c.Root, member.Name) && missingWorktreeLink(member.Path, member.CommonDir) {
 				// A pruned registration leaves ordinary files in the owned
 				// workspace. Both cases require explicit discard consent.
 				p.Dirty = append(p.Dirty, member.Name)
@@ -192,9 +193,9 @@ func (m *Manager) FinishDeletion(ctx context.Context, id string, discard bool, a
 		if !verified {
 			return fail(errors.New("source repository changed; cleanup refused"))
 		}
-		if discard && member.Path == filepath.Join(c.Root, member.Name) && missingWorktreeLink(member.Path) {
+		if discard && member.Path == filepath.Join(c.Root, member.Name) && missingWorktreeLink(member.Path, member.CommonDir) {
 			registered, err := m.registeredWorktree(ctx, repo, member.Path)
-			if err != nil || !missingWorktreeLink(member.Path) {
+			if err != nil || !missingWorktreeLink(member.Path, member.CommonDir) {
 				return fail(errors.New("damaged worktree changed during deletion; retry to check it again"))
 			}
 			if !registered {
@@ -242,8 +243,10 @@ func (m *Manager) removeWorktree(ctx context.Context, member Member, discard boo
 }
 
 // A missing link can be recreated. Existing Git metadata, symlinks and
-// non-directories are left alone even if the path was once registered.
-func missingWorktreeLink(path string) bool {
+// non-directories are left alone even if the path was once registered. A
+// .git file still counts as missing when it names a removed administrative
+// directory of this repository (<common>/worktrees/<name>).
+func missingWorktreeLink(path, commonDir string) bool {
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil || canonical != path {
 		return false
@@ -259,7 +262,41 @@ func missingWorktreeLink(path string) bool {
 		_, err := os.Lstat(filepath.Join(path, name))
 		return errors.Is(err, os.ErrNotExist)
 	}
-	return missing(".git") && (missing("HEAD") || (missing("objects") && missing("commondir")))
+	if !missing("HEAD") && (!missing("objects") || !missing("commondir")) {
+		return false
+	}
+	return missing(".git") || danglingGitFile(filepath.Join(path, ".git"), commonDir)
+}
+
+// danglingGitFile reports whether link is a regular .git file whose gitdir is
+// a removed <commonDir>/worktrees/<name>. A file pointing anywhere else, or at
+// a directory that still exists, is somebody's live metadata.
+func danglingGitFile(link, commonDir string) bool {
+	info, err := os.Lstat(link)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
+		return false
+	}
+	data, err := os.ReadFile(link)
+	if err != nil {
+		return false
+	}
+	target, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: ")
+	if !ok || target == "" || strings.ContainsAny(target, "\n\r") {
+		return false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(link), target)
+	}
+	target = filepath.Clean(target)
+	if filepath.Base(filepath.Dir(target)) != "worktrees" || filepath.Base(target) == "worktrees" {
+		return false
+	}
+	common, err := filepath.EvalSymlinks(filepath.Dir(filepath.Dir(target)))
+	if err != nil || common != commonDir {
+		return false
+	}
+	_, err = os.Lstat(target)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func (m *Manager) registeredWorktree(ctx context.Context, repo Repository, path string) (bool, error) {

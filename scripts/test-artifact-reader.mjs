@@ -61,8 +61,10 @@ try {
   await page.getByText('Create implementation roadmap…', { exact: true }).click();
   const roadmap = page.getByRole('dialog', { name: 'Create implementation roadmap' });
   await roadmap.getByLabel('Include a review').selectOption(structuredDocs.find(item => item.record.kind === 'report').record.id);
-  await expect(roadmap.getByLabel('Milestones')).toHaveValue(/Milestone: M1[\s\S]*Phase:[\s\S]*Status: Open[\s\S]*Definition of done:[\s\S]*Verification evidence:/);
-  await roadmap.getByLabel('Milestones').fill('## Deliver the first slice\n- Milestone: M1\n- Deliverable: Ship the fix\n- Definition of done: Verify the original regression.');
+  while (await roadmap.getByRole('button', { name: 'Remove milestone' }).count() > 1) await roadmap.getByRole('button', { name: 'Remove milestone' }).last().click();
+  await roadmap.getByLabel('Milestone title').fill('Deliver the first slice');
+  await roadmap.getByLabel('Deliverable').fill('Ship the fix');
+  await roadmap.getByLabel('Definition of done (one per line)').fill('Verify the original regression.');
   await roadmap.getByRole('button', { name: 'Save roadmap' }).click();
   await expect(page.getByRole('heading', { name: 'Deliver the first slice' })).toBeVisible();
   await page.getByLabel('Export', { exact: true }).click();
@@ -71,6 +73,13 @@ try {
   const savedMission = JSON.parse(await readFile(await (await missionDownload).path(), 'utf8'));
   assert.equal(savedMission.tasks[0].key, 'M1');
   assert.match(savedMission.tasks[0].brief, /Verify the original regression/);
+  await page.getByLabel('Artifact actions', { exact: true }).click();
+  await page.getByRole('button', { name: 'Edit roadmap milestones…' }).click();
+  const editMilestones = page.getByRole('dialog', { name: 'Edit roadmap milestones' });
+  await editMilestones.getByLabel('Phase', { exact: true }).fill('Verification');
+  await editMilestones.getByRole('button', { name: 'Save roadmap' }).click();
+  await expect(page.getByLabel('Version', { exact: true })).toHaveValue('2');
+  await expect(page.getByText('Phase: Verification', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /Source review.*Structured report/ })).toBeVisible();
   await page.getByLabel('Artifact actions', { exact: true }).click();
   await page.getByText('Draft mission proposal in chat…').click();
@@ -87,7 +96,7 @@ try {
   await page.goto(standalone.replace(doc.id, structuredSpec.id));
   await page.getByLabel('Artifact actions', { exact: true }).click();
   await page.getByText('Create implementation roadmap…', { exact: true }).click();
-  await expect(roadmap.getByLabel('Milestones')).toHaveValue(/## Goal|## Requirements/);
+  assert.ok((await roadmap.getByLabel('Milestone title').evaluateAll(nodes => nodes.map(node => node.value))).includes('Requirements'));
   await roadmap.getByRole('button', { name: 'Cancel' }).click();
   await page.goto(standalone.replace(doc.id, todo.id));
   const checkbox = page.getByRole('checkbox', { name: 'Verify phone' });

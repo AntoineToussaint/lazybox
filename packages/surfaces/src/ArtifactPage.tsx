@@ -1,3 +1,4 @@
+import { roadmapMarkdown, typedMissionPlan, type Roadmap } from './roadmap';
 import { artifactFormat } from './artifact-formats';
 import { ArtifactExportContext, documentSnapshot, exportDocumentHTML, type DocumentHeading } from './artifact-export';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
@@ -136,7 +137,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
   const sizes = useRef<ResizeObserver | null>(null);
   const measureRef = useCallback((node: HTMLElement | null) => { sizes.current?.disconnect(); if (!node) return; sizes.current = new ResizeObserver(([entry]) => setWide(entry.contentRect.width > 860)); sizes.current.observe(node); }, []);
   const [republishing, setRepublishing] = useState(false);
-  const [roadmapInput, setRoadmapInput] = useState<{ version: number; markdown: string }>();
+  const [roadmapInput, setRoadmapInput] = useState<{ version: number; markdown: string; existing?: Roadmap }>();
   const [renaming, setRenaming] = useState(false), [dialog, setDialog] = useState<'delete' | 'save' | 'issue'>();
   const [status, setStatus] = useState('');
   const statusTimer = useRef(0);
@@ -221,10 +222,17 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
   const content = contents.get(shown);
   const baseContent = baseNumber ? contents.get(baseNumber) : '';
   const structured = artifact?.format === 'json' || artifact?.kind === 'todo-list';
+  const roadmap = useMemo<Roadmap | undefined>(() => {
+    if (artifact?.kind !== 'plan' || !structured || !content) return undefined;
+    const parsed = JSON.parse(content);
+    return parsed.schema === 'roadmap.v1' ? parsed : undefined;
+  }, [artifact?.kind, structured, content]);
   const project = (body: string) => {
     if (!structured || !body) return body;
     if (artifact?.kind === 'todo-list') return todoMarkdown(body);
-    const fields = JSON.parse(body) as Record<string, string | string[]>;
+    const parsed = JSON.parse(body);
+    if (artifact?.kind === 'plan' && parsed.schema === 'roadmap.v1') return roadmapMarkdown(parsed);
+    const fields = parsed as Record<string, string | string[]>;
     return Object.entries(fields).filter(([name]) => name !== 'schema').map(([name, value]) => {
       const title = name[0].toUpperCase() + name.slice(1).replace(/[A-Z]/g, letter => ' ' + letter.toLowerCase());
       const text = Array.isArray(value) ? value.map(entry => '- ' + entry).join('\n') : value;
@@ -447,7 +455,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
           <button type="button" disabled={exportContent === undefined} onClick={() => download()}><Icon name="download"/><span>Download .{extension}</span></button>
           {artifact.kind === 'plan' && artifact.format !== 'html' && <button type="button" disabled={currentText === undefined} onClick={() => {
             try {
-              const plan = roadmapMissionPlan(currentText ?? '', artifact.title, artifactId, shown);
+              const plan = roadmap ? typedMissionPlan(roadmap, artifact.title, artifactId, shown) : roadmapMissionPlan(currentText ?? '', artifact.title, artifactId, shown);
               void downloadFile(JSON.stringify(plan, null, 2), 'mission.json', 'application/json');
             } catch (e) { setError(errorText(e)); }
           }}><Icon name="download"/><span>Download mission plan</span></button>}
@@ -459,6 +467,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
         </ActionMenu>
         {!standalone && host.openArtifact && <button type="button" className="artifact-tool artifact-open-window" aria-label="Open in its own window" title="Open in its own window" onClick={() => void host.openArtifact!({ collectionId, artifactId }).catch(e => setError(errorText(e)))}><Icon name="external" size={14}/></button>}
         <ActionMenu ref={moreMenu} label="Artifact actions" className="artifact-more-menu">
+          {roadmap && <button type="button" disabled={shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onClick={() => setRoadmapInput({ version: shown, markdown: '', existing: roadmap })}><Icon name="pencil"/><span>Edit roadmap milestones…</span></button>}
           <button type="button" disabled={content === undefined || !shown} onClick={() => setRoadmapInput({ version: shown, markdown: artifact.format === 'html' ? '' : currentText ?? '' })}><Icon name="artifact"/><span>Create implementation roadmap…</span></button>
           {artifact.kind === 'plan' && <button type="button" disabled={content === undefined} onClick={() => sendToAgent(
             `Prepare a mission proposal from this roadmap. Read the full pinned roadmap revision. Preserve milestone IDs, phases, dependencies, definitions of done, and open decisions in the task briefs. Carry forward existing verification evidence. Distinguish reported completion from owner acceptance. Leave execution for separate approval.\n\n${discussionReference()}`
@@ -599,7 +608,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
         sessionId={conversationId} onShowSession={onShowSession} onClosePanel={() => setTerminal(undefined)}/>
     </section>}
     {roadmapInput && <RoadmapDialog source={artifact} {...roadmapInput} reviews={siblings.artifacts.filter(item => item.kind === 'report' && item.id !== artifactId && item.versions.length > 0)}
-      onClose={() => setRoadmapInput(undefined)} onSaved={plan => { setRoadmapInput(undefined); say('Roadmap saved.'); onRelated({ id: plan.id }, shown); }}/>}
+      onClose={() => setRoadmapInput(undefined)} onSaved={plan => { setRoadmapInput(undefined); say('Roadmap saved.'); if (roadmapInput.existing) { setArtifact(plan); setSelected(0); } else onRelated({ id: plan.id }, shown); }}/>}
     {dialog === 'delete' && <DeleteArtifactDialog artifact={artifact} onClose={() => setDialog(undefined)} onDeleted={() => { setDialog(undefined); onDeleted?.(); }}/>}
     {dialog === 'save' && <SaveToRepositoryDialog artifact={artifact} collection={collection} onClose={() => setDialog(undefined)} onSaved={(path, next) => { setDialog(undefined); if (next) setArtifact(next); artifactsChanged(collectionId); say(`Saved to ${path}. It is not committed.`); }}/>}
     {dialog === 'issue' && <CreateIssueDialog artifact={artifact} collection={collection} onClose={() => setDialog(undefined)} onCreated={(url, number) => { setDialog(undefined); say(`Created issue #${number}.`); if (/^https:\/\//.test(url)) window.open(url, '_blank', 'noopener,noreferrer'); }}/>}

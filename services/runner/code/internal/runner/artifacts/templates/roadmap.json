@@ -1,0 +1,15 @@
+{
+  "schema": "roadmap.v1",
+  "milestones": [{
+    "id": "M1",
+    "title": "Verify the first deliverable",
+    "owner": "",
+    "phase": "Implementation",
+    "status": "open",
+    "deliverable": "An implementation ready for review",
+    "dependsOn": [],
+    "definitionOfDone": ["Regression test passes"],
+    "evidence": [],
+    "openDecisions": []
+  }]
+}

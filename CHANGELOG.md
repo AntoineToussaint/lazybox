@@ -40,6 +40,8 @@ leave out.
 - **Help, in the app** Help → Documentation opens the guides offline, with search; a first-run welcome shows the five keys that matter. Help → Send feedback writes a report you read first, and uploads nothing.
 - **Codex, tested** Lazybox is tested with Codex 0.164 to 0.169; another version says so in one line at the start of a conversation instead of failing silently.
 - **ACP agents are a preview** Gemini CLI, Goose and the other ACP agents are marked Preview in New conversation and Settings, and Settings → Agents says when an installed agent does not take the flag Lazybox starts it with. An agent's own commands, such as /compact, are in the / menu.
+- **Google Antigravity and Hermes Agent** Both are ACP agents in New conversation and Settings → Agents, started with agy acp and hermes acp. Install either with the command Settings shows. Like every ACP agent, both are Preview.
+- **One Gemini key for Gemini CLI and Antigravity** When Antigravity has no API key of its own, it starts with the GEMINI_API_KEY set on Gemini CLI. A key set on Antigravity wins. Settings → Subscriptions groups the two under Google and shows where each key comes from and how each signs in, never the key itself.
 
 ### Claude and your accounts
 
@@ -52,6 +54,7 @@ leave out.
 
 ### Workspaces and tabs
 
+- **Delete a damaged workspace** A workspace whose Git link or registration is missing (its .git was removed, Git pruned it, or the .git names a deleted worktree) can be deleted once you agree to discard its files. This also works when the workspace folder is inside another Git repository. Branches are kept, and a .git that points anywhere else still blocks deletion.
 - **Mission progress** The board counts canceled and blocked tasks, links to the next task needing attention, and shows acceptance criteria from approved plans.
 
 - **Mission evidence after a handoff** Each assignment tracks its own delivered PRs. The board and inbox show each PR’s checks separately, and the timeline links conversations you can still open.

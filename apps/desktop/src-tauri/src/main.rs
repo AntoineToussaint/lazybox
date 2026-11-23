@@ -172,6 +172,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             host::open_console,
             host::open_chat,
             host::open_workspace,
+            host::arrange_desktop_windows,
             host::open_artifact,
             host::open_mission,
             host::dock_chat,

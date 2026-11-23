@@ -210,6 +210,7 @@ function DesktopWindow({ bootstrap, followRestart, renew }: { bootstrap: Bootstr
     // Arm the host to adopt the restarted Runner's locator (possibly a new port)
     // and reread it promptly; the window keeps its state, nothing reloads.
     expectRunnerRestart: async () => { await invoke<void>('expect_runner_restart'); followRestart(); },
+    arrangeWindows: arrangement => invoke<void>('arrange_desktop_windows', { arrangement }),
     openWorkspace: collectionId => invoke<void>('open_workspace', { collectionId }),
     chooseRepositoryFolder: () => invoke<string | null>('choose_repository_folder'),
     openSignIn: url => invoke<void>('open_sign_in', { url }),

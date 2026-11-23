@@ -10,6 +10,7 @@ import { useRunner } from './RunnerContext';
 import { subscriptionName } from './subscription-model';
 import { useProviderAvailability } from './useProviderAvailability';
 import { readDraft, readLaunchChoices, writeDraft } from './view-state';
+import { ApplyWindowArrangement, ReviewLayoutProposal } from './layout-proposal';
 import './help-assistant.css';
 
 /** Where the documentation explains what each agent needs (docs/troubleshooting.md). */
@@ -19,6 +20,7 @@ const suggestions = [
   'How do I add a second subscription?',
   'What are the keys I should know?',
   'How do I run my app from a workspace?',
+  'Design a wide-screen layout for reviewing changes alongside my agent.',
   'Make new coding sessions ask before running tools',
 ];
 
@@ -35,8 +37,11 @@ const set = (store: ViewStateStore | undefined, key: string, value: string) => {
  * The assistant answers from the documentation and proposes settings changes
  * the person approves (SettingsProposal.tsx); it never runs commands.
  */
-export function HelpAssistant({ question, setQuestion, workspaceId, workspaceName, viewState, sessionKey, focusToken, onPurpose }: {
+export function HelpAssistant({ onArrangeWindows, currentLayoutYaml, onReviewLayout, question, setQuestion, workspaceId, workspaceName, viewState, sessionKey, focusToken, onPurpose }: {
   /** The workspace the panel is in: its usage is attributed there, and its name told to the assistant. */
+  onArrangeWindows?(choice: string): void;
+  currentLayoutYaml?(): string;
+  onReviewLayout?(yaml: string): void;
   question?: string;
   setQuestion(value?: string): void;
   workspaceId: string;
@@ -85,7 +90,11 @@ export function HelpAssistant({ question, setQuestion, workspaceId, workspaceNam
     if (!question || starting || pick.kind !== 'ready') return;
     setStarting(true); setError('');
     try {
-      const opened = await api.openAssistant({ profileId: pick.choice.profileId, purpose: 'help', context: workspaceName ? `The person has the workspace "${workspaceName}" open in Lazybox.` : '', collectionId: workspaceId, options: { model: '', permission: '', workflow: 'execute', gatewayId: '', rotationProfileIds: [], noRotation: false, instructions: '' } });
+      const layout = currentLayoutYaml?.();
+      const context = [workspaceName && `The person has the workspace "${workspaceName}" open in Lazybox.`,
+        layout && `Docked layout when this help conversation opened:
+${layout}`].filter(Boolean).join('\n\n');
+      const opened = await api.openAssistant({ profileId: pick.choice.profileId, purpose: 'help', context, collectionId: workspaceId, options: { model: '', permission: '', workflow: 'execute', gatewayId: '', rotationProfileIds: [], noRotation: false, instructions: '' } });
       const id = opened.session?.id;
       if (!id) throw new Error('The Runner did not return the conversation.');
       try {
@@ -141,8 +150,8 @@ export function HelpAssistant({ question, setQuestion, workspaceId, workspaceNam
     </form>}
     {error && <div className="error help-assistant-error" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
     {sessionId
-      ? <ChatPanel key={sessionId} collectionId={workspaceId} purpose="help" embedded showCommands={false} initialSessionId={sessionId} viewState={viewState}
-        onSessionChange={id => { adopt(id); if (!id) focus(); }}/>
+      ? <ApplyWindowArrangement.Provider value={onArrangeWindows}><ReviewLayoutProposal.Provider value={onReviewLayout}><ChatPanel key={sessionId} collectionId={workspaceId} purpose="help" embedded showCommands={false} initialSessionId={sessionId} viewState={viewState}
+        onSessionChange={id => { adopt(id); if (!id) focus(); }}/></ReviewLayoutProposal.Provider></ApplyWindowArrangement.Provider>
       : pick.kind === 'none'
         ? <NoAgent report={report} checking={availability.checking} onRefresh={() => void availability.refresh()}/>
         : <div className="help-start">

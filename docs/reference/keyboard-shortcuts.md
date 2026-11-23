@@ -112,6 +112,7 @@ Act on the active panel group: the one you last clicked or focused, ringed while
 | Change the layout… | — | — |
 | Next layout | `⇧⌘L` | `Ctrl+Shift+L` |
 | Copy the layout as YAML | — | — |
+| Arrange desktop windows | — | — |
 | Import a layout… | — | — |
 | Reset the layout to default | — | — |
 | Focus the panel group to the left | `⌥⌘←` | `Ctrl+Alt+←` |

@@ -218,6 +218,7 @@ export type RunnerDirectoryHost = {
 export type WorkspaceHost = AttentionHost & PowerHost & {
   /** The other Runners this window can show (MULTI_RUNNER.md); absent where there are none to find. */
   runners?: RunnerDirectoryHost;
+  arrangeWindows?(arrangement: string): Promise<void>;
   /** The UI zoom, where the host owns one (the desktop app). */
   zoom?: ZoomHost;
   /** The desktop app: version, updates (absent in a browser). */

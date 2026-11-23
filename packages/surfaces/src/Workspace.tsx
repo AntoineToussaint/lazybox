@@ -67,6 +67,7 @@ import { movePanel } from './dock-keyboard';
 import { showToast } from './toasts';
 import { provideLayoutCommands, type LayoutCommand } from './layout-commands';
 import { applyTemplate, builtinPresets, DEFAULT_PRESET, sameTemplate, templateOf, type LayoutPreset } from './layout-presets';
+import { layoutYaml } from './config-files';
 import { LayoutImportDialog, useLayoutFiles } from './layout-files';
 import { requestAsk } from './help-requests';
 import { useProvideConversationOpeners } from './conversation-requests';
@@ -1001,6 +1002,15 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     dock: panel => void bringBack(panel),
   };
   const moduleProps: SharedModuleProps = {
+    currentLayoutYaml: () => {
+      const currentPage = livePage();
+      const layout = templateOf(currentPage);
+      return layout ? layoutYaml({ name: currentPage.name, layout }) : '';
+    },
+    onArrangeWindows: host?.arrangeWindows ? choice => {
+      void host.arrangeWindows!(choice).catch(error => setError(String(error)));
+    } : undefined,
+    onReviewLayout: workspaceOpen && !locked && !narrow ? setImporting : undefined,
     workspaceId: workspaceID, openMission: host?.openMission, chooseRepositoryFolder: host?.chooseRepositoryFolder, collections, error: catalogError, loaded: catalogLoaded, refresh: refreshCatalog,
     onWorkspaceCreated: (id: string) => beginConversation(id, undefined, true),
     onNewConversation: beginConversation, onShowSession: showSession,

@@ -121,6 +121,16 @@ func TestAgentsAndCommandsNeverSeeTheOwnerEndpoint(t *testing.T) {
 	if strings.Contains(string(out), "CODEFLY") {
 		t.Fatal("managed command env inherits the Runner's Codefly wiring")
 	}
+	// Account probes run the person's provider CLIs with the same environment.
+	probe, err := b.profileEnv(accounts.Profile{ID: "codex-default", Provider: "codex", Isolation: "inherited"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range probe {
+		if strings.HasPrefix(entry, "CODEFLY") || strings.HasPrefix(entry, "LAZYBOX_V2_") {
+			t.Fatalf("an account probe inherits %q", entry)
+		}
+	}
 }
 
 // Credentials derive from a key kept in the Runner state, so an agent that

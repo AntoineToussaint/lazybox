@@ -47,7 +47,7 @@ func programModels(ctx context.Context, provider, program string) ([]agent.Model
 	}
 	defer os.RemoveAll(home)
 	env := []string{}
-	for _, entry := range os.Environ() {
+	for _, entry := range childEnv() {
 		if !slices.ContainsFunc(accountEnv, func(prefix string) bool { return strings.HasPrefix(entry, prefix) }) {
 			env = append(env, entry)
 		}

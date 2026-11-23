@@ -37,7 +37,7 @@ type ClaudeAuth struct {
 // Claude account that is not a saved, isolated one) the saved API key instead
 // of whatever the Runner inherited.
 func (b *Bench) profileEnv(p accounts.Profile) ([]string, error) {
-	env, err := accounts.Resolve(p, os.Environ())
+	env, err := accounts.Resolve(p, childEnv())
 	if err != nil || p.Provider != "claude" || p.Isolation == "environment" {
 		return env, err
 	}

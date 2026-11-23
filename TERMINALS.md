@@ -93,8 +93,7 @@ make lint 2>&1 | lazybox log --to "fix the parser"
 
 No flag is needed. You see every line in the terminal as usual; the run also
 appears in the **Command output** console of every conversation in this
-workspace, labelled *From your terminal* (the console opens on it in the
-conversation you are viewing). It ends with one line saying where the run went
+workspace, labelled *From your terminal*. It ends with one line saying where the run went
 and what an agent would get, for example `"go test ./..." is in the workspace
 console (an agent gets 2.1 KiB of 1.4 MiB, go-test filter)`.
 

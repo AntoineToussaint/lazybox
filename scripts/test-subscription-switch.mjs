@@ -217,7 +217,7 @@ try{
  assert.equal(f.mutations.filter(m=>m.method==='Apply').length,writes+1,'the handoff sends once');
  const revisit=await page.context().newPage();
  await revisit.goto(`${base}/?view=workspace&collection=delta&session=delta-session#token=${f.token}`);
- await revisit.getByRole('combobox',{name:'Session',exact:true}).selectOption('delta-session');n
+ await revisit.getByRole('combobox',{name:'Session',exact:true}).selectOption('delta-session');
  const continued=revisit.getByRole('button',{name:'Open continued Codex conversation'});
  await expect(continued).toBeVisible();
  await expect(revisit.getByRole('region',{name:'Subscription limit'})).toHaveCount(0);

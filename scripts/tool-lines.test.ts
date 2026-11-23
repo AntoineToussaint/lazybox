@@ -58,7 +58,7 @@ test('a call reads as a person says it: verb, target, short facts', () => {
   const read = ran('Read', { file_path: `${ROOT}/src/front_door/mcp.py` }, 'a\nb\nc\n');
   assert.deepEqual(describeTool(read, ROOT), { verb: 'Read', target: 'src/front_door/mcp.py', code: true, file: `${ROOT}/src/front_door/mcp.py`, meta: ['3 lines'], problem: undefined });
   const check = ran('Bash', { command: 'pnpm run check', description: 'Run the checks' }, 'ok\n');
-  assert.deepEqual([describeTool(check).verb, describeTool(check).target, describeTool(check).meta], ['Ran', 'pnpm run check', ['exit 0', '4.2s']]);
+  assert.deepEqual([describeTool(check).verb, describeTool(check).target, describeTool(check).meta], ['Ran', 'pnpm run check', ['4.2s']]);
   const failing = ran('Bash', { command: 'pnpm test' }, [{ type: 'text', text: 'Exit code 2\nFAIL src/a.test.ts\n' }], { failed: true });
   const title = describeTool(failing);
   assert.deepEqual([title.meta, title.problem, failing.exitCode], [['exit 2', '4.2s'], 'FAIL src/a.test.ts', 2]);
@@ -129,7 +129,7 @@ test('the fold keeps the main agent’s calls as runs of lines between its words
   assert.deepEqual(whole.messages.map(m => m.type), ['operation_accepted', 'message_delta', 'tools', 'subagent', 'message_delta', 'tools']);
   const run = whole.messages[2].tools!;
   assert.deepEqual(run.map(t => [t.id, t.status]), [['a', 'completed'], ['b', 'completed']], 'a sub-agent’s calls are not the main agent’s');
-  assert.equal(describeTool(run[1]).meta.join(' '), 'exit 0 4.5s');
+  assert.equal(describeTool(run[1]).meta.join(' '), '4.5s');
   assert.equal(whole.messages[5].tools![0].status, 'unknown', 'a call the turn ended without is not called a success');
   // Any batching lands on the same messages, and never changes an earlier snapshot.
   let one = emptyTranscript(); const snapshots: string[] = [];

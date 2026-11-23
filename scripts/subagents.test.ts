@@ -323,7 +323,7 @@ test('a timeline reads as the chat\'s tool lines: reads grouped, a file read aga
   assert.equal(describeGroup(rereads.item as never).text, 'Reading /tmp/rev.diff ×2', 'a run with the running call says so');
   assert.deepEqual(rereads.ids, ['r6', 'r7'], 'the running call is found in its row');
   // Under a second says nothing.
-  assert.deepEqual(describeTool((bash.item as { entry: never }).entry).meta, ['exit 0']);
+  assert.deepEqual(describeTool((bash.item as { entry: never }).entry).meta, []);
   assert.equal(stepRows(t.subagents.byId[child].items), rows, 'rows are computed once per timeline');
 });
 

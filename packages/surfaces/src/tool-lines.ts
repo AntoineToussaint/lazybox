@@ -1,6 +1,6 @@
 /**
  * Tool calls as lines of the conversation: what each one did, in words
- * ("Read src/app.ts", "Ran pnpm test · exit 0 · 4.2s", "Edited 3 files +12 −4"),
+ * ("Read src/app.ts", "Ran pnpm test · 4.2s", "Edited 3 files +12 −4"),
  * folded from the Runner journal's normalized tool events. Pure, so the
  * transcript fold and any view (the chat, sub-agent cards) share it.
  *
@@ -328,7 +328,7 @@ export type ToolTitle = {
   code: boolean;
   /** A file to open from the line. */
   file?: string;
-  /** Short facts after the title: "exit 0", "4.2s", "+12 −4". */
+  /** Short facts after the title: "exit 1", "4.2s", "+12 −4". */
   meta: string[];
   /** One line saying what went wrong. */
   problem?: string;
@@ -374,7 +374,7 @@ export function describeTool(entry: ToolEntry, root = ''): ToolTitle {
     case 'command': {
       const command = commandText(entry);
       if (!running) {
-        if (entry.exitCode !== undefined && (entry.exitCode !== 0 || i.action !== 'interactive')) meta.push(`exit ${entry.exitCode}`);
+        if (entry.exitCode !== undefined && entry.exitCode !== 0) meta.push(`exit ${entry.exitCode}`);
         // Under a second is not worth a word on every line.
         const ms = durationOf(entry);
         if (ms !== undefined && ms >= 1000) meta.push(shortDuration(ms));
@@ -651,7 +651,7 @@ export function describeToolBrief(entry: ToolEntry, root = ''): ToolTitle & { as
   const title = describeTool(entry, root);
   const took = durationOf(entry);
   const quick = took !== undefined && took < QUICK_MS ? shortDuration(took) : '';
-  const meta = title.meta.filter(m => m !== 'exit 0' && (!quick || m !== quick));
+  const meta = title.meta.filter(m => m !== quick);
   if (kindOf(entry) !== 'command') return { ...title, meta };
   const command = commandText(entry);
   const short = command ? shortCommand(command) : title.target;

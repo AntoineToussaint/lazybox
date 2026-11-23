@@ -68,7 +68,7 @@ func TestCheckRunsRecordDeliveryEvidenceAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if note := finish(b, generator, 1); note != "prerequisite generate: blocked on "+candidate+" (spec "+spec.ID+" v1)" {
+	if note := finish(b, generator, 1); note != "prerequisite generate: blocked on "+candidate+" (“Catalog” v1)" {
 		t.Fatal(note)
 	}
 	storage, _ := b.RegisterPipe(e, "psql -f storage.sql", false, &PipeCheck{Criterion: "storage"})
@@ -417,5 +417,53 @@ func TestMissionOutcomeIsTheSameByConversationAndTask(t *testing.T) {
 	}
 	if after := same(next, ne); !reflect.DeepEqual(after, accepted) {
 		t.Fatalf("restart changed the outcome:\n%+v\n%+v", accepted, after)
+	}
+}
+
+// Found running the Runner live: right after a commit, the outcome must name
+// the new files as current, never repeat a verdict on the files it replaced.
+func TestOutcomeReadsTheCurrentFilesOnEveryLookup(t *testing.T) {
+	ctx := context.Background()
+	source := upstreamOn(t, "main")
+	b := freshBench(t, collections.Repository{ID: "api", Name: "api", Path: source})
+	ws, err := b.Collections.Create(ctx, "fixture", collections.Spec{Name: "catalog", Members: []collections.MemberSpec{{Name: "api", RepositoryID: "api", BaseRef: gitIn(t, source, "rev-parse", "HEAD")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Adapters["codex"] = &agenttest.Adapter{}
+	e, err := b.OpenCollection("codex-default", ws.ID, "", accounts.Options{}, "direct", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := b.Artifacts.Put(ws.ID, artifacts.Put{Title: "Catalog", Content: catalogSpec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.BindDelivery(e, spec.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, criterion := range []string{"storage", "generate", "api"} {
+		c, err := b.RegisterPipe(e, criterion, false, &PipeCheck{Criterion: criterion})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.FinishPipe(c, nil, "", &commands.Report{ExitCode: 0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := b.DeliveryOutcome(e)
+	if err != nil || before.Candidates[0].Verdict != delivery.Passed || !before.Candidates[0].Current {
+		t.Fatalf("before the commit: %+v %v", before, err)
+	}
+	gitIn(t, ws.Members[0].Path, "commit", "--allow-empty", "-m", "after the checks")
+	after, err := b.DeliveryOutcome(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head := after.Candidates[0]; !head.Current || head.Candidate == before.Current || head.Verdict != delivery.Incomplete {
+		t.Fatalf("a commit later, the old files still read as current: %+v", after.Candidates)
+	}
+	if older := after.Candidates[1]; older.Candidate != before.Current || older.Current || older.Verdict != delivery.Passed {
+		t.Fatalf("the checked files are not kept as earlier: %+v", after.Candidates)
 	}
 }

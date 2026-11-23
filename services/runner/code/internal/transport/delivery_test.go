@@ -125,11 +125,15 @@ func TestDeliveryQualificationWithoutMission(t *testing.T) {
 	if !head.Current || head.Verdict != delivery.Blocked || states(head)["generate"] != delivery.Blocked || states(head)["storage"] != delivery.Passed || states(head)["api"] != delivery.Unrun {
 		t.Fatalf("blocked outcome: %+v", outcome)
 	}
+	// People read the spec and each run by name, not by ID.
+	if outcome.Contract.Title != "Catalog" || head.Criteria[1].Evidence[0].Title != "generate" {
+		t.Fatalf("titles: %q %+v", outcome.Contract.Title, head.Criteria[1].Evidence)
+	}
 	if evidence := head.Criteria[0].Evidence; len(evidence) != 1 || evidence[0].CommandId != storage.Id || evidence[0].Output != "available" {
 		t.Fatalf("storage evidence: %+v", head.Criteria[0])
 	}
 	blocked, err := client.PublishDeliveryOutcome(agent, &pb.PublishDeliveryOutcomeRequest{SessionId: e.ID})
-	if err != nil || blocked.Kind != "report" || !strings.Contains(blocked.Content, `"verdict": "blocked"`) {
+	if err != nil || blocked.Kind != "report" || blocked.Title != "Delivery outcome · “Catalog” v1" || !strings.Contains(blocked.Content, `"verdict": "blocked"`) {
 		t.Fatalf("publish while blocked: %v %v", blocked, err)
 	}
 

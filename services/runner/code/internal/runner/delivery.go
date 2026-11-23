@@ -97,7 +97,7 @@ func (b *Bench) missionContract(conversation string) (check delivery.Check, cont
 }
 
 func fromPlanContract(p *work.PlanContract) delivery.Contract {
-	c := delivery.Contract{Artifact: p.Artifact, Version: p.Version, Digest: p.Digest, Schema: "spec.v1", Legacy: p.Criteria}
+	c := delivery.Contract{Artifact: p.Artifact, Title: p.Title, Version: p.Version, Digest: p.Digest, Schema: "spec.v1", Legacy: p.Criteria}
 	if len(p.Bindings) > 0 {
 		c.Schema, c.Criteria, c.Legacy = "spec.v2", p.Bindings, nil
 	}
@@ -130,14 +130,14 @@ func (b *Bench) resolveCheck(e *Execution, criterion string, prerequisite bool) 
 		ids = append(ids, c.ID)
 	}
 	if !slices.Contains(ids, criterion) {
-		return nil, fmt.Errorf("spec %s v%d has no criterion %q (it has %v)", contract.Artifact, contract.Version, criterion, ids)
+		return nil, fmt.Errorf("%s has no criterion %q (it has %v)", contract.Name(), criterion, ids)
 	}
 	candidate, err := b.candidate(e.CollectionID)
 	if err != nil {
 		return nil, fmt.Errorf("cannot say which files the check runs on: %w", err)
 	}
 	check.CriterionID, check.Prerequisite, check.Candidate = criterion, prerequisite, candidate
-	check.ContractDigest, check.Artifact, check.Version = contract.Digest, contract.Artifact, contract.Version
+	check.ContractDigest, check.Artifact, check.Title, check.Version = contract.Digest, contract.Artifact, contract.Title, contract.Version
 	return &check, nil
 }
 
@@ -207,6 +207,7 @@ func (b *Bench) BindDelivery(e *Execution, artifactID string, version uint32) (d
 	if err != nil {
 		return delivery.Binding{}, err
 	}
+	contract.Title = doc.Title
 	if !contract.Bound() {
 		return delivery.Binding{}, errors.New("spec.v1 criteria have no IDs to check: publish a spec.v2 version (`lazybox artifact template delivery-spec`) and bind that")
 	}
@@ -343,7 +344,7 @@ func (b *Bench) RecordReviewCriterion(session, criterion, result string) (delive
 	}
 	contract := fromPlanContract(plan.Contract)
 	if !slices.ContainsFunc(contract.Criteria, func(c delivery.Criterion) bool { return c.ID == criterion }) {
-		return none, delivery.Check{}, fmt.Errorf("spec %s v%d has no criterion %q", contract.Artifact, contract.Version, criterion)
+		return none, delivery.Check{}, fmt.Errorf("%s has no criterion %q", contract.Name(), criterion)
 	}
 	revisions, err := b.candidateRevisions(run.ReviewWorkspace)
 	if err != nil {
@@ -370,6 +371,6 @@ func (b *Bench) RecordReviewCriterion(session, criterion, result string) (delive
 	if _, err := b.Delivery.Record(o); err != nil {
 		return none, delivery.Check{}, err
 	}
-	check := delivery.Check{CriterionID: criterion, ContractDigest: run.ContractDigest, Attempt: run.ReviewAttempt, Subject: o.Subject, Artifact: contract.Artifact, Version: contract.Version, Candidate: candidate}
+	check := delivery.Check{CriterionID: criterion, ContractDigest: run.ContractDigest, Attempt: run.ReviewAttempt, Subject: o.Subject, Artifact: contract.Artifact, Title: contract.Title, Version: contract.Version, Candidate: candidate}
 	return o, check, nil
 }

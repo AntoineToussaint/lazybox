@@ -43,7 +43,9 @@ const (
 // has text criteria and no stable IDs: its criteria stay unbound, and the
 // verdict unverified, until a spec.v2 version binds them.
 type Contract struct {
-	Artifact string      `json:"artifact"`
+	Artifact string `json:"artifact"`
+	// Title is the spec artifact's title when the revision was pinned, for what a person reads.
+	Title    string      `json:"title,omitempty"`
 	Version  uint32      `json:"version"`
 	Schema   string      `json:"schema"`
 	Digest   string      `json:"digest"`
@@ -51,6 +53,9 @@ type Contract struct {
 	// Legacy holds a spec.v1 contract's text criteria.
 	Legacy []string `json:"legacy,omitempty"`
 }
+
+// Name is how a person reads the pinned spec: its title and version.
+func (c Contract) Name() string { return specName(c.Title, c.Artifact, c.Version) }
 
 // Bound reports whether observations can be attributed to the contract's criteria.
 func (c Contract) Bound() bool { return c.Schema == "spec.v2" && len(c.Criteria) > 0 }

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { DeliveryOutcome } from '@lazybox/protocol';
-import { blocking, deliveryOutcomeMarkdown, evidenceLine, headline, resolved, summary } from '../packages/surfaces/src/delivery-model.ts';
+import { blocking, deliveryOutcomeMarkdown, evidenceLine, headline, resolved, specName, summary } from '../packages/surfaces/src/delivery-model.ts';
 
 const criterion = (id: string, state: string, required = true, evidence: object[] = []) => ({ id, expected: `${id} works`, required, state, evidence });
 const outcome = (fields: object) => ({ contract: { artifactId: 'spec-catalog', version: 3, digest: 'd', schema: 'spec.v2', criteria: [] }, attempt: 'a', conversationId: 'c', missionId: '', taskId: '', current: 'candidate:2', decision: '', candidates: [], ...fields }) as unknown as DeliveryOutcome;
@@ -25,6 +25,9 @@ test('evidence says what each observation proved, and a failure a later check re
   assert.equal(evidenceLine(failed as never), 'failed · check · exit 1 · output no longer kept');
   assert.equal(evidenceLine({ ...failed, prerequisite: 'passed', assertion: '', state: 'unverified', exitCode: 0, output: '' } as never), 'unverified · prerequisite met · exit 0');
   assert.equal(evidenceLine({ ...passed, source: 'review', exitCode: undefined } as never), 'passed · review');
+  assert.equal(evidenceLine({ ...passed, title: 'go test ./api' } as never), 'go test ./api · passed · check · exit 0');
+  assert.equal(specName({ title: 'Catalog', artifactId: 'spec-catalog', version: 3 }), '“Catalog” v3');
+  assert.equal(specName({ artifactId: 'spec-catalog', version: 3 }), 'spec spec-catalog v3');
   assert.equal(resolved(c, 0), true);
   assert.equal(resolved(c, 1), false);
 });
@@ -32,7 +35,11 @@ test('evidence says what each observation proved, and a failure a later check re
 test('a published verdict snapshot reads as a document per candidate', () => {
   const md = deliveryOutcomeMarkdown({ schema: 'delivery-outcome.v1', contract: { artifact: 'spec-catalog', version: 3 }, subject: { conversation: 'c', mission: 'm', task: 't' }, decision: 'accepted',
     candidates: [{ candidate: 'candidate:abcdef1234', current: true, verdict: 'blocked', criteria: [{ id: 'api', expected: 'reads | writes', required: true, state: 'unrun' }, { id: 'generate', expected: 'exists', required: false, state: 'blocked', evidence: [{ reference: 'run:e/1', source: 'command', state: 'blocked', exitCode: 1, output: 'unavailable' }] }] }] });
-  assert.match(md, /^Spec spec-catalog v3 · Mission task t/);
+  const titled = deliveryOutcomeMarkdown({ schema: 'delivery-outcome.v1', contract: { artifact: 'spec-catalog', title: 'Catalog', version: 3 }, subject: { conversation: 'c' },
+    candidates: [{ candidate: 'candidate:1', current: true, verdict: 'passed', criteria: [{ id: 'api', expected: 'reads', required: true, state: 'passed', evidence: [{ reference: 'run:e/2', title: 'go test ./api', source: 'command', state: 'passed', exitCode: 0 }] }] }] });
+  assert.match(titled, /^Checked against “Catalog” v3/);
+  assert.match(titled, /passed “go test \.\/api” \(exit 0\)/);
+  assert.match(md, /^Checked against spec spec-catalog v3 · Mission task t/);
   assert.match(md, /\*\*Decision:\*\* accepted\. The technical verdict below is unchanged\./);
   assert.match(md, /## Blocked on the workspace files when published \(abcdef12\)/);
   assert.match(md, /\| \*\*api\*\*: reads \\\| writes \| not run \| — \|/);

@@ -21,19 +21,29 @@ import (
 // task resolve to the same attempt, so both say the same thing, before and
 // after a Runner restart: everything comes from the work log and the delivery
 // journal. The workspace's current files are fingerprinted for the headline
-// candidate, cached briefly so a board refreshing many tasks does not read
-// every repository each time.
-
-const fingerprintTTL = 5 * time.Second
+// candidate on every lookup: a cached answer would call files current that a
+// commit or an edit had already replaced, and say Delivered for them. Lookups
+// that arrive while a fingerprint of the same workspace is under way never take
+// its result, which may predate a commit they just made: they share the next
+// fingerprint, which starts after all of them (a board refreshing several
+// tasks at once still reads each workspace about once per refresh).
 
 type fingerprintCache struct {
-	mu      sync.Mutex
-	entries map[string]fingerprintEntry
+	mu         sync.Mutex
+	workspaces map[string]*fingerprintState
+	// fingerprint replaces Bench.candidate in tests that hold a fingerprint open.
+	fingerprint func(workspace string) (string, error)
 }
 
-type fingerprintEntry struct {
+// fingerprintState is one workspace's fingerprint under way, and the next one
+// the lookups that arrived during it wait for.
+type fingerprintState struct {
+	current, next *fingerprintCall
+}
+
+type fingerprintCall struct {
+	done      chan struct{}
 	candidate string
-	at        time.Time
 }
 
 // currentCandidate is the workspace's candidate now, or "" when it is gone or
@@ -44,22 +54,63 @@ func (b *Bench) currentCandidate(workspace string) string {
 	}
 	c := &b.fingerprints
 	c.mu.Lock()
-	if e, ok := c.entries[workspace]; ok && time.Since(e.at) < fingerprintTTL {
+	if c.workspaces == nil {
+		c.workspaces = map[string]*fingerprintState{}
+	}
+	st := c.workspaces[workspace]
+	if st == nil {
+		st = &fingerprintState{}
+		c.workspaces[workspace] = st
+	}
+	if st.current == nil {
+		// Nothing under way: run the next fingerprint now (those waiting for
+		// it arrived before it starts, so it is fresh for them too).
+		call := st.next
+		if call == nil {
+			call = &fingerprintCall{done: make(chan struct{})}
+		}
+		st.current, st.next = call, nil
 		c.mu.Unlock()
-		return e.candidate
+		b.runFingerprint(workspace, st, call)
+		return call.candidate
 	}
+	if st.next == nil {
+		st.next = &fingerprintCall{done: make(chan struct{})}
+	}
+	running, mine := st.current, st.next
 	c.mu.Unlock()
-	candidate, err := b.candidate(workspace)
-	if err != nil {
-		candidate = ""
-	}
+	<-running.done
 	c.mu.Lock()
-	if c.entries == nil {
-		c.entries = map[string]fingerprintEntry{}
+	if st.current == nil && st.next == mine {
+		st.current, st.next = mine, nil
+		c.mu.Unlock()
+		b.runFingerprint(workspace, st, mine)
+		return mine.candidate
 	}
-	c.entries[workspace] = fingerprintEntry{candidate: candidate, at: time.Now()}
 	c.mu.Unlock()
-	return candidate
+	<-mine.done
+	return mine.candidate
+}
+
+// runFingerprint fills call and releases its waiters, even if fingerprinting panics.
+func (b *Bench) runFingerprint(workspace string, st *fingerprintState, call *fingerprintCall) {
+	c := &b.fingerprints
+	defer func() {
+		c.mu.Lock()
+		st.current = nil
+		if st.next == nil && c.workspaces[workspace] == st {
+			delete(c.workspaces, workspace)
+		}
+		c.mu.Unlock()
+		close(call.done)
+	}()
+	fingerprint := c.fingerprint
+	if fingerprint == nil {
+		fingerprint = b.candidate
+	}
+	if candidate, err := fingerprint(workspace); err == nil {
+		call.candidate = candidate
+	}
 }
 
 // ErrNoContract: nothing names what this conversation or task must deliver.
@@ -156,36 +207,36 @@ func taskDecision(state *work.State, t *work.Task) string {
 	return ""
 }
 
-// markOutputs says, for each command run, whether its full output is still kept.
+// markOutputs names each command run and says whether its full output is still kept.
 func (b *Bench) markOutputs(o *delivery.Outcome) {
 	for i := range o.Candidates {
 		for j := range o.Candidates[i].Criteria {
 			evidence := o.Candidates[i].Criteria[j].Evidence
 			for k := range evidence {
 				if evidence[k].Command != "" {
-					evidence[k].Output = b.outputState(evidence[k].Command)
+					evidence[k].Title, evidence[k].Output = b.runDetail(evidence[k].Command)
 				}
 			}
 		}
 	}
 }
 
-func (b *Bench) outputState(command string) string {
+func (b *Bench) runDetail(command string) (title, output string) {
 	if b.Commands == nil {
-		return "unavailable"
+		return "", "unavailable"
 	}
 	c, err := b.Commands.Get(command)
 	if err != nil {
-		return "unavailable"
+		return "", "unavailable"
 	}
-	report := c.Status().Report
-	if report == nil || report.OutputPath == "" {
-		return "unavailable"
+	state := c.Status()
+	if state.Report == nil || state.Report.OutputPath == "" {
+		return state.Spec.Title, "unavailable"
 	}
-	if _, err := os.Stat(report.OutputPath); err != nil {
-		return "unavailable"
+	if _, err := os.Stat(state.Report.OutputPath); err != nil {
+		return state.Spec.Title, "unavailable"
 	}
-	return "available"
+	return state.Spec.Title, "available"
 }
 
 // PublishDeliveryOutcome publishes o as an immutable verdict snapshot: a new
@@ -201,7 +252,7 @@ func (b *Bench) PublishDeliveryOutcome(o delivery.Outcome, workspace, artifactID
 	}
 	put := artifacts.Put{ID: artifactID, Content: string(content), Author: author, Source: source}
 	if artifactID == "" {
-		put.Title = fmt.Sprintf("Delivery outcome · spec %s v%d", o.Contract.Artifact, o.Contract.Version)
+		put.Title = "Delivery outcome · " + o.Contract.Name()
 		put.Kind, put.Format = "report", "json"
 	}
 	return b.Artifacts.Put(workspace, put)

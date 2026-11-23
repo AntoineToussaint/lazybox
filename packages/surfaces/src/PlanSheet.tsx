@@ -45,7 +45,7 @@ export function PlanSheet({ mission, plan, onClose }: { mission: Mission; plan: 
     <DialogHeader><h2><Icon name="checklist" size={15}/> {grant?.title || 'The orchestrator'} proposes {plan.tasks.length} {plan.tasks.length === 1 ? 'agent' : 'agents'}</h2><button type="button" aria-label="Close" disabled={busy} onClick={onClose}>×</button></DialogHeader>
     <form onSubmit={submit} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.currentTarget.requestSubmit(); } }}>
       <p className="plan-for">For <b>{mission.title}</b>{plan.summary ? <> · {plan.summary}</> : null}</p>
-      {plan.contract && <section><h3>Acceptance criteria</h3><p>Spec {plan.contract.artifactId} · version {plan.contract.version}</p><ul>{plan.contract.acceptanceCriteria.map((text, index) => <li key={index}>{text}</li>)}</ul></section>}
+      {plan.contract && <section><h3>Acceptance criteria</h3><p>{plan.contract.title ? `“${plan.contract.title}”` : `Spec ${plan.contract.artifactId}`} · version {plan.contract.version}</p><ul>{plan.contract.acceptanceCriteria.map((text, index) => <li key={index}>{text}</li>)}</ul></section>}
       {!!plan.baseline?.length && <section><h3>Starting revisions</h3><ul>{plan.baseline.map(member => <li key={member.name}>{member.name} <code title={member.commit}>{member.commit.slice(0, 12)}</code></li>)}</ul></section>}
       {decided && <p className="missions-notice">This plan was {plan.state}.</p>}
       <ol className="plan-tasks">{order.map(({ task, step }) => <li key={task.key} data-key={task.key}>

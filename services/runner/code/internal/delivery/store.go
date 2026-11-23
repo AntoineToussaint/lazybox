@@ -154,6 +154,15 @@ func (s *Store) Bind(conversation string, contract Contract) (Binding, error) {
 		}
 	}
 	if current != nil && current.Contract.Digest == contract.Digest && current.Contract.Artifact == contract.Artifact && current.Contract.Version == contract.Version {
+		// A binding made before contracts carried titles gets one, in the same attempt.
+		if current.Contract.Title == "" && contract.Title != "" {
+			titled := *current
+			titled.Contract.Title = contract.Title
+			if err := s.append(record{Binding: &titled}); err != nil {
+				return Binding{}, err
+			}
+			*current = titled
+		}
 		return *current, nil
 	}
 	b := Binding{Conversation: conversation, Attempt: fmt.Sprintf("conversation:%s/%d", conversation, count+1), Contract: contract, At: s.Now().UnixMilli()}

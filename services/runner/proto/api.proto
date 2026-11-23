@@ -1964,6 +1964,8 @@ message DeliveryContract {
   // "spec.v2"; a "spec.v1" contract has no named criteria.
   string schema = 4;
   repeated DeliveryCriterion criteria = 5;
+  // The spec artifact's title when the revision was pinned.
+  string title = 6;
 }
 // One observation as a person reads it. command_id names the managed command
 // whose output is the evidence; it is read through that command.
@@ -1980,6 +1982,8 @@ message DeliveryEvidence {
   string state = 8;
   // "available" or "unavailable": whether the command's full output is still kept.
   string output = 9;
+  // What ran: the command's title.
+  string title = 10;
 }
 message DeliveryCriterionOutcome {
   string id = 1;
@@ -2021,6 +2025,8 @@ message DeliveryBinding {
   string digest = 5;
   // Each criterion as "[id, required|optional] expected".
   repeated string criteria = 6;
+  // The spec artifact's title when it was bound.
+  string title = 7;
 }
 message PublishRequest {
   string command_id = 1;
@@ -4596,4 +4602,6 @@ message PlanContract {
   string collection_id = 3;
   string digest = 4;
   repeated string acceptance_criteria = 5;
+  // The spec artifact's title when the plan pinned it.
+  string title = 6;
 }

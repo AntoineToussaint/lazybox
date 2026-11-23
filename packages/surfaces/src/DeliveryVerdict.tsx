@@ -1,5 +1,5 @@
 import type { DeliveryEvidence, DeliveryOutcome } from '@lazybox/protocol';
-import { blocking, evidenceLine, headline, markOf, resolved, stateLabel, summary, toneOf, verdictLabel } from './delivery-model';
+import { blocking, evidenceLine, headline, markOf, resolved, specName, stateLabel, summary, toneOf, verdictLabel } from './delivery-model';
 import './missions.css';
 import './delivery.css';
 
@@ -17,7 +17,7 @@ type Props = {
 export function DeliveryVerdict({ outcome, compact, folded, onEvidence }: Props) {
   const c = headline(outcome);
   const tone = toneOf(c?.verdict || '');
-  const spec = `spec ${outcome.contract?.artifactId} v${outcome.contract?.version}`;
+  const spec = specName(outcome.contract);
   if (compact || !c) {
     return <p className={`delivery-verdict compact tone-${tone}`} data-verdict={c?.verdict || 'none'} title={`Delivery against ${spec}`}>
       <span aria-hidden="true">{markOf(tone)}</span><span>{summary(outcome)}</span>

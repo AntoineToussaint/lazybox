@@ -160,7 +160,7 @@ lazybox run --check api -- go test ./api -run TestAuthorized
 
 Only a `--check`, or a prerequisite that failed, replaces a criterion's result: a later `--needs` or a stopped rerun never clears an earlier failure or pass.
 
-A check waits for its result: it never moves to the background, and `--background` is refused. The run ends with one line saying what was recorded, for example `check storage: passed on candidate:3f2a… (spec spec-catalog v3)`, and `lazybox ls` repeats it.
+A check waits for its result: it never moves to the background, and `--background` is refused. The run ends with one line saying what was recorded, for example `check storage: passed on candidate:3f2a… (“Catalog spec” v3)`, and `lazybox ls` repeats it.
 
 The candidate is the files the check ran on: each workspace repository's commit and any uncommitted changes, taken when the run starts. Checking before you commit is fine, but committing changes the candidate, so run the checks again on what you commit. A run whose files change while it runs (an edit or a commit) records nothing and says so. A check is refused before it runs when a workspace repository is not ready.
 
@@ -189,7 +189,7 @@ lazybox delivery status --json   # the same, machine-readable
 | Incomplete | a required criterion is not yet proven on these files |
 | Unverified | nothing names required criteria (no spec, or a text-only spec.v1) |
 
-The verdict is for the workspace's current files, uncommitted changes included. Files nobody checked yet read Incomplete, and the files checked earlier are listed with their own verdicts. A failure a later check resolved stays in the evidence, marked resolved. Select a run to open its output; output the Runner no longer keeps says so. Accepting a task, or asking for changes, is shown beside the verdict and never changes it: accepting with a criterion still open leaves that gap visible.
+The verdict is for the workspace's current files, uncommitted changes included, read again on every lookup: right after a commit the new files read Incomplete until their checks run. The spec and each run are named by their titles (`lazybox run --title` names a run). Files nobody checked yet read Incomplete, and the files checked earlier are listed with their own verdicts. A failure a later check resolved stays in the evidence, marked resolved. Select a run to open its output; output the Runner no longer keeps says so. Accepting a task, or asking for changes, is shown beside the verdict and never changes it: accepting with a criterion still open leaves that gap visible.
 
 A reviewer of a contract-bound Mission review records its verdict on each criterion with `lazybox delivery review <criterion> passed|failed`. It counts for the files under review and is refused once the work has new commits.
 

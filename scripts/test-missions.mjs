@@ -141,7 +141,7 @@ try {
   const taskSession = fixture.missions.missions[0].tasks[0].attempts[0].sessionId;
 
   // The agent's failing `lazybox run` attaches by itself; Open goes to its output.
-  const command = 'go test ./... ' + 'tools/obin-cli/tests/test_reviewed_plan.py '.repeat(8).trim();
+  const command = 'go test ./... ' + './internal/example/reviewed-plan/... '.repeat(8).trim();
   const failing = fixture.startRun(taskSession, command, { exitCode: 1, outputBytes: '1468006', agentBytes: '2150', filter: 'go-test', outputPath: '/state/command-output/task/go-1.log' });
   fixture.missions.recordRun(taskSession, { title: command, exitCode: 1, commandId: failing.id });
   await expect(split.locator('.evidence-chip')).toContainText(command + ' · exit 1', { timeout: 10_000 });

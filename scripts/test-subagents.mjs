@@ -158,7 +158,7 @@ try{
  if(await toggleD.getAttribute('aria-expanded')!=='true')await toggleD.click();
  const lines=card(D).locator('.subagent-step.tool > .tool-lines > .tool-line');
  await expect(lines).toHaveCount(3);
- await expect(lines.nth(0).locator('.tool-meta'),'under a second says nothing').toHaveText('exit 0');
+ await expect(lines.nth(0).locator('.tool-meta'),'under a second says nothing').toHaveCount(0);
  await expect(lines.nth(1).locator(':scope > .tool-line-row')).toHaveText('Read /tmp/rev.diff ×2');
  await expect(lines.nth(2)).toHaveAttribute('data-state','failed');
  await expect(lines.nth(2).locator('.tool-meta'),'a step of 9s says so').toHaveText('9s');

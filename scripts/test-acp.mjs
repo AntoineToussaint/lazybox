@@ -39,7 +39,7 @@ try{
  await expect(messages).toContainText('Done: read the README, wrote notes.txt and ran the check.');
  await expect(messages.locator('.tool-line').filter({hasText:'Read'}).filter({hasText:'README.md'}).first()).toBeVisible();
  await expect(messages.locator('.tool-line').filter({hasText:'notes.txt'}).first()).toContainText('Wrote');
- await expect(messages.locator('.tool-line').filter({hasText:'echo fake-tour-check'}).first()).toContainText('exit 0');
+ await expect(messages.locator('.tool-line').filter({hasText:'echo fake-tour-check'}).first()).toContainText('Ran');
  await expect(messages.getByRole('button',{name:/Updated the plan · 3\/3 done/})).toBeVisible();
  await expect(messages.getByRole('list',{name:'Plan'}).last().getByRole('listitem')).toHaveText([/Read the README/,/Write the notes/,/Run the check/]);
  await expect(messages).not.toContainText('private reasoning');

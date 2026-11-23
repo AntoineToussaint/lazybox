@@ -52,7 +52,7 @@ func TestDeliveryUsesOriginalAttemptAcrossHandoff(t *testing.T) {
 	if !ok || original != first {
 		t.Fatalf("captured attempt %q, want %q", original, first)
 	}
-	pipe, err := b.RegisterPipe(e, "Push release", true)
+	pipe, err := b.RegisterPipe(e, "Push release", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/delivery"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/assistant"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/availability"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/docstool"
@@ -252,6 +253,8 @@ type Bench struct {
 	// Work holds every mission's event log; Prompts the prompt log (work.go).
 	Work    *work.Store
 	Prompts *work.Prompts
+	// Delivery is the delivery journal: conversation bindings and check observations (delivery.go).
+	Delivery *delivery.Store
 	// snippetCatalog is the catalog last listed, to label snippet messages.
 	snippetCatalog atomic.Pointer[[]snippets.Entry]
 	// power is the actions file, its hooks and the CLI's window requests (power.go).
@@ -1045,7 +1048,13 @@ func (b *Bench) start(e *Execution, title string, argv []string, pinnedEnv []str
 	return b.Commands.Start(commands.Spec{SessionID: e.ID, Title: title, Cwd: dir, Argv: argv, Env: env})
 }
 
-func (b *Bench) RegisterPipe(e *Execution, title string, createsPullRequest bool) (*commands.Command, error) {
+// PipeCheck is a run's --check (or, Prerequisite, --needs) criterion.
+type PipeCheck struct {
+	Criterion    string
+	Prerequisite bool
+}
+
+func (b *Bench) RegisterPipe(e *Execution, title string, createsPullRequest bool, check *PipeCheck) (*commands.Command, error) {
 	e.activity.Lock()
 	defer e.activity.Unlock()
 	if e.Engine.Snapshot().Closed {
@@ -1054,6 +1063,13 @@ func (b *Bench) RegisterPipe(e *Execution, title string, createsPullRequest bool
 	spec := commands.Spec{SessionID: e.ID, Title: title, Cwd: e.Cwd, CreatesPullRequest: createsPullRequest}
 	if createsPullRequest {
 		spec.DeliveryAttempt = b.deliveryAttempt(conversationOf(e))
+	}
+	if check != nil {
+		resolved, err := b.resolveCheck(e, check.Criterion, check.Prerequisite)
+		if err != nil {
+			return nil, err
+		}
+		spec.Check = resolved
 	}
 	return b.Commands.Register(spec)
 }

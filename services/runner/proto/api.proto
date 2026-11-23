@@ -187,6 +187,10 @@ service RunnerService {
   rpc RegisterPipe(RegisterPipeRequest) returns (CommandStatus);
   rpc Publish(PublishRequest) returns (CommandStatus);
   rpc FinishPipe(FinishPipeRequest) returns (CommandStatus);
+  // Pins a published spec.v2 revision to the caller's conversation, so its
+  // `lazybox run --check` and `--needs` runs record delivery observations.
+  // Binding another revision starts a new attempt (delivery.Store.Bind).
+  rpc BindDelivery(BindDeliveryRequest) returns (DeliveryBinding);
   rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
   // Takes a terminal run shared with a conversation (`lazybox log --to`) for
   // one composer: true for the first caller only, so the run is added once.
@@ -1893,6 +1897,28 @@ message RegisterPipeRequest {
   string share_with = 4;
   // The CLI recognized actual argv as a PR create command. Display titles can be customized.
   bool creates_pull_request = 5;
+  // The delivery criterion this run checks (`lazybox run --check ID`): exit 0
+  // records an asserted pass, any other exit a failed assertion. Refused unless
+  // the conversation's Mission contract or bound spec names the criterion.
+  string check = 6;
+  // The criterion this run is a prerequisite of (`lazybox run --needs ID`): a
+  // non-zero exit records a failed prerequisite. At most one of check and needs.
+  string needs = 7;
+}
+message BindDeliveryRequest {
+  string session_id = 1;
+  string artifact_id = 2;
+  uint32 version = 3;
+}
+message DeliveryBinding {
+  string conversation = 1;
+  // The attempt the conversation's checks now count for.
+  string attempt = 2;
+  string artifact_id = 3;
+  uint32 version = 4;
+  string digest = 5;
+  // Each criterion as "[id, required|optional] expected".
+  repeated string criteria = 6;
 }
 message PublishRequest {
   string command_id = 1;
@@ -1979,6 +2005,8 @@ message CommandStatus {
   int64 started_at_unix_millis = 19;
   // The command's process (the session host's program, or a `lazybox run`'s), when known.
   int32 pid = 20;
+  // What a finished --check or --needs run recorded, or why it was not recorded.
+  string delivery = 21;
 }
 message ListCommandsRequest {
   // The execution's own commands, and the runs of its workspace.

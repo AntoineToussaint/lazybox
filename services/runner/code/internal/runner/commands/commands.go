@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/delivery"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/processguard"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/journal"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sessionhost"
@@ -25,6 +26,9 @@ type Spec struct {
 	CreatesPullRequest bool `json:"createsPullRequest,omitempty"`
 	// The unique active task attempt at registration, if any.
 	DeliveryAttempt string `json:"deliveryAttempt,omitempty"`
+	// Check is the delivery criterion a `lazybox run --check` or `--needs`
+	// declared, resolved against the binding in force when it registered.
+	Check *delivery.Check `json:"check,omitempty"`
 	// Isolated records that the command owner applied verification isolation.
 	Isolated      bool   `json:"isolated,omitempty"`
 	MaxDurationMs int64  `json:"maxDurationMs,omitempty"`
@@ -102,6 +106,12 @@ type Report struct {
 	// Piped: the output came through `lazybox log`, so ExitCode is not the
 	// producer's.
 	Piped bool `json:"piped,omitempty"`
+	// Observation is what a --check or --needs run observed, saved with its
+	// completion so a Runner restart replays it into the delivery journal
+	// (delivery.Store) with the candidate it ran on; DeliveryError says why
+	// a check run observed nothing.
+	Observation   *delivery.Observation `json:"observation,omitempty"`
+	DeliveryError string                `json:"deliveryError,omitempty"`
 }
 
 // MaxAgentView bounds the compact view a report may carry: gortk bounds its

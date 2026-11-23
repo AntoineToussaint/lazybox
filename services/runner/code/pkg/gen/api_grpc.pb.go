@@ -119,6 +119,7 @@ const (
 	RunnerService_RegisterPipe_FullMethodName                 = "/lazybox.bench.v1.RunnerService/RegisterPipe"
 	RunnerService_Publish_FullMethodName                      = "/lazybox.bench.v1.RunnerService/Publish"
 	RunnerService_FinishPipe_FullMethodName                   = "/lazybox.bench.v1.RunnerService/FinishPipe"
+	RunnerService_BindDelivery_FullMethodName                 = "/lazybox.bench.v1.RunnerService/BindDelivery"
 	RunnerService_ListCommands_FullMethodName                 = "/lazybox.bench.v1.RunnerService/ListCommands"
 	RunnerService_ClaimCommandShare_FullMethodName            = "/lazybox.bench.v1.RunnerService/ClaimCommandShare"
 	RunnerService_ReadCommand_FullMethodName                  = "/lazybox.bench.v1.RunnerService/ReadCommand"
@@ -436,6 +437,10 @@ type RunnerServiceClient interface {
 	RegisterPipe(ctx context.Context, in *RegisterPipeRequest, opts ...grpc.CallOption) (*CommandStatus, error)
 	Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*CommandStatus, error)
 	FinishPipe(ctx context.Context, in *FinishPipeRequest, opts ...grpc.CallOption) (*CommandStatus, error)
+	// Pins a published spec.v2 revision to the caller's conversation, so its
+	// `lazybox run --check` and `--needs` runs record delivery observations.
+	// Binding another revision starts a new attempt (delivery.Store.Bind).
+	BindDelivery(ctx context.Context, in *BindDeliveryRequest, opts ...grpc.CallOption) (*DeliveryBinding, error)
 	ListCommands(ctx context.Context, in *ListCommandsRequest, opts ...grpc.CallOption) (*ListCommandsResponse, error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -1793,6 +1798,16 @@ func (c *runnerServiceClient) FinishPipe(ctx context.Context, in *FinishPipeRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CommandStatus)
 	err := c.cc.Invoke(ctx, RunnerService_FinishPipe_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) BindDelivery(ctx context.Context, in *BindDeliveryRequest, opts ...grpc.CallOption) (*DeliveryBinding, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeliveryBinding)
+	err := c.cc.Invoke(ctx, RunnerService_BindDelivery_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3302,6 +3317,10 @@ type RunnerServiceServer interface {
 	RegisterPipe(context.Context, *RegisterPipeRequest) (*CommandStatus, error)
 	Publish(context.Context, *PublishRequest) (*CommandStatus, error)
 	FinishPipe(context.Context, *FinishPipeRequest) (*CommandStatus, error)
+	// Pins a published spec.v2 revision to the caller's conversation, so its
+	// `lazybox run --check` and `--needs` runs record delivery observations.
+	// Binding another revision starts a new attempt (delivery.Store.Bind).
+	BindDelivery(context.Context, *BindDeliveryRequest) (*DeliveryBinding, error)
 	ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -3953,6 +3972,9 @@ func (UnimplementedRunnerServiceServer) Publish(context.Context, *PublishRequest
 }
 func (UnimplementedRunnerServiceServer) FinishPipe(context.Context, *FinishPipeRequest) (*CommandStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method FinishPipe not implemented")
+}
+func (UnimplementedRunnerServiceServer) BindDelivery(context.Context, *BindDeliveryRequest) (*DeliveryBinding, error) {
+	return nil, status.Error(codes.Unimplemented, "method BindDelivery not implemented")
 }
 func (UnimplementedRunnerServiceServer) ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListCommands not implemented")
@@ -6123,6 +6145,24 @@ func _RunnerService_FinishPipe_Handler(srv interface{}, ctx context.Context, dec
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).FinishPipe(ctx, req.(*FinishPipeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_BindDelivery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BindDeliveryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).BindDelivery(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_BindDelivery_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).BindDelivery(ctx, req.(*BindDeliveryRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -8797,6 +8837,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FinishPipe",
 			Handler:    _RunnerService_FinishPipe_Handler,
+		},
+		{
+			MethodName: "BindDelivery",
+			Handler:    _RunnerService_BindDelivery_Handler,
 		},
 		{
 			MethodName: "ListCommands",

@@ -197,6 +197,14 @@ watchers").
 `lazybox artifact put|get|list` publishes and reads workspace artifacts
 (`ARTIFACTS.md`).
 
+`lazybox run --check CRITERION -- cmd` records the run as the check of a
+delivery criterion (exit 0 passes, any other exit fails), and `--needs
+CRITERION` as a prerequisite (a non-zero exit blocks it). A run is checked
+against its Mission task's approved contract, or against the spec.v2 version
+`lazybox delivery bind <spec-id>@<version>` pinned to the conversation;
+without one it is refused before it runs (`docs/guides/missions.md`,
+"Checking delivery criteria").
+
 `lazybox process validate|show|explain EVENT|events|schema` checks the
 orchestration process file (`.lazybox/process.yaml`, see
 `ORCHESTRATION.md` §4) from files alone; with `--workspace` it asks the

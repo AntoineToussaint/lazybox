@@ -767,7 +767,13 @@ func (s *Service) StartCommand(ctx context.Context, r *pb.StartCommandRequest) (
 	return wireStatus(c.Status()), nil
 }
 func (s *Service) RegisterPipe(ctx context.Context, r *pb.RegisterPipeRequest) (*pb.CommandStatus, error) {
+	if r.Check != "" && r.Needs != "" {
+		return nil, rpcError(errors.New("a run is either a --check or a --needs of one criterion"))
+	}
 	if r.CollectionId != "" || r.ShareWith != "" {
+		if r.Check != "" || r.Needs != "" {
+			return nil, rpcError(errors.New("--check and --needs record a conversation's delivery evidence: run them from its agent"))
+		}
 		if r.SessionId != "" || r.CollectionId == "" {
 			return nil, rpcError(errors.New("a pipe belongs to a session or to a workspace, not both; only a workspace run is shared"))
 		}
@@ -781,7 +787,13 @@ func (s *Service) RegisterPipe(ctx context.Context, r *pb.RegisterPipeRequest) (
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	c, err := s.Bench.RegisterPipe(e, r.Title, r.CreatesPullRequest)
+	var check *runner.PipeCheck
+	if r.Check != "" {
+		check = &runner.PipeCheck{Criterion: r.Check}
+	} else if r.Needs != "" {
+		check = &runner.PipeCheck{Criterion: r.Needs, Prerequisite: true}
+	}
+	c, err := s.Bench.RegisterPipe(e, r.Title, r.CreatesPullRequest, check)
 	if err != nil {
 		return nil, rpcError(err)
 	}
@@ -813,7 +825,23 @@ func (s *Service) FinishPipe(ctx context.Context, r *pb.FinishPipeRequest) (*pb.
 	if err = s.Bench.FinishPipe(c, cause, r.Signal, report); err != nil {
 		return nil, rpcError(err)
 	}
-	return wireStatus(c.Status()), nil
+	state := c.Status()
+	w := wireStatus(state)
+	w.Delivery = s.Bench.DeliveryNote(state)
+	return w, nil
+}
+
+// BindDelivery pins a published spec.v2 revision to the caller's conversation.
+func (s *Service) BindDelivery(ctx context.Context, r *pb.BindDeliveryRequest) (*pb.DeliveryBinding, error) {
+	e, err := s.Bench.Get(r.SessionId)
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	b, err := s.Bench.BindDelivery(e, r.ArtifactId, r.Version)
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	return &pb.DeliveryBinding{Conversation: b.Conversation, Attempt: b.Attempt, ArtifactId: b.Contract.Artifact, Version: b.Contract.Version, Digest: b.Contract.Digest, Criteria: b.Contract.Lines()}, nil
 }
 func (s *Service) ListCommands(ctx context.Context, r *pb.ListCommandsRequest) (*pb.ListCommandsResponse, error) {
 	w := &pb.ListCommandsResponse{}

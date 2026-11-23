@@ -22,6 +22,7 @@ var otherVerbs = []struct{ name, summary string }{
 	{"run", "run a command; the console gets every byte, the agent a compact view"},
 	{"log", "publish piped output to the console"},
 	{"artifact", "publish and read workspace artifacts"},
+	{"delivery", "bind a spec so --check and --needs runs record delivery evidence"},
 	{"process", "check and explain the orchestration process"},
 	{"events", "raw journal records of a session (JSON)"},
 	{"answer", "answer a pending question (--session --request --answers)"},

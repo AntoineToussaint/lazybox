@@ -45,6 +45,7 @@ leave out.
 
 ### Claude and your accounts
 
+- **Renaming a subscription keeps its conversations** Conversations on a renamed subscription resume again. They had stopped with "saved account configuration changed; reconcile before resuming".
 - **Continue in Codex when Claude hits its limit** The limit card offers available accounts and can open a fresh Codex conversation in the same workspace with a draft to review.
 - **An Anthropic API key for Claude** Settings → Agents & workspaces → Claude takes an Anthropic API key, the way Anthropic documents for apps built on its Agent SDK. Lazybox keeps it on your Mac and only ever shows its last four characters; the section also says what Claude agents sign in with now.
 - **Switching accounts is an extension** At a limit, the card offers Switch to another of your accounts, or waiting for the reset. Switching by itself is the Subscription rotation extension in Settings → Extensions; for Claude it says plainly that Anthropic's terms may not allow it. If you had automatic switching on, Lazybox turned the extension on for you, with your settings. An account you sign in to while a conversation runs can be chosen there too.

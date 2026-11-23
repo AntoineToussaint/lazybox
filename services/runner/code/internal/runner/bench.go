@@ -719,7 +719,7 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 	if selected.ID == "" {
 		return nil, errors.New("unknown account profile")
 	}
-	if len(fork) > 0 && (selected.Provider != "codex" || profileBinding(selected) != fork[0].profileBinding) {
+	if len(fork) > 0 && (selected.Provider != "codex" || !sameAccount(selected, fork[0].profileBinding)) {
 		return nil, errors.New("source Codex profile is no longer available")
 	}
 	if emptyWorkspace {

@@ -21,3 +21,38 @@ export function contextSnapshot(report: SDKControlGetContextUsageResponse) {
   capacity:valid(report.rawMaxTokens)?report.rawMaxTokens:valid(report.maxTokens)?report.maxTokens:undefined,
   reserve:categories.filter(row=>row.kind==='buffer').reduce((n,row)=>n+row.tokens,0),categories,source:'sdk_summary_estimate'};
 }
+
+/** Refresh on root usage, keeping at most one SDK request in flight. */
+export function contextReporter(
+ read: () => Promise<SDKControlGetContextUsageResponse>,
+ publish: (snapshot: unknown) => void,
+) {
+ let reading = false;
+ let detailed = false;
+ let revision = 0;
+ async function refresh() {
+  reading = true;
+  let observed: number;
+  do {
+   observed = revision;
+   try {
+    const snapshot = contextSnapshot(await read());
+    if (snapshot.categories.length) {
+     publish(snapshot);
+     detailed = true;
+    } else if (!detailed) {
+     publish(snapshot);
+    }
+   } catch {
+    // Keep the timestamp of the last successful estimate through transient failures.
+    // Until one succeeds, each usage event already publishes its own totals.
+   }
+  } while (revision !== observed);
+  reading = false;
+ }
+ return (totals: unknown) => {
+  revision++;
+  if (!detailed) publish(totals);
+  if (!reading) void refresh();
+ };
+}

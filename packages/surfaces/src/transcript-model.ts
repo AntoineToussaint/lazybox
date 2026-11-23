@@ -17,6 +17,7 @@ import { LINEAGE_EVENTS } from './orchestration-model';
 export type TranscriptMessage = { id: string; type: string; text: string; turnId: string; files?: { name: string; size: number; mediaType?: string; path?: string }[]; count?: number; switched?: SwitchNote; operationId?: string; agentId?: string; tools?: ToolEntry[]; answered?: AnswerNote; /** A message that ran one of the agent's slash commands: shown as one compact line. */ command?: boolean; review?: ReviewNote;
   /** A message Lazybox wrote to the agent (operation_accepted): an event of the conversation, never the person's words. */
   origin?: MessageOrigin;
+  compaction?: boolean;
   promptModel?: string;
   promptContext?: { used: number; capacity?: number };
   /** A `notice`: what a Runner restart (or a revert) left to know. */
@@ -225,7 +226,7 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
     const ran = commandLine(event.type, event.text, event.status, event.type === 'compacted' ? providerData(event.providerDataJson) : {});
     if (ran) {
       if (event.type === 'model_changed') next.reportedModel = event.text;
-      add({ id: record.cursor.toString(), type: 'command', text: ran, turnId: event.turnId });
+      add({ id: record.cursor.toString(), type: 'command', text: ran, turnId: event.turnId, ...(event.type === 'compacted' && {compaction: true}) });
       next.appendToLast = false;
       continue;
     }

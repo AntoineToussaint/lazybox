@@ -363,8 +363,13 @@ write and $20 one-hour cache write per million tokens. `defaultGateways` may exp
 `claude` or `codex` to `metered`; existing defaults remain unchanged.
 
 Context is per agent/thread, never summed as one workspace context window.
-Codex uses its structured token-usage notifications. Claude also queries the
-pinned SDK's `getContextUsage({detail:'summary'})` after turns: category estimates,
+Codex uses its structured token-usage notifications. Its conversation popover
+ranks up to five loaded main-agent prompts, replies and tool outputs after the
+last observed compaction by UTF-8 byte size. Expanding a row previews the text.
+These observations omit hidden inputs and may include text Codex discarded.
+The provider's token and cache counts remain under latest request details. Claude also queries the
+pinned SDK's `getContextUsage({detail:'summary'})` on main-agent usage updates during and after turns. While a refresh is pending,
+the panel keeps the last timestamped estimate. Category estimates,
 capacity and compaction reserve are retained without memory paths or tool schemas.
 Rows retain provider classification; deferred tools are outside the used window.
 Unsupported CLIs retain available totals, with missing breakdowns marked unknown.

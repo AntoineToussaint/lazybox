@@ -7,6 +7,7 @@ import { fitHeader, HEADER_ORDER, isStat, MORE_WIDTH, reserve, STAT_WIDTH, type 
 import { Icon } from './Icons';
 import { LiveIndicator } from './LiveIndicator';
 import type { LiveStatus } from './live-status';
+import type { TranscriptMessage } from './transcript-model';
 import { TelemetryPanel } from './TelemetryPanel';
 import { ToolActivity } from './ToolActivity';
 import { OrchestratorBadge } from './OrchestratorBadge';
@@ -26,9 +27,9 @@ export function ChatStatus({ session, live }: { session?: Session; live: LiveSta
 }
 
 /** Usage and tool activity of the execution on screen. */
-export function SessionInspection({ sessionID, session, activity, activityTruncated }: { sessionID: string; session?: Session; activity: JournalEvent[]; activityTruncated?: boolean }) {
+export function SessionInspection({ sessionID, session, activity, activityTruncated, messages }: { messages: readonly TranscriptMessage[]; sessionID: string; session?: Session; activity: JournalEvent[]; activityTruncated?: boolean }) {
   return <>
-    <TelemetryPanel executionId={sessionID} conversationId={session?.conversationId} compact/>
+    <TelemetryPanel messages={messages} executionId={sessionID} conversationId={session?.conversationId} compact/>
     <ToolActivity events={activity} truncated={activityTruncated}/>
   </>;
 }

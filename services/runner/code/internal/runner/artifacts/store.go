@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/delivery"
 	"io/fs"
 	"os"
 	"path"
@@ -494,7 +495,7 @@ func (s *Store) createWithID(ws, id, title, kind, content string, author Author,
 		var header struct{ Schema string }
 		if json.Unmarshal([]byte(content), &header) == nil {
 			for _, candidate := range Kinds {
-				if header.Schema == candidate+".v1" || candidate == "spec" && header.Schema == "spec.v2" {
+				if header.Schema == candidate+".v1" || candidate == "spec" && header.Schema == "spec.v2" || candidate == "report" && header.Schema == delivery.OutcomeSchema {
 					format = "json"
 					if kind == "" {
 						kind = candidate

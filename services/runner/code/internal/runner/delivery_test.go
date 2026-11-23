@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -304,5 +305,117 @@ func TestCheckRefusesAmbiguousMissionAttempts(t *testing.T) {
 	}
 	if _, err := b.RegisterPipe(e, "go test", false, &PipeCheck{Criterion: "api"}); err == nil || !strings.Contains(err.Error(), "2 Mission tasks") {
 		t.Fatalf("an ambiguous check was accepted: %v", err)
+	}
+}
+
+// Release qualification with a Mission (roadmap milestones E and G): a task
+// worked under an approved spec.v2 plan has one outcome whether it is looked
+// up by its conversation or by the task, before and after a Runner restart;
+// the person's acceptance is reported beside a verdict that keeps its gap.
+func TestMissionOutcomeIsTheSameByConversationAndTask(t *testing.T) {
+	ctx := context.Background()
+	source := upstreamOn(t, "main")
+	b := freshBench(t, collections.Repository{ID: "api", Name: "api", Path: source})
+	ws, err := b.Collections.Create(ctx, "fixture", collections.Spec{Name: "catalog", Members: []collections.MemberSpec{{Name: "api", RepositoryID: "api", BaseRef: gitIn(t, source, "rev-parse", "HEAD")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Adapters["codex"] = &agenttest.Adapter{}
+	parent, err := b.OpenEmptyWorkspace("codex-default", accounts.Options{Permission: "ask"}, "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := b.OpenCollection("codex-default", ws.ID, "", accounts.Options{}, "direct", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := b.Artifacts.Put(ws.ID, artifacts.Put{Title: "Catalog", Content: catalogSpec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := delivery.ContractFromSpec(spec.ID, 1, artifacts.Digest(catalogSpec), catalogSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := b.Work.Create(work.Human, "", "Catalog", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, grant, err := b.Work.IssueGrant(m.ID, work.Human, "", work.GrantPayload{Holder: parent.ID, Ceiling: work.Ceiling{Permission: "ask", Profiles: []string{"codex-default"}, MaxChildren: 1, Depth: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := work.Actor{Kind: work.ActorAgent, Role: "orchestrator", Conversation: parent.ID, Execution: parent.ID}
+	_, plan, err := b.Work.ProposePlan(m.ID, actor, "", work.PlanPayload{Grant: grant, Tasks: []work.PlanTask{{Key: "api", Title: "API"}},
+		Contract: &work.PlanContract{Artifact: spec.ID, Version: 1, Workspace: ws.ID, Digest: contract.Digest, Criteria: contract.Lines(), Bindings: contract.Criteria}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := b.Work.DecidePlan(m.ID, plan, work.Human, "", true, 0, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := state.PlanOf(plan).Created["api"]
+	if _, _, err := b.Work.Assign(m.ID, task, actor, "", work.AttemptPayload{Conversation: conversationOf(e), Workspace: ws.ID, Grant: grant, Parent: parent.ID, Role: "worker", Profile: "codex-default", Permission: "ask"}); err != nil {
+		t.Fatal(err)
+	}
+	finish := func(criterion string, needs bool, exit int) {
+		t.Helper()
+		c, err := b.RegisterPipe(e, criterion, false, &PipeCheck{Criterion: criterion, Prerequisite: needs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.FinishPipe(c, nil, "", &commands.Report{ExitCode: exit}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finish("generate", true, 1)
+	finish("storage", false, 0)
+	same := func(b *Bench, e *Execution) delivery.Outcome {
+		t.Helper()
+		byConversation, err := b.DeliveryOutcome(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		byTask, err := b.TaskDeliveryOutcome(m.ID, task)
+		if err != nil || !reflect.DeepEqual(byConversation, byTask) {
+			t.Fatalf("the lookups disagree:\n%+v\n%+v\n%v", byConversation, byTask, err)
+		}
+		return byTask
+	}
+	o := same(b, e)
+	if o.Subject.Mission != m.ID || o.Subject.Task != task || o.Candidates[0].Verdict != delivery.Blocked || !o.Candidates[0].Current {
+		t.Fatalf("Mission outcome: %+v", o)
+	}
+	if blocking := o.Candidates[0].Blocking(); len(blocking) != 2 || blocking[0].ID != "generate" || blocking[1].ID != "api" {
+		t.Fatalf("blocking: %+v", blocking)
+	}
+
+	// The person accepts with the generator still blocked: the gap stays visible.
+	if _, err := b.Work.Report(m.ID, task, work.Actor{Kind: work.ActorAgent, Conversation: conversationOf(e)}, "", "Storage works; generation is blocked"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Work.Decide(m.ID, task, work.Human, "", true, "ship storage first"); err != nil {
+		t.Fatal(err)
+	}
+	accepted := same(b, e)
+	if accepted.Decision != delivery.Accepted || accepted.Candidates[0].Verdict != delivery.Blocked {
+		t.Fatalf("acceptance changed the verdict: %+v", accepted)
+	}
+
+	if err := b.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	next, err := New(b.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	ne, err := next.Get(e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := same(next, ne); !reflect.DeepEqual(after, accepted) {
+		t.Fatalf("restart changed the outcome:\n%+v\n%+v", accepted, after)
 	}
 }

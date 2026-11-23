@@ -59,6 +59,11 @@ func validateStructured(kind, content string) error {
 			return fmt.Errorf("%w: %v", ErrInvalid, err)
 		}
 		return nil
+	case kind == "report" && schema == delivery.OutcomeSchema:
+		if _, err := delivery.ParseOutcome(content); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		return nil
 	}
 	for name, shape := range fields {
 		raw := body[name]

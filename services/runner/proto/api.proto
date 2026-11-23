@@ -191,6 +191,15 @@ service RunnerService {
   // `lazybox run --check` and `--needs` runs record delivery observations.
   // Binding another revision starts a new attempt (delivery.Store.Bind).
   rpc BindDelivery(BindDeliveryRequest) returns (DeliveryBinding);
+  // The delivery outcome of a conversation, or of a Mission task: the same
+  // projection (delivery.Project) through either lookup.
+  rpc GetDeliveryOutcome(GetDeliveryOutcomeRequest) returns (DeliveryOutcome);
+  // Publishes the outcome as an immutable verdict snapshot: a report
+  // artifact (schema delivery-outcome.v1), or the next version of one.
+  rpc PublishDeliveryOutcome(PublishDeliveryOutcomeRequest) returns (Artifact);
+  // A contract-bound reviewer's verdict on one criterion
+  // (`lazybox delivery review <criterion> passed|failed`).
+  rpc RecordReviewCriterion(RecordReviewCriterionRequest) returns (RecordReviewCriterionResponse);
   rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
   // Takes a terminal run shared with a conversation (`lazybox log --to`) for
   // one composer: true for the first caller only, so the run is added once.
@@ -1909,6 +1918,89 @@ message BindDeliveryRequest {
   string session_id = 1;
   string artifact_id = 2;
   uint32 version = 3;
+}
+// Exactly one lookup: session_id (that conversation), or mission_id and task_id.
+message GetDeliveryOutcomeRequest {
+  string session_id = 1;
+  string mission_id = 2;
+  string task_id = 3;
+}
+message PublishDeliveryOutcomeRequest {
+  string session_id = 1;
+  string mission_id = 2;
+  string task_id = 3;
+  // The verdict snapshot to publish a new version of; empty for a new one.
+  string artifact_id = 4;
+}
+message RecordReviewCriterionRequest {
+  string session_id = 1;
+  string criterion = 2;
+  // "passed" or "failed".
+  string result = 3;
+}
+message RecordReviewCriterionResponse {
+  // What was recorded, as a person reads it.
+  string note = 1;
+}
+message DeliveryCriterion {
+  string id = 1;
+  string expected = 2;
+  bool required = 3;
+}
+message DeliveryContract {
+  string artifact_id = 1;
+  uint32 version = 2;
+  string digest = 3;
+  // "spec.v2"; a "spec.v1" contract has no named criteria.
+  string schema = 4;
+  repeated DeliveryCriterion criteria = 5;
+}
+// One observation as a person reads it. command_id names the managed command
+// whose output is the evidence; it is read through that command.
+message DeliveryEvidence {
+  string id = 1;
+  // "command", "review".
+  string source = 2;
+  string reference = 3;
+  string command_id = 4;
+  optional int32 exit_code = 5;
+  string assertion = 6;
+  string prerequisite = 7;
+  // What this observation alone says: passed, failed, blocked or unverified.
+  string state = 8;
+  // "available" or "unavailable": whether the command's full output is still kept.
+  string output = 9;
+}
+message DeliveryCriterionOutcome {
+  string id = 1;
+  string expected = 2;
+  bool required = 3;
+  // passed, failed, blocked, unverified or unrun.
+  string state = 4;
+  // Every observation on this candidate, in the order recorded.
+  repeated DeliveryEvidence evidence = 5;
+}
+message DeliveryCandidateOutcome {
+  string candidate = 1;
+  // The workspace holds these files now.
+  bool current = 2;
+  // passed, failed, blocked, incomplete or unverified.
+  string verdict = 3;
+  repeated DeliveryCriterionOutcome criteria = 4;
+}
+// delivery.Outcome on the wire.
+message DeliveryOutcome {
+  DeliveryContract contract = 1;
+  string attempt = 2;
+  string conversation_id = 3;
+  string mission_id = 4;
+  string task_id = 5;
+  // The workspace's candidate now; empty when it cannot be read.
+  string current = 6;
+  // The person's decision on the outcome: "accepted", "rejected" or empty.
+  string decision = 7;
+  // Newest first: the current candidate, then each one checked.
+  repeated DeliveryCandidateOutcome candidates = 8;
 }
 message DeliveryBinding {
   string conversation = 1;

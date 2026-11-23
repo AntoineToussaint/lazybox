@@ -35,13 +35,13 @@ Finish A's visual check while starting B and the scenario fixture. After B, C an
 
 ```mermaid
 flowchart LR
-  A["A. Failed run on card<br/>merged, live UI check open"]
-  B["B. Evidence contract<br/>merged"]
-  C["C. Capture and replay<br/>commands merged, reviews open"]
-  D["D. Derive outcomes<br/>merged except carry-forward of unaffected proof"]
-  E["E. Outcome endpoint<br/>open"]
-  F1["F1. Conversation and Mission verdict"]
-  F2["F2. Published verdict snapshot"]
+  A["A. Failed run on card<br/>delivered"]
+  B["B. Evidence contract<br/>delivered"]
+  C["C. Capture and replay<br/>delivered"]
+  D["D. Derive outcomes<br/>delivered; no carry-forward"]
+  E["E. Outcome endpoint<br/>delivered"]
+  F1["F1. Conversation and Mission verdict<br/>delivered"]
+  F2["F2. Published verdict snapshot<br/>delivered"]
   G{"G. Release qualification<br/>CLI, conversation, Mission and artifact agree<br/>before and after Runner restart"}
   B --> C --> E
   B --> D --> E
@@ -51,18 +51,21 @@ flowchart LR
   G -- "any surface disagrees" --> E
 ```
 
-## November 23 checkpoint: merged
+## Status: delivered
 
-[#76](https://github.com/AntoineToussaint/lazybox/pull/76) landed A's card change and the first slices of B and D. The evidence-contract change completes B and the reducer rules of D.
+[#76](https://github.com/AntoineToussaint/lazybox/pull/76), [#80](https://github.com/AntoineToussaint/lazybox/pull/80), [#87](https://github.com/AntoineToussaint/lazybox/pull/87), [#90](https://github.com/AntoineToussaint/lazybox/pull/90) and the outcome change deliver B through G. The user guide is [Missions: checking and reading delivery criteria](../../docs/guides/missions.md#checking-delivery-criteria).
 
-| Milestone | Merged | Still open |
+| Milestone | Delivered | Left open |
 |---|---|---|
-| A | The collapsed card and inbox keep the newest unresolved failed run beside the latest run. A failure clears once a later run of the same command (matched by title) passes. | Live visual check on the card and inbox. A stable command identity instead of the title. |
-| B | `spec.v2` with stable criterion IDs and required flags ([`delivery/contract.go`](../../services/runner/code/internal/delivery/contract.go)). `lazybox artifact template delivery-spec` starts one. Publishing recognizes the schema, and each version records the schema it declares. The artifact reader lists criteria by ID and level. Pinned Mission plans keep the bindings and name them in the approval sheet and the worker and reviewer briefs. The `delivery-observation.v1` contract ([`delivery/outcome.go`](../../services/runner/code/internal/delivery/outcome.go)): contract artifact, version and digest; candidate ID derived from each repository's commit; attempt; conversation, and Mission and task when present; source, reference and idempotency ID; separate exit, assertion, prerequisite and decision fields. One `ContractFromSpec` pins spec.v1 and spec.v2 revisions for plans and assessment. Versioned fixtures cover a conversation without a Mission, an approved Mission contract, a candidate change and a legacy text-only spec, with round trips that preserve every identity. | Nothing for B. C records these observations from managed commands and reviews. |
-| D | [`delivery.Assess`](../../services/runner/code/internal/delivery/outcome.go) folds valid observations for one contract digest, candidate and attempt under the rules above. A human acceptance, waiver or rejection is reported beside the verdict and leaves the technical result in place. A new candidate starts with no proof. | Carrying proof forward to a new candidate for criteria its change cannot affect. |
-| C | `lazybox run --check <criterion>` and `--needs <criterion>` record observations ([`runner/delivery.go`](../../services/runner/code/internal/runner/delivery.go)). A check resolves its criterion when it registers, against the Mission task's approved contract or a spec.v2 version bound with `lazybox delivery bind`, and is refused before it runs otherwise. At completion the Runner reads each repository's HEAD as the candidate and saves the observation with the command's completion, then records it in the delivery journal ([`delivery/store.go`](../../services/runner/code/internal/delivery/store.go)), keyed by run so retries and restart replays leave one. A failed write is reported after the run and retried every minute. The managed command ID is the observation ID and reference. | Contract-bound review executions recording per-criterion results. |
-| E, F1, F2, G | Nothing yet. | The outcome endpoint and the user-facing delivery verdict. |
+| A | The collapsed card and inbox keep the newest unresolved failed run beside the latest run; it clears when a later run with the same title passes. The delivery verdict now carries criterion-bound evidence beside it. | A look at the card in a real desktop session (the Playwright suite covers it on the fixture). |
+| B | `spec.v2` criteria with IDs and required flags; `delivery-observation.v1` with contract digest, candidate (each repository's commit and uncommitted tree), attempt, subject, source, reference, and separate exit, assertion, prerequisite and decision; versioned fixtures for the four cases. | — |
+| C | `lazybox run --check` / `--needs` resolve their criterion at registration and record against the files fingerprinted then; a run whose files change records nothing. Contract-bound reviewers record per-criterion verdicts (`lazybox delivery review`). The journal keeps one observation per run across retries and restarts; failed writes are visible and retried. | — |
+| D | `delivery.Assess` and `delivery.Project`: decisive observations only, failed > blocked > incomplete > passed, the person's decision beside the verdict. | Proof never carries forward: any change to the files makes a new candidate that needs its checks again (see the decision below). |
+| E | `GetDeliveryOutcome` by conversation or by Mission task serves one projection: the current files first, then each candidate checked, with every observation and whether its command output is still kept. `lazybox delivery status [--json]`. Agents read only their own conversation's outcome; command output stays behind `ReadCommand`. | — |
+| F1 | The verdict on the Mission card (one line, every criterion when expanded), in the acceptance inbox, and under the conversation's messages; runs open their output; acceptance shows beside an unchanged verdict. | — |
+| F2 | `lazybox delivery publish [--id]` keeps the outcome as a `delivery-outcome.v1` report; each version keeps its verdict; the reader renders it with output availability as published. | Re-checking output availability when an old snapshot is read later. |
+| G | `TestDeliveryQualificationWithoutMission` (RPCs, restart, authorization, snapshots), `TestMissionOutcomeIsTheSameByConversationAndTask` (both lookups, acceptance, restart), the pinned-plan review flow, and the Missions and artifact-reader UI suites with screenshots. | A run on a real desktop with a live agent. |
 
-> **Decision** Mission cards match a resolved failure by run title until C supplies a criterion-bound observation. Two different commands with the same title would clear each other.
+> **Decision** Proof is per candidate: a commit or an edit makes new files whose checks run again. Deciding which criteria a change cannot affect would need a dependency map per criterion; until one exists, re-running is the honest answer.
 
-> **Note** Verified with `make check` and CI on #76. The new card behaviour has not been looked at in the running app.
+> **Decision** Mission cards still match a resolved *run* failure by title; the delivery verdict beside them is criterion-bound and does not depend on titles.

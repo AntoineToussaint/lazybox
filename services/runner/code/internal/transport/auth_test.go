@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"google.golang.org/protobuf/proto"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -215,9 +216,11 @@ func TestAgentCredentialIsDeniedEveryRPCOffTheAllowlist(t *testing.T) {
 	// linking and listing its own workspace's pull requests (items_test.go),
 	// and asking the person to start a conversation and waiting for its own
 	// request's answer (conversation_starts_test.go), and binding a spec to
-	// its own conversation (TestAgentBindsDeliveryOnlyForItself).
+	// its own conversation, reading and publishing its own conversation's
+	// delivery outcome and recording its own review's verdicts
+	// (TestAgentBindsDeliveryOnlyForItself).
 	// Reviewer-only verification execution is covered by TestVerificationRPCScopesRecipesAndCancelsProcesses.
-	if len(allowed) != 35 || !allowed[pb.RunnerService_BindDelivery_FullMethodName] || !allowed[pb.RunnerService_RenameCollection_FullMethodName] || !allowed[pb.RunnerService_RunReviewVerification_FullMethodName] || !allowed[pb.RunnerService_RetireArtifact_FullMethodName] || !allowed[pb.RunnerService_RequestConversationStart_FullMethodName] || !allowed[pb.RunnerService_WaitConversationStart_FullMethodName] || !allowed[pb.RunnerService_ListLinks_FullMethodName] || !allowed[pb.RunnerService_LinkItem_FullMethodName] || !allowed[pb.RunnerService_ClaimLease_FullMethodName] || !allowed[pb.RunnerService_ReleaseLease_FullMethodName] || !allowed[pb.RunnerService_ListLeases_FullMethodName] || !allowed[pb.RunnerService_ProposePlan_FullMethodName] || !allowed[pb.RunnerService_SpawnAgent_FullMethodName] || !allowed[pb.RunnerService_ListAgentLineage_FullMethodName] || !allowed[pb.RunnerService_SendAgentMessage_FullMethodName] ||
+	if len(allowed) != 38 || !allowed[pb.RunnerService_BindDelivery_FullMethodName] || !allowed[pb.RunnerService_GetDeliveryOutcome_FullMethodName] || !allowed[pb.RunnerService_PublishDeliveryOutcome_FullMethodName] || !allowed[pb.RunnerService_RecordReviewCriterion_FullMethodName] || !allowed[pb.RunnerService_RenameCollection_FullMethodName] || !allowed[pb.RunnerService_RunReviewVerification_FullMethodName] || !allowed[pb.RunnerService_RetireArtifact_FullMethodName] || !allowed[pb.RunnerService_RequestConversationStart_FullMethodName] || !allowed[pb.RunnerService_WaitConversationStart_FullMethodName] || !allowed[pb.RunnerService_ListLinks_FullMethodName] || !allowed[pb.RunnerService_LinkItem_FullMethodName] || !allowed[pb.RunnerService_ClaimLease_FullMethodName] || !allowed[pb.RunnerService_ReleaseLease_FullMethodName] || !allowed[pb.RunnerService_ListLeases_FullMethodName] || !allowed[pb.RunnerService_ProposePlan_FullMethodName] || !allowed[pb.RunnerService_SpawnAgent_FullMethodName] || !allowed[pb.RunnerService_ListAgentLineage_FullMethodName] || !allowed[pb.RunnerService_SendAgentMessage_FullMethodName] ||
 		!allowed[pb.RunnerService_WaitAgents_FullMethodName] || !allowed[pb.RunnerService_StopChildAgent_FullMethodName] || !allowed[pb.RunnerService_ReportAgentTask_FullMethodName] || !allowed[pb.RunnerService_SetReviewFindingState_FullMethodName] || !allowed[pb.RunnerService_AskAgent_FullMethodName] || !allowed[pb.RunnerService_WaitAgentAsk_FullMethodName] || !allowed[pb.RunnerService_AddReviewFinding_FullMethodName] || !allowed[pb.RunnerService_ListReviewFindings_FullMethodName] || !allowed[pb.RunnerService_RegisterPipe_FullMethodName] || !allowed[pb.RunnerService_Publish_FullMethodName] || !allowed[pb.RunnerService_FinishPipe_FullMethodName] ||
 		!allowed[pb.RunnerService_FollowPipe_FullMethodName] || !allowed[pb.RunnerService_CancelCommand_FullMethodName] || !allowed[pb.RunnerService_ListCommands_FullMethodName] ||
 		!allowed[pb.RunnerService_ListArtifacts_FullMethodName] || !allowed[pb.RunnerService_GetArtifact_FullMethodName] || !allowed[pb.RunnerService_PutArtifact_FullMethodName] ||
@@ -312,8 +315,32 @@ func TestAgentCredentialScopeHoldsOverConnect(t *testing.T) {
 }
 
 func TestAgentBindsDeliveryOnlyForItself(t *testing.T) {
-	allowed := agentRPCs[pb.RunnerService_BindDelivery_FullMethodName]
 	self := principal{session: "worker"}
+	for method, cases := range map[string]map[proto.Message]bool{
+		pb.RunnerService_GetDeliveryOutcome_FullMethodName: {
+			&pb.GetDeliveryOutcomeRequest{SessionId: "worker"}:                 true,
+			&pb.GetDeliveryOutcomeRequest{SessionId: "other"}:                  false,
+			&pb.GetDeliveryOutcomeRequest{MissionId: "m", TaskId: "t"}:         false,
+			&pb.GetDeliveryOutcomeRequest{SessionId: "worker", MissionId: "m"}: false,
+		},
+		pb.RunnerService_PublishDeliveryOutcome_FullMethodName: {
+			&pb.PublishDeliveryOutcomeRequest{SessionId: "worker"}:         true,
+			&pb.PublishDeliveryOutcomeRequest{SessionId: "other"}:          false,
+			&pb.PublishDeliveryOutcomeRequest{MissionId: "m", TaskId: "t"}: false,
+		},
+		pb.RunnerService_RecordReviewCriterion_FullMethodName: {
+			&pb.RecordReviewCriterionRequest{SessionId: "worker", Criterion: "api", Result: "passed"}: true,
+			&pb.RecordReviewCriterionRequest{SessionId: "other", Criterion: "api", Result: "passed"}:  false,
+		},
+	} {
+		for r, want := range cases {
+			if got := agentRPCs[method](nil, self, r); got != want {
+				t.Errorf("%s %v: allowed %t", method, r, got)
+			}
+		}
+	}
+	allowed := agentRPCs[pb.RunnerService_BindDelivery_FullMethodName]
+	self = principal{session: "worker"}
 	if !allowed(nil, self, &pb.BindDeliveryRequest{SessionId: "worker", ArtifactId: "spec", Version: 1}) {
 		t.Fatal("an agent could not bind its own conversation")
 	}

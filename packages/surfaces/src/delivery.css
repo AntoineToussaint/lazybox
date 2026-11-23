@@ -1,0 +1,28 @@
+.delivery-verdict{display:grid;gap:4px;margin:0;font-size:calc(11px * var(--text-scale));color:var(--text-secondary)}
+.delivery-verdict.compact{display:flex;gap:6px;align-items:baseline}
+.delivery-verdict.compact>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.delivery-verdict>[aria-hidden],.delivery-verdict summary>[aria-hidden]{font-weight:600}
+.delivery-verdict.tone-pass>[aria-hidden],.delivery-verdict.tone-pass summary>[aria-hidden]{color:var(--trust-verified)}
+.delivery-verdict.tone-fail>[aria-hidden],.delivery-verdict.tone-fail summary>[aria-hidden]{color:var(--danger-strong)}
+.delivery-verdict.tone-pending>[aria-hidden],.delivery-verdict.tone-pending summary>[aria-hidden]{color:var(--trust-claimed)}
+details.delivery-verdict{margin:6px 12px;padding:8px 10px;border:1px solid var(--line-subtle);border-radius:6px;background:var(--surface-raised,transparent)}
+details.delivery-verdict.tone-fail{border-color:var(--danger-line-subtle)}
+details.delivery-verdict.tone-pass{border-color:var(--ok-line)}
+.delivery-verdict summary{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;cursor:pointer;list-style:none}
+.delivery-verdict summary::-webkit-details-marker{display:none}
+.delivery-verdict summary::after{content:"Details";margin-left:auto;color:var(--text-faint)}
+.delivery-verdict[open] summary::after{content:"Hide"}
+details.delivery-verdict[open] summary{margin-bottom:4px}
+.delivery-where,.delivery-history{color:var(--text-muted)}
+.delivery-decision{color:var(--text-tertiary);font-style:italic}
+.delivery-history{margin:0}
+.delivery-blocking{color:var(--text-secondary)}
+.delivery-criteria{display:grid;gap:3px;margin:0;padding:0;list-style:none}
+.delivery-criteria li{display:grid;grid-template-columns:7em 1fr;gap:2px 8px;align-items:baseline}
+.delivery-criteria .delivery-evidence{grid-column:2;display:flex;flex-wrap:wrap;gap:4px}
+.delivery-criteria li.tone-fail .delivery-state{color:var(--danger-strong)}
+.delivery-criteria li.tone-pass .delivery-state{color:var(--trust-verified)}
+.delivery-evidence .evidence-chip.resolved{opacity:.65;text-decoration:line-through}
+.delivery-evidence .evidence-chip{gap:4px}
+.panel-chat details.delivery-verdict:not([open]){flex:none}
+.panel-chat details.delivery-verdict[open]{max-height:40vh;overflow:auto}

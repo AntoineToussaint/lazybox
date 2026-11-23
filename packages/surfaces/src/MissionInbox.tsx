@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react';
 import { ConnectError } from '@lazybox/client-core';
 import { Icon } from './Icons';
+import { DeliveryVerdict } from './DeliveryVerdict';
+import { useDeliveryOutcome } from './useDeliveryOutcome';
 import { awaitingRows, evidenceChip, flagLabel, headlineEvidence, trustLabel, trustMeaning, type AwaitingRow } from './missions-model';
 import { useMissions } from './useMissions';
 import { pendingPlans, usd } from './orchestration-model';
@@ -53,11 +55,15 @@ function AwaitingTask({ row: { mission, task }, onOpen, update }: { row: Awaitin
   };
   const attempt = task.attempt;
   const askButton = useRef<HTMLButtonElement>(null);
+  // The same verdict the Mission card shows, so a person accepts knowing what is still open.
+  const contracted = mission.plans.some(p => p.state === 'approved' && !!p.contract);
+  const outcome = useDeliveryOutcome(contracted && attempt ? { missionId: mission.id, taskId: task.id } : undefined);
   // Back (or Escape in the note) returns to the choice, the focus on Ask for changes.
   const back = () => { setChanges(null); requestAnimationFrame(() => askButton.current?.focus()); };
   return <li className="inbox-item inbox-task" data-task={task.id} data-inbox-row tabIndex={-1} aria-label={`Awaiting acceptance: ${task.title}`}>
     <div className="inbox-task-head"><strong>{task.title}</strong><span className={`trust-badge trust-${task.trust}`} title={trustMeaning[task.trust]}>{trustLabel[task.trust] || task.trust}</span></div>
     <span className="inbox-task-meta">{mission.title}{task.report ? ` · “${task.report}”` : ''}</span>
+    {outcome && <DeliveryVerdict outcome={outcome} compact/>}
     <p className="inbox-task-reason">{task.reason}{task.flags.filter(f => f !== 'no_evidence').map(f => ` · ${flagLabel[f] || f}`).join('')}</p>
     {headlineEvidence(task.evidence).length > 0 && <span className="inbox-task-meta">{headlineEvidence(task.evidence).map(e => { const chip = evidenceChip(e); return `${chip.mark} ${chip.label}`; }).join('   ')}</span>}
     {task.brief && <details className="mission-brief"><summary>Review task brief and acceptance criteria</summary><p className="mission-card-brief">{task.brief}</p></details>}

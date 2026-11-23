@@ -1,5 +1,6 @@
 import { RoadmapDocument, roadmapOutline } from './RoadmapDocument';
 import { specOrPlanDocument } from './artifact-sections';
+import { deliveryOutcomeMarkdown } from './delivery-model';
 import { roadmapMarkdown, typedMissionPlan, type Roadmap } from './roadmap';
 import { ArtifactSource, useArtifactSourceDraft } from './ArtifactSource';
 import { artifactFormat } from './artifact-formats';
@@ -241,6 +242,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
     if (artifact?.kind === 'todo-list') return todoMarkdown(body);
     const parsed = JSON.parse(body);
     if (artifact?.kind === 'plan' && parsed.schema === 'roadmap.v1') return roadmapMarkdown(parsed);
+    if (artifact?.kind === 'report' && parsed.schema === 'delivery-outcome.v1') return deliveryOutcomeMarkdown(parsed);
     const typed = body === content ? fieldDocument : specOrPlanDocument(parsed);
     return typed?.markdown ?? structuredMarkdown(parsed);
   };

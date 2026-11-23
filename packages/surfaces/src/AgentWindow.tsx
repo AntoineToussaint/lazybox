@@ -30,6 +30,8 @@ import { conversationName } from './conversation-model';
 import { useComposeRequests } from './compose';
 import { queuedMessages } from './transcript-model';
 export type { RunnerConnection } from './RunnerContext';
+import { DeliveryVerdict } from './DeliveryVerdict';
+import { useDeliveryOutcome } from './useDeliveryOutcome';
 import './style.css';
 import './chat-header.css';
 import { awaitingFirstMessage } from './agent-status';
@@ -520,6 +522,8 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const codeRuns = useMemo(() => sessionID && !assistant && mode === 'agent' ? new CodeRuns(api, sessionID) : null, [api, sessionID, assistant, mode]);
   useEffect(() => codeRuns?.attach(), [codeRuns]);
   const openCommand = onOpenCommand || (showCommands ? (commandId: string) => { setCommand(commandId); setCommandsOpen(true); } : onOpenViewer ? (commandId: string) => void onOpenViewer(sessionID, commandId) : undefined);
+  // The conversation's delivery verdict (its bound spec or Mission task), refreshed as each turn ends.
+  const delivery = useDeliveryOutcome(sessionID && !assistant ? { sessionId: sessionID } : undefined, transcript.turnRunning);
   // A Run request goes as its own message, beside any draft: at once, or queued behind the turn in progress.
   const sendRunRequest = async (text: string, reportId?: string): Promise<'sent' | 'drafted'> => {
     const ready = !!session && !session.closed && (!session.fault || limited || continuesAfterError);
@@ -759,6 +763,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             enableFullAccess={session?.provider === 'codex' && !session.closed && session.capabilities?.livePermission && session.permission !== 'yolo' && session.workflow !== 'plan' && !assistant ? () => changePermission('yolo') : undefined}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
             subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onOpenContinuation={id => void openLinkedConversation(id, 0n)} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
+          {delivery && !transcript.turnRunning && <DeliveryVerdict outcome={delivery} folded onEvidence={openCommand ? e => openCommand(e.commandId) : undefined}/>}
           {!transcript.error && <LiveBar api={api} session={session} sessionID={sessionID} live={live} disconnected={disconnected} activity={transcript.activity} viewState={viewState} onInterrupt={() => void interrupt()}
             onOpenCommand={openCommand} onOpenFile={session?.collectionId ? openFile : undefined}/>}
           {!transcript.error && !disconnected && <QueuedMessages session={session} queued={queued} turnRunning={transcript.turnRunning} live={live} agentName={agentName} activity={transcript.activity} delivery={queuedDelivery} sendNowKey={sendNowKey}/>}

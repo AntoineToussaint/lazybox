@@ -67,6 +67,7 @@ var builtinBriefings = []builtinBriefing{
 		{version: 3, since: "never with & or nohup", note: "Start servers and watchers with `lazybox run -- <command>` too, never with & or nohup: one still running after 20s moves to the background (`lazybox ls` lists your commands, `lazybox stop ID` stops one)."},
 		{version: 4, since: "lazybox run --check <criterion>", note: "When your Mission task's approved spec or a spec you bound (`lazybox delivery bind <spec-id>@<version>`) names criteria, run each check as `lazybox run --check <criterion> -- <command>`, and a step it depends on with `--needs <criterion>`."},
 		{version: 5, since: "uncommitted changes included", note: "A check's result counts for the exact files it ran on, uncommitted changes included: run the checks again after you commit."},
+		{version: 6, since: "lazybox delivery status", note: "Before you report work done, `lazybox delivery status` shows the delivery verdict and which criteria are still open."},
 	}},
 	{id: "documents", text: documentsBriefing, changes: []briefingChange{
 		{version: 1, since: "lazybox artifact put", note: "Publish plans, specs and reports you write for the person as Lazybox artifacts: `lazybox artifact put <file|-> --title \"…\" --kind plan|spec|report|notes|other`, and each revision as a new version with `--id ID`."},

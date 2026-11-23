@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ViewStateStore } from '@lazybox/platform';
 import type { Collection } from '@lazybox/protocol';
 import { AppearanceSync } from './appearance/AppearanceSync';
+import { useKeyboardNavigation } from './keyboard';
 import { ArtifactCompanion } from './ArtifactCompanion';
 import { AttentionScope } from './useAttention';
 import { RunnerProvider, useRunner, type RunnerConnection } from './RunnerContext';
@@ -15,6 +16,7 @@ export function ArtifactWindow({ connection, ...view }: ArtifactView & { connect
 }
 
 function StandalonePage({ collectionId, artifactId, viewState }: ArtifactView) {
+  useKeyboardNavigation(viewState);
   const { api } = useRunner();
   const [collection, setCollection] = useState<Collection>();
   useEffect(() => {

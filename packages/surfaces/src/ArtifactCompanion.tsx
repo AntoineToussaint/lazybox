@@ -90,10 +90,10 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
     if (id !== sessionId) setChatKey(key => key + 1);
     rememberSession(id);
   };
-  const discuss = (artifact: Artifact, reference: string) => {
+  const discuss = (_artifact: Artifact, reference: string) => {
     let id = sessionId;
     if (id === undefined) {
-      id = artifact.originSessionId;
+      id = '';
       try { id = companionStore?.getItem(companionStore.key + ':conversation') ?? id; } catch { /* session storage is optional */ }
       resolveSession(id);
     }

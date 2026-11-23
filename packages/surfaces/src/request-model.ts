@@ -81,7 +81,10 @@ export function risksOf(command: string, paths: string[], root: string, extra: {
     if (/\bgit\s+push\b.*(--force|-f\b)/.test(command) || /\bgit\s+(reset\s+--hard|clean\s+-[a-z]*f|checkout\s+--\s|restore\s)/.test(command)) add({ kind: 'discard', text: 'Can discard work' });
     if (/\b(npm|pnpm|yarn)\s+publish\b|\bcargo\s+publish\b|\bgh\s+(release|pr\s+merge)\b/.test(command)) add({ kind: 'publish', text: 'Publishes' });
     if (NETWORK.test(command)) add({ kind: 'network', text: 'Uses the network' });
-    for (const match of command.matchAll(/(?:^|\s|=)((?:\/|~\/)[^\s'";|&)]+)/g)) paths.push(match[1]);
+    // Codex wraps commands in a login shell. Inspect the script's paths;
+    // the shell executable itself is not a requested file.
+    const script = command.replace(/^\s*\/(?:usr\/)?bin\/(?:ba|z|da|k)?sh\s+-l?c\s+['"]?/, '');
+    for (const match of script.matchAll(/(?:^|\s|=)((?:\/|~\/)[^\s'";|&)]+)/g)) paths.push(match[1]);
   }
   if (extra.network) add({ kind: 'network', text: extra.network });
   const home = /^~\//;

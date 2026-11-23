@@ -484,3 +484,5 @@ folder or checkout, put **Run in your home folder** or **Run in the home
 checkout of REPO** directly before the block. The same destination
 instructions work with a standalone inline-code command. HTML previews and
 version comparisons remain display-only.
+
+The agent companion opens a fresh conversation by default, with the displayed revision and any selected excerpt in its draft. Selecting an existing workspace conversation explicitly continues its history. The companion remembers that choice per artifact. Enter in the detached reader uses the same configured send binding as workspace chat.

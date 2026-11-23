@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/adapters/jsonl"
 )
 
 // The agent's tools and the person's controls. An agent's call runs only on
@@ -396,16 +397,11 @@ func (m *Manager) act(ctx context.Context, b *conv, params map[string]any) (actR
 	return r, nil
 }
 
-// serviceError keeps the service's own words: "adapter act: {"message":"…"}" reads "…".
+// serviceError keeps the service's own words: a call it refused reads as its message.
 func serviceError(err error) error {
-	text := err.Error()
-	if i := strings.Index(text, ": {"); i >= 0 {
-		var e struct {
-			Message string `json:"message"`
-		}
-		if json.Unmarshal([]byte(text[i+2:]), &e) == nil && e.Message != "" {
-			return errors.New(e.Message)
-		}
+	var call *jsonl.CallError
+	if errors.As(err, &call) && call.Message != "" {
+		return errors.New(call.Message)
 	}
 	return err
 }

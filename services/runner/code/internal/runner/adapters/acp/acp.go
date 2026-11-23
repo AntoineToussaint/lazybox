@@ -299,7 +299,7 @@ func (s *session) load(ctx context.Context, params map[string]any) (json.RawMess
 	select {
 	case m := <-loaded:
 		if present(m.Error) {
-			return nil, fmt.Errorf("adapter session/load: %s", m.Error)
+			return nil, jsonl.NewCallError("session/load", m.Error)
 		}
 		return m.Result, nil
 	case <-ctx.Done():
@@ -350,14 +350,13 @@ type rpcError struct {
 	Data    json.RawMessage `json:"data"`
 }
 
-// errorOf reads the JSON-RPC error out of a failed call ("adapter <method>: {…}").
+// errorOf reads the JSON-RPC error out of a failed call.
 func errorOf(err error) (rpcError, bool) {
-	var e rpcError
-	text := err.Error()
-	if i := strings.Index(text, "{"); i >= 0 && json.Unmarshal([]byte(text[i:]), &e) == nil && (e.Code != 0 || e.Message != "") {
-		return e, true
+	var call *jsonl.CallError
+	if errors.As(err, &call) && (call.Code != 0 || call.Message != "") {
+		return rpcError{Code: call.Code, Message: call.Message, Data: call.Data}, true
 	}
-	return e, false
+	return rpcError{}, false
 }
 
 // authRequired is ACP's "Authentication required" error code.

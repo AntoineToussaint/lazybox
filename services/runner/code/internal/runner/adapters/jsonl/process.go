@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -281,7 +282,7 @@ func (p *Process) Call(ctx context.Context, method string, params any) (json.Raw
 	select {
 	case m := <-ch:
 		if len(m.Error) > 0 && string(m.Error) != "null" {
-			return nil, fmt.Errorf("adapter %s: %s", method, m.Error)
+			return nil, NewCallError(method, m.Error)
 		}
 		return m.Result, nil
 	case <-ctx.Done():
@@ -335,4 +336,46 @@ func (p *Process) Close() error {
 	case <-timer.C:
 		return errors.New("native process exit remains unconfirmed")
 	}
+}
+
+// CallError is the error an adapter answered a call with (a JSON-RPC error
+// object). It reads as the agent's own message ("API error: 429 This request
+// would exceed your account's rate limit…"), never as the raw object: that
+// text reaches the person. Method, Code and Data stay for code that decides
+// what to do with it.
+type CallError struct {
+	Method  string
+	Code    int
+	Message string
+	Data    json.RawMessage
+	// Raw is the error as the adapter sent it, for an answer that is not an object.
+	Raw json.RawMessage
+}
+
+// NewCallError reads an adapter's error answer to method.
+func NewCallError(method string, raw json.RawMessage) *CallError {
+	e := &CallError{Method: method, Raw: append(json.RawMessage(nil), raw...)}
+	var object struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(raw, &object) == nil {
+		e.Code, e.Message, e.Data = object.Code, object.Message, object.Data
+	} else {
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			e.Message = text
+		}
+	}
+	// A JavaScript error's own "Error: " prefix says nothing to the person.
+	e.Message = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(e.Message), "Error: "))
+	return e
+}
+
+func (e *CallError) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	return fmt.Sprintf("the agent refused %s: %s", e.Method, e.Raw)
 }

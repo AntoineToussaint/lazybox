@@ -1602,7 +1602,7 @@ message RemoveCollectionRepositoryRequest {
 }
 message CollectionRequest { string collection_id = 1; }
 message CollectionResponse { Collection collection = 1; }
-message ListCollectionsRequest {}
+message ListCollectionsRequest { bool include_retained_artifact_workspaces = 1; }
 // The person's order (ArrangeWorkspaces): a workspace they never placed
 // (created since) comes first, newest first; with no order kept, by ID.
 message ListCollectionsResponse { repeated Collection collections = 1; }
@@ -2149,12 +2149,14 @@ message WorkspaceDeletionPreview {
   repeated string dirty_repositories = 2;
   bool files_outside_repositories = 3;
   string blocked = 4;
+  bool supports_keep_artifacts = 5;
 }
 message DeleteWorkspaceRequest {
   string collection_id = 1;
   string confirm_name = 2;
   bool discard_changes = 3;
   bool stop_sessions = 4;
+  bool keep_artifacts = 5;
 }
 
 // References are resolved inside the owned workspace on the Runner, never on the client.

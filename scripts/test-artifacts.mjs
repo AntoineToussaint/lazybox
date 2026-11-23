@@ -20,6 +20,8 @@ import {reportTitle,seedReport} from './fixtures/artifact-sample.mjs';
 
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];
 Object.assign(session,{busy:false,status:'done',conversationId:'conversation-alpha',agents:[{id:'root',status:'done'}]});
+fixture.collections.push({id:'former',name:'Former project',state:'deleted',keepArtifacts:true,members:[]});
+fixture.artifacts.agentPut({collectionId:'former',title:'Kept after deletion',kind:'report',content:'Historical results'});
 const channel=fixture.openEvents(session.id);
 const plan1='# Datasource migration plan\n\nMove reads first, then writes.\n\n## Steps\n1. Phase one: dual read\n2. Phase two: dual write\n3. Phase three: cut over\n';
 const plan2=plan1.replace('2. Phase two: dual write','2. Phase two: dual write behind a flag').replace('3. Phase three: cut over','3. Phase three: cut over\n4. Phase four: remove the old path');
@@ -215,6 +217,11 @@ try{
  await scopes.getByRole('radio',{name:'All workspaces'}).click();
  const elsewhere=page.getByRole('listbox',{name:'Artifacts of every workspace'});
  await expect(elsewhere.getByRole('group',{name:'Beta release'}).getByRole('option',{name:/Plan from Beta/})).toBeVisible({timeout:20000});
+ const kept=elsewhere.getByRole('group',{name:'Former project (deleted workspace)'}).getByRole('option',{name:/Kept after deletion/});
+ await kept.click();
+ const keptPage=page.getByRole('article',{name:'Kept after deletion'});
+ await expect(keptPage).toContainText('Historical results');
+ if(await keptPage.getByRole('button',{name:'Back to artifacts'}).isVisible())await keptPage.getByRole('button',{name:'Back to artifacts'}).click();
  await elsewhere.getByRole('option',{name:/Plan from Beta/}).click();
  await expect(page.getByRole('article',{name:'Plan from Beta'})).toBeVisible();
  await page.screenshot({path:'.cache/artifacts-panel.png'});

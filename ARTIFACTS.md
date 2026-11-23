@@ -31,7 +31,7 @@ These rules hold for every caller:
 - **Tracking an already tracked file returns the existing artifact.**
 - **Limits:** a title of at most 200 characters, content of at most 1 MiB of
   UTF-8, and at most 1000 versions per artifact.
-- **Deleting a workspace deletes its artifacts.** Deleting a conversation
+- **Workspace deletion keeps artifacts and their version history by default.** Find them under **Artifacts → All workspaces**. Select **Permanently delete workspace artifacts and all their versions** to remove them when the undo period ends. Deleting a conversation
   does not delete the artifacts taken from it.
 - **Retiring never deletes.** A retired artifact keeps every version, is
   left out of `ListArtifacts` unless `include_retired`, and is restored as

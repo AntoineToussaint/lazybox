@@ -65,6 +65,7 @@ type Member struct {
 var ErrBranchExists = errors.New("branch already exists; choose a new collection branch")
 
 type Collection struct {
+	KeepArtifacts           bool              `json:"keepArtifacts,omitempty"`
 	HourlyWorkflowReview    bool              `json:"hourlyWorkflowReview,omitempty"`
 	Slug                    string            `json:"slug,omitempty"`
 	LegacyRoot              bool              `json:"legacyRoot,omitempty"`
@@ -337,11 +338,20 @@ func (c *Collection) syncOwners() {
 	}
 }
 func (m *Manager) List() []Collection {
+	return m.list(false)
+}
+
+// ListForArtifacts includes tombstones whose saved documents remain accessible.
+func (m *Manager) ListForArtifacts() []Collection {
+	return m.list(true)
+}
+
+func (m *Manager) list(includeRetained bool) []Collection {
 	m.recordsMu.RLock()
 	defer m.recordsMu.RUnlock()
 	out := make([]Collection, 0, len(m.items))
 	for _, c := range m.items {
-		if c.State != "deleted" {
+		if c.State != "deleted" || (includeRetained && c.KeepArtifacts) {
 			out = append(out, clone(c))
 		}
 	}

@@ -37,7 +37,7 @@ func TestPendingDeletionSurvivesRestartAndCanBeUndone(t *testing.T) {
 		b.Close()
 		t.Fatal(err)
 	}
-	workspaceRequest := PendingDeletion{WorkspaceID: workspace.ID, Title: workspace.Name, Discard: true, Stop: true}
+	workspaceRequest := PendingDeletion{WorkspaceID: workspace.ID, Title: workspace.Name, Discard: true, Stop: true, KeepArtifacts: true}
 	workspaceDeletion, err := b.ScheduleDeletion(ctx, workspaceRequest)
 	if err != nil {
 		b.Close()
@@ -63,6 +63,10 @@ func TestPendingDeletionSurvivesRestartAndCanBeUndone(t *testing.T) {
 	}
 	if _, err := os.Stat(file); err != nil {
 		t.Fatal(err)
+	}
+	restored, err := b.ScheduleDeletion(ctx, workspaceRequest)
+	if err != nil || !restored.KeepArtifacts {
+		t.Fatal("lost artifact retention choice", restored, err)
 	}
 	retry, err := b.ScheduleDeletion(ctx, conversationRequest)
 	if err != nil || !retry.Expires.Equal(conversationDeletion.Expires) {

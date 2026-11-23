@@ -81,7 +81,7 @@ The page follows new versions by itself. Rename by double-clicking the title.
   **Create GitHub issue…** in a workspace repository. The desktop app opens
   the system Save dialog for Markdown, HTML, and JSON exports.
 
-Deleting a workspace deletes its artifacts; deleting a conversation does not.
+Workspace deletion keeps artifacts and their version history by default. Find them under **Artifacts → All workspaces**. Select **Permanently delete workspace artifacts and all their versions** to remove them when the undo period ends. Deleting a conversation keeps its artifacts.
 
 ## Preview an HTML artifact
 

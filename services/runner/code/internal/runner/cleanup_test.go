@@ -34,7 +34,7 @@ func TestWorkspaceDeletionStopsAgentAndOwnedCommandsBeforeRemovingFiles(t *testi
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err = b.DeleteWorkspace(ctx, c.ID, c.Name, false, true); err != nil {
+	if _, err = b.DeleteWorkspace(ctx, c.ID, c.Name, false, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if !e.Engine.Snapshot().Closed || !cmd.Status().Done || b.Active(e.ID) {
@@ -77,7 +77,7 @@ func TestUnconfirmedCommandCleanupCannotReleaseWorkspaceOrDeleteHistory(t *testi
 	if err = b.DeleteConversation(context.Background(), e.ID, true); err == nil || !strings.Contains(err.Error(), "unconfirmed") {
 		t.Fatal("history deleted despite unresolved resources", err)
 	}
-	if _, err = b.DeleteWorkspace(context.Background(), c.ID, c.Name, true, true); err == nil {
+	if _, err = b.DeleteWorkspace(context.Background(), c.ID, c.Name, true, true, false); err == nil {
 		t.Fatal("workspace deleted despite unresolved resources")
 	}
 	if _, err = os.Stat(c.Root); err != nil {

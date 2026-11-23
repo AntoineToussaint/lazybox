@@ -182,7 +182,7 @@ func TestRemoveLibraryRepositoryKeepsWorktreeAndSurvivesRestart(t *testing.T) {
 	if len(m.Repositories()) != 0 {
 		t.Fatal("configured entry reappeared")
 	}
-	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, func(string) bool { return false }); err != nil {
+	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, func(string) bool { return false }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = m.FinishDeletion(ctx, c.ID, false, func(string) bool { return false }); err != nil {

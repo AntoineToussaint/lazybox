@@ -50,18 +50,18 @@ func (b *Bench) StopExecution(ctx context.Context, id string) error {
 	}
 	return nil
 }
-func (b *Bench) DeleteWorkspace(ctx context.Context, id, name string, discard, stop bool) (collections.Collection, error) {
+func (b *Bench) DeleteWorkspace(ctx context.Context, id, name string, discard, stop, keepArtifacts bool) (collections.Collection, error) {
 	if b.Collections == nil {
 		return collections.Collection{}, errors.New("workspaces unavailable")
 	}
-	c, err := b.Collections.BeginDeletion(ctx, id, name, discard, stop, b.Active)
+	c, err := b.Collections.BeginDeletion(ctx, id, name, discard, stop, keepArtifacts, b.Active)
 	if err != nil {
 		return c, err
 	}
 	if c.State == "deleted" {
 		// A retry after deletion finished: only what may have been left behind.
 		if b.Artifacts != nil {
-			err = b.Artifacts.DeleteWorkspace(id)
+			err = b.Artifacts.FinishWorkspaceDeletion(id, c.KeepArtifacts)
 		}
 		return c, err
 	}
@@ -98,8 +98,7 @@ func (b *Bench) DeleteWorkspace(ctx context.Context, id, name string, discard, s
 		b.itemsWorkspaceGone(id, c.Name)
 	}
 	if err == nil && c.State == "deleted" && b.Artifacts != nil {
-		// A workspace's artifacts go with it, like its terminals and output.
-		err = b.Artifacts.DeleteWorkspace(id)
+		err = b.Artifacts.FinishWorkspaceDeletion(id, c.KeepArtifacts)
 	}
 	return c, err
 }

@@ -10786,9 +10786,10 @@ func (x *CollectionResponse) GetCollection() *Collection {
 }
 
 type ListCollectionsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                             protoimpl.MessageState `protogen:"open.v1"`
+	IncludeRetainedArtifactWorkspaces bool                   `protobuf:"varint,1,opt,name=include_retained_artifact_workspaces,json=includeRetainedArtifactWorkspaces,proto3" json:"include_retained_artifact_workspaces,omitempty"`
+	unknownFields                     protoimpl.UnknownFields
+	sizeCache                         protoimpl.SizeCache
 }
 
 func (x *ListCollectionsRequest) Reset() {
@@ -10819,6 +10820,13 @@ func (x *ListCollectionsRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ListCollectionsRequest.ProtoReflect.Descriptor instead.
 func (*ListCollectionsRequest) Descriptor() ([]byte, []int) {
 	return file_api_proto_rawDescGZIP(), []int{136}
+}
+
+func (x *ListCollectionsRequest) GetIncludeRetainedArtifactWorkspaces() bool {
+	if x != nil {
+		return x.IncludeRetainedArtifactWorkspaces
+	}
+	return false
 }
 
 // The person's order (ArrangeWorkspaces): a workspace they never placed
@@ -16517,6 +16525,7 @@ type WorkspaceDeletionPreview struct {
 	DirtyRepositories        []string               `protobuf:"bytes,2,rep,name=dirty_repositories,json=dirtyRepositories,proto3" json:"dirty_repositories,omitempty"`
 	FilesOutsideRepositories bool                   `protobuf:"varint,3,opt,name=files_outside_repositories,json=filesOutsideRepositories,proto3" json:"files_outside_repositories,omitempty"`
 	Blocked                  string                 `protobuf:"bytes,4,opt,name=blocked,proto3" json:"blocked,omitempty"`
+	SupportsKeepArtifacts    bool                   `protobuf:"varint,5,opt,name=supports_keep_artifacts,json=supportsKeepArtifacts,proto3" json:"supports_keep_artifacts,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -16579,12 +16588,20 @@ func (x *WorkspaceDeletionPreview) GetBlocked() string {
 	return ""
 }
 
+func (x *WorkspaceDeletionPreview) GetSupportsKeepArtifacts() bool {
+	if x != nil {
+		return x.SupportsKeepArtifacts
+	}
+	return false
+}
+
 type DeleteWorkspaceRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	CollectionId   string                 `protobuf:"bytes,1,opt,name=collection_id,json=collectionId,proto3" json:"collection_id,omitempty"`
 	ConfirmName    string                 `protobuf:"bytes,2,opt,name=confirm_name,json=confirmName,proto3" json:"confirm_name,omitempty"`
 	DiscardChanges bool                   `protobuf:"varint,3,opt,name=discard_changes,json=discardChanges,proto3" json:"discard_changes,omitempty"`
 	StopSessions   bool                   `protobuf:"varint,4,opt,name=stop_sessions,json=stopSessions,proto3" json:"stop_sessions,omitempty"`
+	KeepArtifacts  bool                   `protobuf:"varint,5,opt,name=keep_artifacts,json=keepArtifacts,proto3" json:"keep_artifacts,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -16643,6 +16660,13 @@ func (x *DeleteWorkspaceRequest) GetDiscardChanges() bool {
 func (x *DeleteWorkspaceRequest) GetStopSessions() bool {
 	if x != nil {
 		return x.StopSessions
+	}
+	return false
+}
+
+func (x *DeleteWorkspaceRequest) GetKeepArtifacts() bool {
+	if x != nil {
+		return x.KeepArtifacts
 	}
 	return false
 }
@@ -38855,8 +38879,9 @@ const file_api_proto_rawDesc = "" +
 	"\x12CollectionResponse\x12<\n" +
 	"\n" +
 	"collection\x18\x01 \x01(\v2\x1c.lazybox.bench.v1.CollectionR\n" +
-	"collection\"\x18\n" +
-	"\x16ListCollectionsRequest\"Y\n" +
+	"collection\"i\n" +
+	"\x16ListCollectionsRequest\x12O\n" +
+	"$include_retained_artifact_workspaces\x18\x01 \x01(\bR!includeRetainedArtifactWorkspaces\"Y\n" +
 	"\x17ListCollectionsResponse\x12>\n" +
 	"\vcollections\x18\x01 \x03(\v2\x1c.lazybox.bench.v1.CollectionR\vcollections\"A\n" +
 	"\x18ArrangeWorkspacesRequest\x12%\n" +
@@ -39315,17 +39340,19 @@ const file_api_proto_rawDesc = "" +
 	"updated_at\x18\b \x01(\tR\tupdatedAt\"h\n" +
 	"\x17ListGitHubItemsResponse\x122\n" +
 	"\x05items\x18\x01 \x03(\v2\x1c.lazybox.bench.v1.GitHubItemR\x05items\x12\x19\n" +
-	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\xcf\x01\n" +
+	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\x87\x02\n" +
 	"\x18WorkspaceDeletionPreview\x12,\n" +
 	"\x12active_session_ids\x18\x01 \x03(\tR\x10activeSessionIds\x12-\n" +
 	"\x12dirty_repositories\x18\x02 \x03(\tR\x11dirtyRepositories\x12<\n" +
 	"\x1afiles_outside_repositories\x18\x03 \x01(\bR\x18filesOutsideRepositories\x12\x18\n" +
-	"\ablocked\x18\x04 \x01(\tR\ablocked\"\xae\x01\n" +
+	"\ablocked\x18\x04 \x01(\tR\ablocked\x126\n" +
+	"\x17supports_keep_artifacts\x18\x05 \x01(\bR\x15supportsKeepArtifacts\"\xd5\x01\n" +
 	"\x16DeleteWorkspaceRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12!\n" +
 	"\fconfirm_name\x18\x02 \x01(\tR\vconfirmName\x12'\n" +
 	"\x0fdiscard_changes\x18\x03 \x01(\bR\x0ediscardChanges\x12#\n" +
-	"\rstop_sessions\x18\x04 \x01(\bR\fstopSessions\"O\n" +
+	"\rstop_sessions\x18\x04 \x01(\bR\fstopSessions\x12%\n" +
+	"\x0ekeep_artifacts\x18\x05 \x01(\bR\rkeepArtifacts\"O\n" +
 	"\x14WorkspaceFileRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\"_\n" +

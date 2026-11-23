@@ -26,7 +26,7 @@ func TestWorkspaceDeletionHangsUpItsTerminals(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err = b.DeleteWorkspace(ctx, c.ID, c.Name, false, true); err != nil {
+	if _, err = b.DeleteWorkspace(ctx, c.ID, c.Name, false, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if !term.Status().Done || len(b.Terminals.List(c.ID)) != 0 {

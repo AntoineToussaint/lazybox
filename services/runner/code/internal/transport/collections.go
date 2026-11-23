@@ -80,8 +80,12 @@ func (s *Service) ListCollections(ctx context.Context, r *pb.ListCollectionsRequ
 	}
 	w := &pb.ListCollectionsResponse{}
 	hidden := s.hiddenWorkspaces()
-	for _, c := range m.List() {
-		if hidden[c.ID] {
+	list := m.List
+	if r.IncludeRetainedArtifactWorkspaces {
+		list = m.ListForArtifacts
+	}
+	for _, c := range list() {
+		if hidden[c.ID] || (c.State == "deleted" && (s.Bench.Artifacts == nil || !s.Bench.Artifacts.HasWorkspace(c.ID))) {
 			continue
 		}
 		w.Collections = append(w.Collections, wireCollection(c))

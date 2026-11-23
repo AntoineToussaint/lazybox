@@ -235,6 +235,13 @@ func (s *Store) find(ws, id string) (*Artifact, error) {
 	return nil, fmt.Errorf("artifact %q: %w", id, fs.ErrNotExist)
 }
 
+// HasWorkspace reports whether a deleted workspace still has documents to list.
+func (s *Store) HasWorkspace(ws string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.items[ws]) > 0
+}
+
 // List returns a workspace's artifacts, most recently updated first.
 func (s *Store) List(ws string) ([]Artifact, error) {
 	if err := validWorkspace(ws); err != nil {
@@ -658,6 +665,25 @@ func (s *Store) Delete(ws, id string) error {
 	}
 	delete(s.items[ws], id)
 	delete(s.pending, ws+"/"+id)
+	return nil
+}
+
+// FinishWorkspaceDeletion stops following removed files when their saved versions are kept.
+func (s *Store) FinishWorkspaceDeletion(ws string, keep bool) error {
+	if !keep {
+		return s.DeleteWorkspace(ws)
+	}
+	items, err := s.List(ws)
+	if err != nil {
+		return err
+	}
+	for _, a := range items {
+		if a.TrackedPath != "" {
+			if _, err = s.Update(ws, a.ID, "", "", true); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

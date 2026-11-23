@@ -46,7 +46,8 @@ const server=await createServer({...testViteCache(import.meta.url),configFile:fa
 const raw=chat=>Promise.all([expect(chat).not.toContainText(/exhausted|rate_limit|provider failure|provider_error/i),expect(chat.locator('.account-notice')).toHaveCount(0)]);
 try{
  await server.listen();await mkdir('.cache',{recursive:true});browser=await webkit.launch();
- const page=await browser.newPage({viewport:{width:1440,height:900},locale:'en-US'});page.setDefaultTimeout(15000);
+ const context=await browser.newContext({viewport:{width:1440,height:900},locale:'en-US'});
+ const page=await context.newPage();page.setDefaultTimeout(15000);
  const errors=await collectPageErrors(page);
  const base=`http://127.0.0.1:${server.httpServer.address().port}`;
 
@@ -214,6 +215,16 @@ try{
  assert.match(handoff.message.text,/Keep the notes concise/);
  assert.equal(handoff.sessionId,f.sessions.at(-1).id);
  assert.equal(f.mutations.filter(m=>m.method==='Apply').length,writes+1,'the handoff sends once');
+ const revisit=await page.context().newPage();
+ await revisit.goto(`${base}/?view=workspace&collection=delta&session=delta-session#token=${f.token}`);
+ const continued=revisit.getByRole('button',{name:'Open continued Codex conversation'});
+ await expect(continued).toBeVisible();
+ await expect(revisit.getByRole('region',{name:'Subscription limit'})).toHaveCount(0);
+ const openedBefore=f.mutations.filter(m=>m.method==='OpenSession').length;
+ await continued.click();
+ await expect(continued).toHaveCount(0);
+ assert.equal(f.mutations.filter(m=>m.method==='OpenSession').length,openedBefore);
+ await revisit.close();
  const refreshPage=await browser.newPage({viewport:{width:1440,height:900}});
  await collectPageErrors(refreshPage,errors);
  await refreshPage.goto(`${base}/?view=workspace&collection=delta&session=delta-session#token=${f.token}`);

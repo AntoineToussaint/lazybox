@@ -23,7 +23,7 @@ import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, u
 import { flushSync } from 'react-dom';
 import { type CommandStatus, type Session } from '@lazybox/protocol';
 import type { SurfaceTarget, ViewStateStore } from '@lazybox/platform';
-import { readDraft, writeDraft } from './view-state';
+import { readDraft, writeDraft, writePreference } from './view-state';
 import { RunnerProvider, useRunner, type RunnerConnection } from './RunnerContext';
 import { AttentionScope, PanelShownContext, useMarkViewed } from './useAttention';
 import { conversationName } from './conversation-model';
@@ -67,7 +67,7 @@ import { continuationPrompt } from './continuation-prompt';
 import { ConfirmDialog } from './ConfirmDialog';
 import type { TranscriptMessage } from './transcript-model';
 import { MessageArea } from './MessageArea';
-import { SubscriptionControls } from './SubscriptionSwitch';
+import { continuationKey, SubscriptionControls } from './SubscriptionSwitch';
 import { Composer } from './Composer';
 import { ComposerInfo } from './ComposerInfo';
 import { ConsoleWindow, EventLog, SessionCommands } from './SessionCommands';
@@ -580,8 +580,9 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     if (firstMessage) {
       const operationId = crypto.randomUUID();
       try {
-        await api.apply({ sessionId: opened.session.id, operationId,
+        const receipt = await api.apply({ sessionId: opened.session.id, operationId,
           operation: { case: 'message', value: { text: firstMessage, attachments: [] } } }, { timeoutMs: 30_000 });
+        if (receipt.error || receipt.delivery === 'failed') throw new Error(receipt.error || 'Message delivery failed.');
       } catch (error) {
         writeDraft(viewState, opened.session.id, { text: firstMessage, files: [], operationId });
         transferError = `Codex could not confirm the handoff. The context is saved in the draft. ${humanError(error)}`;
@@ -590,6 +591,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     setSession(undefined); setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
     setSessionID(opened.session.id); onSessionChange?.(opened.session.id); refresh();
     if (transferError) showMenuNotice(transferError);
+    else if (firstMessage) writePreference(viewState, continuationKey(source), opened.session.id);
   };
   const openBranch = async () => {
     if (!branchMessage || !branchSelection) return;
@@ -623,10 +625,10 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     setSession(undefined); setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
     setSessionID(opened.session.id); onSessionChange?.(opened.session.id); refresh();
   };
-  const openBranchSource = async (id: string, cursor: bigint) => {
+  const openLinkedConversation = async (id: string, cursor: bigint) => {
     try {
       const { session: source } = await api.getSession({ sessionId: id });
-      if (!source) throw new Error('The source conversation is no longer available.');
+      if (!source) throw new Error('The linked conversation is no longer available.');
       if (!onOpenHandoff?.({ collectionId: source.collectionId, sessionId: source.id, commandId: '' })) {
         setSessionID(source.id); onSessionChange?.(source.id);
       }
@@ -749,14 +751,14 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
               ? 'The new worktrees start at the saved repository checkpoint. Ignored files are excluded.'
               : 'This uses the current workspace files.'}
           </ConfirmDialog>}
-          {session?.forkedFromSessionId && <button type="button" className="text-button" onClick={() => void openBranchSource(session.forkedFromSessionId, session.forkedFromCursor)}>
+          {session?.forkedFromSessionId && <button type="button" className="text-button" onClick={() => void openLinkedConversation(session.forkedFromSessionId, session.forkedFromCursor)}>
             Open previous conversation
           </button>}
           <CodeRunContext.Provider value={codeRuns}><MessageArea onBranch={allowStart && !assistant && session?.provider === 'codex'
             ? (entry, sideQuestion) => { setBranchSelection({ message: entry, source: sessionID, requestKey: crypto.randomUUID(), sideQuestion }); setRetryDraft(sideQuestion ? "" : entry.text); setBranchFromCheckpoint(entry.type !== 'operation_accepted' && !!session.collectionId && !!onOpenHandoff); } : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             enableFullAccess={session?.provider === 'codex' && !session.closed && session.capabilities?.livePermission && session.permission !== 'yolo' && session.workflow !== 'plan' && !assistant ? () => changePermission('yolo') : undefined}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
-            subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
+            subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onOpenContinuation={id => void openLinkedConversation(id, 0n)} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
           {!transcript.error && <LiveBar api={api} session={session} sessionID={sessionID} live={live} disconnected={disconnected} activity={transcript.activity} viewState={viewState} onInterrupt={() => void interrupt()}
             onOpenCommand={openCommand} onOpenFile={session?.collectionId ? openFile : undefined}/>}
           {!transcript.error && !disconnected && <QueuedMessages session={session} queued={queued} turnRunning={transcript.turnRunning} live={live} agentName={agentName} activity={transcript.activity} delivery={queuedDelivery} sendNowKey={sendNowKey}/>}

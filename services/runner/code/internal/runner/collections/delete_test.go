@@ -281,3 +281,151 @@ func TestRegisteredWorktreeBeforeLargeListingTail(t *testing.T) {
 		t.Fatalf("lost a registered worktree in a large listing: %v", err)
 	}
 }
+
+// assertDiscardDeletes checks the damaged member is reported, refused without
+// discard consent, then deleted with it while its branch survives.
+func assertDiscardDeletes(t *testing.T, m *Manager, repo Repository, c Collection) {
+	t.Helper()
+	ctx := context.Background()
+	member := c.Members[0]
+	inactive := func(string) bool { return false }
+	preview, err := m.PreviewDeletion(ctx, c.ID, inactive)
+	if err != nil || len(preview.Dirty) != 1 || preview.Dirty[0] != member.Name {
+		t.Fatalf("preview: %+v, %v", preview, err)
+	}
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err == nil {
+		t.Fatal("damaged member accepted without discard consent")
+	}
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, true, false, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.FinishDeletion(ctx, c.ID, true, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(c.Root); !os.IsNotExist(err) {
+		t.Fatalf("workspace root remains: %v", err)
+	}
+	if got := gitTest(t, repo.Path, "rev-parse", "refs/heads/"+member.Branch); got != member.BaseCommit {
+		t.Fatal("branch lost")
+	}
+}
+
+// nestedRoot is a workspaces root inside another Git repository, so Git run
+// in a member without its own link reports the outer repository's top level.
+func nestedRoot(t *testing.T) string {
+	t.Helper()
+	outer := t.TempDir()
+	gitTest(t, outer, "init", "-b", "main")
+	root := filepath.Join(outer, "workspaces")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func adminDir(t *testing.T, member Member) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(member.Path, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := strings.TrimSpace(strings.TrimPrefix(string(data), "gitdir:"))
+	if filepath.Base(filepath.Dir(dir)) != "worktrees" {
+		t.Fatalf("unexpected gitdir %q", dir)
+	}
+	return dir
+}
+
+// Regression: "member is not the expected worktree root" when the workspaces
+// root lives inside another repository and the member's .git is gone.
+func TestDeleteNestedWorkspaceWithoutGitLink(t *testing.T) {
+	for _, prune := range []bool{false, true} {
+		t.Run(map[bool]string{false: "registered", true: "pruned"}[prune], func(t *testing.T) {
+			repo := repoTest(t)
+			m := newTest(t, nestedRoot(t), repo)
+			c, err := m.Create(context.Background(), "nested", specTest(repo.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(c.Members[0].Path, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			if prune {
+				gitTest(t, repo.Path, "worktree", "prune", "--expire", "now")
+			}
+			assertDiscardDeletes(t, m, repo, c)
+		})
+	}
+}
+
+func TestDeleteMemberWhoseGitFileNamesARemovedGitdir(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "nested"}[nested], func(t *testing.T) {
+			repo := repoTest(t)
+			root := t.TempDir()
+			if nested {
+				root = nestedRoot(t)
+			}
+			m := newTest(t, root, repo)
+			c, err := m.Create(context.Background(), "dangling", specTest(repo.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.RemoveAll(adminDir(t, c.Members[0])); err != nil {
+				t.Fatal(err)
+			}
+			assertDiscardDeletes(t, m, repo, c)
+		})
+	}
+}
+
+func TestDeleteRefusesGitLinkPointingElsewhere(t *testing.T) {
+	cases := map[string]func(t *testing.T, link string){
+		"file outside the repository": func(t *testing.T, link string) {
+			elsewhere := filepath.Join(t.TempDir(), "worktrees", "api")
+			if err := os.WriteFile(link, []byte("gitdir: "+elsewhere+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"file outside worktrees": func(t *testing.T, link string) {
+			if err := os.WriteFile(link, []byte("gitdir: "+filepath.Join(filepath.Dir(link), "gone")+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlink to a removed gitdir": func(t *testing.T, link string) {
+			if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), link); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, damage := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			repo := repoTest(t)
+			m := newTest(t, t.TempDir(), repo)
+			c, err := m.Create(ctx, "elsewhere", specTest(repo.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			member := c.Members[0]
+			link := filepath.Join(member.Path, ".git")
+			if err := os.RemoveAll(adminDir(t, member)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(link); err != nil {
+				t.Fatal(err)
+			}
+			damage(t, link)
+			inactive := func(string) bool { return false }
+			if _, err := m.PreviewDeletion(ctx, c.ID, inactive); err == nil {
+				t.Fatal("preview accepted a .git link that names someone else's metadata")
+			}
+			if _, err := m.BeginDeletion(ctx, c.ID, c.Name, true, false, false, inactive); err == nil {
+				t.Fatal("deletion accepted a .git link that names someone else's metadata")
+			}
+			if _, err := os.Stat(filepath.Join(member.Path, "source.txt")); err != nil {
+				t.Fatalf("member files touched: %v", err)
+			}
+		})
+	}
+}

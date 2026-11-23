@@ -13230,9 +13230,11 @@ type RegisterPipeRequest struct {
 	CollectionId string `protobuf:"bytes,3,opt,name=collection_id,json=collectionId,proto3" json:"collection_id,omitempty"`
 	// With collection_id: the conversation (id or title) whose message box receives
 	// the run's compact view when it finishes. The person still decides to send it.
-	ShareWith     string `protobuf:"bytes,4,opt,name=share_with,json=shareWith,proto3" json:"share_with,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ShareWith string `protobuf:"bytes,4,opt,name=share_with,json=shareWith,proto3" json:"share_with,omitempty"`
+	// The CLI recognized actual argv as a PR create command. Display titles can be customized.
+	CreatesPullRequest bool `protobuf:"varint,5,opt,name=creates_pull_request,json=createsPullRequest,proto3" json:"creates_pull_request,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RegisterPipeRequest) Reset() {
@@ -13291,6 +13293,13 @@ func (x *RegisterPipeRequest) GetShareWith() string {
 		return x.ShareWith
 	}
 	return ""
+}
+
+func (x *RegisterPipeRequest) GetCreatesPullRequest() bool {
+	if x != nil {
+		return x.CreatesPullRequest
+	}
+	return false
 }
 
 type PublishRequest struct {
@@ -29513,8 +29522,10 @@ type MissionEvidence struct {
 	AtUnixMillis   int64             `protobuf:"varint,18,opt,name=at_unix_millis,json=atUnixMillis,proto3" json:"at_unix_millis,omitempty"`
 	Revisions      map[string]string `protobuf:"bytes,19,rep,name=revisions,proto3" json:"revisions,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	ContractDigest string            `protobuf:"bytes,20,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Preserved in history, excluded from the current attempt’s evidence.
+	Historical    bool `protobuf:"varint,21,opt,name=historical,proto3" json:"historical,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MissionEvidence) Reset() {
@@ -29685,6 +29696,13 @@ func (x *MissionEvidence) GetContractDigest() string {
 		return x.ContractDigest
 	}
 	return ""
+}
+
+func (x *MissionEvidence) GetHistorical() bool {
+	if x != nil {
+		return x.Historical
+	}
+	return false
 }
 
 type MissionEvent struct {
@@ -39059,14 +39077,15 @@ const file_api_proto_rawDesc = "" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x12\n" +
 	"\x04argv\x18\x03 \x03(\tR\x04argv\x12\x10\n" +
-	"\x03cwd\x18\x04 \x01(\tR\x03cwd\"\x8e\x01\n" +
+	"\x03cwd\x18\x04 \x01(\tR\x03cwd\"\xc0\x01\n" +
 	"\x13RegisterPipeRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12#\n" +
 	"\rcollection_id\x18\x03 \x01(\tR\fcollectionId\x12\x1d\n" +
 	"\n" +
-	"share_with\x18\x04 \x01(\tR\tshareWith\"[\n" +
+	"share_with\x18\x04 \x01(\tR\tshareWith\x120\n" +
+	"\x14creates_pull_request\x18\x05 \x01(\bR\x12createsPullRequest\"[\n" +
 	"\x0ePublishRequest\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x16\n" +
@@ -40486,7 +40505,7 @@ const file_api_proto_rawDesc = "" +
 	"permission\x18\x0e \x01(\tR\n" +
 	"permission\x12\x1d\n" +
 	"\n" +
-	"profile_id\x18\x0f \x01(\tR\tprofileId\"\xb2\x05\n" +
+	"profile_id\x18\x0f \x01(\tR\tprofileId\"\xd2\x05\n" +
 	"\x0fMissionEvidence\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x14\n" +
@@ -40513,7 +40532,10 @@ const file_api_proto_rawDesc = "" +
 	"\x06detail\x18\x11 \x01(\tR\x06detail\x12$\n" +
 	"\x0eat_unix_millis\x18\x12 \x01(\x03R\fatUnixMillis\x12N\n" +
 	"\trevisions\x18\x13 \x03(\v20.lazybox.bench.v1.MissionEvidence.RevisionsEntryR\trevisions\x12'\n" +
-	"\x0fcontract_digest\x18\x14 \x01(\tR\x0econtractDigest\x1a<\n" +
+	"\x0fcontract_digest\x18\x14 \x01(\tR\x0econtractDigest\x12\x1e\n" +
+	"\n" +
+	"historical\x18\x15 \x01(\bR\n" +
+	"historical\x1a<\n" +
 	"\x0eRevisionsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\f\n" +

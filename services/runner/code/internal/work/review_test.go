@@ -1,10 +1,16 @@
 package work
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"testing"
 )
+
+// deliveredPR returns the link that authorizes subsequent checks for this attempt.
+func deliveredPR(check Recorded) Recorded {
+	return Recorded{Evidence: Evidence{Kind: EvidencePR, Attempt: check.Attempt, Repository: check.Repository, Number: check.Number, Ref: PullRequestLinkRef(check.Repository, check.Number), Outcome: OutcomeUnknown}}
+}
 
 // An agent review is evidence: while its latest record has open blockers the
 // task is never verified, even with green checks on its head; once they are
@@ -16,19 +22,19 @@ func TestReviewBlockersKeepATaskFromVerified(t *testing.T) {
 	blocked := Recorded{Seq: 3, Actor: Actor{Kind: ActorAgent, Role: "reviewer"}, Evidence: Evidence{Kind: EvidenceReview, Ref: "review:rv-1", Title: "Codex review of turn 2", Outcome: OutcomeFail, Detail: "2 blockers, 1 minor", Blockers: 2, Findings: 3}}
 	settled := Recorded{Seq: 4, Actor: Actor{Kind: ActorAgent, Role: "reviewer"}, Evidence: Evidence{Kind: EvidenceReview, Ref: "review:rv-1", Title: "Codex review of turn 2", Outcome: OutcomePass, Detail: "1 minor", Findings: 1}}
 
-	trust, flags, reason := judge(&Task{Evidence: []Recorded{run, pr}})
+	trust, flags, reason := judge(&Task{Evidence: []Recorded{deliveredPR(pr), run, pr}})
 	if trust != TrustVerified || slices.Contains(flags, FlagBlockers) {
 		t.Fatalf("green checks without a review: %s %v", trust, flags)
 	}
-	trust, flags, reason = judge(&Task{Evidence: []Recorded{run, pr, blocked}})
+	trust, flags, reason = judge(&Task{Evidence: []Recorded{deliveredPR(pr), run, pr, blocked}})
 	if trust != TrustObserved || !slices.Contains(flags, FlagBlockers) || !strings.Contains(reason, "Codex review of turn 2 has open blockers: 2 blockers, 1 minor") {
 		t.Fatalf("open blockers: %s %v %q", trust, flags, reason)
 	}
-	trust, flags, _ = judge(&Task{Evidence: []Recorded{pr, blocked}})
+	trust, flags, _ = judge(&Task{Evidence: []Recorded{deliveredPR(pr), pr, blocked}})
 	if trust != TrustObserved || !slices.Contains(flags, FlagBlockers) {
 		t.Fatalf("open blockers, checks only: %s %v", trust, flags)
 	}
-	trust, flags, _ = judge(&Task{Evidence: []Recorded{run, pr, blocked, settled}})
+	trust, flags, _ = judge(&Task{Evidence: []Recorded{deliveredPR(pr), run, pr, blocked, settled}})
 	if trust != TrustVerified || slices.Contains(flags, FlagBlockers) {
 		t.Fatalf("blockers settled: %s %v", trust, flags)
 	}
@@ -63,10 +69,10 @@ func TestBoundReviewOnlyInvalidatedByLaterRevisionObservations(t *testing.T) {
 }
 
 func TestUnboundReviewCannotClearPinnedCandidateBlockers(t *testing.T) {
-	checks := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidencePR, Member: "api", Head: "abc", Outcome: OutcomePass}}
+	checks := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidencePR, Repository: "o/api", Number: 1, Member: "api", Head: "abc", Outcome: OutcomePass}}
 	bound := Recorded{Seq: 2, Evidence: Evidence{Kind: EvidenceReview, Ref: "review:candidate", ContractDigest: "spec", Revisions: map[string]string{"api": "abc"}, Outcome: OutcomeFail, Blockers: 1}}
 	turn := Recorded{Seq: 3, Evidence: Evidence{Kind: EvidenceReview, Ref: "review:turn", Outcome: OutcomePass}}
-	task := Task{Evidence: []Recorded{checks, bound, turn}}
+	task := Task{Evidence: []Recorded{deliveredPR(checks), checks, bound, turn}}
 	if trust, flags, _ := judge(&task); trust == TrustVerified || !slices.Contains(flags, FlagBlockers) {
 		t.Fatalf("unrelated turn review cleared candidate blockers: %s %v", trust, flags)
 	}
@@ -79,13 +85,13 @@ func TestUnboundReviewCannotClearPinnedCandidateBlockers(t *testing.T) {
 }
 
 func TestFreshPinnedAttemptDoesNotInheritVerifiedEvidence(t *testing.T) {
-	pr := Recorded{Seq: 1, Evidence: Evidence{Attempt: "first", Kind: EvidencePR, Member: "api", Head: "abc", Outcome: OutcomePass}}
-	task := Task{Attempts: []*Attempt{{ID: "next", Dispatch: &Dispatch{}}}, Evidence: []Recorded{pr}}
+	pr := Recorded{Seq: 1, Evidence: Evidence{Attempt: "first", Kind: EvidencePR, Repository: "o/api", Number: 1, Member: "api", Head: "abc", Outcome: OutcomePass}}
+	task := Task{Attempts: []*Attempt{{ID: "next", Dispatch: &Dispatch{}}}, Evidence: []Recorded{deliveredPR(pr), pr}}
 	if trust, flags, _ := judge(&task); trust != TrustClaimed || !slices.Contains(flags, FlagNoEvidence) {
 		t.Fatalf("fresh worker inherited checks: %s %v", trust, flags)
 	}
 	pr.Attempt = "next"
-	task.Evidence = append(task.Evidence, pr)
+	task.Evidence = append(task.Evidence, deliveredPR(pr), pr)
 	if trust, _, _ := judge(&task); trust != TrustVerified {
 		t.Fatalf("current worker checks ignored: %s", trust)
 	}
@@ -145,10 +151,10 @@ func TestInvalidateReviewPreservesAttemptOrderingAndReplay(t *testing.T) {
 }
 
 func TestIncompleteVerificationCannotInheritGreenCITrust(t *testing.T) {
-	pr := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidencePR, Ref: "pr:repo#1", Repository: "repo", Head: "current", Outcome: OutcomePass}}
+	pr := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidencePR, Ref: "pr:repo#1", Repository: "repo", Number: 1, Head: "current", Outcome: OutcomePass}}
 	for _, outcome := range []string{OutcomeUnknown, OutcomePending, OutcomePass} {
 		review := Recorded{Seq: 2, Evidence: Evidence{Kind: EvidenceReview, Ref: "review:1", State: "verification", Outcome: outcome}}
-		trust, _, reason := judge(&Task{Evidence: []Recorded{pr, review}})
+		trust, _, reason := judge(&Task{Evidence: []Recorded{deliveredPR(pr), pr, review}})
 		if (trust == TrustVerified) != (outcome == OutcomePass) {
 			t.Fatalf("%s produced %s: %s", outcome, trust, reason)
 		}
@@ -159,7 +165,58 @@ func TestPRDeliveryLinkPreservesExistingChecksAndReview(t *testing.T) {
 	pr := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidencePR, Repository: "team/api", Member: "api", Head: "abc", Outcome: OutcomePass, Number: 1}}
 	review := Recorded{Seq: 2, Evidence: Evidence{Kind: EvidenceReview, ContractDigest: "spec", Outcome: OutcomePass, Revisions: map[string]string{"api": "abc"}}}
 	link := Recorded{Seq: 3, Evidence: Evidence{Kind: EvidencePR, Ref: PullRequestLinkRef("team/api", 2), Repository: "team/api", Member: "api", Number: 2, Outcome: OutcomeUnknown}}
-	if trust, flags, _ := judge(&Task{Evidence: []Recorded{pr, review, link}}); trust != TrustVerified || slices.Contains(flags, FlagStale) {
+	if trust, flags, _ := judge(&Task{Evidence: []Recorded{deliveredPR(pr), pr, review, link}}); trust != TrustVerified || slices.Contains(flags, FlagStale) {
 		t.Fatalf("delivery changed existing checks/review: %s %v", trust, flags)
+	}
+}
+
+func TestTrustFollowsDeliveredPRIdentity(t *testing.T) {
+	first := Recorded{Evidence: Evidence{Kind: EvidencePR, Repository: "team/api", Member: "api", Number: 12, Head: "aaa", Outcome: OutcomePass}}
+	latest := first
+	latest.Head = "bbb"
+	second := latest
+	second.Number, second.Outcome = 13, OutcomeFail
+	local := Recorded{Evidence: Evidence{Kind: EvidenceCommit, Member: first.Member, Head: first.Head}}
+	stale := second
+	stale.Outcome = OutcomePass
+	pending := second
+	pending.Outcome = OutcomePending
+	unknown := second
+	unknown.Outcome = OutcomeUnknown
+	for _, tc := range []struct {
+		name        string
+		evidence    []Recorded
+		trust, flag string
+	}{
+		{"legacy workspace observation", []Recorded{first}, TrustClaimed, FlagNoEvidence},
+		{"link cannot retroactively validate old checks", []Recorded{first, deliveredPR(first)}, TrustClaimed, FlagNoEvidence},
+		{"current head without a local revision", []Recorded{deliveredPR(first), first, latest}, TrustVerified, ""},
+		{"same repository different PRs", []Recorded{deliveredPR(second), second, deliveredPR(first), first}, TrustClaimed, FlagCIFailing},
+		{"another PR failed despite locally matching pass", []Recorded{local, deliveredPR(second), second, deliveredPR(first), first}, TrustClaimed, FlagCIFailing},
+		{"another PR stale", []Recorded{local, deliveredPR(second), stale, deliveredPR(first), first}, TrustClaimed, FlagStale},
+		{"another PR pending", []Recorded{deliveredPR(second), pending, deliveredPR(first), first}, TrustClaimed, ""},
+		{"another PR without checks", []Recorded{deliveredPR(second), unknown, deliveredPR(first), first}, TrustClaimed, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			trust, flags, reason := judge(&Task{Evidence: tc.evidence})
+			if trust != tc.trust || (tc.flag != "" && !slices.Contains(flags, tc.flag)) || (tc.flag == "" && len(flags) > 0) {
+				t.Fatalf("got %s %v: %s", trust, flags, reason)
+			}
+		})
+	}
+}
+
+func TestCurrentEvidenceSeqs(t *testing.T) {
+	task := Task{Attempts: []*Attempt{{ID: "first"}, {ID: "second"}}}
+	check := Recorded{Seq: 1, Evidence: Evidence{Kind: EvidencePR, Attempt: "first", Repository: "team/api", Number: 12, Head: "aaa", Outcome: OutcomePass}}
+	task.Evidence = append(task.Evidence, check)
+	check.Seq, check.Attempt = 2, "second"
+	task.Evidence = append(task.Evidence, check)
+	link := deliveredPR(check)
+	link.Seq = 3
+	check.Seq = 4
+	task.Evidence = append(task.Evidence, link, check, Recorded{Seq: 5, Evidence: Evidence{Kind: EvidenceRun, Attempt: "second"}})
+	if got := task.CurrentEvidenceSeqs(); !maps.Equal(got, map[uint64]bool{3: true, 4: true, 5: true}) {
+		t.Fatalf("current evidence seqs: %v", got)
 	}
 }

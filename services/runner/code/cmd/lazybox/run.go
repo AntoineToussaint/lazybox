@@ -17,6 +17,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
+	workitems "github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/items"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen/genconnect"
 	"github.com/codefly-dev/gortk"
@@ -147,6 +148,9 @@ func runCommand(ctx context.Context, c console, unavailable error, o runOptions,
 	}
 	target := pipeTarget{o.session, o.collection, o.to}
 	request, targetErr := target.request(title)
+	if request != nil && request.SessionId != "" {
+		request.CreatesPullRequest = workitems.CreatesPullRequestArgv(argv)
+	}
 	if o.to != "" && targetErr != nil {
 		return targetErr // refused before running anything
 	}

@@ -2,6 +2,7 @@ package work
 
 import (
 	"fmt"
+	"iter"
 	"strings"
 )
 
@@ -200,6 +201,45 @@ func blockedBy(t *Task, done map[string]bool) string {
 	return ""
 }
 
+// currentEvidence walks the current attempt's journal in order. Older journals can
+// contain workspace-wide CI. Only checks after delivery of that PR can
+// speak for the attempt. All records remain available in its history.
+func (t *Task) currentEvidence() iter.Seq[*Recorded] {
+	attemptID := ""
+	if attempt := t.Current(); attempt != nil {
+		attemptID = attempt.ID
+	}
+	return func(yield func(*Recorded) bool) {
+		delivered := map[string]bool{}
+		for i := range t.Evidence {
+			r := &t.Evidence[i]
+			if r.Attempt != attemptID {
+				continue
+			}
+			if r.Kind == EvidencePR {
+				if r.IsPullRequestLink() {
+					delivered[r.Ref] = true
+				} else if !delivered[PullRequestLinkRef(r.Repository, r.Number)] {
+					continue
+				}
+			}
+			if !yield(r) {
+				return
+			}
+		}
+	}
+}
+
+// CurrentEvidenceSeqs identifies journal entries the current attempt owns,
+// including delivery markers shown before their first check arrives.
+func (t *Task) CurrentEvidenceSeqs() map[uint64]bool {
+	current := make(map[uint64]bool)
+	for r := range t.currentEvidence() {
+		current[r.Seq] = true
+	}
+	return current
+}
+
 // judge is what the task's evidence supports, with flags and one sentence.
 // verified: checks passed on a pull request whose head is the newest the
 // Runner saw for that repository. observed: the latest `lazybox run` (with a
@@ -208,16 +248,11 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 	if len(t.Evidence) == 0 {
 		return TrustClaimed, []string{FlagNoEvidence}, "no run or check recorded"
 	}
-	newest := map[string]string{} // member → newest head the Runner saw
+	newest := map[string]string{} // member → latest locally observed run or commit revision
 	var run, review, boundReview *Recorded
-	prs := map[string]*Recorded{} // repository → latest pull request evidence
+	prs := map[string]*Recorded{} // delivery reference → latest check observation
 	order := []string{}
-	attempt := t.Current()
-	for i := range t.Evidence {
-		r := &t.Evidence[i]
-		if attempt != nil && attempt.Dispatch != nil && r.Attempt != attempt.ID {
-			continue
-		}
+	for r := range t.currentEvidence() {
 		switch r.Kind {
 		case EvidenceRun:
 			for member, head := range r.Revisions {
@@ -238,22 +273,15 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 		case EvidencePR:
 			if r.IsPullRequestLink() {
 				continue
-			} // Delivery identifies the PR; it carries no check result.
-			if r.Member != "" && r.Head != "" && r.Outcome == OutcomePass {
-				// A passing PR head is the head the checks ran on; a later run
-				// at another head makes it stale.
-				if _, ok := newest[r.Member]; !ok {
-					newest[r.Member] = r.Head
-				}
 			}
-			key := firstNonEmpty(r.Repository, r.Member)
+			key := PullRequestLinkRef(r.Repository, r.Number)
 			if prs[key] == nil {
 				order = append(order, key)
 			}
 			prs[key] = r
 		}
 	}
-	var verified, ciFailing, stale *Recorded
+	var verified, ciFailing, stale, unchecked *Recorded
 	for _, key := range order {
 		pr := prs[key]
 		current := newest[pr.Member] == "" || pr.Head == "" || newest[pr.Member] == pr.Head
@@ -262,8 +290,10 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 			verified = pr
 		case pr.Outcome == OutcomePass:
 			stale = pr
-		case pr.Outcome == OutcomeFail && current:
+		case pr.Outcome == OutcomeFail:
 			ciFailing = pr
+		default:
+			unchecked = pr
 		}
 	}
 	if stale != nil {
@@ -294,26 +324,34 @@ func judge(t *Task) (trust string, flags []string, reason string) {
 	if blocked {
 		flags = append(flags, FlagBlockers)
 	}
+	// One delivered PR cannot clear another PR's outstanding checks.
+	var checkIssue string
 	switch {
-	case verified != nil && ciFailing == nil && !blocked && !incomplete:
+	case ciFailing != nil:
+		checkIssue = "checks failed on " + prName(ciFailing)
+	case stale != nil:
+		checkIssue = "checks passed on an older head of " + prName(stale)
+	case unchecked != nil:
+		checkIssue = "waiting for passing checks on " + prName(unchecked)
+	}
+	switch {
+	case verified != nil && checkIssue == "" && !blocked && !incomplete:
 		return TrustVerified, flags, "checks passed on " + prName(verified)
 	case run != nil && run.Outcome == OutcomePass:
 		reason = "last run passed: " + runName(run)
-		if stale != nil {
-			reason += "; checks passed on an older head of " + prName(stale)
+		if checkIssue != "" {
+			reason += "; " + checkIssue
 		}
 		if blocked || incomplete {
 			reason += "; " + reviewName(review)
 		}
 		return TrustObserved, flags, reason
+	case checkIssue != "":
+		return TrustClaimed, flags, checkIssue
 	case verified != nil && (blocked || incomplete):
 		return TrustObserved, flags, "checks passed on " + prName(verified) + "; " + reviewName(review)
-	case ciFailing != nil:
-		return TrustClaimed, flags, "checks failed on " + prName(ciFailing)
 	case run != nil:
 		return TrustClaimed, flags, "last run failed: " + runName(run)
-	case stale != nil:
-		return TrustClaimed, flags, "checks passed on an older head of " + prName(stale)
 	}
 	return TrustClaimed, append(flags, FlagNoEvidence), "no passing run or check recorded"
 }
@@ -322,8 +360,8 @@ func reviewStale(t *Task, review *Recorded) bool {
 	if review.State == "stale" {
 		return true
 	}
-	for _, later := range t.Evidence {
-		if later.Seq <= review.Seq || later.Attempt != review.Attempt {
+	for later := range t.currentEvidence() {
+		if later.Seq <= review.Seq || later.IsPullRequestLink() {
 			continue
 		}
 		if later.Kind == EvidenceCommit || later.Kind == EvidencePR {

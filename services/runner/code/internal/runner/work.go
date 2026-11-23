@@ -247,14 +247,6 @@ func (b *Bench) RecordCommit(workspace, member, commit, subject string) {
 	_, _ = b.Work.Record(work.Origin{Workspace: workspace}, work.Actor{Kind: work.ActorLazybox}, work.Evidence{Kind: work.EvidenceCommit, Ref: "commit:" + member + "@" + commit, Title: subject, Outcome: work.OutcomeUnknown, Workspace: workspace, Member: member, Head: commit})
 }
 
-// PullRequestObservation is what the PR loop read about a member's branch.
-type PullRequestObservation struct {
-	Workspace, Member, Repository, Title, URL, State, Head, Checks string
-	Number                                                         int64
-	Failed                                                         []string
-	Total                                                          int
-}
-
 // RefreshMissionPullRequest reads the explicitly delivered PR by identity, even
 // if the workspace has switched branches since the task linked it.
 func (b *Bench) RefreshMissionPullRequest(ctx context.Context, link work.Evidence) {
@@ -262,31 +254,29 @@ func (b *Bench) RefreshMissionPullRequest(ctx context.Context, link work.Evidenc
 	if _, err := b.DeliveredLink(link.Workspace, ref); err != nil {
 		return
 	}
-	item := b.refreshNow(ctx, ref)
-	if item.PR == nil || item.Ref != ref {
-		return
-	}
-	b.RecordPullRequest(PullRequestObservation{Workspace: link.Workspace, Member: link.Member, Repository: link.Repository, Number: link.Number, Title: item.Title, URL: item.URL, State: item.RawState, Head: item.PR.HeadSHA, Checks: item.PR.Checks, Total: len(item.PR.CheckRuns), Failed: item.PR.FailingNames()})
+	// Accepted provider reads publish evidence via observeItems. A reaction may
+	// still use refreshNow's cached return value, but it cannot verify a task.
+	b.refreshNow(ctx, ref)
 }
 
-// RecordPullRequest updates checks for attempts linked to this pull request.
-// A workspace or branch match alone carries no task attribution.
-func (b *Bench) RecordPullRequest(pr PullRequestObservation) {
-	if b.Work == nil || pr.Number == 0 || pr.Head == "" {
-		return
+func (b *Bench) recordPullRequest(link workitems.Link, item workitems.Item) error {
+	pr := item.PR
+	if pr == nil || item.Number == 0 || pr.HeadSHA == "" {
+		return nil
 	}
-	ev := work.Evidence{Kind: work.EvidencePR, Ref: fmt.Sprintf("pr:%s#%d@%s", pr.Repository, pr.Number, pr.Head), Title: pr.Title, Workspace: pr.Workspace, Member: pr.Member, Repository: pr.Repository, Number: pr.Number, Head: pr.Head, State: pr.State, URL: pr.URL}
+	ev := work.Evidence{Kind: work.EvidencePR, Ref: fmt.Sprintf("pr:%s#%d@%s", item.Repository, item.Number, pr.HeadSHA), Title: item.Title, Workspace: link.Workspace, Member: link.Member, Repository: item.Repository, Number: item.Number, Head: pr.HeadSHA, State: item.RawState, URL: item.URL}
 	switch pr.Checks {
 	case "success":
-		ev.Outcome, ev.Detail = work.OutcomePass, fmt.Sprintf("%d checks passed", pr.Total)
+		ev.Outcome, ev.Detail = work.OutcomePass, fmt.Sprintf("%d checks passed", len(pr.CheckRuns))
 	case "failure":
-		ev.Outcome, ev.Detail = work.OutcomeFail, "failed: "+strings.Join(pr.Failed, ", ")
+		ev.Outcome, ev.Detail = work.OutcomeFail, "failed: "+strings.Join(pr.FailingNames(), ", ")
 	case "pending":
 		ev.Outcome, ev.Detail = work.OutcomePending, "checks running"
 	default:
 		ev.Outcome, ev.Detail = work.OutcomeUnknown, "no checks"
 	}
-	_, _ = b.Work.Record(work.Origin{Workspace: pr.Workspace}, work.Actor{Kind: work.ActorCheck}, ev)
+	_, err := b.Work.Record(work.Origin{Workspace: link.Workspace}, work.Actor{Kind: work.ActorCheck}, ev)
+	return err
 }
 
 // RememberSnippets keeps the catalog the person last listed, to record which

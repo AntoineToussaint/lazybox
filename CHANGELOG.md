@@ -52,6 +52,7 @@ leave out.
 
 ### Workspaces and tabs
 
+- **Mission evidence after a handoff** Each assignment tracks its own delivered PRs. The board and inbox show each PR’s checks separately, and the timeline links conversations you can still open.
 - **Pull requests belong to the task that delivered them** Mission tasks receive PR checks after the assigned conversation links or creates the pull request. Sharing a workspace no longer attaches its PR checks to other tasks.
 - **Readable mission timelines** Narrow windows show who acted above each event, with conversation names you can open directly.
 - **Missions in the main navigation** Open an outcome across workspaces or detach it into its own window. Task assignments and orchestrator grants ask you to choose a destination. Mission budgets count usage during the grant.

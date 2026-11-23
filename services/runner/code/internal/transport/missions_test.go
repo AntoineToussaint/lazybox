@@ -157,7 +157,7 @@ func TestMissionEvidenceAttachesAutomatically(t *testing.T) {
 	// Checks passing on that linked head verify it; checks on an older head would not.
 	f.service.observePullRequest(f.mine.Id, "api", &pb.PullRequestStatus{Found: true, GithubRepository: "team/api", Number: 7, HeadSha: committed.Commit, State: "open", ChecksState: "success", Checks: []*pb.PullRequestCheck{{Name: "test", Status: "completed", Conclusion: "success"}}})
 	task = taskOf(t, getMission(t, f, owner, missionID), taskID)
-	if task.Trust != work.TrustVerified || task.Evidence[0].Kind != work.EvidencePR || task.Evidence[0].Number != 7 {
+	if task.Trust != work.TrustVerified || task.Evidence[0].Kind != work.EvidencePR || task.Evidence[0].Number != 7 || task.Evidence[0].Historical {
 		t.Fatalf("checks on the newest head verify: %+v", task)
 	}
 	before := getMission(t, f, owner, missionID).Seq
@@ -298,6 +298,9 @@ func TestAssigningToANewConversationAndDeletingIt(t *testing.T) {
 	if prompts, _ := f.client.ListPromptHistory(owner, &pb.ListPromptHistoryRequest{CollectionId: f.theirs.Id}); len(prompts.Prompts) != 1 {
 		t.Fatalf("brief not recorded: %+v", prompts)
 	}
+	if n, err := f.bench.Work.Record(work.Origin{Workspace: f.theirs.Id}, work.Actor{Kind: work.ActorLazybox}, work.Evidence{Kind: work.EvidenceCommit, Ref: "commit:api@abc", Member: "api", Head: "abc"}); err != nil || n != 1 {
+		t.Fatalf("record first attempt commit: n=%d err=%v", n, err)
+	}
 	if _, err = f.client.DeleteConversation(owner, &pb.DeleteConversationRequest{SessionId: opened.ID, StopSessions: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +315,7 @@ func TestAssigningToANewConversationAndDeletingIt(t *testing.T) {
 	if m, err = f.client.UpdateMission(owner, &pb.UpdateMissionRequest{MissionId: missionID, Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: taskID, SessionId: f.conversation.ID}}}); err != nil {
 		t.Fatal(err)
 	}
-	if task = taskOf(t, m, taskID); len(task.Attempts) != 2 || task.Status == work.StatusFailed {
+	if task = taskOf(t, m, taskID); len(task.Attempts) != 2 || task.Status == work.StatusFailed || len(task.Evidence) != 1 || !task.Evidence[0].Historical {
 		t.Fatalf("reassigned: %+v", task)
 	}
 }

@@ -266,7 +266,7 @@ func (s *Store) Record(origin Origin, actor Actor, ev Evidence) (int, error) {
 				continue
 			}
 		}
-		if last, ok := task.LastEvidence(ev.Ref); ok && last.Attempt == at.Attempt.ID && sameEvidence(last.Evidence, ev) {
+		if last, ok := task.lastObservation(ev, at.Attempt.ID); ok && sameEvidence(last.Evidence, ev) {
 			continue
 		}
 		item := ev
@@ -278,6 +278,23 @@ func (s *Store) Record(origin Origin, actor Actor, ev Evidence) (int, error) {
 		recorded++
 	}
 	return recorded, errors.Join(errs...)
+}
+
+// For a delivered PR, deduplicate against the latest observation of the PR.
+// Comparing by head-specific ref would suppress a return to an earlier head,
+// or the first validated observation after linking a PR from an old journal.
+func (t *Task) lastObservation(ev Evidence, attempt string) (Recorded, bool) {
+	if ev.Kind != EvidencePR || ev.IsPullRequestLink() {
+		last, ok := t.LastEvidence(ev.Ref)
+		return last, ok && last.Attempt == attempt
+	}
+	for i := len(t.Evidence) - 1; i >= 0; i-- {
+		last := t.Evidence[i]
+		if last.Attempt == attempt && last.Kind == EvidencePR && last.Number == ev.Number && strings.EqualFold(last.Repository, ev.Repository) {
+			return last, !last.IsPullRequestLink()
+		}
+	}
+	return Recorded{}, false
 }
 
 func sameEvidence(a, b Evidence) bool {

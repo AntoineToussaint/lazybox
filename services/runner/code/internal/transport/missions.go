@@ -305,13 +305,6 @@ func (s *Service) observeLoop(collection, member string, out *pb.PullRequestStat
 		return
 	}
 	s.Bench.ObservePullRequestLoop(collection, member, out.GithubRepository, status, created, readAt)
-	pr := runner.PullRequestObservation{Workspace: collection, Member: member, Repository: out.GithubRepository, Title: out.Title, URL: out.Url, State: out.State, Head: out.HeadSha, Checks: out.ChecksState, Number: out.Number, Total: len(out.Checks)}
-	for _, c := range out.Checks {
-		if c.Status == "completed" && (c.Conclusion == "failure" || c.Conclusion == "timed_out" || c.Conclusion == "cancelled" || c.Conclusion == "action_required") {
-			pr.Failed = append(pr.Failed, c.Name)
-		}
-	}
-	s.Bench.RecordPullRequest(pr)
 }
 
 func (s *Service) ListPromptHistory(ctx context.Context, r *pb.ListPromptHistoryRequest) (*pb.PromptHistory, error) {
@@ -423,8 +416,12 @@ func (s *Service) wireMission(ctx context.Context, state *work.State, readErr er
 				break
 			}
 		}
+		currentEvidence := v.CurrentEvidenceSeqs()
 		for i := len(v.Evidence) - 1; i >= 0; i-- {
-			task.Evidence = append(task.Evidence, wireEvidence(v.Evidence[i]))
+			record := v.Evidence[i]
+			evidence := wireEvidence(record)
+			evidence.Historical = !currentEvidence[record.Seq]
+			task.Evidence = append(task.Evidence, evidence)
 		}
 		if v.Attempt != nil && !v.Attempt.Ended && s.Bench.Prompts != nil {
 			memory := s.Bench.Prompts.Snippets(v.Attempt.Conversation, "")

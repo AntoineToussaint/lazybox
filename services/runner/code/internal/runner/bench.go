@@ -1045,13 +1045,17 @@ func (b *Bench) start(e *Execution, title string, argv []string, pinnedEnv []str
 	return b.Commands.Start(commands.Spec{SessionID: e.ID, Title: title, Cwd: dir, Argv: argv, Env: env})
 }
 
-func (b *Bench) RegisterPipe(e *Execution, title string) (*commands.Command, error) {
+func (b *Bench) RegisterPipe(e *Execution, title string, createsPullRequest bool) (*commands.Command, error) {
 	e.activity.Lock()
 	defer e.activity.Unlock()
 	if e.Engine.Snapshot().Closed {
 		return nil, errors.New("execution closed")
 	}
-	return b.Commands.Register(commands.Spec{SessionID: e.ID, Title: title, Cwd: e.Cwd})
+	spec := commands.Spec{SessionID: e.ID, Title: title, Cwd: e.Cwd, CreatesPullRequest: createsPullRequest}
+	if createsPullRequest {
+		spec.DeliveryAttempt = b.deliveryAttempt(conversationOf(e))
+	}
+	return b.Commands.Register(spec)
 }
 
 // withCommandEnv is a command's environment with the variables an agent asked

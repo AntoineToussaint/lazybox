@@ -54,6 +54,11 @@ async function run(scheme) {
   fixture.missions.addOverlap(m.id, { taskIds: [indexTask.id, rankTask.id], paths: ['search/rank.go'] });
   fixture.missions.reportChild(index.id, 'Indexed 1,204 files; go test ./search passed.');
 
+  // The journal and assignment survive deletion of the child's session.
+  const deleted = fixture.sessions.findIndex(s => s.id === index.id);
+  assert.notEqual(deleted, -1);
+  fixture.sessions.splice(deleted, 1);
+
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
   const page = await context.newPage();
   const errors = []; page.on('pageerror', error => errors.push(String(error)));
@@ -99,6 +104,9 @@ async function run(scheme) {
   await page.setViewportSize({ width: 640, height: 900 });
   await expect(timeline.locator('.timeline-lane-head').first()).toBeHidden();
   await expect(timeline.locator('.timeline-actor').getByRole('button', {name: 'Search lead', exact:true}).first()).toBeVisible();
+  const historicalActor = timeline.locator('.timeline-actor').filter({ hasText: 'Index the corpus' }).first();
+  await expect(historicalActor).toBeVisible();
+  await expect(historicalActor.getByRole('button')).toHaveCount(0);
   assert.ok(await timeline.evaluate(node => node.scrollWidth <= node.clientWidth + 1));
   await page.setViewportSize({ width: 1440, height: 900 });
 
@@ -123,6 +131,11 @@ async function run(scheme) {
   await page.screenshot({ path: `${shots}orchestration-leases-${scheme}.png` });
   await tabs.getByRole('tab', { name: 'Board' }).click();
   await expect(panel.locator('.mission-columns')).toBeVisible();
+  await tabs.getByRole('tab', { name: /Timeline/ }).click();
+  await page.setViewportSize({ width: 640, height: 900 });
+  await timeline.locator('.timeline-actor').getByRole('button', { name: 'Search lead', exact: true }).first().click();
+  await expect(panel).toBeHidden();
+  await expect(page.locator('.panel-chat').getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
   assert.deepEqual(errors, []);
   await context.close();
 }

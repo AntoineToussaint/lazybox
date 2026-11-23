@@ -85,7 +85,8 @@ export function evidenceChip(e: MissionEvidence): { mark: string; label: string;
     return { mark, label: [e.title || 'run', exit].filter(Boolean).join(' · '), tone, title: [e.piped ? 'Piped through lazybox log: the producer’s exit status is unknown.' : 'lazybox run, exit status observed by the Runner.', e.detail, e.outputPath && `Full output: ${e.outputPath}`].filter(Boolean).join('\n') };
   }
   if (e.kind === 'pr') {
-    return { mark, label: `PR #${e.number}${e.head ? ' · ' + short(e.head) : ''}`, tone, title: [`${e.repository}#${e.number} (${e.state})`, e.detail].filter(Boolean).join('\n') };
+    if (e.ref.startsWith('pr-link:')) return { mark, label: `Linked PR #${e.number}`, tone, title: `Delivered ${e.repository}#${e.number}` };
+    return { mark, label: `PR #${e.number}${e.head ? ' · ' + short(e.head) : ''}`, tone, title: [`${e.repository}#${e.number}${e.state ? ` (${e.state})` : ''}`, e.detail].filter(Boolean).join('\n') };
   }
   // An agent review: failing while it has open blockers.
   if (e.kind === 'review' && e.contractDigest) {
@@ -98,10 +99,18 @@ export function evidenceChip(e: MissionEvidence): { mark: string; label: string;
   return { mark, label: e.title || e.ref, tone, title: e.ref };
 }
 
-/** The newest evidence worth a chip on a card: the latest run, the latest PR, the latest commit. */
+/** Keep the latest checks for each PR. Show its delivery marker until checks arrive. */
 export function headlineEvidence(evidence: readonly MissionEvidence[]): MissionEvidence[] {
   const seen = new Set<string>(), out: MissionEvidence[] = [];
-  for (const e of evidence) if (!seen.has(e.kind)) { seen.add(e.kind); out.push(e); }
+  const prKey = (e: MissionEvidence) => `pr:${e.repository.toLowerCase()}#${e.number}`;
+  const current = evidence.filter(e => !e.historical);
+  const checked = new Set(current.filter(e => e.kind === 'pr' && !e.ref.startsWith('pr-link:')).map(prKey));
+  for (const e of current) {
+    const key = e.kind === 'pr' ? prKey(e) : e.kind;
+    if (seen.has(key) || (e.kind === 'pr' && e.ref.startsWith('pr-link:') && checked.has(key))) continue;
+    seen.add(key);
+    out.push(e);
+  }
   return out;
 }
 

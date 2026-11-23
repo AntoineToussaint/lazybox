@@ -13,9 +13,19 @@ November 23, 2026. Release objective: a person opening an ordinary conversation,
 | F2. Publish the outcome — artifact store and reader | Same as F1; parallel with F1 | Export an immutable versioned verdict snapshot with candidate, criterion states and scoped evidence references. | Publish while blocked, repair, publish again. The original version still shows blocked; the later version shows the new result. Expired output has an explicit unavailable state. |
 | G. Release qualification — scenarios and desktop | C–F complete; fixture preparation starts now | Run the catalog failure, partial repair and final success sequence with and without a Mission. | CLI, conversation, Mission and artifact agree for each candidate before and after Runner restart. Retain test output, candidate revisions and UI evidence. |
 
-## Decision rules to settle in B
+## Decision rules settled in B
 
-A failed required assertion produces a failed verdict. A failed prerequisite that prevented execution produces blocked. Missing or stale required proof produces incomplete. When these coexist, summarize failed first, then blocked, then incomplete, and list every affected criterion. Zero declared criteria yields unverified. An unrelated pass never resolves an earlier failure. These are proposed rules for the versioned fixtures.
+The versioned fixtures in [`delivery/testdata/v1`](../../services/runner/code/internal/delivery/testdata/v1) pin these rules. A change to them is a new fixture version.
+
+| Recorded facts on one criterion | Criterion state |
+|---|---|
+| Assertion failed | failed |
+| Prerequisite failed, so the check could not run | blocked |
+| Assertion passed with exit 0, or from a review | passed |
+| Exit 0 with no assertion, a piped run with no exit, or nothing recorded | unverified or unrun |
+| A human decision | recorded beside the verdict; never changes a criterion |
+
+The verdict is the worst required criterion: failed, then blocked, then incomplete (unrun or unverified), otherwise passed. No required criteria, an unbound spec.v1 contract, or an observation scope that does not match the contract digest yields unverified. Each criterion takes its latest observation in the same contract, candidate and attempt, so an unrelated pass never resolves an earlier failure, and proof on one candidate or attempt never counts for another. `delivery.Observation.Validate` refuses contradictions such as a passing assertion with a failing exit, an assertion from a check that could not run, or a decision from an agent.
 
 ## Sequence and release boundary
 
@@ -24,9 +34,9 @@ Finish A's visual check while starting B and the scenario fixture. After B, C an
 ```mermaid
 flowchart LR
   A["A. Failed run on card<br/>merged, live UI check open"]
-  B["B. Evidence contract<br/>spec.v2 merged, observation fields open"]
+  B["B. Evidence contract<br/>merged"]
   C["C. Capture and replay<br/>open"]
-  D["D. Derive outcomes<br/>Assess merged, freshness and acceptance open"]
+  D["D. Derive outcomes<br/>merged except carry-forward of unaffected proof"]
   E["E. Outcome endpoint<br/>open"]
   F1["F1. Conversation and Mission verdict"]
   F2["F2. Published verdict snapshot"]
@@ -41,13 +51,13 @@ flowchart LR
 
 ## November 23 checkpoint: merged
 
-[#76](https://github.com/AntoineToussaint/lazybox/pull/76) landed A's card change and the first slices of B and D.
+[#76](https://github.com/AntoineToussaint/lazybox/pull/76) landed A's card change and the first slices of B and D. The evidence-contract change completes B and the reducer rules of D.
 
 | Milestone | Merged | Still open |
 |---|---|---|
 | A | The collapsed card and inbox keep the newest unresolved failed run beside the latest run. A failure clears once a later run of the same command (matched by title) passes. | Live visual check on the card and inbox. A stable command identity instead of the title. |
-| B | `spec.v2` with stable criterion IDs and required flags ([`delivery/contract.go`](../../services/runner/code/internal/delivery/contract.go)). `lazybox artifact template delivery-spec` starts one. Publishing recognizes the schema, and each version records the schema it declares. The artifact reader lists criteria by ID and level. Pinned Mission plans keep the bindings and name them in the approval sheet and the worker and reviewer briefs. | Candidate identity, attempt ID, evidence source and separate process-exit, assertion, prerequisite and human-decision fields. Versioned fixtures for the four cases in B. |
-| D | [`delivery.Assess`](../../services/runner/code/internal/delivery/outcome.go) folds observations for one contract digest, candidate and attempt. Failed outranks blocked, which outranks incomplete. No required criteria yields unverified. Observations without a source or reference, an unknown result or an empty scope are ignored. Tests cover the catalog sequence and each guard. | Evidence freshness after candidate changes. Human acceptance and waiver that preserve the technical outcome. |
+| B | `spec.v2` with stable criterion IDs and required flags ([`delivery/contract.go`](../../services/runner/code/internal/delivery/contract.go)). `lazybox artifact template delivery-spec` starts one. Publishing recognizes the schema, and each version records the schema it declares. The artifact reader lists criteria by ID and level. Pinned Mission plans keep the bindings and name them in the approval sheet and the worker and reviewer briefs. The `delivery-observation.v1` contract ([`delivery/outcome.go`](../../services/runner/code/internal/delivery/outcome.go)): contract artifact, version and digest; candidate ID derived from each repository's commit; attempt; conversation, and Mission and task when present; source, reference and idempotency ID; separate exit, assertion, prerequisite and decision fields. One `ContractFromSpec` pins spec.v1 and spec.v2 revisions for plans and assessment. Versioned fixtures cover a conversation without a Mission, an approved Mission contract, a candidate change and a legacy text-only spec, with round trips that preserve every identity. | Nothing for B. C records these observations from managed commands and reviews. |
+| D | [`delivery.Assess`](../../services/runner/code/internal/delivery/outcome.go) folds valid observations for one contract digest, candidate and attempt under the rules above. A human acceptance, waiver or rejection is reported beside the verdict and leaves the technical result in place. A new candidate starts with no proof. | Carrying proof forward to a new candidate for criteria its change cannot affect. |
 | C, E, F1, F2, G | Nothing yet. | Live command attribution, durable observation capture, the outcome endpoint and the user-facing delivery verdict. |
 
 > **Decision** Mission cards match a resolved failure by run title until C supplies a criterion-bound observation. Two different commands with the same title would clear each other.

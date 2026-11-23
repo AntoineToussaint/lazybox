@@ -1,0 +1,202 @@
+{
+  "schema": "delivery-fixture.v1",
+  "description": "A Mission task working an approved contract: commands and a review report against named criteria, the review fails the API criterion, and the owner's waiver is recorded beside the failed verdict. A pass from a concurrent attempt does not count for this one.",
+  "spec": {
+    "schema": "spec.v2",
+    "problem": "Deliver an authenticated work catalog",
+    "requirements": [
+      "Persist and retrieve work items"
+    ],
+    "acceptanceCriteria": [
+      {
+        "id": "storage",
+        "expected": "Duplicate inserts retain one work item",
+        "required": true
+      },
+      {
+        "id": "generate",
+        "expected": "The catalog service is generated",
+        "required": true
+      },
+      {
+        "id": "api",
+        "expected": "An authorized client retrieves the item after restart",
+        "required": true
+      },
+      {
+        "id": "docs",
+        "expected": "The module guide describes the catalog",
+        "required": false
+      }
+    ]
+  },
+  "contract": {
+    "artifact": "spec-catalog",
+    "version": 3,
+    "schema": "spec.v2",
+    "digest": "sha256:catalog-spec-v3",
+    "criteria": [
+      {
+        "id": "storage",
+        "expected": "Duplicate inserts retain one work item",
+        "required": true
+      },
+      {
+        "id": "generate",
+        "expected": "The catalog service is generated",
+        "required": true
+      },
+      {
+        "id": "api",
+        "expected": "An authorized client retrieves the item after restart",
+        "required": true
+      },
+      {
+        "id": "docs",
+        "expected": "The module guide describes the catalog",
+        "required": false
+      }
+    ]
+  },
+  "candidates": [
+    {
+      "id": "candidate:d6ca30eed1911523",
+      "revisions": {
+        "api": "a1b2c3d",
+        "catalog": "0f9e8d7"
+      }
+    }
+  ],
+  "observations": [
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex7/c1",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:d6ca30eed1911523",
+      "attempt": "attempt-7",
+      "subject": {
+        "conversation": "conv-worker",
+        "mission": "mission-catalog",
+        "task": "task-api"
+      },
+      "source": "command",
+      "reference": "run:ex7/c1",
+      "criterionId": "storage",
+      "exitCode": 0,
+      "assertion": "passed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex7/c2",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:d6ca30eed1911523",
+      "attempt": "attempt-7",
+      "subject": {
+        "conversation": "conv-worker",
+        "mission": "mission-catalog",
+        "task": "task-api"
+      },
+      "source": "command",
+      "reference": "run:ex7/c2",
+      "criterionId": "generate",
+      "exitCode": 0,
+      "assertion": "passed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "review:rv1@1",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:d6ca30eed1911523",
+      "attempt": "attempt-7",
+      "subject": {
+        "conversation": "conv-worker",
+        "mission": "mission-catalog",
+        "task": "task-api"
+      },
+      "source": "review",
+      "reference": "review:rv1@1",
+      "criterionId": "api",
+      "assertion": "failed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "human:owner/1",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:d6ca30eed1911523",
+      "attempt": "attempt-7",
+      "subject": {
+        "conversation": "conv-worker",
+        "mission": "mission-catalog",
+        "task": "task-api"
+      },
+      "source": "human",
+      "reference": "human:owner",
+      "decision": "waived"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex8/c1",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:d6ca30eed1911523",
+      "attempt": "attempt-8",
+      "subject": {
+        "conversation": "conv-worker",
+        "mission": "mission-catalog",
+        "task": "task-api"
+      },
+      "source": "command",
+      "reference": "run:ex8/c1",
+      "criterionId": "api",
+      "exitCode": 0,
+      "assertion": "passed"
+    }
+  ],
+  "checkpoints": [
+    {
+      "after": 3,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:d6ca30eed1911523",
+        "attempt": "attempt-7"
+      },
+      "verdict": "failed",
+      "criteria": {
+        "storage": "passed",
+        "generate": "passed",
+        "api": "failed",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 5,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:d6ca30eed1911523",
+        "attempt": "attempt-7"
+      },
+      "verdict": "failed",
+      "decision": "waived",
+      "criteria": {
+        "storage": "passed",
+        "generate": "passed",
+        "api": "failed",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 5,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:d6ca30eed1911523",
+        "attempt": "attempt-8"
+      },
+      "verdict": "incomplete",
+      "criteria": {
+        "storage": "unrun",
+        "generate": "unrun",
+        "api": "passed",
+        "docs": "unrun"
+      }
+    }
+  ]
+}

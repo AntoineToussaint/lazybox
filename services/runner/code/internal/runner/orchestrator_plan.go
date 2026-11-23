@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -55,33 +54,14 @@ func (b *Bench) ProposePlan(ctx context.Context, session, operation, summary str
 		if err != nil {
 			return nil, nil, err
 		}
-		var header struct{ Schema string }
-		if doc.Kind != "spec" || doc.Format != "json" || json.Unmarshal([]byte(doc.Content), &header) != nil {
+		if doc.Kind != "spec" || doc.Format != "json" {
 			return nil, nil, fmt.Errorf("%w: the contract needs a structured spec", work.ErrRefused)
 		}
-		contract := &work.PlanContract{Artifact: artifactID, Version: version, Workspace: c.e.CollectionID, Digest: artifacts.Digest(doc.Content)}
-		switch header.Schema {
-		case "spec.v2":
-			contract.Bindings, err = delivery.ParseSpecV2(doc.Content)
-			if err != nil {
-				return nil, nil, fmt.Errorf("%w: %v", work.ErrRefused, err)
-			}
-			for _, criterion := range contract.Bindings {
-				level := "optional"
-				if criterion.Required {
-					level = "required"
-				}
-				contract.Criteria = append(contract.Criteria, fmt.Sprintf("[%s, %s] %s", criterion.ID, level, criterion.Expected))
-			}
-		case "spec.v1":
-			var legacy struct{ AcceptanceCriteria []string }
-			if json.Unmarshal([]byte(doc.Content), &legacy) != nil || len(legacy.AcceptanceCriteria) == 0 {
-				return nil, nil, fmt.Errorf("%w: missing acceptance criteria", work.ErrRefused)
-			}
-			contract.Criteria = legacy.AcceptanceCriteria
-		default:
-			return nil, nil, fmt.Errorf("%w: unsupported spec schema", work.ErrRefused)
+		spec, err := delivery.ContractFromSpec(artifactID, version, artifacts.Digest(doc.Content), doc.Content)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", work.ErrRefused, err)
 		}
+		contract := &work.PlanContract{Artifact: artifactID, Version: version, Workspace: c.e.CollectionID, Digest: spec.Digest, Criteria: spec.Lines(), Bindings: spec.Criteria}
 		if len(strings.Join(contract.Criteria, "\n")) > 4096 {
 			return nil, nil, fmt.Errorf("%w: mission acceptance criteria exceed 4 KiB", work.ErrRefused)
 		}

@@ -5,6 +5,7 @@ import { createDockview, type DockviewApi, type DockviewGroupPanel, type Dockvie
 import 'dockview/dist/styles/dockview.css';
 import './dock.css';
 import { iconElement } from './Icons';
+import { focusUnmoved } from './pending-focus';
 import { focusWhenShown } from './focus';
 import { beginDrag, type DragAxis } from './drag-gesture';
 import { refreshNativeWebViews } from './native-web-view';
@@ -689,16 +690,21 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     if (zoomed && !dock.hasMaximizedGroup() && panel.group.api.location.type === 'grid' && gridGroups(dock).length > 1) dock.maximizeGroup(panel);
   };
   /** Focus into a panel: where the person last was in it, else its message box, else its first field or control. */
-  const focusInto = (panel: IDockviewPanel) => requestAnimationFrame(() => {
-    const host = latest.current.hostFor(panelFrom(panel.id, panel.params));
-    const last = lastFocus.current.get(panel.id);
-    // Not an element of a window that has closed since (a group popped out and put back), and not
-    // the code editor's own input: Monaco tracks its focus with the window it was first shown in,
-    // which a popped-out editor has left (focusing it from here throws). Its tabs take the focus instead.
-    const usable = (element: HTMLElement) => element.isConnected && element.ownerDocument === host.ownerDocument && !!element.ownerDocument.defaultView && host.contains(element) && !element.closest('.monaco-editor') && element.getClientRects().length > 0 && !(element as HTMLButtonElement).disabled;
-    if (last && usable(last)) { last.focus({ preventScroll: true }); return; }
-    (host.querySelector<HTMLElement>('[data-agent-composer]:not(:disabled)') || host.querySelector<HTMLElement>('textarea:not(:disabled), [tabindex="0"], button:not(:disabled), input:not(:disabled)'))?.focus({ preventScroll: true });
-  });
+  const focusInto = (panel: IDockviewPanel) => {
+    // Focus that moves before the next frame was moved by the person (or another request): it stays there.
+    const before = document.activeElement;
+    requestAnimationFrame(() => {
+      if (!focusUnmoved(before, document.activeElement)) return;
+      const host = latest.current.hostFor(panelFrom(panel.id, panel.params));
+      const last = lastFocus.current.get(panel.id);
+      // Not an element of a window that has closed since (a group popped out and put back), and not
+      // the code editor's own input: Monaco tracks its focus with the window it was first shown in,
+      // which a popped-out editor has left (focusing it from here throws). Its tabs take the focus instead.
+      const usable = (element: HTMLElement) => element.isConnected && element.ownerDocument === host.ownerDocument && !!element.ownerDocument.defaultView && host.contains(element) && !element.closest('.monaco-editor') && element.getClientRects().length > 0 && !(element as HTMLButtonElement).disabled;
+      if (last && usable(last)) { last.focus({ preventScroll: true }); return; }
+      (host.querySelector<HTMLElement>('[data-agent-composer]:not(:disabled)') || host.querySelector<HTMLElement>('textarea:not(:disabled), [tabindex="0"], button:not(:disabled), input:not(:disabled)'))?.focus({ preventScroll: true });
+    });
+  };
   const titleIn = (group: { activePanel?: { title?: string } }) => group.activePanel?.title || 'panel';
   const announce = (text: string, edge?: LayoutDirection) => {
     setRing(true);

@@ -99,13 +99,23 @@ export function evidenceChip(e: MissionEvidence): { mark: string; label: string;
   return { mark, label: e.title || e.ref, tone, title: e.ref };
 }
 
-/** Keep the latest checks for each PR. Show its delivery marker until checks arrive. */
+/**
+ * Keep the latest checks for each PR, and show its delivery marker until checks arrive.
+ * Keep the newest unresolved command failure beside the latest run: a failure stays
+ * until a later run of the same command passes, since another passing command can test a different part of the work.
+ */
 export function headlineEvidence(evidence: readonly MissionEvidence[]): MissionEvidence[] {
-  const seen = new Set<string>(), out: MissionEvidence[] = [];
+  const seen = new Set<string>(), passed = new Set<string>(), out: MissionEvidence[] = [];
   const prKey = (e: MissionEvidence) => `pr:${e.repository.toLowerCase()}#${e.number}`;
   const current = evidence.filter(e => !e.historical);
   const checked = new Set(current.filter(e => e.kind === 'pr' && !e.ref.startsWith('pr-link:')).map(prKey));
+  let failure = false;
   for (const e of current) {
+    if (e.kind === 'run' && e.outcome === 'fail' && !failure && !(e.title && passed.has(e.title))) {
+      failure = true;
+      if (seen.has('run')) { out.push(e); continue; }
+    }
+    if (e.kind === 'run' && e.outcome === 'pass' && e.title) passed.add(e.title);
     const key = e.kind === 'pr' ? prKey(e) : e.kind;
     if (seen.has(key) || (e.kind === 'pr' && e.ref.startsWith('pr-link:') && checked.has(key))) continue;
     seen.add(key);

@@ -494,7 +494,7 @@ func (s *Store) createWithID(ws, id, title, kind, content string, author Author,
 		var header struct{ Schema string }
 		if json.Unmarshal([]byte(content), &header) == nil {
 			for _, candidate := range Kinds {
-				if header.Schema == candidate+".v1" {
+				if header.Schema == candidate+".v1" || candidate == "spec" && header.Schema == "spec.v2" {
 					format = "json"
 					if kind == "" {
 						kind = candidate
@@ -545,7 +545,7 @@ func (s *Store) append(a *Artifact, content string, author Author, source Source
 		if err := validateStructured(a.Kind, content); err != nil {
 			return err
 		}
-		schema = a.Kind + ".v1"
+		schema = structuredSchema(a.Kind, content)
 	}
 	if len(a.Versions) >= MaxVersions {
 		return fmt.Errorf("%q has reached %d versions; track a new artifact to keep going", a.Title, MaxVersions)

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { roadmapMissionPlan, agentReference, ago, artifactChip, artifactPaletteEntries, authorShort, diffStats, fromConversation, groupByWorkspace, guessKind, hunks, lineDiff, linkedMarkdownFiles, mostlyNamesFile, slug, suggestedPath, titleFromMarkdown, trackableFile, updatedLine, updatedSinceSeen, type FoundArtifact } from '../packages/surfaces/src/artifact-model.ts';
+import { roadmapMissionPlan, agentReference, ago, artifactChip, artifactPaletteEntries, authorShort, diffStats, fromConversation, groupByWorkspace, guessKind, hunks, lineDiff, linkedMarkdownFiles, mostlyNamesFile, slug, structuredMarkdown, suggestedPath, titleFromMarkdown, trackableFile, updatedLine, updatedSinceSeen, type FoundArtifact } from '../packages/surfaces/src/artifact-model.ts';
 
 // Artifacts as the Runner lists them, for the finding helpers.
 const made = (id: string, collectionId: string, at: number, extra: Record<string, unknown> = {}) => ({ id, collectionId, title: `Title ${id}`, kind: 'plan', trackedPath: '', originSessionId: '', originConversationId: '', updatedAtUnixMillis: BigInt(at), versions: [{ number: 1 }], ...extra }) as never;
@@ -189,4 +189,12 @@ test('phase progress and mission export distinguish accepted work from pending r
   assert.match(proposal.tasks[0].brief, /Depends on: A/);
   b.status = 'accepted';
   assert.throws(() => typedMissionPlan(roadmap, 'Release', 'art', 4), /already been accepted/);
+});
+
+test('a structured spec reads as sections, with named criteria by ID and requirement level', () => {
+  const v1 = structuredMarkdown({ schema: 'spec.v1', problem: 'Reconnect', acceptanceCriteria: ['One row after reconnect'] });
+  assert.equal(v1, '## Problem\n\nReconnect\n\n## Acceptance criteria\n\n- One row after reconnect');
+  const v2 = structuredMarkdown({ schema: 'spec.v2', acceptanceCriteria: [{ id: 'storage', expected: 'One work item', required: true }, { id: 'docs', expected: 'Guide updated', required: false }] });
+  assert.equal(v2, '## Acceptance criteria\n\n- **storage** (required): One work item\n- **docs** (optional): Guide updated');
+  assert.doesNotMatch(v2, /object Object/);
 });

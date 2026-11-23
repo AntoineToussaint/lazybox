@@ -91,3 +91,21 @@ test('a stale Mission review names its bound inputs', () => {
   assert.match(chip.title, /api candidate-sha/);
   assert.equal(liveLabel('reserved'), 'Reserved');
 });
+
+test('a passing storage check keeps the prior generator failure visible', () => {
+  const storage = evidence({ title: 'Storage smoke', exitCode: 0 });
+  const generator = evidence({ title: 'Generate service', outcome: 'fail', exitCode: 1 });
+  const earlier = evidence({ title: 'First generation attempt', outcome: 'fail', exitCode: 1 });
+  assert.deepEqual(headlineEvidence([storage, generator, earlier]), [storage, generator]);
+  assert.deepEqual(headlineEvidence([generator, earlier]), [generator]);
+});
+
+test('a passing rerun of the failed command clears its failure from the card', () => {
+  const rerun = evidence({ title: 'Generate service', exitCode: 0 });
+  const storage = evidence({ title: 'Storage smoke', exitCode: 0 });
+  const generator = evidence({ title: 'Generate service', outcome: 'fail', exitCode: 1 });
+  const migrate = evidence({ title: 'Migrate', outcome: 'fail', exitCode: 2 });
+  assert.deepEqual(headlineEvidence([rerun, storage, generator]), [rerun]);
+  assert.deepEqual(headlineEvidence([rerun, generator, migrate]), [rerun, migrate]);
+  assert.deepEqual(headlineEvidence([storage, evidence({ outcome: 'fail' }), evidence({})]), [storage, evidence({ outcome: 'fail' })]);
+});

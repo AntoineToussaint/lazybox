@@ -180,6 +180,9 @@ func wireStatus(s commands.Status) *pb.CommandStatus {
 	if !s.Done {
 		w.Ports = s.Ports
 	}
+	if s.Spec.Check != nil {
+		w.Check = s.Spec.Check.CriterionID
+	}
 	if s.Spec.TerminalID != "" {
 		w.Origin = "terminal"
 	}
@@ -867,6 +870,7 @@ func (s *Service) ListCommands(ctx context.Context, r *pb.ListCommandsRequest) (
 // listedCommand is a listed command with the ports it listens on now.
 func (s *Service) listedCommand(ctx context.Context, c commands.Status) *pb.CommandStatus {
 	w := listedStatus(c)
+	w.Delivery = s.Bench.DeliveryNote(c)
 	if !c.Done {
 		w.Ports = s.Bench.CommandPorts(ctx, c)
 		if c.Mode == "managed" && w.Pid == 0 {

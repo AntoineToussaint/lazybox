@@ -149,16 +149,20 @@ lazybox run --check storage -- psql -f checks/storage.sql
 lazybox run --check api -- go test ./api -run TestAuthorized
 ```
 
-| Run | Exit | Recorded for the criterion |
+| Run | Exit | Effect on the criterion |
 |---|---|---|
 | `--check` | 0 | passed |
 | `--check` | non-zero | failed |
 | `--needs` | non-zero | blocked: a prerequisite failed |
-| `--needs` | 0 | nothing proven yet; run its `--check` |
+| `--needs` | 0 | clears a blocked criterion; proves nothing else, so run its `--check` |
 | either | 126 or 127 (could not start) | blocked |
-| either | stopped, or piped through `lazybox log` | unverified |
+| either | stopped (Stop in Lazybox, an interrupt) | marks an unrun criterion unverified; never erases a result |
 
-The run ends with one line saying what was recorded, for example `check storage: passed on candidate:3f2a… (spec spec-catalog v3)`. The candidate is the commit of each workspace repository when the run finished, so a later commit needs its checks run again.
+Only a `--check`, or a prerequisite that failed, replaces a criterion's result: a later `--needs` or a stopped rerun never clears an earlier failure or pass.
+
+A check waits for its result: it never moves to the background, and `--background` is refused. The run ends with one line saying what was recorded, for example `check storage: passed on candidate:3f2a… (spec spec-catalog v3)`, and `lazybox ls` repeats it.
+
+The candidate is the files the check ran on: each workspace repository's commit and any uncommitted changes, taken when the run starts. Checking before you commit is fine, but committing changes the candidate, so run the checks again on what you commit. A run whose files change while it runs (an edit or a commit) records nothing and says so. A check is refused before it runs when a workspace repository is not ready.
 
 A worker on a Mission task checks against the plan's approved contract. An ordinary conversation pins a published spec.v2 version first:
 
@@ -166,4 +170,4 @@ A worker on a Mission task checks against the plan's approved contract. An ordin
 lazybox delivery bind spec-catalog@3
 ```
 
-Binding another version starts a new attempt; earlier results stay with the version they were checked against. A check is refused before it runs when no contract names its criterion. The Runner saves each result with the run's completion and records it once, including after a restart. The verdict on the Mission card and in the conversation is not shown yet.
+Each bind of a different version, even one bound before, starts a new attempt with no results yet; earlier results stay with the attempt they were checked in. A check is refused before it runs when no contract names its criterion, and in a conversation that works more than one Mission task at once. The Runner saves each result with the run's completion and records it once, including after a restart. The verdict on the Mission card and in the conversation is not shown yet.

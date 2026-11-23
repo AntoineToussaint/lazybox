@@ -3,6 +3,7 @@ package delivery
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -103,6 +104,50 @@ func TestFixtures(t *testing.T) {
 	}
 }
 
+func TestCandidateIDKeepsMembersAndRevisionsApart(t *testing.T) {
+	if CandidateID(map[string]string{"a=b": "c"}) == CandidateID(map[string]string{"a": "b=c"}) {
+		t.Fatal("two workspaces share a candidate")
+	}
+}
+
+// Only a decisive observation (an assertion or a failed prerequisite) replaces
+// a criterion's state: a met prerequisite clears a blocked one, and nothing
+// that proves nothing erases a failure.
+func TestAssessKeepsResultsAgainstObservationsThatProveNothing(t *testing.T) {
+	zero, one, stopped := 0, 1, 130
+	s := Scope{"contract", "candidate", "attempt"}
+	contract := Contract{Schema: "spec.v2", Digest: "contract", Criteria: []Criterion{{"tests", "tests pass", true}}}
+	n := 0
+	run := func(exit *int, assertion, prerequisite string) Observation {
+		n++
+		return Observation{Schema: ObservationSchema, ID: fmt.Sprint("run:", n), Scope: s, Subject: Subject{Conversation: "c"}, CriterionID: "tests", Source: SourceCommand, Reference: "run", ExitCode: exit, Assertion: assertion, Prerequisite: prerequisite}
+	}
+	failed, passed := run(&one, Failed, ""), run(&zero, Passed, "")
+	blocked, met, bare, halted := run(&one, "", Failed), run(&zero, "", Passed), run(&zero, "", ""), run(&stopped, "", "")
+	for name, tc := range map[string]struct {
+		history []Observation
+		want    string
+	}{
+		"failure, then a met prerequisite": {[]Observation{failed, met}, Failed},
+		"failure, then a stopped rerun":    {[]Observation{failed, halted}, Failed},
+		"pass, then a stopped rerun":       {[]Observation{passed, halted}, Passed},
+		"pass, then a bare exit 0":         {[]Observation{passed, bare}, Passed},
+		"blocked, then a met prerequisite": {[]Observation{blocked, met}, Unverified},
+		"met prerequisite, then its check": {[]Observation{blocked, met, failed}, Failed},
+		"pass, then a failed prerequisite": {[]Observation{passed, blocked}, Blocked},
+		"nothing proven on an unrun one":   {[]Observation{bare}, Unverified},
+	} {
+		for _, o := range tc.history {
+			if err := o.Validate(); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+		}
+		if got := Assess(s, contract, tc.history).Criteria["tests"]; got != tc.want {
+			t.Errorf("%s: %s, want %s", name, got, tc.want)
+		}
+	}
+}
+
 func TestCandidateIDFollowsRevisions(t *testing.T) {
 	a := CandidateID(map[string]string{"api": "1", "web": "2"})
 	if a != CandidateID(map[string]string{"web": "2", "api": "1"}) {
@@ -135,6 +180,16 @@ func TestObservationValidation(t *testing.T) {
 		"passing assertion, exit 1":    func(o *Observation) { o.ExitCode = &one },
 		"review with an exit":          func(o *Observation) { o.Source = SourceReview },
 		"human with a result":          func(o *Observation) { o.Source, o.Decision = SourceHuman, Waived },
+		"human decision on one criterion": func(o *Observation) {
+			o.Source, o.Decision, o.ExitCode, o.Assertion = SourceHuman, Waived, nil, ""
+		},
+		"failed prerequisite, exit 0": func(o *Observation) { o.Assertion, o.Prerequisite = "", Failed },
+		"met prerequisite, exit 1":    func(o *Observation) { o.Assertion, o.Prerequisite, o.ExitCode = "", Passed, &one },
+		"met prerequisite, no exit":   func(o *Observation) { o.Assertion, o.Prerequisite, o.ExitCode = "", Passed, nil },
+		"prerequisite with assertion": func(o *Observation) { o.Prerequisite = Passed },
+		"review as a prerequisite": func(o *Observation) {
+			o.Source, o.ExitCode, o.Assertion, o.Prerequisite = SourceReview, nil, "", Failed
+		},
 	} {
 		o := base
 		change(&o)

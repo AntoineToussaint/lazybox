@@ -22,10 +22,12 @@ The versioned fixtures in [`delivery/testdata/v1`](../../services/runner/code/in
 | Assertion failed | failed |
 | Prerequisite failed, so the check could not run | blocked |
 | Assertion passed with exit 0, or from a review | passed |
-| Exit 0 with no assertion, a piped run with no exit, or nothing recorded | unverified or unrun |
-| A human decision | recorded beside the verdict; never changes a criterion |
+| Prerequisite passed (`--needs` exited 0) | clears blocked to unverified; changes nothing else |
+| No assertion and no prerequisite (a bare exit 0, a stopped run) | unrun becomes unverified; changes nothing else |
+| Nothing recorded | unrun |
+| A human decision on the outcome | recorded beside the verdict; never changes a criterion |
 
-The verdict is the worst required criterion: failed, then blocked, then incomplete (unrun or unverified), otherwise passed. No required criteria, an unbound spec.v1 contract, or an observation scope that does not match the contract digest yields unverified. Each criterion takes its latest observation in the same contract, candidate and attempt, so an unrelated pass never resolves an earlier failure, and proof on one candidate or attempt never counts for another. `delivery.Observation.Validate` refuses contradictions such as a passing assertion with a failing exit, an assertion from a check that could not run, or a decision from an agent.
+The verdict is the worst required criterion: failed, then blocked, then incomplete (unrun or unverified), otherwise passed. No required criteria, an unbound spec.v1 contract, or an observation scope that does not match the contract digest yields unverified. Each criterion takes its latest decisive observation (an assertion or a failed prerequisite) in the same contract, candidate and attempt, so an unrelated pass, a met prerequisite or a stopped rerun never resolves an earlier failure, and proof on one candidate or attempt never counts for another. A candidate names each repository's commit and its uncommitted tree. `delivery.Observation.Validate` refuses contradictions such as a passing assertion with a failing exit, a failed prerequisite with exit 0, an assertion from a prerequisite, a decision from an agent, or a person's decision on a single criterion.
 
 ## Sequence and release boundary
 

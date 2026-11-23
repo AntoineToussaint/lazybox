@@ -8,17 +8,23 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 )
 
 // checkConsole accepts or refuses a run's criterion and answers its finish with a delivery note.
+// unavailable answers that many finishes as a restarting Runner would; old is a
+// Runner that ignores the criterion.
 type checkConsole struct {
 	pipeClient
-	request *pb.RegisterPipeRequest
-	refuse  error
-	note    string
+	request     *pb.RegisterPipeRequest
+	refuse      error
+	note        string
+	unavailable int
+	finishes    int
+	old         bool
 }
 
 func (c *checkConsole) RegisterPipe(_ context.Context, r *connect.Request[pb.RegisterPipeRequest]) (*connect.Response[pb.CommandStatus], error) {
@@ -26,10 +32,18 @@ func (c *checkConsole) RegisterPipe(_ context.Context, r *connect.Request[pb.Reg
 	if c.refuse != nil {
 		return nil, c.refuse
 	}
-	return connect.NewResponse(&pb.CommandStatus{Id: "command"}), nil
+	status := &pb.CommandStatus{Id: "command", Check: r.Msg.Check + r.Msg.Needs}
+	if c.old {
+		status.Check = ""
+	}
+	return connect.NewResponse(status), nil
 }
 func (c *checkConsole) FinishPipe(_ context.Context, r *connect.Request[pb.FinishPipeRequest]) (*connect.Response[pb.CommandStatus], error) {
 	c.finished = r.Msg
+	c.finishes++
+	if c.finishes <= c.unavailable {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("the Runner is restarting"))
+	}
 	return connect.NewResponse(&pb.CommandStatus{Delivery: c.note}), nil
 }
 
@@ -106,5 +120,60 @@ func TestDeliveryBindPinsAVersionedSpec(t *testing.T) {
 	}
 	if err := deliveryCommand(context.Background(), &bindingClient{}, "", []string{"bind", "spec@1"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 		t.Fatal("bound with no session")
+	}
+}
+
+// An older Runner ignores --check: the run would prove nothing, so it is not run.
+func TestCheckRunIsRefusedByARunnerThatRecordsNoChecks(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	c := &checkConsole{old: true}
+	err := runCommand(context.Background(), c, nil, runOptions{session: "execution", outputDir: dir, check: "api"}, []string{"touch", marker}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "records no delivery checks") {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("the command ran")
+	}
+	if c.finished == nil || c.finished.CaptureError == "" {
+		t.Fatal("the registered pipe was left open")
+	}
+}
+
+// A check's completion is offered again while the Runner restarts.
+func TestCheckRunRetriesItsCompletion(t *testing.T) {
+	defer func(d time.Duration) { finishRetry = d }(finishRetry)
+	finishRetry = 30 * time.Second
+	c := &checkConsole{unavailable: 2, note: "check api: passed on candidate:1 (spec catalog v3)"}
+	var stdout bytes.Buffer
+	if err := runCommand(context.Background(), c, nil, runOptions{session: "execution", outputDir: t.TempDir(), check: "api"}, []string{"true"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if c.finishes != 3 || !strings.Contains(stdout.String(), "check api: passed") {
+		t.Fatalf("%d finishes: %q", c.finishes, stdout.String())
+	}
+	plain := &checkConsole{unavailable: 1}
+	_ = runCommand(context.Background(), plain, nil, runOptions{session: "execution", outputDir: t.TempDir()}, []string{"true"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if plain.finishes != 1 {
+		t.Fatalf("a run with no check retried %d times", plain.finishes)
+	}
+}
+
+// A check run the CLI interrupts reports a signal, so it asserts nothing.
+func TestInterruptedCheckRunReportsItsSignal(t *testing.T) {
+	c := &checkConsole{}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
+	// The command traps the interrupt and exits 1, as test runners do.
+	_ = runCommand(ctx, c, nil, runOptions{session: "execution", outputDir: t.TempDir(), check: "api"}, []string{"sh", "-c", "trap 'exit 1' INT TERM; sleep 5 & wait"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if c.finished == nil || c.finished.Signal == "" {
+		t.Fatalf("finish carried no signal: %+v", c.finished)
+	}
+}
+
+func TestCheckRunCannotGoToTheBackground(t *testing.T) {
+	err := runVerb(context.Background(), "", []string{"--check", "api", "--background", "--", "true"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "cannot go --background") {
+		t.Fatal(err)
 	}
 }

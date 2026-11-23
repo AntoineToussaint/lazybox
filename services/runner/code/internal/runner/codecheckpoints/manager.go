@@ -804,3 +804,26 @@ func (m *Manager) Delete(ctx context.Context, conversation string) error {
 	}
 	return os.RemoveAll(filepath.Join(m.root, "verification", conversation))
 }
+
+// Fingerprint names the files in dir's work tree as Git would commit them
+// after adding everything that is not ignored (the same snapshot a turn's
+// checkpoint takes): its HEAD, followed by that tree when uncommitted changes
+// make it differ from HEAD's. Untracked files over the checkpoint limits are
+// left out of the tree, as from a checkpoint.
+func (m *Manager) Fingerprint(ctx context.Context, dir string) (string, error) {
+	w, err := snapshot(ctx, dir, filepath.Join(m.root, "tmp"), m.limits)
+	if err != nil {
+		return "", err
+	}
+	if w.Head == "" {
+		return "", errors.New("the repository has no commit yet")
+	}
+	committed, err := git(ctx, w.Top, "rev-parse", "-q", "--verify", "HEAD^{tree}")
+	if err != nil {
+		return "", err
+	}
+	if committed == w.Tree {
+		return w.Head, nil
+	}
+	return w.Head + "+" + w.Tree, nil
+}

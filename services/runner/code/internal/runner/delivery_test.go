@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -104,7 +105,7 @@ func TestCheckRunsRecordDeliveryEvidenceAcrossRestart(t *testing.T) {
 		t.Fatalf("starting replayed %d observations, want 4", got)
 	}
 	// A late retry of the same finish and later sweeps add nothing.
-	next.reconcileDelivery()
+	next.retryDelivery()
 	restored, err := next.Commands.Get(api.Status().ID)
 	if err != nil {
 		t.Fatal(err)
@@ -207,9 +208,101 @@ func TestUnrecordedObservationIsVisibleAndRetried(t *testing.T) {
 		t.Fatalf("the failure was not visible: %q", note)
 	}
 	b.Delivery = healthy
-	b.reconcileDelivery()
-	b.reconcileDelivery()
+	b.retryDelivery()
+	b.retryDelivery()
 	if got := b.Delivery.Observations(); len(got) != 1 || got[0].Classify() != delivery.Passed {
 		t.Fatalf("retry recorded %+v", got)
+	}
+}
+
+// The candidate is the files the check runs on: uncommitted changes make
+// their own, and a run whose files change before it finishes records nothing.
+func TestCheckCandidateCoversUncommittedChanges(t *testing.T) {
+	ctx := context.Background()
+	source := upstreamOn(t, "main")
+	b := freshBench(t, collections.Repository{ID: "api", Name: "api", Path: source})
+	ws, err := b.Collections.Create(ctx, "fixture", collections.Spec{Name: "catalog", Members: []collections.MemberSpec{{Name: "api", RepositoryID: "api", BaseRef: gitIn(t, source, "rev-parse", "HEAD")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Adapters["codex"] = &agenttest.Adapter{}
+	e, err := b.OpenCollection("codex-default", ws.ID, "", accounts.Options{}, "direct", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := b.Artifacts.Put(ws.ID, artifacts.Put{Title: "Catalog", Content: catalogSpec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.BindDelivery(e, spec.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	member := ws.Members[0].Path
+	clean := delivery.CandidateID(map[string]string{"api": gitIn(t, member, "rev-parse", "HEAD")})
+	if err := os.WriteFile(filepath.Join(member, "fix.go"), []byte("package api\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err := b.RegisterPipe(e, "go test ./api", false, &PipeCheck{Criterion: "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty.Status().Spec.Check.Candidate == clean {
+		t.Fatal("uncommitted changes kept the committed candidate")
+	}
+	if err := b.FinishPipe(dirty, nil, "", &commands.Report{ExitCode: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if note := b.DeliveryNote(dirty.Status()); !strings.HasPrefix(note, "check api: passed on "+dirty.Status().Spec.Check.Candidate) {
+		t.Fatal(note)
+	}
+
+	// An edit while the check runs: what it tested is no candidate.
+	moving, err := b.RegisterPipe(e, "go test ./api", false, &PipeCheck{Criterion: "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(member, "fix.go"), []byte("package api\n\nconst edited = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.FinishPipe(moving, nil, "", &commands.Report{ExitCode: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if note := b.DeliveryNote(moving.Status()); !strings.Contains(note, "not recorded") || !strings.Contains(note, "changed while the check ran") {
+		t.Fatal(note)
+	}
+	if got := len(b.Delivery.Observations()); got != 1 {
+		t.Fatalf("%d observations, want only the dirty-tree pass", got)
+	}
+}
+
+// A conversation working two Mission tasks cannot say which one a check is for.
+func TestCheckRefusesAmbiguousMissionAttempts(t *testing.T) {
+	ctx := context.Background()
+	source := upstreamOn(t, "main")
+	b := freshBench(t, collections.Repository{ID: "api", Name: "api", Path: source})
+	ws, err := b.Collections.Create(ctx, "fixture", collections.Spec{Name: "catalog", Members: []collections.MemberSpec{{Name: "api", RepositoryID: "api", BaseRef: gitIn(t, source, "rev-parse", "HEAD")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Adapters["codex"] = &agenttest.Adapter{}
+	e, err := b.OpenCollection("codex-default", ws.ID, "", accounts.Options{}, "direct", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := b.Work.Create(work.Human, "", "Catalog", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"API", "Storage"} {
+		_, task, err := b.Work.AddTask(m.ID, work.Human, "", "", title, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := b.Work.Assign(m.ID, task, work.Human, "", work.AttemptPayload{Conversation: conversationOf(e), Workspace: e.CollectionID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := b.RegisterPipe(e, "go test", false, &PipeCheck{Criterion: "api"}); err == nil || !strings.Contains(err.Error(), "2 Mission tasks") {
+		t.Fatalf("an ambiguous check was accepted: %v", err)
 	}
 }

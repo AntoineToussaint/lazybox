@@ -60,14 +60,14 @@
   },
   "candidates": [
     {
-      "id": "candidate:d6ca30eed1911523",
+      "id": "candidate:927de552ccb5897c",
       "revisions": {
         "api": "a1b2c3d",
         "catalog": "0f9e8d7"
       }
     },
     {
-      "id": "candidate:9cb0d946043fb7fa",
+      "id": "candidate:b2dbad522ff19132",
       "revisions": {
         "api": "a1b2c3d",
         "catalog": "1a2b3c4"
@@ -79,7 +79,7 @@
       "schema": "delivery-observation.v1",
       "id": "run:ex9/a1",
       "contractDigest": "sha256:catalog-spec-v3",
-      "candidate": "candidate:d6ca30eed1911523",
+      "candidate": "candidate:927de552ccb5897c",
       "attempt": "attempt-9",
       "subject": {
         "conversation": "conv-worker",
@@ -96,7 +96,7 @@
       "schema": "delivery-observation.v1",
       "id": "run:ex9/a2",
       "contractDigest": "sha256:catalog-spec-v3",
-      "candidate": "candidate:d6ca30eed1911523",
+      "candidate": "candidate:927de552ccb5897c",
       "attempt": "attempt-9",
       "subject": {
         "conversation": "conv-worker",
@@ -113,7 +113,7 @@
       "schema": "delivery-observation.v1",
       "id": "run:ex9/a3",
       "contractDigest": "sha256:catalog-spec-v3",
-      "candidate": "candidate:d6ca30eed1911523",
+      "candidate": "candidate:927de552ccb5897c",
       "attempt": "attempt-9",
       "subject": {
         "conversation": "conv-worker",
@@ -130,7 +130,7 @@
       "schema": "delivery-observation.v1",
       "id": "run:ex9/b1",
       "contractDigest": "sha256:catalog-spec-v3",
-      "candidate": "candidate:9cb0d946043fb7fa",
+      "candidate": "candidate:b2dbad522ff19132",
       "attempt": "attempt-9",
       "subject": {
         "conversation": "conv-worker",
@@ -149,7 +149,7 @@
       "after": 3,
       "scope": {
         "contractDigest": "sha256:catalog-spec-v3",
-        "candidate": "candidate:d6ca30eed1911523",
+        "candidate": "candidate:927de552ccb5897c",
         "attempt": "attempt-9"
       },
       "verdict": "passed",
@@ -164,7 +164,7 @@
       "after": 4,
       "scope": {
         "contractDigest": "sha256:catalog-spec-v3",
-        "candidate": "candidate:d6ca30eed1911523",
+        "candidate": "candidate:927de552ccb5897c",
         "attempt": "attempt-9"
       },
       "verdict": "passed",
@@ -179,7 +179,7 @@
       "after": 4,
       "scope": {
         "contractDigest": "sha256:catalog-spec-v3",
-        "candidate": "candidate:9cb0d946043fb7fa",
+        "candidate": "candidate:b2dbad522ff19132",
         "attempt": "attempt-9"
       },
       "verdict": "incomplete",

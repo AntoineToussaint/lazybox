@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"slices"
 	"time"
@@ -18,11 +20,14 @@ import (
 // A `lazybox run --check C` (or `--needs C`) resolves its criterion when it
 // registers: against the approved contract of the conversation's Mission
 // attempt, or else the spec revision the conversation bound with `lazybox
-// delivery bind`. The check is saved on the command. When the run finishes,
-// the Runner reads each workspace repository's HEAD as the candidate and saves
-// the observation with the command's completion, then records it in the
-// delivery journal. A Runner that stops in between replays saved observations
-// when it starts and every reconcileEvery; the journal keeps one per run.
+// delivery bind`. It also fingerprints every workspace repository then (its
+// commit and any uncommitted changes, codecheckpoints.Fingerprint): that is
+// the candidate. The check is saved on the command. When the run finishes the
+// Runner fingerprints again; a run whose files changed meanwhile records
+// nothing. The observation is recorded in the delivery journal and saved with
+// the command's completion. A Runner that stopped before recording it replays
+// saved observations when it starts; a failed write is retried every
+// reconcileEvery. The journal keeps one observation per run.
 
 const reconcileEvery = time.Minute
 
@@ -32,7 +37,16 @@ func (b *Bench) openDelivery() error {
 		return err
 	}
 	b.Delivery = store
-	b.reconcileDelivery()
+	if n := store.Skipped(); n > 0 {
+		log.Printf("delivery journal: %d unreadable record(s) skipped", n)
+	}
+	b.deliveryPending = map[string]error{}
+	// After a restart, any finished run may hold an unrecorded observation.
+	for _, state := range b.Commands.List("") {
+		if state.Done {
+			b.recordObservation(state)
+		}
+	}
 	b.watchers.Add(1)
 	go func() {
 		defer b.watchers.Done()
@@ -43,7 +57,7 @@ func (b *Bench) openDelivery() error {
 			case <-b.ctx.Done():
 				return
 			case <-ticker.C:
-				b.reconcileDelivery()
+				b.retryDelivery()
 			}
 		}
 	}()
@@ -51,15 +65,23 @@ func (b *Bench) openDelivery() error {
 }
 
 // missionContract is the approved contract of the conversation's live Mission
-// attempt: found reports an attempt, even one whose plan has no contract.
+// attempt: found reports an attempt, even one whose plan has no contract. A
+// conversation working several tasks at once cannot say which one a check is
+// for, so it is refused, as deliveryAttempt treats it.
 func (b *Bench) missionContract(conversation string) (check delivery.Check, contract delivery.Contract, found bool, err error) {
 	if b.Work == nil || conversation == "" {
 		return
 	}
+	var attempts []work.Attachment
 	for _, at := range b.Work.Attempts() {
-		if at.Attempt.Conversation != conversation {
-			continue
+		if at.Attempt.Conversation == conversation {
+			attempts = append(attempts, at)
 		}
+	}
+	if len(attempts) > 1 {
+		return check, contract, true, fmt.Errorf("this conversation works %d Mission tasks at once, so a check cannot tell which one it counts for", len(attempts))
+	}
+	for _, at := range attempts {
 		state, err := b.Work.Mission(at.Mission)
 		if err != nil {
 			return check, contract, true, err
@@ -109,9 +131,43 @@ func (b *Bench) resolveCheck(e *Execution, criterion string, prerequisite bool) 
 	if !slices.Contains(ids, criterion) {
 		return nil, fmt.Errorf("spec %s v%d has no criterion %q (it has %v)", contract.Artifact, contract.Version, criterion, ids)
 	}
-	check.CriterionID, check.Prerequisite = criterion, prerequisite
+	candidate, err := b.candidate(e.CollectionID)
+	if err != nil {
+		return nil, fmt.Errorf("cannot say which files the check runs on: %w", err)
+	}
+	check.CriterionID, check.Prerequisite, check.Candidate = criterion, prerequisite, candidate
 	check.ContractDigest, check.Artifact, check.Version = contract.Digest, contract.Artifact, contract.Version
 	return &check, nil
+}
+
+// candidate fingerprints every repository of the workspace. A repository that
+// is not ready or cannot be read refuses it: a candidate never names part of
+// the workspace.
+func (b *Bench) candidate(workspace string) (string, error) {
+	if b.Collections == nil || b.Checkpoints == nil {
+		return "", errors.New("workspace fingerprints are unavailable on this Runner")
+	}
+	w, err := b.Collections.Get(workspace)
+	if err != nil {
+		return "", err
+	}
+	if len(w.Members) == 0 {
+		return "", errors.New("the workspace has no repository")
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
+	defer cancel()
+	revisions := map[string]string{}
+	for _, m := range w.Members {
+		if !m.Ready {
+			return "", fmt.Errorf("repository %s is not ready", m.Name)
+		}
+		revision, err := b.Checkpoints.Fingerprint(ctx, m.Path)
+		if err != nil {
+			return "", fmt.Errorf("repository %s: %w", m.Name, err)
+		}
+		revisions[m.Name] = revision
+	}
+	return delivery.CandidateID(revisions), nil
 }
 
 // BindDelivery pins a published spec.v2 revision to e's conversation. A
@@ -147,7 +203,8 @@ func (b *Bench) BindDelivery(e *Execution, artifactID string, version uint32) (d
 }
 
 // observeCheck adds to report what a finished check run observed, on the
-// revisions its workspace holds now.
+// files fingerprinted when it registered; a run whose files changed before it
+// finished observed something no candidate names, and records nothing.
 func (b *Bench) observeCheck(state commands.Status, report *commands.Report, signal string) {
 	check := state.Spec.Check
 	e, err := b.Get(state.Spec.SessionID)
@@ -155,9 +212,13 @@ func (b *Bench) observeCheck(state commands.Status, report *commands.Report, sig
 		report.DeliveryError = "the conversation is gone: " + err.Error()
 		return
 	}
-	revisions := b.revisions(e.CollectionID)
-	if len(revisions) == 0 {
-		report.DeliveryError = "the workspace has no repository revisions to say what was checked"
+	now, err := b.candidate(e.CollectionID)
+	switch {
+	case err != nil:
+		report.DeliveryError = "cannot say which files the check ran on: " + err.Error()
+		return
+	case now != check.Candidate:
+		report.DeliveryError = "the workspace's files changed while the check ran (a commit or an edit); run it again"
 		return
 	}
 	var exit *int
@@ -166,28 +227,37 @@ func (b *Bench) observeCheck(state commands.Status, report *commands.Report, sig
 		exit = &code
 	}
 	ref := "run:" + e.ID + "/" + state.ID
-	o := check.Observe(ref, ref, delivery.CandidateID(revisions), exit, signal != "")
+	o := check.Observe(ref, ref, check.Candidate, exit, signal != "")
 	report.Observation = &o
 }
 
-// recordObservation records a finished run's saved observation. A failure
-// leaves it saved with the run for reconcileDelivery.
-func (b *Bench) recordObservation(state commands.Status) error {
+// recordObservation records a run's observation in the delivery journal. A
+// failed write is kept pending for retryDelivery and DeliveryNote.
+func (b *Bench) recordObservation(state commands.Status) {
 	if b.Delivery == nil || state.Report == nil || state.Report.Observation == nil {
-		return nil
-	}
-	_, err := b.Delivery.Record(*state.Report.Observation)
-	return err
-}
-
-// reconcileDelivery records every saved observation the journal lacks.
-func (b *Bench) reconcileDelivery() {
-	if b.Delivery == nil || b.Commands == nil {
 		return
 	}
-	for _, state := range b.Commands.List("") {
-		if state.Done {
-			_ = b.recordObservation(state)
+	_, err := b.Delivery.Record(*state.Report.Observation)
+	b.deliveryMu.Lock()
+	defer b.deliveryMu.Unlock()
+	if err != nil && !errors.Is(err, delivery.ErrConflict) {
+		b.deliveryPending[state.ID] = err
+	} else {
+		delete(b.deliveryPending, state.ID)
+	}
+}
+
+// retryDelivery records the observations a failed write left pending.
+func (b *Bench) retryDelivery() {
+	b.deliveryMu.Lock()
+	ids := make([]string, 0, len(b.deliveryPending))
+	for id := range b.deliveryPending {
+		ids = append(ids, id)
+	}
+	b.deliveryMu.Unlock()
+	for _, id := range ids {
+		if c, err := b.Commands.Get(id); err == nil {
+			b.recordObservation(c.Status())
 		}
 	}
 }
@@ -203,13 +273,17 @@ func (b *Bench) DeliveryNote(state commands.Status) string {
 		return "delivery evidence not recorded: " + state.Report.DeliveryError
 	}
 	o := state.Report.Observation
-	if o == nil {
+	if o == nil || b.Delivery == nil {
 		return ""
 	}
-	if err := b.recordObservation(state); errors.Is(err, delivery.ErrConflict) {
-		return o.Summary(*check) + "; not recorded: " + err.Error()
-	} else if err != nil {
-		return o.Summary(*check) + "; not yet in the delivery journal (" + err.Error() + "), the Runner retries"
+	if b.Delivery.Has(o.ID) {
+		return o.Summary(*check)
 	}
-	return o.Summary(*check)
+	b.deliveryMu.Lock()
+	err := b.deliveryPending[state.ID]
+	b.deliveryMu.Unlock()
+	if err == nil {
+		return o.Summary(*check) + "; not recorded: a different observation is already recorded for this run"
+	}
+	return o.Summary(*check) + "; not yet in the delivery journal (" + err.Error() + "), the Runner retries"
 }

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
-import { environmentPaths, releasePath, includeSource, validateEnvironmentRoot, shareSubscriptions, sharedSubscriptionState, freezeRunnerReload, workingTauriConfig } from './environments.mjs';
+import { environmentPaths, releasePath, includeSource, validateEnvironmentRoot, shareSubscriptions, sharedSubscriptionState, freezeRunnerReload, workingTauriConfig, pruneFailedCandidate, sweepFailedCandidates } from './environments.mjs';
 import { startDesktopDevServer, desktopDevConfig, stopProcessGroup, spawnProcessGroup } from './desktop-dev.mjs';
 import { uiWatcher } from './ui-watch.mjs';
 import { spawn } from 'node:child_process';
@@ -392,4 +392,45 @@ test('a Working build signs its bundle ad hoc, as a release build does', () => {
   assert.equal(config.identifier, paths.identifier);
   assert.equal(config.productName, paths.productName);
   assert.equal(config.bundle.macOS.signingIdentity, '-');
+});
+
+// Regression: each failed stage left its whole source, dependencies and app
+// (about 9 GB) under releases/, until the disk was full.
+test('a failed stage keeps only its gates.json', async () => {
+  const { mkdtemp, mkdir: makeDir, writeFile: write, readdir: list } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join: joinPath } = await import('node:path');
+  const destination = await mkdtemp(joinPath(tmpdir(), 'lazybox-candidate-'));
+  await write(joinPath(destination, 'gates.json'), '{"status":"failed"}');
+  await makeDir(joinPath(destination, 'source', 'node_modules'), { recursive: true });
+  await write(joinPath(destination, 'source', 'node_modules', 'big'), 'x');
+  await makeDir(joinPath(destination, 'Lazybox.app'));
+  await pruneFailedCandidate(destination);
+  assert.deepEqual(await list(destination), ['gates.json']);
+});
+
+// An interrupted stage skips its own cleanup, and failed candidates from
+// before the cleanup existed stay: the next stage sweeps them, never the
+// pinned release or the one before it, never one that passed.
+test('a stage sweeps what earlier stages left, never a release that can run', async () => {
+  const { mkdtemp, mkdir: makeDir, writeFile: write, readdir: list } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join: joinPath } = await import('node:path');
+  const root = await mkdtemp(joinPath(tmpdir(), 'lazybox-environments-'));
+  const candidate = async (id, passed) => {
+    const dir = joinPath(root, 'releases', id);
+    await makeDir(joinPath(dir, 'source'), { recursive: true });
+    await write(joinPath(dir, 'gates.json'), '{}');
+    if (passed) await write(joinPath(dir, 'release.json'), '{}');
+    return dir;
+  };
+  const failed = await candidate('failed', false), interrupted = await candidate('interrupted', false);
+  const passed = await candidate('passed', true), pinnedOld = await candidate('pinned-old', false), previous = await candidate('previous', false);
+  await makeDir(joinPath(root, 'working'), { recursive: true });
+  await write(joinPath(root, 'working', 'current.json'), JSON.stringify({ id: 'pinned-old', previous: 'previous' }));
+  await sweepFailedCandidates(root);
+  assert.deepEqual(await list(failed), ['gates.json']);
+  assert.deepEqual(await list(interrupted), ['gates.json']);
+  for (const kept of [passed, pinnedOld, previous]) assert.ok((await list(kept)).includes('source'), kept);
+  await sweepFailedCandidates(joinPath(root, 'nowhere'));
 });

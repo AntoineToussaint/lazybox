@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/adapters/jsonl"
 )
 
 // The agent's tools and the person's controls. An agent's call runs only on
@@ -97,6 +98,7 @@ func (m *Manager) Tool(ctx context.Context, c Caller, name string, raw json.RawM
 	}
 	text, image, err := m.run(ctx, b, action, a)
 	if err != nil {
+		// The service's own message says so; a log in its data saying "… is not installed" about something else does not count.
 		if strings.Contains(err.Error(), "is not installed") {
 			// The person installs it with one click; an agent running an
 			// install in its workspace would only fail or install it elsewhere.
@@ -325,13 +327,7 @@ func (m *Manager) ensureOpen(ctx context.Context, b *conv) error {
 	workspace := b.workspace
 	m.mu.Unlock()
 	fail := func(err error) error {
-		if service := serviceError(err); service != err {
-			err = service
-		} else {
-			// The process itself failed: one line for the person, the rest is in its stderr tail.
-			first, _, _ := strings.Cut(err.Error(), "\n")
-			err = fmt.Errorf("the browser service did not start: %s", first)
-		}
+		err = openProblem(err)
 		m.mu.Lock()
 		b.status, b.problem = "failed", err.Error()
 		m.changedLocked(b)
@@ -383,7 +379,7 @@ func (m *Manager) act(ctx context.Context, b *conv, params map[string]any) (actR
 	defer cancel()
 	raw, err := p.Call(call, "act", params)
 	if err != nil {
-		return actResult{}, serviceError(err)
+		return actResult{}, err
 	}
 	var r actResult
 	if err = json.Unmarshal(raw, &r); err != nil {
@@ -396,18 +392,17 @@ func (m *Manager) act(ctx context.Context, b *conv, params map[string]any) (actR
 	return r, nil
 }
 
-// serviceError keeps the service's own words: "adapter act: {"message":"…"}" reads "…".
-func serviceError(err error) error {
-	text := err.Error()
-	if i := strings.Index(text, ": {"); i >= 0 {
-		var e struct {
-			Message string `json:"message"`
-		}
-		if json.Unmarshal([]byte(text[i+2:]), &e) == nil && e.Message != "" {
-			return errors.New(e.Message)
-		}
+// openProblem is why the browser did not open, for the person: the
+// service's own words when it answered with an error (jsonl.CallError reads
+// as them), else one line of the process's failure (the rest is in its
+// stderr tail).
+func openProblem(err error) error {
+	var call *jsonl.CallError
+	if errors.As(err, &call) {
+		return err
 	}
-	return err
+	first, _, _ := strings.Cut(err.Error(), "\n")
+	return fmt.Errorf("the browser service did not start: %s", first)
 }
 
 // closeBrowser closes b's page; who is agent or person.
@@ -549,7 +544,7 @@ func (m *Manager) Input(ctx context.Context, conversation string, input map[stri
 	defer cancel()
 	raw, err := p.Call(call, "input", input)
 	if err != nil {
-		return State{}, serviceError(err)
+		return State{}, err
 	}
 	var page PageState
 	m.mu.Lock()

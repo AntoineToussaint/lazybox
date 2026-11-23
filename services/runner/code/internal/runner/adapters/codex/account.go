@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/adapters/jsonl"
 	"net/url"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/adapters/jsonl"
 )
 
 // AccountClient uses native account RPCs without starting a thread or inference.
@@ -83,7 +84,7 @@ func (a *AccountClient) Login(ctx context.Context, method string) (Login, error)
 	}
 	raw, err := a.p.Call(ctx, "account/login/start", map[string]string{"type": kind})
 	if err != nil {
-		return Login{}, loginError(err.Error())
+		return Login{}, loginError(jsonl.FullText(err))
 	}
 	var response struct{ LoginID, AuthURL, VerificationURL, UserCode string }
 	if err = json.Unmarshal(raw, &response); err != nil {

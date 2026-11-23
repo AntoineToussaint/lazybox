@@ -121,7 +121,11 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 		cancel()
 		return nil, err
 	}
-	fail := func(err error) (agent.Session, error) { cancel(); p.Close(); return nil, err }
+	fail := func(err error) (agent.Session, error) {
+		cancel()
+		p.Close()
+		return nil, startError(err)
+	}
 	setup, done := context.WithTimeout(life, 30*time.Second)
 	defer done()
 	initialized, err := p.Call(setup, "initialize", map[string]any{"clientInfo": map[string]string{"name": "lazybox_v2_testbench", "title": "Lazybox V2 test bench", "version": "0.1.0"}, "capabilities": map[string]any{"experimentalApi": true}})
@@ -1131,3 +1135,16 @@ func (s *session) Close() error { err := s.p.Close(); s.cancel(); return err }
 
 // HostID is the session host running the app-server, or "" for a local pipe.
 func (s *session) HostID() string { return s.p.HostID() }
+
+// startError names the step Codex refused when it did not start: only a
+// refusal itself, never one inside a joined error (a fork that ended at the
+// wrong turn, then could not be archived, failed at the fork, not the archive).
+func startError(err error) error {
+	if call, ok := err.(*jsonl.CallError); ok {
+		if call.Reason() == "" {
+			return fmt.Errorf("Codex did not start: %w", err) // the error names the step itself
+		}
+		return fmt.Errorf("Codex did not start (%s): %w", call.Method, err)
+	}
+	return err
+}

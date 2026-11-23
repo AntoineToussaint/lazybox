@@ -1,5 +1,6 @@
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { errorReason as reason } from './error-text.js';
 
 /**
  * The agent browser's tools (BROWSER.md) on an in-process MCP server. Each
@@ -25,10 +26,6 @@ export function browserContent(raw: string): Content[] {
   return out;
 }
 
-const reason = (error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  try { return JSON.parse(message).message || message; } catch { return message; }
-};
 
 const ref = z.string().describe('The element\'s ref from the latest browser_snapshot, such as e12.');
 const element = z.string().optional().describe('A few words naming the element for the person watching, such as "Sign in button".');

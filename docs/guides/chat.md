@@ -516,3 +516,5 @@ need your review. **CLI settings** inherits the agent’s native settings while
 Lazybox’s command approvals stay in effect. Hover over the shield to see the
 agent’s last report. The existing `/permissions yolo` shortcut selects Full
 access.
+
+In the sub-agent panel, the timer shows elapsed run time. After a minute without a reported event, **Last update** shows how long it has been since Lazybox heard from that sub-agent. Hover over it for the timestamp.

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import type { ContextSnapshot, TelemetryReport } from '@lazybox/protocol';
 import {useRunner} from './RunnerContext';
 import type { TranscriptMessage } from './transcript-model';
-import { describeTool } from './tool-lines';
+import { describeToolBrief } from './tool-lines';
 import './telemetry.css';
 import { contextLevel, dollars, percentLabel, unpricedHelp, unpricedLine, usageBreakdown, type UsageBreakdown } from './usage-model';
 
@@ -13,31 +13,45 @@ const percentage=(n?:bigint,capacity?:bigint)=>n===undefined||!capacity||capacit
 const labels:Record<string,string>={uncached_input:'Uncached input',cached_input:'Cached input',reasoning_output:'Reasoning output',other_output:'Other output',messages:'Messages',system_tools:'System tools',mcp_tools:'MCP tools',system_prompt:'System prompt',skills:'Skills',memory_files:'Memory files',mcp_instructions:'MCP server instructions',mcp_server_instructions:'MCP server instructions',autocompact_buffer:'Compaction reserve',free_space:'Free space',mcp_tools_deferred:'MCP tools',system_tools_deferred:'System tools'};
 // Chart series colours are theme tokens (chart-1 … chart-7), readable in light and dark.
 const colors:Record<string,string>={uncached_input:'var(--chart-1)',cached_input:'var(--chart-2)',reasoning_output:'var(--chart-3)',other_output:'var(--chart-4)',messages:'var(--chart-1)',system_tools:'var(--chart-2)',mcp_tools:'var(--chart-3)',system_prompt:'var(--chart-4)',skills:'var(--chart-5)',memory_files:'var(--chart-6)',mcp_server_instructions:'var(--chart-7)'};
-/** Rank the visible main-thread text independently of the provider's token meter. */
+const textSize = (bytes: number) => bytes < 1000 ? `${bytes} B` : bytes < 1_000_000
+ ? `${Number((bytes / 1000).toFixed(1))} kB` : `${Number((bytes / 1_000_000).toFixed(1))} MB`;
+
 function ObservedContributors({messages}:{messages:readonly TranscriptMessage[]}) {
- const largest = useMemo(() => {
-  const items: {key:string; label:string; bytes:number; preview:string}[] = [];
+ const groups = useMemo(() => {
+  type Item = { key: string; label: string; bytes: number; preview: string };
+  const grouped = new Map<string, {name:string; bytes:number; largest:Item[]}>();
   const encoder = new TextEncoder();
+  function add(name: string, item: Item) {
+   const group = grouped.get(name) ?? {name, bytes:0, largest:[]};
+   group.bytes += item.bytes;
+   group.largest.push(item);
+   group.largest.sort((a,b) => b.bytes - a.bytes);
+   if (group.largest.length > 5) group.largest.pop();
+   grouped.set(name, group);
+  }
   for (let i = messages.length - 1; i >= 0; i--) {
    const message = messages[i];
    if (message.compaction) break;
-   if (message.type === 'operation_accepted' || message.type === 'message_delta') {
-    if (message.text) items.push({key:message.id,label:message.type === 'message_delta' ? 'Assistant message' : 'Prompt',
-     bytes:encoder.encode(message.text).length,preview:message.text.slice(0,500)});
+   if (message.text && (message.type === 'operation_accepted' || message.type === 'message_delta')) {
+    const name = message.type === 'message_delta' ? 'Assistant replies' : 'Your messages';
+    add(name, {key:message.id, label:message.text.trim().split('\n',1)[0].slice(0,100),
+     bytes:encoder.encode(message.text).length, preview:message.text.slice(0,500)});
    }
    for (const tool of message.tools || []) {
     if (!tool.output) continue;
-    const title = describeTool(tool);
-    items.push({key:message.id+'/'+tool.id,label:[title.verb,title.target].filter(Boolean).join(' '),
-     bytes:tool.outputBytes ?? encoder.encode(tool.output).length,preview:tool.output.slice(0,500)});
+    const title = describeToolBrief(tool);
+    add('Tool outputs', {key:message.id+'/'+tool.id, label:[title.verb,title.target].filter(Boolean).join(' '),
+     bytes:tool.outputBytes ?? encoder.encode(tool.output).length, preview:tool.output.slice(0,500)});
    }
   }
-  return items.sort((a,b)=>b.bytes-a.bytes).slice(0,5);
+  return [...grouped.values()].sort((a,b)=>b.bytes-a.bytes);
  },[messages]);
- return <section className="context-contributors" aria-label="Largest observed contributors"><strong>Largest observed contributors</strong>
-  <p className="telemetry-note">Loaded messages and tool outputs since the last observed compaction, ranked by text size. Retained token counts are unknown.</p>
-  {largest.map(item=><details key={item.key}><summary><span>{item.label}</span><small>{item.bytes.toLocaleString()} bytes</small></summary><pre>{item.preview}</pre></details>)}
-  {!largest.length && <p className="telemetry-note">No transcript text observed yet.</p>}
+ if (!groups.length) return null;
+ return <section className="context-contributors" aria-label="Transcript size"><strong>Transcript size</strong>
+  {groups.map(group=><details key={group.name}><summary><span>{group.name}</span><small>{textSize(group.bytes)}</small></summary>
+   <div className="context-items">{group.largest.map(item=><details key={item.key}><summary><span>{item.label}</span><small>{textSize(item.bytes)}</small></summary><pre>{item.preview}</pre></details>)}</div>
+  </details>)}
+  <p className="telemetry-note">Loaded text since the last observed compaction. Token counts by category are unavailable.</p>
  </section>;
 }
 
@@ -58,7 +72,7 @@ function ContextView({context:c,showAgent,messages}:{context:ContextSnapshot;sho
   {showAgent&&<h4>{c.agent==='root'?'Main agent':c.agent}</h4>}
   <div className="context-total"><strong>{percent===undefined?'Context usage':`${percentLabel(percent)} used`}</strong><span title={`${number(c.used)} / ${number(c.capacity)} tokens`}>{short(c.used)} <span>/ {short(c.capacity)}</span></span></div>
   <div className="context-meter" role="meter" aria-label="Context used" aria-valuemin={0} aria-valuemax={c.capacity===undefined?undefined:Number(c.capacity)} aria-valuenow={c.used===undefined?undefined:Number(c.used)} aria-valuetext={`${number(c.used)} of ${number(c.capacity)} tokens`}>
-   {used.length&&categoryTotal>0?used.map(row=><span key={row.name} title={`${labels[row.name]||row.name}: ${number(row.tokens)} tokens`} style={{width:`${usedPercent*Number(row.tokens??0n)/categoryTotal}%`,background:colors[row.name]||'var(--text-muted)'}}/>):<span style={{width:`${usedPercent}%`,background:'var(--chart-1)'}}/>}
+   {c.source!=='sdk_token_breakdown'&&used.length&&categoryTotal>0?used.map(row=><span key={row.name} title={`${labels[row.name]||row.name}: ${number(row.tokens)} tokens`} style={{width:`${usedPercent*Number(row.tokens??0n)/categoryTotal}%`,background:colors[row.name]||'var(--text-muted)'}}/>):<span style={{width:`${usedPercent}%`,background:'var(--chart-1)'}}/>}
    <span title="Compaction reserve" style={{width:`${reservePercent}%`,background:'var(--chart-muted)'}}/>
   </div>
   {messages && <ObservedContributors messages={messages}/>}

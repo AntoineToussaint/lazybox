@@ -22,6 +22,10 @@ A task can start from a GitHub issue (`WorkItems.tsx`, pure model in `item-conte
 
 `handoff.tsx` (pure model in `handoff-model.ts`) adds **Open in Terminal** to conversation, Inbox, chat-header, workspace and Files menus and the palette (`terminal.external`), and **Continue in Claude Code / Codex…** (the provider's resume command with `cd`, copied) to conversation menus and the chat's ⋯. A desktop host opens the person's own terminal app (`configureExternalTerminal`; `src-tauri/src/terminal.rs` checks the window and asks the Runner that the folder is inside a workspace); a browser gets the `cd` to paste. The terminal choice (Settings → Agents & workspaces) is this computer's, kept in browser storage. `npm run test:chat-handoff`.
 
+## Context usage
+
+The Codex meter shows reported window usage. **Transcript size** groups observed text by tool outputs, assistant replies and user messages since the last observed compaction. Expand a group to inspect its five largest items. **Latest request details** shows the provider’s token types.
+
 ## Context menus
 
 Inside the app a right-click opens a Lazybox menu for that place, never the browser's or macOS's; a long press on touch, Shift+F10 or the context-menu key on the focused element open the same menu. Arrows, Home/End, typing the start of a label, Enter and Escape work as in a native menu; a press outside, scrolling, leaving the window or Escape closes it, and one is open at a time. Text fields keep the native menu (spelling, paste, emoji); the Monaco editor keeps its own, in Lazybox colours; Alt+right-click shows the native menu in development, for Inspect Element.

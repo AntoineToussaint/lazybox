@@ -164,6 +164,9 @@ export class NativeStatus {
       if ('ambient' in m && m.ambient) return out;
       const old = this.tasks.get(m.task_id);
       if (m.run_id && old?.run && m.run_id < old.run) return out;
+      // Delayed activity for a finished run must not reopen its timer or tray entry.
+      if (old && TERMINAL.includes(old.status) && m.subtype !== 'task_notification'
+          && (!m.run_id || m.run_id === old.run)) return out;
       const id = old?.id || (m.tool_use_id ? `claude-tool:${m.tool_use_id}` : `claude-task:${m.task_id}`);
       const status = m.subtype === 'task_notification' ? ({ completed: 'done', failed: 'failed', stopped: 'stopped' }[m.status]) : 'running';
       if (this.tasks.size >= 256 && !old) return out;

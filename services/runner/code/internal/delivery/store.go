@@ -41,10 +41,16 @@ type Store struct {
 	observations []Observation
 	byID         map[string]int
 	size         int64
-	Now          func() time.Time
+	// skipped counts unreadable lines left in the journal; broken stops
+	// writing after a failed write could not be undone.
+	skipped int
+	broken  error
+	Now     func() time.Time
 }
 
-// OpenStore reads the journal at path, dropping a torn last line that was never acknowledged.
+// OpenStore reads the journal at path, dropping a torn last line that was
+// never acknowledged. An unreadable line elsewhere is skipped and counted
+// (Skipped), so one damaged record never keeps the Runner from starting.
 func OpenStore(path string) (*Store, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -72,11 +78,11 @@ func OpenStore(path string) (*Store, error) {
 			return nil, err
 		}
 		var r record
-		if err := json.Unmarshal(bytes.TrimSpace(line), &r); err != nil {
-			f.Close()
-			return nil, fmt.Errorf("delivery journal %s: line at byte %d: %w", path, size, err)
-		}
 		size += int64(len(line))
+		if err := json.Unmarshal(bytes.TrimSpace(line), &r); err != nil {
+			s.skipped++
+			continue
+		}
 		switch {
 		case r.Binding != nil:
 			s.bindings = append(s.bindings, *r.Binding)
@@ -99,7 +105,13 @@ func (s *Store) Close() error {
 	return s.f.Close()
 }
 
+// Skipped is the number of unreadable journal lines OpenStore left out.
+func (s *Store) Skipped() int { return s.skipped }
+
 func (s *Store) append(r record) error {
+	if s.broken != nil {
+		return s.broken
+	}
 	line, err := json.Marshal(r)
 	if err != nil {
 		return err
@@ -111,8 +123,11 @@ func (s *Store) append(r record) error {
 	}
 	if err != nil {
 		// Never leave a partial line for the next record to follow.
-		_ = s.f.Truncate(s.size)
-		_, _ = s.f.Seek(s.size, io.SeekStart)
+		if terr := s.f.Truncate(s.size); terr != nil {
+			s.broken = fmt.Errorf("the delivery journal could not be repaired after a failed write (%v); restart the Runner", terr)
+		} else if _, serr := s.f.Seek(s.size, io.SeekStart); serr != nil {
+			s.broken = fmt.Errorf("the delivery journal could not be repaired after a failed write (%v); restart the Runner", serr)
+		}
 		return err
 	}
 	s.size += int64(len(line))
@@ -184,6 +199,14 @@ func (s *Store) Record(o Observation) (bool, error) {
 	s.byID[o.ID] = len(s.observations)
 	s.observations = append(s.observations, o)
 	return true, nil
+}
+
+// Has reports whether an observation is recorded under id.
+func (s *Store) Has(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.byID[id]
+	return ok
 }
 
 // Observations is every recorded observation, in journal order.

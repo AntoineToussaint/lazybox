@@ -38,6 +38,7 @@ func TestCheckObserve(t *testing.T) {
 		{"check piped", check, nil, false, Unverified},
 		{"needs exit 1", needs, code(1), false, Blocked},
 		{"needs exit 0", needs, code(0), false, Unverified},
+		{"needs stopped", needs, code(1), true, Unverified},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o := tc.check.Observe("run:e/c", "run:e/c", "candidate:1", tc.exit, tc.signalled)
@@ -94,11 +95,12 @@ func TestStoreBindsAndReplaysObservationsOnce(t *testing.T) {
 	_ = s.Close()
 
 	// A torn last line was never acknowledged: reopening drops it and keeps the rest.
+	// A damaged line is skipped rather than keeping the Runner from starting.
 	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
-	_, _ = f.WriteString(`{"observation":{"schema":"delivery-obs`)
+	_, _ = f.WriteString("{damaged\n" + `{"observation":{"schema":"delivery-obs`)
 	_ = f.Close()
 	s, err = OpenStore(path)
-	if err != nil {
+	if err != nil || s.Skipped() != 1 {
 		t.Fatal(err)
 	}
 	defer s.Close()

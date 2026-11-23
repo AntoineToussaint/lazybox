@@ -2007,6 +2007,10 @@ message CommandStatus {
   int32 pid = 20;
   // What a finished --check or --needs run recorded, or why it was not recorded.
   string delivery = 21;
+  // The criterion a --check or --needs run counts for, as the Runner resolved
+  // it at registration: a CLI that asked for one and reads none is talking to
+  // a Runner that records no delivery evidence.
+  string check = 22;
 }
 message ListCommandsRequest {
   // The execution's own commands, and the runs of its workspace.

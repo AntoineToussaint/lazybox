@@ -35,6 +35,8 @@ type jsonCommand struct {
 	Signal     string   `json:"signal,omitempty"`
 	StartedAt  string   `json:"startedAt,omitempty"`
 	OutputPath string   `json:"outputPath,omitempty"`
+	// Delivery is what a --check or --needs run recorded, or why it did not.
+	Delivery string `json:"delivery,omitempty"`
 }
 
 // agentLs lists the agent's own commands: running ones first, then the most
@@ -109,6 +111,9 @@ func (c *cli) agentLs(cl *client, session string) error {
 			}
 		}
 		c.out("  %s %s  %-40s %s\n", c.paint(colour, icon), r.ID, oneLine(r.Title, 40), c.paint(dim, detail))
+		if r.Delivery != "" {
+			c.out("      %s\n", c.paint(dim, r.Delivery))
+		}
 	}
 	if running > 0 {
 		c.out("%s\n", c.paint(dim, "Stop one: lazybox stop ID"))
@@ -117,7 +122,7 @@ func (c *cli) agentLs(cl *client, session string) error {
 }
 
 func describeCommand(cmd *pb.CommandStatus) jsonCommand {
-	r := jsonCommand{ID: cmd.Id, Title: cmd.Title, Background: cmd.Background, Ports: cmd.Ports, Signal: cmd.Signal, ExitCode: cmd.ExitCode}
+	r := jsonCommand{ID: cmd.Id, Title: cmd.Title, Background: cmd.Background, Ports: cmd.Ports, Signal: cmd.Signal, ExitCode: cmd.ExitCode, Delivery: cmd.Delivery}
 	if cmd.Report != nil {
 		r.OutputPath = cmd.Report.OutputPath
 		if r.ExitCode == nil && cmd.Done && cmd.Report.Filter != "" {

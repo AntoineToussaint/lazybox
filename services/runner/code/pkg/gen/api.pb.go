@@ -13962,7 +13962,11 @@ type CommandStatus struct {
 	// The command's process (the session host's program, or a `lazybox run`'s), when known.
 	Pid int32 `protobuf:"varint,20,opt,name=pid,proto3" json:"pid,omitempty"`
 	// What a finished --check or --needs run recorded, or why it was not recorded.
-	Delivery      string `protobuf:"bytes,21,opt,name=delivery,proto3" json:"delivery,omitempty"`
+	Delivery string `protobuf:"bytes,21,opt,name=delivery,proto3" json:"delivery,omitempty"`
+	// The criterion a --check or --needs run counts for, as the Runner resolved
+	// it at registration: a CLI that asked for one and reads none is talking to
+	// a Runner that records no delivery evidence.
+	Check         string `protobuf:"bytes,22,opt,name=check,proto3" json:"check,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -14140,6 +14144,13 @@ func (x *CommandStatus) GetPid() int32 {
 func (x *CommandStatus) GetDelivery() string {
 	if x != nil {
 		return x.Delivery
+	}
+	return ""
+}
+
+func (x *CommandStatus) GetCheck() string {
+	if x != nil {
+		return x.Check
 	}
 	return ""
 }
@@ -39430,7 +39441,7 @@ const file_api_proto_rawDesc = "" +
 	"outputPath\x12\x1d\n" +
 	"\n" +
 	"agent_view\x18\x06 \x01(\tR\tagentView\x12\x14\n" +
-	"\x05piped\x18\a \x01(\bR\x05piped\"\xfc\x04\n" +
+	"\x05piped\x18\a \x01(\bR\x05piped\"\x92\x05\n" +
 	"\rCommandStatus\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -39457,7 +39468,8 @@ const file_api_proto_rawDesc = "" +
 	"\x0ecan_background\x18\x12 \x01(\bR\rcanBackground\x123\n" +
 	"\x16started_at_unix_millis\x18\x13 \x01(\x03R\x13startedAtUnixMillis\x12\x10\n" +
 	"\x03pid\x18\x14 \x01(\x05R\x03pid\x12\x1a\n" +
-	"\bdelivery\x18\x15 \x01(\tR\bdeliveryB\f\n" +
+	"\bdelivery\x18\x15 \x01(\tR\bdelivery\x12\x14\n" +
+	"\x05check\x18\x16 \x01(\tR\x05checkB\f\n" +
 	"\n" +
 	"_exit_code\"4\n" +
 	"\x13ListCommandsRequest\x12\x1d\n" +

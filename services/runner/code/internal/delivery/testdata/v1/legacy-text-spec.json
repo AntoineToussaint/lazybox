@@ -23,7 +23,7 @@
   },
   "candidates": [
     {
-      "id": "candidate:2cb85bd3b661cbba",
+      "id": "candidate:c5781c6b29dd44af",
       "revisions": {
         "api": "5e6f7a8"
       }
@@ -34,7 +34,7 @@
       "schema": "delivery-observation.v1",
       "id": "run:ex2/c1",
       "contractDigest": "sha256:reconnect-spec-v1",
-      "candidate": "candidate:2cb85bd3b661cbba",
+      "candidate": "candidate:c5781c6b29dd44af",
       "attempt": "attempt-2",
       "subject": {
         "conversation": "conv-reconnect"
@@ -51,7 +51,7 @@
       "after": 1,
       "scope": {
         "contractDigest": "sha256:reconnect-spec-v1",
-        "candidate": "candidate:2cb85bd3b661cbba",
+        "candidate": "candidate:c5781c6b29dd44af",
         "attempt": "attempt-2"
       },
       "verdict": "unverified",

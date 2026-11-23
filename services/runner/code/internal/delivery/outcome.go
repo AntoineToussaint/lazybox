@@ -3,6 +3,7 @@ package delivery
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -29,7 +30,6 @@ const (
 	Incomplete = "incomplete"
 	Unverified = "unverified"
 	Unrun      = "unrun"
-	Unbound    = "unbound"
 )
 
 // Human decisions. They are recorded beside the technical verdict and never replace it.
@@ -55,19 +55,23 @@ type Contract struct {
 // Bound reports whether observations can be attributed to the contract's criteria.
 func (c Contract) Bound() bool { return c.Schema == "spec.v2" && len(c.Criteria) > 0 }
 
-// CandidateID names the revisions under test: each workspace repository and its
-// commit. The same revisions always yield the same ID; any change yields another.
+// CandidateID names the files under test: each workspace repository and its
+// revision (its commit, and its uncommitted tree when it has one). The same
+// revisions always yield the same ID; any change yields another.
 func CandidateID(revisions map[string]string) string {
 	members := make([]string, 0, len(revisions))
 	for member := range revisions {
 		members = append(members, member)
 	}
 	slices.Sort(members)
-	h := sha256.New()
+	pairs := make([][2]string, 0, len(members))
 	for _, member := range members {
-		fmt.Fprintf(h, "%s=%s\n", member, revisions[member])
+		pairs = append(pairs, [2]string{member, revisions[member]})
 	}
-	return "candidate:" + hex.EncodeToString(h.Sum(nil))[:16]
+	// JSON keeps member and revision apart whatever characters they hold.
+	encoded, _ := json.Marshal(pairs)
+	sum := sha256.Sum256(encoded)
+	return "candidate:" + hex.EncodeToString(sum[:])[:16]
 }
 
 // Scope identifies an immutable contract and candidate within one execution attempt.
@@ -102,7 +106,8 @@ type Observation struct {
 	ExitCode *int `json:"exitCode,omitempty"`
 	// Assertion is the declared check's result: passed, failed, or empty when nothing was asserted.
 	Assertion string `json:"assertion,omitempty"`
-	// Prerequisite is failed when something the check needs kept it from running.
+	// Prerequisite is failed when something the check needs kept it from
+	// running, and passed when that step succeeded (`--needs` exiting 0).
 	Prerequisite string `json:"prerequisite,omitempty"`
 	// Decision is a person's accepted, waived or rejected; only a human source carries one.
 	Decision string `json:"decision,omitempty"`
@@ -121,13 +126,14 @@ func (o Observation) Validate() error {
 		return errors.New("observation needs a conversation, and a Mission and task together")
 	case !slices.Contains([]string{"", Passed, Failed}, o.Assertion):
 		return fmt.Errorf("unknown assertion %q", o.Assertion)
-	case !slices.Contains([]string{"", Failed}, o.Prerequisite):
+	case !slices.Contains([]string{"", Passed, Failed}, o.Prerequisite):
 		return fmt.Errorf("unknown prerequisite %q", o.Prerequisite)
 	}
 	switch o.Source {
 	case SourceHuman:
-		if !slices.Contains([]string{Accepted, Waived, Rejected}, o.Decision) || o.Assertion != "" || o.Prerequisite != "" || o.ExitCode != nil {
-			return errors.New("a human observation records only a decision")
+		// A decision is on the whole outcome, never on one criterion.
+		if !slices.Contains([]string{Accepted, Waived, Rejected}, o.Decision) || o.Assertion != "" || o.Prerequisite != "" || o.ExitCode != nil || o.CriterionID != "" {
+			return errors.New("a human observation records only a decision on the outcome")
 		}
 		return nil
 	case SourceCommand, SourceReview:
@@ -139,8 +145,14 @@ func (o Observation) Validate() error {
 		return errors.New("only a person records a decision")
 	case o.CriterionID == "":
 		return errors.New("a technical observation names its criterion")
-	case o.Prerequisite == Failed && o.Assertion != "":
-		return errors.New("a check that could not run asserts nothing")
+	case o.Prerequisite != "" && o.Assertion != "":
+		return errors.New("a prerequisite asserts nothing about its criterion")
+	case o.Source == SourceReview && o.Prerequisite != "":
+		return errors.New("a review is no prerequisite")
+	case o.Prerequisite == Failed && o.ExitCode != nil && *o.ExitCode == 0:
+		return errors.New("a failed prerequisite contradicts a successful exit")
+	case o.Prerequisite == Passed && (o.ExitCode == nil || *o.ExitCode != 0):
+		return errors.New("a prerequisite passes only with exit 0 observed")
 	case o.Source == SourceReview && o.ExitCode != nil:
 		return errors.New("a review has no process exit")
 	case o.Source == SourceCommand && o.Assertion == Passed && o.ExitCode != nil && *o.ExitCode != 0:
@@ -152,7 +164,7 @@ func (o Observation) Validate() error {
 // Classify reads one valid technical observation as a criterion state.
 // A failed assertion fails; a failed prerequisite blocks; a passing assertion
 // passes only with its exit observed as 0 (commands) or from a review. Anything
-// else, a bare exit 0 or a pipe included, leaves the criterion unverified.
+// else, a bare exit 0, a met prerequisite or a stopped run, is unverified.
 func (o Observation) Classify() string {
 	switch {
 	case o.Assertion == Failed:
@@ -173,22 +185,20 @@ type Assessment struct {
 }
 
 // Assess folds observations in journal order for the requested scope. Each
-// criterion takes its latest observation, so only a later observation of the
-// same criterion resolves an earlier failure. The verdict is the worst required
-// state: failed, then blocked, then incomplete; passed when every required
-// criterion passed; unverified with no required criterion or an unbound contract.
+// criterion takes its latest decisive observation: an assertion or a failed
+// prerequisite. An observation that proves nothing (a bare exit 0, a stopped
+// run) only marks an unrun criterion unverified, and a met prerequisite only
+// clears a blocked one; neither erases a pass or a failure. So only a later
+// check of the same criterion resolves an earlier failure. The verdict is the
+// worst required state: failed, then blocked, then incomplete; passed when
+// every required criterion passed; unverified with no required criterion or
+// an unbound (spec.v1) contract.
 func Assess(scope Scope, contract Contract, history []Observation) Assessment {
 	a := Assessment{Verdict: Unverified, Criteria: map[string]string{}}
 	for _, c := range contract.Criteria {
 		a.Criteria[c.ID] = Unrun
 	}
-	if !contract.Bound() {
-		for id := range a.Criteria {
-			a.Criteria[id] = Unbound
-		}
-		return a
-	}
-	if scope.ContractDigest != contract.Digest || scope.Candidate == "" || scope.Attempt == "" {
+	if !contract.Bound() || scope.ContractDigest != contract.Digest || scope.Candidate == "" || scope.Attempt == "" {
 		return a
 	}
 	for _, o := range history {
@@ -199,8 +209,17 @@ func Assess(scope Scope, contract Contract, history []Observation) Assessment {
 			a.Decision = o.Decision
 			continue
 		}
-		if _, ok := a.Criteria[o.CriterionID]; ok {
-			a.Criteria[o.CriterionID] = o.Classify()
+		current, ok := a.Criteria[o.CriterionID]
+		if !ok {
+			continue
+		}
+		switch state := o.Classify(); {
+		case o.Assertion != "" || o.Prerequisite == Failed:
+			a.Criteria[o.CriterionID] = state
+		case o.Prerequisite == Passed && (current == Blocked || current == Unrun):
+			a.Criteria[o.CriterionID] = Unverified
+		case current == Unrun:
+			a.Criteria[o.CriterionID] = Unverified
 		}
 	}
 	rank := 0

@@ -96,6 +96,11 @@ type foreground struct {
 	exited       chan outcome
 	followCancel context.CancelFunc
 	requests     chan *pb.FollowPipeResponse
+	// signal names what ended the command when a signal did, or when the
+	// CLI stopped it (an interrupt, or a stop asked from Lazybox): such a run
+	// asserts nothing, whatever status it exits with.
+	signal      string
+	interrupted bool
 }
 
 type outcome struct {
@@ -162,16 +167,22 @@ func (f *foreground) run() (code int, moved bool, err error) {
 			f.readers.Wait()
 			outR.Close()
 			errR.Close()
+			f.signal = result.Signal
+			if f.signal == "" && (f.interrupted || result.ExitCode < 0) {
+				f.signal = "SIGINT"
+			}
 			return exitStatus(result, f.argv[0], f.s), false, nil
 		case <-interrupted:
 			// The agent's call or the person's Ctrl-C ended: the command ends too.
 			interrupted = nil
+			f.interrupted = true
 			_ = guard.Interrupt()
 			stopTimer = time.After(stopGrace)
 		case <-stopTimer:
 			_ = guard.Stop()
 		case request := <-f.requests:
 			if request.Stop && stopTimer == nil {
+				f.interrupted = true
 				_ = guard.Interrupt()
 				stopTimer = time.After(stopGrace)
 			} else if request.Background {

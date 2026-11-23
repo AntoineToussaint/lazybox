@@ -17,6 +17,9 @@ type Check struct {
 	// Contract names the spec revision, for what a person and an agent read.
 	Artifact string `json:"artifact"`
 	Version  uint32 `json:"version"`
+	// Candidate is the workspace's files when the run registered
+	// (CandidateID); a run that finishes on other files records nothing.
+	Candidate string `json:"candidate"`
 }
 
 // A shell's status for a command it could not start: not executable (126) or not found (127).
@@ -28,7 +31,8 @@ const (
 // Observe reads a finished run as an observation of its criterion.
 //
 //   - A --check run that exits 0 asserts a pass, and any other exit a failure.
-//   - A --needs run that exits non-zero is a failed prerequisite; exit 0 asserts nothing.
+//   - A --needs run that exits non-zero is a failed prerequisite; exit 0 is a
+//     met one, which clears a blocked criterion and proves nothing else.
 //   - A command that could not start (126, 127) is a failed prerequisite either way.
 //   - A run ended by a signal (a stop) or with no observed exit (a pipe) asserts nothing.
 func (c Check) Observe(id, reference, candidate string, exit *int, signalled bool) Observation {
@@ -41,6 +45,7 @@ func (c Check) Observe(id, reference, candidate string, exit *int, signalled boo
 	case c.Prerequisite && *exit != 0:
 		o.Prerequisite = Failed
 	case c.Prerequisite:
+		o.Prerequisite = Passed
 	case *exit == 0:
 		o.Assertion = Passed
 	default:
@@ -54,7 +59,7 @@ func (o Observation) Summary(c Check) string {
 	state, role := o.Classify(), "check"
 	if c.Prerequisite {
 		role = "prerequisite"
-		if state == Unverified && o.ExitCode != nil && !(o.Prerequisite == Failed) {
+		if o.Prerequisite == Passed {
 			state = "met; run its --check next"
 		}
 	}

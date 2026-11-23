@@ -124,6 +124,13 @@ func runVerb(ctx context.Context, endpointPath string, args []string, stdout, st
 	if o.check != "" && o.needs != "" {
 		return errors.New("a run is either the --check or a --needs of one criterion")
 	}
+	if o.check != "" || o.needs != "" {
+		// A check's result is what the agent waits for: it never moves to the background.
+		if o.background {
+			return errors.New("--check and --needs wait for the result; they cannot go --background")
+		}
+		o.wait = true
+	}
 	var c console
 	var unavailable error
 	// From a person's own terminal: the registered Runner, and the workspace
@@ -198,6 +205,10 @@ func runCommand(ctx context.Context, c console, unavailable error, o runOptions,
 		if checked {
 			return fmt.Errorf("not run: %w", err) // a wrong criterion or a missing binding is fixed before the run
 		}
+	} else if checked && r.Msg.Check == "" {
+		// An older Runner ignores the criterion: the run would prove nothing.
+		_, _ = c.FinishPipe(ctx, connect.NewRequest(&pb.FinishPipeRequest{CommandId: r.Msg.Id, CaptureError: "not run: the Runner records no delivery checks"}))
+		return errors.New("not run: this Runner records no delivery checks; update Lazybox")
 	} else {
 		s.ctx, s.console, s.id, s.checked = ctx, c, r.Msg.Id, checked
 	}
@@ -229,7 +240,7 @@ func runCommand(ctx context.Context, c console, unavailable error, o runOptions,
 	if target.workspace() {
 		summary.AgentView = boundView(view.String())
 	}
-	s.finish(summary)
+	s.finish(summary, f.signal)
 	if target.workspace() {
 		// The person already saw every line; say where the run went.
 		fmt.Fprintln(stderr, workspaceNote(title, o.to, summary, s.id, s.publishErr))
@@ -409,7 +420,12 @@ func (w streamWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (s *sink) finish(r *pb.CommandReport) {
+// finishRetry is how long a --check or --needs run keeps offering its
+// completion to a Runner that does not answer (a restart): its evidence is
+// recorded only once the Runner has it. Other runs offer it once.
+var finishRetry = time.Minute
+
+func (s *sink) finish(r *pb.CommandReport, signal string) {
 	if s.console == nil {
 		return
 	}
@@ -417,9 +433,18 @@ func (s *sink) finish(r *pb.CommandReport) {
 	if s.publishErr != nil {
 		cause = s.publishErr.Error()
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
-	defer cancel()
-	status, err := s.console.FinishPipe(ctx, connect.NewRequest(&pb.FinishPipeRequest{CommandId: s.id, CaptureError: cause, Report: r}))
+	request := connect.NewRequest(&pb.FinishPipeRequest{CommandId: s.id, CaptureError: cause, Report: r, Signal: signal})
+	var status *connect.Response[pb.CommandStatus]
+	var err error
+	for deadline := time.Now().Add(finishRetry); ; time.Sleep(2 * time.Second) {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
+		status, err = s.console.FinishPipe(ctx, request)
+		cancel()
+		code := connect.CodeOf(err)
+		if err == nil || !s.checked || code == connect.CodeNotFound || code == connect.CodePermissionDenied || code == connect.CodeInvalidArgument || time.Now().After(deadline) {
+			break
+		}
+	}
 	if err != nil && s.publishErr == nil {
 		s.publishErr = err
 	}

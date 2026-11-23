@@ -103,10 +103,11 @@ func turnEnd(turn string, result, failure json.RawMessage, title string) []agent
 	if present(failure) {
 		// The agent's own words, read the way every adapter call's error is (jsonl.CallError).
 		e := jsonl.NewCallError("session/prompt", failure)
-		said := e.Reason() != ""
+		reason := e.Reason()
+		said := reason != ""
 		fault := agent.Event{Type: "failure", TurnID: turn, Status: "provider_error", Text: title + " ended the turn with an error."}
 		if said {
-			fault.Text = e.Reason()
+			fault.Text = reason
 		}
 		if e.Code == authRequired {
 			fault.Status = "auth_required"

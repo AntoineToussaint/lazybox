@@ -34,17 +34,6 @@ func computer() string {
 	return "computer"
 }
 
-// callText is everything Codex said about a refused call, its raw answer
-// included: loginError recognises its cases by phrases that may sit in any
-// field of it.
-func callText(err error) string {
-	var call *jsonl.CallError
-	if errors.As(err, &call) {
-		return call.Error() + " " + string(call.Raw)
-	}
-	return err.Error()
-}
-
 func loginError(message string) error {
 	if strings.Contains(message, "Enable device code sign-in") && strings.Contains(message, "ChatGPT Security Settings") {
 		return ErrDeviceAuthDisabled
@@ -95,7 +84,7 @@ func (a *AccountClient) Login(ctx context.Context, method string) (Login, error)
 	}
 	raw, err := a.p.Call(ctx, "account/login/start", map[string]string{"type": kind})
 	if err != nil {
-		return Login{}, loginError(callText(err))
+		return Login{}, loginError(jsonl.FullText(err))
 	}
 	var response struct{ LoginID, AuthURL, VerificationURL, UserCode string }
 	if err = json.Unmarshal(raw, &response); err != nil {

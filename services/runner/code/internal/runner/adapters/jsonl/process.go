@@ -373,13 +373,13 @@ func NewCallError(method string, raw json.RawMessage) *CallError {
 	return e
 }
 
-// Reason is what the adapter said in words: its message, with the reason
-// its data gives when that adds something. Empty when it said nothing
-// readable (a bare code, an object of other fields).
+// Reason is what the adapter said in words, as one bounded line: its
+// message, with the reason its data gives when that adds something. Empty
+// when it said nothing readable (a bare code, an object of other fields).
 func (e *CallError) Reason() string {
-	message, detail := e.Message, dataDetail(e.Data)
+	message, detail := oneLine(e.Message), dataDetail(e.Data)
 	switch {
-	case detail == "" || strings.Contains(message, detail):
+	case detail == "" || strings.Contains(e.Message, strings.TrimSuffix(detail, "…")):
 		return message
 	case message == "":
 		return detail
@@ -387,14 +387,30 @@ func (e *CallError) Reason() string {
 	return message + ": " + detail
 }
 
+// Full is everything the adapter answered, for code that recognises a case
+// by a phrase anywhere in it: Reason and Error keep only what the person reads.
+func (e *CallError) Full() string { return e.Message + " " + string(e.Raw) }
+
+// Error is the reason; without one, it says so, with the code. It never
+// names the call: the caller says which step failed.
 func (e *CallError) Error() string {
 	if reason := e.Reason(); reason != "" {
 		return reason
 	}
 	if e.Code != 0 {
-		return fmt.Sprintf("%s failed (error %d)", e.Method, e.Code)
+		return fmt.Sprintf("no reason given (error %d)", e.Code)
 	}
-	return e.Method + " failed"
+	return "no reason given"
+}
+
+// FullText is everything an error says, a CallError's whole answer included:
+// what code matches phrases against.
+func FullText(err error) string {
+	var call *CallError
+	if errors.As(err, &call) {
+		return err.Error() + " " + call.Full()
+	}
+	return err.Error()
 }
 
 // dataDetail is the reason an error's data gives in words, when it gives

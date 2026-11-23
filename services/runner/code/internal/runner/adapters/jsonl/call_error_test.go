@@ -28,9 +28,9 @@ func TestAnAdaptersErrorReadsAsItsMessage(t *testing.T) {
 		"data that repeats the message":   {`{"message":"Rate limited","data":{"message":"Rate limited"}}`, "Rate limited"},
 		"a code of another type":          {`{"code":"E_RATE","message":"Rate limited"}`, "Rate limited"},
 		"a string error":                  {`"busy"`, "busy"},
-		"nothing to read":                 {`{"code":-1}`, "turn failed (error -1)"},
-		"not an error object":             {`42`, "turn failed"},
-		"a bare code":                     {`{"code":-32601}`, "turn failed (error -32601)"},
+		"nothing to read":                 {`{"code":-1}`, "no reason given (error -1)"},
+		"not an error object":             {`42`, "no reason given"},
+		"a bare code":                     {`{"code":-32601}`, "no reason given (error -32601)"},
 		"a stack trace in data":           {`{"message":"Internal error","data":"TypeError: x is undefined\n    at a (b.js:1)\n    at c (d.js:2)"}`, "Internal error: TypeError: x is undefined"},
 	} {
 		if got := NewCallError("turn", json.RawMessage(tc.raw)).Error(); got != tc.want {
@@ -45,5 +45,21 @@ func TestALongReasonIsOneBoundedLine(t *testing.T) {
 	got := NewCallError("turn", json.RawMessage(`{"message":"Internal error","data":"`+long+`"}`)).Error()
 	if n := len([]rune(got)); n > len("Internal error: ")+detailLimit || !strings.HasSuffix(got, "…") {
 		t.Fatalf("%d runes: %q", n, got[:40])
+	}
+}
+
+// The person reads one bounded line; code matching phrases reads everything.
+func TestTheReasonIsOneLineButMatchersSeeEverything(t *testing.T) {
+	long := strings.Repeat("rate limited ", 30)
+	if got := NewCallError("turn", json.RawMessage(`{"message":"`+long+`","data":{"message":"`+long+`"}}`)).Error(); strings.Count(got, "rate limited") > 30 || strings.Contains(got, ": rate") {
+		t.Fatalf("a long message repeated in data is said twice: %q", got)
+	}
+	trace := NewCallError("turn", json.RawMessage(`{"message":"TypeError: x is undefined\n    at a (b.js:1)\n    at c (d.js:2)"}`))
+	if got := trace.Error(); got != "TypeError: x is undefined" {
+		t.Fatalf("a multi-line message: %q", got)
+	}
+	hidden := NewCallError("open", json.RawMessage(`{"message":"failed","data":{"log":"line one\nChromium is not installed"}}`))
+	if !strings.Contains(FullText(fmt.Errorf("opening: %w", hidden)), "is not installed") || strings.Contains(hidden.Error(), "is not installed") {
+		t.Fatalf("matchers miss what the person does not read: %q", FullText(hidden))
 	}
 }

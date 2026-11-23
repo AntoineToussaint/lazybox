@@ -11,5 +11,9 @@ export const errorText = (error: unknown): string => {
 /** A Runner call's refusal as the person reads it: the message inside the Runner's JSON answer, when it is one. */
 export const errorReason = (error: unknown): string => {
   const message = errorText(error);
-  try { return JSON.parse(message).message || message; } catch { return message; }
+  try {
+    const parsed: unknown = JSON.parse(message);
+    const inner = parsed && typeof parsed === 'object' ? (parsed as { message?: unknown }).message : undefined;
+    return typeof inner === 'string' && inner ? inner : message;
+  } catch { return message; }
 };

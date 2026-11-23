@@ -366,9 +366,6 @@ func startupError(title, method string, err error, methods ...authMethod) error 
 		}
 		return fmt.Errorf("%s needs you to sign in. %s", title, hint)
 	}
-	if e.Reason() == "" {
-		return fmt.Errorf("%s did not start (%s): error %d", title, method, e.Code)
-	}
 	return fmt.Errorf("%s did not start (%s): %w", title, method, e)
 }
 

@@ -98,7 +98,7 @@ func (m *Manager) Tool(ctx context.Context, c Caller, name string, raw json.RawM
 	}
 	text, image, err := m.run(ctx, b, action, a)
 	if err != nil {
-		if strings.Contains(err.Error(), "is not installed") {
+		if strings.Contains(jsonl.FullText(err), "is not installed") {
 			// The person installs it with one click; an agent running an
 			// install in its workspace would only fail or install it elsewhere.
 			return "", errors.New("Chromium for the agent browser is not installed on this computer. Do not install it yourself: tell the person they can install it with Install Chromium in Settings → Browser, then use the browser again (no restart needed)")

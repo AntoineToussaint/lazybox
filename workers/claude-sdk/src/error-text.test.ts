@@ -14,4 +14,6 @@ test('an error reads as its message, never as JavaScript\'s "Error: …"', () =>
 test('a Runner refusal reads as the message inside its JSON answer', () => {
   assert.equal(errorReason(new Error('{"message":"refused: not your workspace"}')), 'refused: not your workspace');
   assert.equal(errorReason(new Error('not JSON')), 'not JSON');
+  // A message that is not a string is not passed on as one.
+  assert.equal(errorReason(new Error('{"message":{"code":"E"}}')), '{"message":{"code":"E"}}');
 });

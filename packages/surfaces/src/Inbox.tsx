@@ -53,9 +53,10 @@ export function AttentionCenter({ collections, selection, onOpen, viewState }: {
   const keymap = useKeymap(viewState);
   const show = () => { if (conversationOpeners()?.showAgents()) requestAgentsFocus(); else setOpen(true); };
   useKeyboardAction('inbox.open', show);
-  useAttentionNotifier(inbox, collections, selection, onOpen, keymap);
   const awaiting = useAwaitingTasks(), plans = useMissionAttention() - awaiting, pulls = usePullInboxCount(), github = useGitHubInboxCount();
   const needsInput = inbox.counts['needs-input'] + awaiting + plans, count = inbox.unread + awaiting + plans + pulls + github;
+  // The Dock shows the Inbox button's number: what needs the person, pull requests and tasks included.
+  useAttentionNotifier(inbox, count, collections, selection, onOpen, keymap);
   const label = [inbox.unread ? `Inbox, ${inbox.unread} ${inbox.unread === 1 ? 'conversation needs' : 'conversations need'} attention` : 'Inbox', awaiting ? `${awaiting} ${awaiting === 1 ? 'task awaits' : 'tasks await'} acceptance` : '', plans ? `${plans} ${plans === 1 ? 'plan awaits' : 'plans await'} approval` : '', pulls ? `${pulls} ${pulls === 1 ? 'pull request needs' : 'pull requests need'} you` : '', github ? `${github} GitHub ${github === 1 ? 'item' : 'items'}` : ''].filter(Boolean).join(', ');
   return <>
     <button className="toolbar-action inbox-action" aria-label={label} title={`Inbox (${keymap['inbox.open']})`} aria-expanded={open} onClick={show}>
@@ -153,7 +154,7 @@ function InboxDialog({ inbox, collections, selection, onClose, onOpen }: { inbox
 }
 
 /** Notifications and the dock badge, from the one window whose host can show them. */
-function useAttentionNotifier(inbox: ReturnType<typeof useMergedInbox>, collections: Collection[], selection: ViewTarget, onOpen: (target: ViewTarget) => void, keymap: Keymap) {
+function useAttentionNotifier(inbox: ReturnType<typeof useMergedInbox>, count: number, collections: Collection[], selection: ViewTarget, onOpen: (target: ViewTarget) => void, keymap: Keymap) {
   const host = useAttentionHost();
   const directory = useRunnerDirectory();
   const others = useRef(directory?.runners); others.current = directory?.runners;
@@ -183,11 +184,16 @@ function useAttentionNotifier(inbox: ReturnType<typeof useMergedInbox>, collecti
     const next = bindings(latest.current.keymap['attention.next']).find(isChord);
     deliverAttention(notices.filter(notice => notice.key !== here && notice.key !== elsewhere), preferences, { host, focused, nextKey: next ? displayKey(next) : undefined, open: openNotice });
   }, [host, inbox.rows]);
-  const badge = preferences.badge ? inbox.counts['needs-input'] : 0;
+  const badge = preferences.badge ? count : 0;
   useEffect(() => {
     if (!host?.setAttentionBadge) return;
     void host.setAttentionBadge(badge).catch(() => {});
   }, [host, badge]);
   useEffect(() => () => { void host?.setAttentionBadge?.(0).catch(() => {}); }, [host]);
+  // A system that asks once (macOS): ask at start, while undecided, so the first notification is not lost.
+  useEffect(() => {
+    if (!host?.askAtStart || !host.requestNotificationPermission) return;
+    void host.notificationPermission?.().then(state => state === 'default' ? host.requestNotificationPermission!() : state).catch(() => {});
+  }, [host]);
   useEffect(() => host?.onAttentionOpen?.(destination => open.current({ collectionId: destination.collectionId, sessionId: destination.sessionId, commandId: '', ...(destination.runner ? { runner: destination.runner } : {}) })), [host]);
 }

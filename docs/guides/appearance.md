@@ -75,7 +75,8 @@ Settings → Notifications:
   *failed*, or is *ready for review* (finished its turn). While Lazybox is in
   front you get a toast in the window instead of a system notification, with
   `⌘J` to jump to it.
-- **Dock badge** with the number of conversations waiting for you.
+- **Dock badge** with the Inbox count: conversations, pull requests and tasks
+  waiting for you.
 - **Sounds:** a short sound when something needs you (on by default) and when
   an agent is done (off by default). Each one is Lazybox's soft chime, a macOS
   system sound (Glass, Ping… — in the desktop app) or a short file of your own
@@ -83,4 +84,11 @@ Settings → Notifications:
   **Volume** for all, and **Only when Lazybox is in the background** keeps
   them quiet while you are looking at it. These choices belong to this
   computer, so they are kept by this browser or app, not on the Runner.
-- **Send a test notification** to check your system allows them.
+- **Send a test notification** to check your system allows them. It says
+  whether the system took it; a refusal, of the test or of a real
+  notification, shows here with the reason until one goes through.
+
+In the desktop app, macOS asks once, the first time Lazybox starts, whether
+it may notify you. Settings → Notifications shows what macOS decided. If you
+said no, allow it in **System Settings → Notifications → Lazybox**; Settings
+reads the new answer when you come back.

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
-import { environmentPaths, releasePath, includeSource, validateEnvironmentRoot, shareSubscriptions, sharedSubscriptionState, freezeRunnerReload } from './environments.mjs';
+import { environmentPaths, releasePath, includeSource, validateEnvironmentRoot, shareSubscriptions, sharedSubscriptionState, freezeRunnerReload, workingTauriConfig } from './environments.mjs';
 import { startDesktopDevServer, desktopDevConfig, stopProcessGroup, spawnProcessGroup } from './desktop-dev.mjs';
 import { uiWatcher } from './ui-watch.mjs';
 import { spawn } from 'node:child_process';
@@ -382,4 +382,14 @@ test('managed Dev waits for its own native desktop receipt and detects an exited
   await writeFile(receipt, 'ready');
   await waiting;
   await assert.rejects(waitForDesktop(receipt, { ...desktop, exitCode: 1 }, () => false), /did not finish/);
+});
+
+// Regression: Working's app was only linker-signed (its executable, not its
+// bundle), so macOS had no signed identity to allow notifications for.
+test('a Working build signs its bundle ad hoc, as a release build does', () => {
+  const paths = environmentPaths('/tmp/lazybox-environments', 'working');
+  const config = workingTauriConfig(paths);
+  assert.equal(config.identifier, paths.identifier);
+  assert.equal(config.productName, paths.productName);
+  assert.equal(config.bundle.macOS.signingIdentity, '-');
 });

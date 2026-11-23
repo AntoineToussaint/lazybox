@@ -42,5 +42,24 @@ export function deliverAttention(notices: readonly AttentionNotice[], preference
   }
   // A burst (many agents failing at once) is one summary, not a wall of banners.
   const banners = shown.length > 3 ? [...shown.slice(0, 2), { ...shown[2], title: `${shown.length - 2} more conversations need you`, body: 'Open the Lazybox inbox to see them all.' }] : shown;
-  for (const notice of banners) void host.notifyAttention?.(notice).catch(() => {});
+  for (const notice of banners) void host.notifyAttention?.(notice).then(() => reportRefusal(''), error => reportRefusal(error));
+}
+
+/**
+ * The last notification the system refused, and why ("Notifications are not
+ * allowed for this application"); empty once one goes through. Settings →
+ * Notifications shows it: a refusal is never silent.
+ */
+let refusal = '';
+const refusalListeners = new Set<() => void>();
+export function notificationRefusal(): string { return refusal; }
+export function onNotificationRefusal(listener: () => void): () => void {
+  refusalListeners.add(listener);
+  return () => { refusalListeners.delete(listener); };
+}
+export function reportRefusal(error: unknown) {
+  const next = error ? String(error).replace(/^Error: /, '') : '';
+  if (next === refusal) return;
+  refusal = next;
+  for (const listener of refusalListeners) listener();
 }

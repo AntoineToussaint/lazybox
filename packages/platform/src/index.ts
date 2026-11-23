@@ -20,6 +20,10 @@ export type AttentionHost = {
   onAttentionOpen?(listener: (destination: AttentionDestination) => void): () => void;
   notificationPermission?(): Promise<NotificationPermission>;
   requestNotificationPermission?(): Promise<NotificationPermission>;
+  /** Where the person allows or blocks notifications for this app, when the system owns it ("System Settings → Notifications → Lazybox"); absent in a browser. */
+  systemSettings?: string;
+  /** Ask for permission at start, while undecided: the system prompts once and remembers (macOS). A browser only asks after a click. */
+  askAtStart?: boolean;
 };
 /** A region of the window in CSS pixels, from its top-left corner. */
 export type WindowRect = { x: number; y: number; width: number; height: number };

@@ -11,9 +11,11 @@ export const releaseNotes: readonly Release[] = [
   {
     id: '2026-11-23.1',
     date: '2026-11-23',
-    title: 'Out-of-date pull requests and focus',
+    title: 'Out-of-date pull requests, notifications and focus',
     items: [
       { title: 'Update a pull request that is behind', body: 'When a repository requires branches to be up to date and a pull request is behind its base, the Inbox, the Pull requests panel and the workspace\'s pull request card offer Update branch instead of a Merge GitHub would refuse. It asks first, updates only the head you saw, and the checks run again. A refused merge now shows why.' },
+      { title: 'The Dock shows the Inbox count', body: 'The badge on the app icon is the Inbox button\'s number, pull requests and tasks included, not only conversations waiting for an answer.' },
+      { title: 'Notifications that reach you, or say why not', body: 'On macOS, Lazybox asks permission once and posts through macOS\'s current notification system; Settings → Notifications shows what macOS decided and why a notification was refused, instead of reporting success for notifications macOS dropped.' },
       { title: 'Focus stays where you put it', body: 'A conversation that opens a moment after you start a task (on another Runner, say) no longer takes the keyboard back if you have already moved on.' },
     ],
   },

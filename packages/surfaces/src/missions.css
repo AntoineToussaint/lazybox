@@ -70,11 +70,11 @@
 .mission-column h4 span{margin-left:auto;font-variant-numeric:tabular-nums;letter-spacing:0;color:var(--text-disabled)}
 .column-needs h4{color:var(--attention-input,var(--warn))}
 .mission-column-empty{margin:4px 6px 8px;font-size:calc(11px * var(--text-scale));line-height:1.5;color:var(--text-disabled)}
-.mission-column ul{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.mission-column>ul{grid-template-columns:minmax(0,1fr);list-style:none;margin:0;padding:0;display:grid;gap:6px}
 /* Docked beside the work, columns stack: the board reads top to bottom. */
 @container (max-width:760px){.mission-columns{grid-template-columns:minmax(0,1fr)}.mission-column-empty{display:none}.mission-column:has(ul:empty){padding-bottom:0}}
 
-.mission-card{display:grid;gap:6px;padding:9px 10px;border-radius:7px;background:var(--surface-hover);border:1px solid var(--line-subtle);min-width:0}
+.mission-card{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;padding:9px 10px;border-radius:7px;background:var(--surface-hover);border:1px solid var(--line-subtle);min-width:0}
 .mission-card.status-needs_you{border-color:var(--warn-line)}
 .mission-card.status-failed{border-color:var(--danger-line)}
 .mission-card.status-canceled{opacity:.6}
@@ -109,10 +109,12 @@
 .mission-evidence{list-style:none;display:flex;flex-wrap:wrap;gap:4px;margin:0;padding:0}
 .missions-panel .evidence-chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:1px 7px;border-radius:9px;font:calc(10px * var(--code-scale))/calc(16px * var(--code-scale)) var(--font-mono,ui-monospace,monospace);background:var(--surface);border:1px solid var(--line);color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis}
 .missions-panel .evidence-chip:disabled{opacity:1;cursor:default}
-.evidence-chip time{color:var(--text-disabled);font-family:var(--font-ui)}
-.evidence-chip.tone-pass{border-color:var(--ok-line)}.evidence-chip.tone-pass>span{color:var(--trust-verified)}
-.evidence-chip.tone-fail{border-color:var(--danger-line-subtle)}.evidence-chip.tone-fail>span{color:var(--danger-strong)}
-.evidence-chip.tone-pending>span{color:var(--trust-claimed)}
+.mission-evidence>li{max-width:100%;min-width:0}
+.evidence-chip .evidence-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.evidence-chip time{flex:none;color:var(--text-disabled);font-family:var(--font-ui)}
+.evidence-chip.tone-pass{border-color:var(--ok-line)}.evidence-chip.tone-pass>[aria-hidden]{color:var(--trust-verified)}
+.evidence-chip.tone-fail{border-color:var(--danger-line-subtle)}.evidence-chip.tone-fail>[aria-hidden]{color:var(--danger-strong)}
+.evidence-chip.tone-pending>[aria-hidden]{color:var(--trust-claimed)}
 .mission-card-detail{display:grid;gap:3px;padding-top:4px;border-top:1px solid var(--line-subtle);font-size:calc(11px * var(--text-scale));color:var(--text-tertiary)}
 .mission-card-detail h5{margin:6px 0 0;font-size:calc(10px * var(--text-scale));font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--text-faint)}
 .mission-card-detail p{margin:0;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}

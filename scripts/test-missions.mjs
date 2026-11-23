@@ -141,10 +141,14 @@ try {
   const taskSession = fixture.missions.missions[0].tasks[0].attempts[0].sessionId;
 
   // The agent's failing `lazybox run` attaches by itself; Open goes to its output.
-  const failing = fixture.startRun(taskSession, 'go test ./...', { exitCode: 1, outputBytes: '1468006', agentBytes: '2150', filter: 'go-test', outputPath: '/state/command-output/task/go-1.log' });
-  fixture.missions.recordRun(taskSession, { title: 'go test ./...', exitCode: 1, commandId: failing.id });
-  await expect(split.locator('.evidence-chip')).toContainText('go test ./... · exit 1', { timeout: 10_000 });
+  const command = 'go test ./... ' + 'tools/obin-cli/tests/test_reviewed_plan.py '.repeat(8).trim();
+  const failing = fixture.startRun(taskSession, command, { exitCode: 1, outputBytes: '1468006', agentBytes: '2150', filter: 'go-test', outputPath: '/state/command-output/task/go-1.log' });
+  fixture.missions.recordRun(taskSession, { title: command, exitCode: 1, commandId: failing.id });
+  await expect(split.locator('.evidence-chip')).toContainText(command + ' · exit 1', { timeout: 10_000 });
   await expect(split.locator('.evidence-chip.tone-fail')).toHaveCount(1);
+  const cardBounds = await split.boundingBox();
+  const chipBounds = await split.locator('.evidence-chip.tone-fail').boundingBox();
+  assert.ok(chipBounds.x + chipBounds.width <= cardBounds.x + cardBounds.width + 1, 'long evidence stays inside its task card');
   await expect(split.locator('.mission-flag')).toHaveText('Last run failed');
 
   // Reported done after a failing run: it asks for acceptance, but is only claimed.
@@ -178,7 +182,7 @@ try {
   };
   await reopenBoard();
   // A passing run makes it observed; checks passing on the PR verify it.
-  fixture.missions.recordRun(taskSession, { title: 'go test ./...', exitCode: 0 });
+  fixture.missions.recordRun(taskSession, { title: command, exitCode: 0 });
   await expect(split.locator('.trust-badge')).toHaveText('Observed', { timeout: 10_000 });
   await expect(split.locator('.mission-flag')).toHaveCount(0);
   fixture.missions.recordPullRequest('alpha', { number: 1216, head: 'abcd123', outcome: 'pass' });

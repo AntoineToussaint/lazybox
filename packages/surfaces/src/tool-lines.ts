@@ -24,6 +24,8 @@ export type ToolEntry = {
   output?: string;
   /** Lines in the output the provider reported (before bounding). */
   outputLines?: number;
+  /** UTF-8 size of the observed output before the display preview is bounded. */
+  outputBytes?: number;
   outputImages?: number;
   exitCode?: number;
   /** Reported by the provider (Codex); otherwise taken from journal times. */
@@ -167,6 +169,7 @@ export function applyToolPayload(previous: ToolEntry | undefined, payload: Recor
   }
   if (output !== undefined && output !== null) {
     const { text, images } = outputText(output);
+    next.outputBytes = new TextEncoder().encode(text).length;
     next.output = boundOutput(text); next.outputLines = countLines(text); next.outputImages = images || undefined;
     // Claude reports a failed command as "Exit code N" on the first line.
     const exit = /^Exit code (\d+)/.exec(text);

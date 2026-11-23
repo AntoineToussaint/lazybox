@@ -8,7 +8,7 @@ import { exitAfter, readStream } from './stream.js';
 import { readQuota } from './usage.js';
 import { NativeStatus } from './status.js';
 import { CommandCatalog } from './catalog.js';
-import { contextSnapshot } from './context.js';
+import { contextReporter } from './context.js';
 import { SettingsApprovals, settingsServer, settingsServerName, updateSettingsTool } from './settings.js';
 import { alwaysChoices, covers, decide, offered, restoreGrant, type Grant } from './permissions.js';
 import { browserServer, browserServerName } from './browser.js';
@@ -124,7 +124,10 @@ async function open(options: any) {
 
 async function receive(q: Query) {
   const status = new NativeStatus();
-  let readingContext=false;
+  const reportContext = typeof q.getContextUsage === 'function' && contextReporter(
+    () => q.getContextUsage({ detail: 'summary' }),
+    data => event({ type: 'context', agentId: 'root', sessionId: reference, data }),
+  );
   const end = await readStream(q, message => {
     for (const normalized of status.normalize(message)) {
       // A turn the person interrupted ends with Claude's "error during
@@ -134,16 +137,16 @@ async function receive(q: Query) {
       if (!interrupts.pass(normalized)) continue;
       // A model change that waited for this turn applies before the next one is sent.
       if (normalized.type === 'turn_ended') void models.turnEnded();
-      event(normalized);
+      if (reportContext && normalized.type === 'context' && (!normalized.agentId || normalized.agentId === 'root')) {
+        reportContext(normalized.data);
+      } else {
+        event(normalized);
+      }
     }
     reference = status.reference || reference;
     if (message.type === 'system' && !('parent_tool_use_id' in message && message.parent_tool_use_id)) {
       if (message.subtype === 'init') sayCatalog(catalog.fromInitMessage(message));
       else if (message.subtype === 'commands_changed') sayCatalog(catalog.fromChanged(message.commands));
-    }
-    if(message.type==='result'&&!readingContext&&typeof q.getContextUsage==='function'){
-      readingContext=true;
-      void q.getContextUsage({detail:'summary'}).then(report=>event({type:'context',agentId:'root',sessionId:reference,data:contextSnapshot(report)})).catch(()=>{/* Older CLIs retain their last observed totals. */}).finally(()=>{readingContext=false;});
     }
   });
   // Nothing will read another message: say why, and exit (see exitAfter).

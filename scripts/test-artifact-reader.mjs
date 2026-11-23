@@ -161,6 +161,7 @@ try {
   await expect(page.getByText('0 of 1 complete', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Draft remaining tasks in chat' }).click();
   const taskChat = page.getByRole('complementary', { name: 'Agent companion' });
+  await taskChat.getByRole('combobox', { name: 'Conversation' }).selectOption(session.id);
   const taskDraft = taskChat.getByRole('textbox', { name: 'Message', exact: true });
   await expect(taskDraft).toHaveValue(new RegExp(todo.id + ' --version 1[\\s\\S]*items marked todo'));
   await taskDraft.fill('');
@@ -199,7 +200,8 @@ try {
   const sendsBefore = fixture.mutations.filter(call => call.method === 'Apply').length;
   await page.getByRole('button', { name: 'Discuss selection with agent companion' }).click();
   const chat = page.getByRole('complementary', { name: 'Agent companion' });
-  await expect(chat.getByRole('combobox', { name: 'Conversation' })).toHaveValue(session.id);
+  await expect(chat.getByRole('combobox', { name: 'Conversation' })).toHaveValue('');
+  await chat.getByRole('combobox', { name: 'Conversation' }).selectOption(session.id);
   const draft = chat.getByRole('textbox', { name: 'Message', exact: true });
   await expect(draft).toHaveValue(/--version 1[\s\S]*Selected excerpt:\n> .*Latency/);
   await expect(page.getByRole('separator', { name: 'Resize the chat' })).toBeVisible();
@@ -242,7 +244,7 @@ try {
   await expect(chat).toHaveCount(0);
   await page.getByRole('button', { name: 'Agent companion', exact: true }).click();
   await expect(draft).toHaveValue(noteDraft + '\n\nCould you check this?');
-  await chat.getByRole('button', { name: 'Send message', exact: true }).click();
+  await draft.press('Enter');
   await expect.poll(() => fixture.mutations.filter(call => call.method === 'Apply' && call.body.message).length).toBe(sendsBefore + 1);
   const discussion = fixture.mutations.find(call => call.method === 'Apply' && call.body.message);
   assert.match(JSON.stringify(discussion.body.message), /Workspace note.*Could you check this/);
@@ -253,6 +255,7 @@ try {
   await page.goto(standalone.replace(doc.id, reviewDoc.id));
   const reviewPage = page.getByRole('article', { name: 'Revision review' });
   await reviewPage.getByRole('button', { name: 'Agent companion', exact: true }).click();
+  await chat.getByRole('combobox', { name: 'Conversation' }).selectOption(session.id);
   await expect(draft).toHaveValue(/Revision review/);
   await draft.fill('Could we make this clearer?');
   const publishReview = wording => fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, artifactId: reviewDoc.id, content: '## Scope\n\n' + wording });

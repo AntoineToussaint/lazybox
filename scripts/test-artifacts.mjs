@@ -234,7 +234,8 @@ try{
  const sentBefore=fixture.mutations.filter(call=>call.method==='Apply').length;
  await companionButton.click();
  const companion=page.getByRole('complementary',{name:'Agent companion'});
- await expect(companion.getByRole('combobox',{name:'Conversation'})).toHaveValue('beta-session');
+ await expect(companion.getByRole('combobox',{name:'Conversation'})).toHaveValue('');
+ await companion.getByRole('combobox',{name:'Conversation'}).selectOption('beta-session');
  await expect(companion.getByRole('textbox',{name:'Message',exact:true})).toHaveValue(/Plan from Beta[\s\S]*--version 1/);
  assert.equal(fixture.mutations.filter(call=>call.method==='Apply').length,sentBefore);
  await companion.getByRole('button',{name:'Close agent companion'}).click();

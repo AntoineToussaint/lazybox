@@ -47,7 +47,9 @@ test('the next actions follow the status: assign, report, accept', () => {
 
 test('a mission summary leads with what needs the person', () => {
   assert.equal(missionSummary(mission({})), 'No tasks yet');
-  assert.equal(missionSummary(mission({ tasks: [task({ status: 'needs_you' }), task({ status: 'working' }), task({ status: 'done' }), task({ status: 'canceled' })] })), '1 needs you · 1 working · 1 of 3 done');
+  assert.equal(missionSummary(mission({ tasks: [task({ status: 'needs_you' }), task({ status: 'working' }), task({ status: 'done' }), task({ status: 'canceled' })] })), '1 needs you · 1 working · 1 canceled · 1 of 4 done');
+  assert.equal(missionSummary(mission({ tasks: [task({ status: 'canceled' })] })), '1 canceled · 0 of 1 done');
+  assert.equal(missionSummary(mission({ tasks: [task({ status: 'blocked' }), task({ status: 'failed' })] })), '1 failed · 1 blocked · 0 of 2 done');
   assert.equal(missionSummary(mission({ canceled: true })), 'Canceled');
   assert.match(missionSummary(mission({ error: 'corrupt' })), /Unreadable/);
 });

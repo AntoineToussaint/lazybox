@@ -66,12 +66,14 @@ export function awaitingRows(missions: readonly Mission[]): AwaitingRow[] {
 export function missionSummary(mission: Mission): string {
   if (mission.error) return 'Unreadable: ' + mission.error;
   if (mission.canceled) return 'Canceled';
-  const tasks = mission.tasks.filter(t => t.status !== 'canceled');
+  const tasks = mission.tasks;
   if (!tasks.length) return 'No tasks yet';
-  const count = (key: ColumnKey) => tasks.filter(t => columnOf(t.status) === key).length;
-  const needs = count('needs'), working = count('working'), done = tasks.filter(t => t.status === 'done').length;
-  const parts = [needs && `${needs} need${needs === 1 ? 's' : ''} you`, working && `${working} working`, `${done} of ${tasks.length} done`].filter(Boolean);
-  return parts.join(' · ');
+  const count = (status: string) => tasks.filter(t => t.status === status).length;
+  const needs = count('needs_you') + count('claimed_done');
+  const working = tasks.filter(t => columnOf(t.status) === 'working').length;
+  const failed = count('failed'), blocked = count('blocked'), canceled = count('canceled');
+  return [failed && `${failed} failed`, blocked && `${blocked} blocked`, needs && `${needs} need${needs === 1 ? 's' : ''} you`,
+    working && `${working} working`, canceled && `${canceled} canceled`, `${count('done')} of ${tasks.length} done`].filter(Boolean).join(' · ');
 }
 
 const short = (sha: string) => sha.slice(0, 7);

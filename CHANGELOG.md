@@ -52,6 +52,8 @@ leave out.
 
 ### Workspaces and tabs
 
+- **Mission progress** The board counts canceled and blocked tasks, links to the next task needing attention, and shows acceptance criteria from approved plans.
+
 - **Mission evidence after a handoff** Each assignment tracks its own delivered PRs. The board and inbox show each PR’s checks separately, and the timeline links conversations you can still open.
 - **Pull requests belong to the task that delivered them** Mission tasks receive PR checks after the assigned conversation links or creates the pull request. Sharing a workspace no longer attaches its PR checks to other tasks.
 - **Readable mission timelines** Narrow windows show who acted above each event, with conversation names you can open directly.
@@ -131,6 +133,8 @@ leave out.
 - **Keys act on the row you are on** A pull request action that finishes after you moved to another row leaves you there, so m or Enter on that row never acts on the previous one.
 
 ### Artifacts
+
+- **Work beside an artifact** Open Agent companion from the reader, inspect structured documents by type, or edit the latest source and save a new version.
 
 - **Versioned artifacts** Track a plan or a report from a message, a file or an agent; each update is a version you can compare with the last.
 - **Found from anywhere** A card in the conversation, a count in the chat header, ⌘K across every workspace, and All workspaces in the Artifacts panel.

@@ -108,6 +108,9 @@ try {
   const card = title => panel.locator('.mission-card').filter({ has: page.getByRole('button', { name: title, exact: true }) });
   const column = key => panel.locator(`.column-${key}`);
   await expect(column('ready').locator('.mission-card')).toHaveCount(2);
+  await expect(panel.locator('.mission-summary')).toContainText('1 blocked · 0 of 2 done');
+  await panel.getByRole('button', {name: 'Blocked · Document the parser'}).click();
+  await expect(card('Document the parser')).toBeFocused();
   await expect(card('Document the parser').locator('.mission-status')).toHaveText('Blocked');
   await expect(card('Document the parser').locator('.mission-reason')).toHaveText('Waiting for “Split the parser”');
   await expect(card('Split the parser').locator('.trust-badge')).toHaveCount(0);

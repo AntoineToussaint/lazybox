@@ -107,6 +107,8 @@ async function run(scheme, capped) {
     await sheet.getByRole('button', { name: capped ? 'Approve without cap' : 'Approve and remove $20 grant cap' }).click();
     await expect(sheet).toHaveCount(0);
     await expect(panel.locator('.mission-card')).toHaveCount(3);
+    await panel.locator('summary').filter({ hasText: 'Acceptance criteria' }).click();
+    await expect(panel.getByText('Search restores the last query', { exact: true })).toBeVisible();
     await expect(panel.locator('.mission-orchestrator-budget')).toContainText('no cap');
     assert.equal(updates().find(u => u.approvePlan).approvePlan.capUsd ?? 0, 0);
     assert.deepEqual(errors, []);

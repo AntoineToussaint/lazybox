@@ -41,6 +41,8 @@ Retiring is safe and reversible:
 
 ## Read and compare
 
+Open **Source → Edit source** to edit the latest Markdown, JSON or HTML directly. **Save version** (⌘S or Ctrl+S) publishes a revision. The editor keeps the draft in this window while you switch tabs or review a newer version. If someone publishes first, your draft stays attached to its original version. Copy your changes before discarding it and editing the latest source. Edit a tracked file in its workspace to publish a revision.
+
 An artifact lives in its workspace, and you reach it from wherever you are:
 
 | From | How |
@@ -62,16 +64,9 @@ The page follows new versions by itself. Rename by double-clicking the title.
 
 ## Use it
 
-- **Send to agent** puts a reference in the message box of the conversation
-  beside the page — title, version, an outline, and the command that prints the
-  whole text. You decide when to send.
-- **Open in its own window** for a second screen. Use the same button again
-  to bring that window forward. In that window, **Discuss in chat** opens a
-  resizable chat with the selected version or excerpt ready in the draft.
-  Choose the source conversation, another workspace conversation, or start a
-  new one. You decide when to send. When a new revision arrives, **Review
-  update** compares it with the version you started discussing and keeps the
-  chat beside the diff. **Read latest** returns to the updated document.
+- **Agent companion** opens a chat beside the artifact, or below it in a narrow panel. The draft includes the displayed version and any selected excerpt. You choose when to send. The companion opens the artifact’s source conversation when available. You can choose another conversation in the artifact’s workspace or start a new one. This also works when browsing **All workspaces**. A retained artifact from a deleted workspace offers **Copy artifact reference**.
+- **Review update** compares a new revision with the version you started discussing and keeps the companion beside the diff. **Read latest** returns to the updated document.
+- **Open in its own window** moves reading and discussion to a second screen. Use the same button again to bring that window forward.
 - In a chat you moved to its own window, an artifact opens **beside the chat,
   in that window**. Drag its edge to resize it; × or Esc closes it, and **Open
   in main window** shows it in the workspace.
@@ -96,13 +91,12 @@ The preview supports inline styles, embedded raster images, and native HTML
 controls such as expandable details. It runs in a sandbox with scripts and
 external resources blocked. Repository file tracking uses Markdown.
 
-Use **Source** to read the original HTML in Lazybox. For artifacts managed
+For artifacts managed
 directly in Lazybox, select an older revision and choose **Republish vN** to
 make that content current while preserving the intervening history.
 
-Select text in the Markdown reader or HTML source to **Send selection to
-agent**. The draft includes the excerpt and a command to read the exact
-revision you had open. In a standalone window, Lazybox copies that draft.
+Select text in the Markdown reader or HTML source before opening **Agent companion**. The draft includes the excerpt and a command to read the exact
+revision you had open.
 
 ## Publish a TODO list
 
@@ -118,6 +112,10 @@ Each entry has a unique stable ID, text, and a status of `todo` or `done`. Array
 ```
 
 Checking an item saves a revision. Earlier revisions can be viewed and exported as Markdown checklists.
+
+## Read a typed document
+
+Open **Document** on a JSON spec to read the problem, requirements, and acceptance criteria. A plan presents its steps in execution order and groups its completion checks. A roadmap groups milestones by phase and shows each milestone’s owner, status, dependencies, definition of done and recorded evidence. Select a dependency to jump to its milestone. A checklist records each check or uncheck as a revision.
 
 ## Build a structured artifact
 

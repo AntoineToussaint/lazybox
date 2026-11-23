@@ -28,7 +28,7 @@ function milestoneBrief(m: Milestone) {
   return lines.filter(Boolean).join('\n\n');
 }
 
-export function roadmapMarkdown(plan: Roadmap) {
+export function roadmapPhases(plan: Roadmap) {
   const phases = new Map<string, Milestone[]>();
   for (const milestone of plan.milestones) {
     const phase = milestone.phase.trim() || 'Unassigned phase';
@@ -36,7 +36,11 @@ export function roadmapMarkdown(plan: Roadmap) {
     if (group) group.push(milestone);
     else phases.set(phase, [milestone]);
   }
-  return Array.from(phases, ([phase, milestones]) => {
+  return phases;
+}
+
+export function roadmapMarkdown(plan: Roadmap) {
+  return Array.from(roadmapPhases(plan), ([phase, milestones]) => {
     const accepted = milestones.filter(m => m.status === 'accepted').length;
     const waiting = milestones.filter(m => m.status === 'awaiting-acceptance').length;
     const progress = [accepted + ' of ' + milestones.length + ' accepted'];

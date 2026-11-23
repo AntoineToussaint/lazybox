@@ -198,3 +198,17 @@ test('a structured spec reads as sections, with named criteria by ID and require
   assert.equal(v2, '## Acceptance criteria\n\n- **storage** (required): One work item\n- **docs** (optional): Guide updated');
   assert.doesNotMatch(v2, /object Object/);
 });
+
+test('spec.v2 keeps named criteria in the specialized acceptance section', async () => {
+  const { specOrPlanDocument } = await import('../packages/surfaces/src/artifact-sections.ts');
+  const spec = { schema: 'spec.v2', problem: 'Reconnect', requirements: ['Persist the item'], acceptanceCriteria: [
+    { id: 'retain-item', required: true, expected: 'One item after reconnect' },
+    { id: 'usage-guide', required: false, expected: 'Publish the guide' },
+  ] };
+  const doc = specOrPlanDocument(spec);
+  assert.ok(doc);
+  assert.equal(doc.markdown, structuredMarkdown(spec));
+  assert.deepEqual(doc.sections.map(s => [s.field, doc.markdown.split('\n')[s.line - 1]]), [
+    ['problem', '## Problem'], ['requirements', '## Requirements'], ['acceptanceCriteria', '## Acceptance criteria'],
+  ]);
+});

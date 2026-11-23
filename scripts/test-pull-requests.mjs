@@ -180,12 +180,15 @@ try {
   await expect(siblingSend).toBeEnabled();
   let releaseSend;
   const release = new Promise(resolve => { releaseSend = resolve; });
-  await page.route('**/SendPullRequestFailures', async route => { await release; await route.continue(); });
+  await page.route('**/SendPullRequestFailures', async route => { await release; await route.fetch(); await route.abort(); });
   await page.screenshot({path: '.cache/pull-requests-inbox.png'});
   await pullRows.first().getByRole('button', {name: 'Send the failures to Claude'}).click();
   try { await expect(siblingSend).toBeDisabled(); } finally { releaseSend(); }
   await expect.poll(() => sent('SendPullRequestFailures').length).toBe(2);
+  await expect(siblingSend).toBeEnabled();
+  await siblingSend.click();
   await expect(siblingFailure).toContainText('Auto-dismiss in');
+  assert.equal(f.tracked.sent.filter(item => item.method === 'SendPullRequestFailures').length, 2, 'a lost acknowledgement recovers the original dispatch');
   await expect(siblingSend).toHaveCount(0);
   await sibling.close();
   await expect(pullRows.first().locator('.pr-inbox-note')).toContainText('Sent 2 failing checks');
@@ -231,7 +234,7 @@ try {
   await phone.screenshot({path: '.cache/pull-requests-phone.png'});
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'no sideways scrolling on a phone');
   await phoneRows.first().getByRole('button', {name: 'Send the failures to Claude'}).click();
-  await expect.poll(() => sent('SendPullRequestFailures').length, {timeout: 15_000}).toBe(3);
+  await expect.poll(() => sent('SendPullRequestFailures').length, {timeout: 15_000}).toBe(4);
   assert.equal(f.tracked.sent.filter(item => item.method === 'SendPullRequestFailures').length, 2, 'the phone recovers the desktop delivery receipt');
   await expect(phoneRows.first().getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
   await expect(phoneRows.first()).toContainText('Auto-dismiss in');

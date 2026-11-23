@@ -105,7 +105,9 @@ async function run(scheme, capped) {
   if (!capped) {
     await toggle.uncheck();
     await sheet.getByRole('button', { name: capped ? 'Approve without cap' : 'Approve and remove $20 grant cap' }).click();
-    await expect(line.locator('.lineage-state')).toHaveText('approved');
+    await expect(sheet).toHaveCount(0);
+    await expect(panel.locator('.mission-card')).toHaveCount(3);
+    await expect(panel.locator('.mission-orchestrator-budget')).toContainText('no cap');
     assert.equal(updates().find(u => u.approvePlan).approvePlan.capUsd ?? 0, 0);
     assert.deepEqual(errors, []);
     await context.close();

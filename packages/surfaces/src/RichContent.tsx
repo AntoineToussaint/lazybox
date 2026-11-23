@@ -16,6 +16,8 @@ import go from 'highlight.js/lib/languages/go';
 import rust from 'highlight.js/lib/languages/rust';
 import yaml from 'highlight.js/lib/languages/yaml';
 import diff from 'highlight.js/lib/languages/diff';
+import xml from 'highlight.js/lib/languages/xml';
+import markdown from 'highlight.js/lib/languages/markdown';
 import './rich-content.css';
 import { contextMenu } from './ContextMenu';
 import { codeBlockItems, fileLinkItems } from './chat-context-menu';
@@ -24,7 +26,7 @@ import { inlineRunItems, useRunnableBlock, useRunScope } from './code-runs';
 import { inlineCommand, pathProgramsIn, programAt } from './code-run';
 import { ConversationSourceContext, conversationSourceFromLink } from './conversation-source';
 import { headingSlug } from './docs-model';
-for (const [name, language] of Object.entries({json,bash,typescript,python,go,rust,yaml,diff})) hljs.registerLanguage(name,language);
+for (const [name, language] of Object.entries({json,bash,typescript,python,go,rust,yaml,diff,xml,markdown})) hljs.registerLanguage(name,language);
 hljs.registerAliases(['js','javascript','tsx','jsx','ts'],{languageName:'typescript'});
 
 function Copy({text}:{text:string}) {

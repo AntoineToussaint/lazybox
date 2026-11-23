@@ -1,11 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import hljs from 'highlight.js/lib/core';
-import xml from 'highlight.js/lib/languages/xml';
-import markdown from 'highlight.js/lib/languages/markdown';
 import { CodeBlock } from './RichContent';
-
-hljs.registerLanguage('xml', xml);
-hljs.registerLanguage('markdown', markdown);
 
 type SourceDraft = { version: number; text: string };
 type DraftState = { key: string; draft?: SourceDraft };

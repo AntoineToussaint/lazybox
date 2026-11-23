@@ -23,6 +23,8 @@ The board has four columns â€” **Ready**, **Working**, **Needs you**, **Done** â
 and each card shows the task's status, its trust, its evidence, the
 conversation working on it and whether that agent is alive.
 
+The board summary includes blocked, failed and canceled tasks. A canceled task stays in the original total. Select the task named below the summary to jump to its card. For approved plans with a pinned spec, expand **Acceptance criteria** under the outcome to review the agreed requirements.
+
 ## Evidence is recorded for you
 
 While a conversation works on a task, Lazybox attaches evidence to the task

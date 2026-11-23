@@ -2,7 +2,8 @@ import { peekProps } from './peek-model';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Artifact, Collection } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
-import { ArtifactHostContext, ArtifactPage } from './ArtifactPage';
+import { ArtifactCompanion } from './ArtifactCompanion';
+import { ArtifactHostContext } from './ArtifactPage';
 import { ContextMenu, menuPoint, type ContextMenuState } from './ContextMenu';
 import { DeleteArtifactDialog } from './ArtifactDialogs';
 import { ago, asKind, authorShort, fromConversation, groupByWorkspace, kindIcon, kindLabel, updatedLine, updatedSinceSeen, type ConversationRef } from './artifact-model';
@@ -238,7 +239,7 @@ export function ArtifactsPanel({ workspaceId, collections, viewState, target, on
       </button>}
     </section>
     <Resizer split={SPLITS.artifactsList} label="artifact list"/>
-    {current ? <ArtifactPage key={currentCollectionId + '/' + current.id} collectionId={currentCollectionId} artifactId={current.id} summary={current} collection={other ? collections.find(c => c.id === other.collectionId) : collection}
+    {current ? <ArtifactCompanion viewState={viewState} key={currentCollectionId + '/' + current.id} collectionId={currentCollectionId} artifactId={current.id} summary={current} collection={other ? catalog.find(c => c.id === other.collectionId) : collection}
       onNavigateRelated={(next, fromVersion) => {
         setHistory(items => [...items, { collectionId: currentCollectionId, id: current.id, version: fromVersion }]);
         navigate(currentCollectionId, next.id, next.version);

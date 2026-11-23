@@ -103,6 +103,7 @@ type BoardProps = { missionId: string; collections: Collection[]; viewState?: Vi
 function MissionBoard({ missionId, collections, viewState, onShowSession, onShowPanel }: BoardProps) {
   const missions = useMissions();
   const mission = useMissionDetail(missionId, missions.put);
+  const boardRef = useRef<HTMLDivElement>(null);
   const [adding, setAdding] = useState(false);
   const [tab, setTab] = useState<MissionTab>(() => (readPreference(viewState, tabKey) as MissionTab) || 'board');
   const chooseTab = (next: MissionTab) => { setTab(next); try { writePreference(viewState, tabKey, next); } catch { /* a convenience */ } };
@@ -130,13 +131,25 @@ function MissionBoard({ missionId, collections, viewState, onShowSession, onShow
     if (e.kind === 'run' && e.commandId) onShowPanel?.('console', { collectionId: e.collectionId || task.attempt?.collectionId || '', sessionId: e.sessionId || task.attempt?.sessionId || '', commandId: e.commandId });
     else if (e.url) window.open(e.url, '_blank', 'noopener');
   };
+  const attention = mission.tasks.find(t => t.gate && t.status === 'needs_you')
+    || mission.tasks.find(t => ['failed', 'needs_you', 'changes_requested', 'blocked'].includes(t.status));
   const goals = new Map(mission.goals.map(g => [g.id, g.title]));
-  return <div className="mission-board" data-mission={mission.id}>
+  return <div ref={boardRef} className="mission-board" data-mission={mission.id}>
     <div className="mission-head">
       <div className="mission-title"><h3>{mission.title}</h3>
         <span className="mission-process" title={`Process ${mission.process}, pinned when the mission started (${mission.processDigest}). A report asks you to accept the task; only you can.`}>{mission.process === 'solo-pair' ? 'One agent per task' : mission.process} · you accept each task</span>
       </div>
       {!firstTask && <p className="mission-summary" role="status">{missionSummary(mission)}</p>}
+      {tab === 'board' && attention && !mission.canceled && !mission.error && <div className="mission-next-decision">
+        <button type="button" className="link-button" onClick={() => boardRef.current?.querySelector<HTMLElement>(`[data-task="${CSS.escape(attention.id)}"]`)?.focus()}>
+          {statusLabel[attention.status]} · {attention.title}
+        </button>
+        <span>{attention.reason}</span>
+      </div>}
+      {mission.plans.filter(p => p.state === 'approved' && p.contract?.acceptanceCriteria.length).map(p =>
+        <details className="mission-brief" key={p.id}><summary>Acceptance criteria · {p.summary || 'Approved plan'}</summary>
+          <ul>{p.contract!.acceptanceCriteria.map((line, i) => <li key={i}>{line}</li>)}</ul>
+        </details>)}
       {mission.brief && <details className="mission-brief"><summary>Brief</summary><p>{mission.brief}</p></details>}
       {mission.error && <p className="missions-notice tone-warn">{mission.error}</p>}
     </div>

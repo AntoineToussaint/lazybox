@@ -233,11 +233,13 @@ html[data-motion=reduce] .doc-anchor,html[data-motion=reduce] .doc-toc li a{tran
   background: white;
 }
 
-.artifact-html-source {
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
+.artifact-source-pane .code-block pre{white-space:pre-wrap!important;overflow-wrap:anywhere;max-height:none}
+.artifact-source-pane .code-block code{white-space:inherit}
+.artifact-source-edit{border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--code-bg)}
+.artifact-source-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:7px 12px;background:var(--surface-hover);border-bottom:1px solid var(--line)}
+.artifact-source-actions span{margin-inline-end:auto;color:var(--text-subtle);font-size:calc(12px * var(--text-scale))}
+.artifact-source-edit textarea{display:block;box-sizing:border-box;width:100%;min-height:clamp(230px,52vh,680px);resize:vertical;padding:14px 16px;border:0;border-radius:0;background:var(--code-bg);color:var(--code-text);font:calc(13px * var(--code-scale))/1.6 var(--font-mono);tab-size:2}
+.artifact-source-edit p{margin:8px 12px;font-size:calc(12px * var(--text-scale))}
 
 .artifact-task-progress {
   display: flex;
@@ -249,3 +251,29 @@ html[data-motion=reduce] .doc-anchor,html[data-motion=reduce] .doc-toc li a{tran
   font-family: var(--font-ui);
 }
 .artifact-task-progress progress { width: 6em; height: .45em; accent-color: var(--accent); }
+
+/* A spec's contract and a plan's checks have distinct reading surfaces. */
+.doc-body > .typed-field { margin-block:1.35em; padding:1em 1.15em; border:1px solid var(--line); border-radius:9px; overflow-wrap:anywhere }
+.doc-body > .typed-field:first-child { margin-top:0 }
+.doc-body .typed-field > h2 { margin:0 0 .65em; font-size:1.13em }
+.doc-body .typed-field > :last-child { margin-bottom:0 }
+.doc-body :is(.field-problem,.field-goal) { border:0; border-left:3px solid var(--accent-line); border-radius:0; padding-block:.15em }
+.doc-body :is(.field-acceptanceCriteria,.field-completionChecks) { background:var(--surface-hover) }
+.doc-body .typed-field > ul > li + li,.doc-body .field-steps > ol > li + li { padding-top:.5em; margin-top:.5em; border-top:1px solid var(--line-subtle) }
+.roadmap-document>section+section{margin-top:2em}
+.roadmap-phase,.roadmap-milestone>header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:.3em 1em}
+.doc-body .roadmap-phase h2,.doc-body .roadmap-milestone h3{margin:0}
+.roadmap-phase>span,.roadmap-identity,.roadmap-dependencies,.roadmap-state{font-size:.84em;color:var(--text-muted)}
+.roadmap-milestone{margin-top:.75em;border:1px solid var(--line);border-radius:9px;padding:1em 1.15em;overflow-wrap:anywhere}
+.roadmap-state{border:1px solid var(--line);border-radius:5px;padding:.05em .5em;white-space:nowrap}
+.roadmap-state.state-blocked{color:var(--danger-strong);background:var(--danger-bg)}
+.roadmap-state.state-awaiting-acceptance{color:var(--warn-strong);background:var(--warn-bg)}
+.roadmap-state.state-accepted{color:var(--ok-strong);background:var(--ok-bg)}
+.roadmap-detail{border-top:1px solid var(--line-subtle);padding-top:.65em;margin-top:.7em}
+.doc-body .roadmap-detail h4,.roadmap-detail .doc-body>ul{margin:0 0 .4em}
+
+.artifact-checklist{list-style:none;margin:0;padding:0;max-width:var(--measure)}
+.artifact-checklist li{border-bottom:1px solid var(--line-subtle)}
+.artifact-checklist label{display:flex;align-items:baseline;gap:.7em;padding:.65em .25em;color:var(--reader-text);overflow-wrap:anywhere}
+.artifact-checklist input{flex:none;accent-color:var(--accent-solid)}
+.artifact-checklist [data-status=done] span{text-decoration:line-through;color:var(--text-muted)}

@@ -176,3 +176,6 @@
 .mission-first-task h4{margin:0}
 .mission-first-task p{max-width:54ch;margin:6px 0 12px;color:var(--text-secondary)}
 .mission-first-task .task-form{margin:0}
+
+.mission-next-decision{display:grid;justify-items:start;gap:2px;margin:6px 0}
+.mission-next-decision span{color:var(--text-subtle);font-size:calc(12px * var(--text-scale))}

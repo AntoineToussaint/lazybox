@@ -6,6 +6,7 @@ import { homeOffers, type HomeTarget } from './home-run';
 import { CodeBlock } from './RichContent';
 import { MermaidDiagram } from './MermaidDiagram';
 import { Icon } from './Icons';
+import type { ArtifactSection } from './artifact-sections';
 import { lineDiff } from './artifact-model';
 import { blockDiff, calloutLabel, cellTone, parseCallout, type BlockChange, type CalloutKind, type TocEntry } from './artifact-reader';
 import '@fontsource-variable/inter/opsz.css';
@@ -14,7 +15,7 @@ import '@fontsource-variable/newsreader/opsz-italic.css';
 import './artifact-reader.css';
 
 /** The few hast shapes the callout plugin reads and rewrites. */
-type HastNode = { type: string; tagName?: string; value?: string; properties?: Record<string, unknown>; children?: HastNode[] };
+type HastNode = { type: string; tagName?: string; position?: { start: { line: number } }; value?: string; properties?: Record<string, unknown>; children?: HastNode[] };
 type HastNodeProp = ExtraProps['node'];
 const textOf = (node: HastNode | HastNodeProp | undefined): string => !node ? '' : node.type === 'text' ? (node as HastNode).value || '' : ((node as HastNode).children || []).map(child => textOf(child)).join('');
 
@@ -46,6 +47,26 @@ function rehypeCallouts() {
   return (tree: HastNode) => visit(tree);
 }
 
+// Group schema-defined fields in the existing Markdown tree. Its links,
+// footnotes, diagrams, code controls and source-based heading ids stay intact.
+function rehypeArtifactSections(sections: ArtifactSection[]) {
+  const byLine = new Map(sections.map(section => [section.line, section]));
+  return (tree: HastNode) => {
+    const grouped: HastNode[] = [];
+    let current: HastNode | undefined;
+    for (const node of tree.children || []) {
+      const field = node.tagName === 'h2' && byLine.get(node.position?.start.line ?? 0);
+      if (field) {
+        current = { type: 'element', tagName: 'section', properties: { className: ['typed-field', 'field-' + field.field], ariaLabel: field.label }, children: [] };
+        grouped.push(current);
+      }
+      if (node.tagName === 'section' && node.properties?.dataFootnotes !== undefined) current = undefined;
+      (current?.children || grouped).push(node);
+    }
+    tree.children = grouped;
+  };
+}
+
 const calloutIcon: Record<CalloutKind, string> = { note: 'notes', tip: 'sparkle', important: 'alert', warning: 'alert', caution: 'alert', decision: 'check' };
 
 function scrollToId(container: HTMLElement | null, id: string) {
@@ -58,6 +79,7 @@ function scrollToId(container: HTMLElement | null, id: string) {
 
 type BodyProps = {
   markdown: string;
+  sections?: ArtifactSection[];
   /** Heading ids by source line, from extractToc of the same text. */
   headings?: TocEntry[];
   /** The scroll container, for in-document links (footnotes, anchors). */
@@ -75,7 +97,7 @@ type BodyProps = {
  * code with its language and copy, Mermaid diagrams, footnotes. Raw HTML is
  * never interpreted and external images are not loaded.
  */
-export const DocumentBody = memo(function DocumentBody({ markdown, headings, scroller, idPrefix = 'doc-', marked, onReviewShell }: BodyProps) {
+export const DocumentBody = memo(function DocumentBody({ markdown, sections, headings, scroller, idPrefix = 'doc-', marked, onReviewShell }: BodyProps) {
   const byLine = useMemo(() => new Map((headings || []).map(entry => [entry.line, entry])), [headings]);
   // Markdown renderers are component types. Recreating them on a workspace
   // refresh remounts every diagram and resets its pan, zoom and source view.
@@ -137,11 +159,12 @@ export const DocumentBody = memo(function DocumentBody({ markdown, headings, scr
       },
       // Do not load external images from an agent's document just by reading it.
       img: ({ alt }) => <span className="content-reference">{alt || 'Image reference'}</span>,
-      section: ({ node, children, className }) => (className || '').includes('footnotes') || node?.properties?.dataFootnotes !== undefined ? <section className="doc-footnotes" aria-label="Footnotes">{children}</section> : <section className={className}>{children}</section>,
+      section: ({ node, children, className, ...attrs }) => (className || '').includes('footnotes') || node?.properties?.dataFootnotes !== undefined ? <section className="doc-footnotes" aria-label="Footnotes">{children}</section> : <section {...attrs} className={className}>{children}</section>,
     };
   }, [byLine, scroller, marked, markdown, canReviewShell]);
+  const plugins = useMemo(() => sections ? [rehypeCallouts, () => rehypeArtifactSections(sections)] : [rehypeCallouts], [sections]);
   return <div className="doc-body">
-    <Markdown remarkPlugins={[remarkGfm]} remarkRehypeOptions={{ clobberPrefix: idPrefix }} rehypePlugins={[rehypeCallouts]} components={components}>{markdown}</Markdown>
+    <Markdown remarkPlugins={[remarkGfm]} remarkRehypeOptions={{ clobberPrefix: idPrefix }} rehypePlugins={plugins} components={components}>{markdown}</Markdown>
   </div>;
 });
 

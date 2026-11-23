@@ -12,11 +12,11 @@ export function todoMarkdown(content: string) {
 
 export function TodoList({ content, disabled, onSave }: { content: string; disabled: boolean; onSave(body: string): void }) {
   const list = JSON.parse(content) as { schema: string; items: Item[] };
-  return <ol>{list.items.map(item => <li key={item.id}><label>
+  return <ol className="artifact-checklist" aria-label="Checklist items">{list.items.map(item => <li key={item.id} data-status={item.status}><label>
     <input type="checkbox" checked={item.status === 'done'} disabled={disabled} onChange={event => {
       const status = event.target.checked ? 'done' : 'todo';
       const items = list.items.map(entry => entry.id === item.id ? { ...entry, status } : entry);
       onSave(JSON.stringify({ ...list, items }, null, 2));
-    }}/> {item.text}
+    }}/><span>{item.text}</span>
   </label></li>)}</ol>;
 }

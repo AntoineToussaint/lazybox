@@ -213,6 +213,7 @@ try{
  await expect(list.getByRole('option')).toHaveCount(2);
  // An artifact made in another workspace is one click away, not lost: All workspaces lists it under its workspace.
  fixture.artifacts.agentPut({collectionId:'beta',sessionId:'beta-session',conversationId:'conversation-beta',title:'Plan from Beta',kind:'plan',content:'# Plan from Beta\n\nSteps.\n'});
+ fixture.artifacts.agentPut({collectionId:'beta',sessionId:'alpha-session',title:'Imported plan with moved origin',kind:'plan',content:'Imported from Alpha.'});
  const scopes=page.getByRole('radiogroup',{name:'Show artifacts of'});
  await scopes.getByRole('radio',{name:'All workspaces'}).click();
  const elsewhere=page.getByRole('listbox',{name:'Artifacts of every workspace'});
@@ -221,16 +222,35 @@ try{
  await kept.click();
  const keptPage=page.getByRole('article',{name:'Kept after deletion'});
  await expect(keptPage).toContainText('Historical results');
+ await expect(keptPage.getByRole('button',{name:'Copy artifact reference'})).toBeVisible();
  if(await keptPage.getByRole('button',{name:'Back to artifacts'}).isVisible())await keptPage.getByRole('button',{name:'Back to artifacts'}).click();
  await elsewhere.getByRole('option',{name:/Plan from Beta/}).click();
  await expect(page.getByRole('article',{name:'Plan from Beta'})).toBeVisible();
  await page.screenshot({path:'.cache/artifacts-panel.png'});
  const fromBeta=page.getByRole('article',{name:'Plan from Beta'});
+ // Opening an artifact in Alpha's dock uses Beta's companion and preserves the workspace chat.
+ const companionButton=fromBeta.getByRole('button',{name:'Agent companion',exact:true});
+ await expect(companionButton.locator('span')).toBeVisible();
+ const sentBefore=fixture.mutations.filter(call=>call.method==='Apply').length;
+ await companionButton.click();
+ const companion=page.getByRole('complementary',{name:'Agent companion'});
+ await expect(companion.getByRole('combobox',{name:'Conversation'})).toHaveValue('beta-session');
+ await expect(companion.getByRole('textbox',{name:'Message',exact:true})).toHaveValue(/Plan from Beta[\s\S]*--version 1/);
+ assert.equal(fixture.mutations.filter(call=>call.method==='Apply').length,sentBefore);
+ await companion.getByRole('button',{name:'Close agent companion'}).click();
+ await expect(companionButton).toBeFocused();
  await fromBeta.getByLabel('Artifact actions',{exact:true}).click();
- await expect(fromBeta.getByRole('button',{name:'Copy mission proposal brief'})).toBeVisible();
- await expect(fromBeta.getByRole('button',{name:'Draft mission proposal in chat…'})).toHaveCount(0);
+ await expect(fromBeta.getByRole('button',{name:'Draft mission proposal in chat…'})).toBeVisible();
  await fromBeta.getByLabel('Artifact actions',{exact:true}).click();
  if(await fromBeta.getByRole('button',{name:'Back to artifacts'}).isVisible())await fromBeta.getByRole('button',{name:'Back to artifacts'}).click();
+ await elsewhere.getByRole('option',{name:/Imported plan with moved origin/}).click();
+ const imported=page.getByRole('article',{name:'Imported plan with moved origin'});
+ await imported.getByRole('button',{name:'Agent companion',exact:true}).click();
+ await expect(companion.getByRole('combobox',{name:'Conversation'})).toBeEnabled();
+ await expect(companion.getByRole('combobox',{name:'Conversation'})).toHaveValue('');
+ await expect(companion.locator('select option[value="alpha-session"]')).toHaveCount(0);
+ await companion.getByRole('button',{name:'Close agent companion'}).click();
+ if(await imported.getByRole('button',{name:'Back to artifacts'}).isVisible())await imported.getByRole('button',{name:'Back to artifacts'}).click();
  await scopes.getByRole('radio',{name:'This workspace'}).click();
  await expect(fromBeta).toHaveCount(0);
 

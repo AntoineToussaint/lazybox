@@ -36,6 +36,7 @@ export default scenario({
       highlight(css('.plan-tasks').in(sheet), { label: 'In order', hold: 1.8 }),
       highlight(css('.plan-overlaps').in(sheet), { label: 'Shared files', hold: 1.6 }),
       caption('Approve it, with a budget cap'),
+      click(role('checkbox', 'Set a budget cap').in(sheet)),
       click(role('button', /^Approve with \$\d+ cap$/).in(sheet)),
       expect.hidden(sheet),
       expect.call('UpdateMission', body => !!body.approvePlan),

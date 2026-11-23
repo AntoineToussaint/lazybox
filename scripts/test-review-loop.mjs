@@ -53,7 +53,16 @@ try{
  const chat=page.locator('section.panel-chat:visible');
  const start=async(label='Review with Codex')=>{const before=fixture.reviewOf('alpha').runs.length;await changes.getByRole('group',{name:'Review with another agent'}).getByRole('button',{name:label}).click();await expect.poll(()=>fixture.reviewOf('alpha').runs.length).toBe(before+1);return fixture.reviewOf('alpha').runs.at(-1);};
  const reviewRow=run=>tray.locator(`li[data-review="${run.id}"]`);
- const sendAccepted=async n=>{await tray.getByRole('button',{name:`Send ${n} comment${n===1?'':'s'} to the agent`}).click();};
+ // Filed findings are drafted in the author's message box ("Fix N findings in
+ // <conversation>"); they count as sent when the person sends that message.
+ const sendAccepted=async n=>{
+  await tray.getByRole('button',{name:new RegExp(`^Fix ${n} finding${n===1?'':'s'} in `)}).click();
+  const box=chat.getByRole('textbox',{name:'Message',exact:true});
+  await expect(box).not.toHaveValue('');
+  const draft=await box.inputValue();
+  await box.press('Enter');await expect(box).toHaveValue('');
+  return draft;
+ };
 
  // ---- Two rounds, ending clean ------------------------------------------
  const run=await start();
@@ -67,8 +76,7 @@ try{
  await expect(row.getByRole('group',{name:'Codex review loop'})).toBeVisible();
  await tray.locator('.review-tray-list').getByRole('listitem').filter({hasText:'The error is logged, not returned'}).getByRole('button',{name:'Accept'}).click();
  await tray.getByRole('button',{name:/^Pending/}).click();
- await sendAccepted(1);
- await expect(chat.getByRole('textbox',{name:'Message',exact:true})).toHaveValue(/To ask about one, run `lazybox ask reviewer/);
+ assert.match(await sendAccepted(1),/To ask about one, run `lazybox ask reviewer/);
  // The reviewer's conversation is a tab beside the work, on its page; the author's shows the exchange too.
  await expect(chat.getByRole('note').filter({hasText:'Codex asked Claude:'})).toContainText('Should Handle ever log?');
  await expect(chat.getByRole('note').filter({hasText:'Claude answered Codex:'})).toContainText('No: return the error.');
@@ -158,7 +166,7 @@ try{
   assert.ok(trayBox.x+trayBox.width<=diffBox.x+1,`${name}: the tray covers no part of the diff`);
   // Every loop control and the Send button answer a click where they are, even with the findings scrolled to their end.
   await tray.locator('.review-tray-scroll').evaluate(node=>{node.scrollTop=node.scrollHeight;});
-  for(const control of [fourthControls.getByRole('combobox',{name:'Between rounds'}),fourthControls.getByRole('button',{name:'Pause'}),fourthControls.getByRole('button',{name:'Stop loop'}),fourthControls.getByRole('button',{name:'Take over'}),fourthRow.getByRole('status'),tray.getByRole('button',{name:/^Send/}),tray.getByRole('button',{name:'Close review'})]) {
+  for(const control of [fourthControls.getByRole('combobox',{name:'Between rounds'}),fourthControls.getByRole('button',{name:'Pause'}),fourthControls.getByRole('button',{name:'Stop loop'}),fourthControls.getByRole('button',{name:'Take over'}),fourthRow.getByRole('status'),tray.getByRole('button',{name:/^(Send .* to the agent|Fix \d+ findings? in )/}),tray.getByRole('button',{name:'Close review'})]) {
    await control.scrollIntoViewIfNeeded();
    assert.ok(await hit(control),`${name}: ${await control.evaluate(node=>node.getAttribute('aria-label')||node.textContent)} is in reach`);
   }

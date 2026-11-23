@@ -80,6 +80,11 @@ button.workspace-pulls-overflow{display:none}
   .workspace-shell .workspace-header-actions{gap:2px}
   .workspace-shell .toolbar-action{width:34px;height:34px;padding:0;justify-content:center}
   .workspace-shell .toolbar-action>span,.workspace-shell .toolbar-action>kbd{display:none}
+  /* Four page tabs (Missions, Work, Extensions, Settings) keep their room: the workspace's name is in
+     the context bar right below, and its tools keep it as their label. */
+  .workspace-shell .workspace-header>nav{flex:0 0 auto}
+  .workspace-shell .workspace-header>nav button{padding:0 10px}
+  .workspace-header .workspace-tool-name{display:none}
 }
 @media(max-width:760px){
   .workspace-shell .workspace-header{gap:6px;padding:0 8px;flex-shrink:0}

@@ -891,7 +891,8 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       ]),
       command('layout.add', 'New tab in the active group…', 'Layout', () => group && openAddMenu(group.id), () => docked && canAdd(group), keymap['layout.add']),
       command('layout.reset', 'Reset layout to default', 'Layouts', () => applyLayout(builtinPresets.find(value => value.id === DEFAULT_PRESET)!), () => workspaceOpen && !locked),
-      command('layout.reset-all', 'Reset the layout and shortcuts', 'Layouts', () => resetEverything(), () => workspaceOpen, keymap['layout.reset-all']),
+      // The way back from any page, Settings and Missions included: it shows the reset workspace.
+      command('layout.reset-all', 'Reset the layout and shortcuts', 'Layouts', () => resetEverything(), () => true, keymap['layout.reset-all']),
       ...[...builtinPresets, ...savedLayouts].map(preset => command(`layout.preset:${preset.id}`, `Layout: ${preset.name}`, 'Layouts', () => applyLayout(preset), () => workspaceOpen && !locked)),
       ...Object.entries(registry).map(([kind, module]) => command(`panel.show:${kind}`, `Show ${module.title}`, 'Panels', () => kind === 'terminal' ? showTerminal() : kind === 'chat' ? showSession(livePage().selection) : kind === 'artifacts' ? showWorkspaceArtifacts() : kind === 'agents' ? void bringBackAgents() : void showModule(kind), () => !locked && workspaceOpen && (kind !== 'terminal' || terminalReady))),
     ];
@@ -943,7 +944,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     ...directional('resize', (direction, argument) => dock.current?.resize(direction, !!(argument as { repeat?: boolean } | undefined)?.repeat)),
     ...tabSlots,
     'layout.add': { run: () => { const group = dock.current?.activeGroup(); if (group) openAddMenu(group.id); }, enabled: () => hasActive() && canAdd(dock.current?.activeGroup()) },
-    'layout.reset-all': { run: () => resetEverything(), enabled: () => workspaceOpen },
+    'layout.reset-all': { run: () => resetEverything(), enabled: () => true },
   } as Parameters<typeof useActions>[0]);
   /** Whether a group has a `+`: not the sidebar (its panels are the workspace list), and not a group in a window of its own. */
   const canAdd = (group?: { panels: Panel[]; location: string }) => !!group && group.location !== 'popout' && !group.panels.every(panel => sidebarKinds.has(panel.kind));

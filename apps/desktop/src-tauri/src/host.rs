@@ -1250,6 +1250,21 @@ pub fn window_event(window: &tauri::Window, event: &WindowEvent) {
     }
 }
 
+fn apply_placement(
+    w: &tauri::Window,
+    p: &placement::Placement,
+    maximized: bool,
+) -> tauri::Result<()> {
+    w.unmaximize()?;
+    w.set_min_size(Some(tauri::LogicalSize::new(p.min_width, p.min_height)))?;
+    w.set_position(tauri::PhysicalPosition::new(p.x, p.y))?;
+    w.set_size(tauri::LogicalSize::new(p.width, p.height))?;
+    if maximized {
+        w.maximize()?;
+    }
+    Ok(())
+}
+
 /// Arrange visible Lazybox windows on the focused display. Other displays keep their roles.
 fn arrange_windows(app: &tauri::AppHandle, action: &str) -> Result<(), String> {
     let host = app.try_state::<Host>().ok_or("Connect a Runner first")?;
@@ -1308,16 +1323,7 @@ fn arrange_windows(app: &tauri::AppHandle, action: &str) -> Result<(), String> {
             }
             let p = placement::fit(Some(g), &displays)?;
             w.unminimize().map_err(error)?;
-            w.unmaximize().map_err(error)?;
-            w.set_min_size(Some(tauri::LogicalSize::new(p.min_width, p.min_height)))
-                .map_err(error)?;
-            w.set_position(tauri::PhysicalPosition::new(p.x, p.y))
-                .map_err(error)?;
-            w.set_size(tauri::LogicalSize::new(p.width, p.height))
-                .map_err(error)?;
-            if *maximized {
-                w.maximize().map_err(error)?;
-            }
+            apply_placement(&w, &p, *maximized).map_err(error)?;
         }
         return Ok(());
     }
@@ -1349,19 +1355,7 @@ fn arrange_windows(app: &tauri::AppHandle, action: &str) -> Result<(), String> {
         // logical dimensions across monitors with different pixel densities.
         let p = placement::fit(Some(&current), std::slice::from_ref(destination))?;
         let maximized = focus.is_maximized().map_err(error)?;
-        focus.unmaximize().map_err(error)?;
-        focus
-            .set_min_size(Some(tauri::LogicalSize::new(p.min_width, p.min_height)))
-            .map_err(error)?;
-        focus
-            .set_position(tauri::PhysicalPosition::new(p.x, p.y))
-            .map_err(error)?;
-        focus
-            .set_size(tauri::LogicalSize::new(p.width, p.height))
-            .map_err(error)?;
-        if maximized {
-            focus.maximize().map_err(error)?;
-        }
+        apply_placement(&focus, &p, maximized).map_err(error)?;
         return Ok(());
     }
     let work = geometry(&focus)?.display.work;
@@ -1394,19 +1388,20 @@ fn arrange_windows(app: &tauri::AppHandle, action: &str) -> Result<(), String> {
         if width < 320.0 || height < 240.0 {
             return Err("These windows do not fit on this display. Move some to another display or choose another arrangement.".into());
         }
-        moves.push((w, rect, width, height));
+        moves.push((
+            w,
+            placement::Placement {
+                x: rect.x as i32,
+                y: rect.y as i32,
+                width,
+                height,
+                min_width: width.min(580.0),
+                min_height: height.min(600.0),
+            },
+        ));
     }
-    for (w, rect, width, height) in moves {
-        w.unmaximize().map_err(error)?;
-        w.set_min_size(Some(tauri::LogicalSize::new(
-            width.min(580.0),
-            height.min(600.0),
-        )))
-        .map_err(error)?;
-        w.set_size(tauri::LogicalSize::new(width, height))
-            .map_err(error)?;
-        w.set_position(tauri::PhysicalPosition::new(rect.x as i32, rect.y as i32))
-            .map_err(error)?;
+    for (w, p) in moves {
+        apply_placement(&w, &p, false).map_err(error)?;
     }
     Ok(())
 }

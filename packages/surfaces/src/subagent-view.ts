@@ -1,6 +1,6 @@
 import { createContext, useContext, useSyncExternalStore } from 'react';
 import type { Session } from '@lazybox/protocol';
-import { ancestry, canStopSubagent, emptySubagents, type Subagent, type SubagentStatus, type Subagents } from './subagent-model';
+import { ancestry, canStopSubagent, emptySubagents, panelAgent, type Subagent, type SubagentStatus, type Subagents } from './subagent-model';
 import type { FileLink } from './file-reference';
 import type { OpenModifiers } from './file-links';
 
@@ -173,7 +173,7 @@ export function useSubagentView(): SubagentView | null { return useContext(Subag
 const noop = () => () => {};
 /** One sub-agent, re-rendering only when it changes. */
 export function useSubagent(view: SubagentView | null, id: string): Subagent | undefined {
-  return useSyncExternalStore(view ? view.subscribe : noop, () => view?.index.byId[id]);
+  return useSyncExternalStore(view ? view.subscribe : noop, () => view && panelAgent(view.index, id) || undefined);
 }
 /** The presentation (open cards, panel…); re-renders on any change to it. */
 export function usePresentation(view: SubagentView | null): number {

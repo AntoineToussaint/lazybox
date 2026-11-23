@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -124,7 +123,7 @@ func (b *Bench) probeAgentCLI(program string, done chan struct{}) {
 	defer s.probes.Done()
 	base := make([]string, 0, 64)
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "LAZYBOX_V2_") {
+		if !runnerWiring(entry) {
 			base = append(base, entry)
 		}
 	}

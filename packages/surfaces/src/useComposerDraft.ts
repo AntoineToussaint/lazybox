@@ -40,6 +40,7 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
   const [uncertainSend, setUncertainSend] = useState('');
   const sendAttempt = useRef<SendAttempt | null>(null);
 
+  const snippet = useRef<{key:string; text:string} | undefined>(undefined);
   const reviewDrafts = useRef<ReviewDraft[]>([]);
   const [restoring, setRestoring] = useState(false);
   const saved = useRef<{ destination: string; files: File[] } | undefined>(undefined);
@@ -49,6 +50,7 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
     async function restore() {
       const draft = readDraft(viewState, sessionID);
       setFiles([]); setMissingFiles([]);
+      snippet.current = draft.snippetKey ? {key:draft.snippetKey, text:draft.text} : undefined;
       reviewDrafts.current = draft.reviews || [];
       setMessage(draft.text);
       setUncertainSend(draft.operationId);
@@ -82,7 +84,8 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
     try {
       const refs = fileReferences(selected, text, missing, operationId);
       reviewDrafts.current = reviewDrafts.current.filter(r => text.includes(r.text));
-      writeDraft(viewState, destination, { text, files: [...refs, ...missing], operationId, reviews: reviewDrafts.current });
+      if (snippet.current?.text !== text || selected.length || missing.length) snippet.current = undefined;
+      writeDraft(viewState, destination, { snippetKey:snippet.current?.key, text, files: [...refs, ...missing], operationId, reviews: reviewDrafts.current });
       if (!viewState) return;
       const binary = selected.filter((_, i) => refs[i].blobId);
       const previous = saved.current;
@@ -97,5 +100,5 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
     } catch (e) { onError(`Could not save this window's draft: ${String(e)}`); }
   };
 
-  return { reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft };
+  return { snippet, reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft };
 }

@@ -151,6 +151,9 @@ try{
  await expect(sentChip).toBeVisible();
  await expect(sentChip.locator('xpath=ancestor::article[1]')).toContainText('Include the CLI.');
  await sentChip.click();
+ const pinnedPreview=page.getByRole('tooltip').filter({hasText:'Run the relevant tests.'});
+ await pinnedPreview.dispatchEvent('pointerdown',{pointerType:'touch'});
+ await expect(sentChip).toHaveAttribute('aria-expanded','true');
  await expect(page.getByRole('tooltip').filter({hasText:'Run the relevant tests.'})).toBeVisible();
  await sentChip.press('Escape');
  f.runner.journalMessages=false;

@@ -185,7 +185,7 @@ try{
  await expect(youSaid(chat,'Also log the port it picked.').locator('.message-tag')).toHaveText('steered');await expect(chat.getByRole('article',{name:'You, steered: Also log the port it picked.'})).toHaveCount(1);await expect(youSaid(chat,'Also log the port it picked.').locator('.eyebrow')).toHaveCount(0);await page.mouse.move(0,0);await youSaid(chat,'Also log the port it picked.').screenshot({path:'.cache/message-own-steered.png'});
 
  await composer.fill('Inspect the error path independently');await composer.press('Enter');
- await strip.getByRole('button',{name:'Send to sub-agent'}).click();
+ await strip.getByRole('button',{name:'Request delegation'}).click();
  await expect.poll(()=>deliveries().at(-1)).toEqual({operationId:sentAs('Inspect the error path independently'),how:'delegate'});
  assert.equal(codex.interrupted,undefined);
  await expect(youSaid(chat,'Inspect the error path independently').locator('.message-tag')).toHaveText('sub-agent requested');

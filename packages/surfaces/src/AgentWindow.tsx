@@ -164,7 +164,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       if (!snippet) { setError(`Snippet "${entry.snippet}" no longer exists. Update the ]] menu in Settings → Keyboard.`); return; }
       saveSnippetUse(viewState, snippet.key);
       if (entry.mode === 'send' && !message.trim() && !files.length && !missingFiles.length && !sending) void send(undefined, snippet.body, snippet.key);
-      else { const next = message + (message && !message.endsWith('\n') ? '\n' : '') + snippet.body; setMessage(next); persistDraft(next, files, missingFiles); requestAnimationFrame(() => composer.current?.focus()); }
+      else { const next = message + (message && !message.endsWith('\n') ? '\n' : '') + snippet.body; draftSnippet.current = next === snippet.body ? {key:snippet.key, text:next} : undefined; setMessage(next); persistDraft(next, files, missingFiles); requestAnimationFrame(() => composer.current?.focus()); }
     }, error => setError(humanError(error)));
   });
   // Enter while a send is in flight (the box is read-only meanwhile) does nothing: the send under way says how it went.
@@ -178,7 +178,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // other read of the window (its review, its sessions) then waited forever.
   const shown = useContext(PanelShownContext);
   const transcript = useTranscript(api, sessionID, !!info && shown);
-  const [branchSelection, setBranchSelection] = useState<{ message: TranscriptMessage; source: string; requestKey: string }>();
+  const [branchSelection, setBranchSelection] = useState<{ message: TranscriptMessage; source: string; requestKey: string; sideQuestion?: boolean }>();
   const branchMessage = branchSelection?.source === sessionID ? branchSelection.message : undefined;
   const [retryDraft, setRetryDraft] = useState('');
   const [branchFromCheckpoint, setBranchFromCheckpoint] = useState(false);
@@ -190,7 +190,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const scroll = useChatScroll(transcript.reader, conversation, session?.pending.length);
   const { jumpToLatest } = scroll;
   const [error, setError] = useState('');
-  const { reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
+  const { snippet: draftSnippet, reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
   const [commandsOpen, setCommandsOpen] = useState(initialCommandsOpen ?? !!initialCommandId);
   const [sending, setSending] = useState(false);
   const [commands, setCommands] = useState<CommandStatus[]>([]);
@@ -301,16 +301,21 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     sendingRef.current = true; setSending(true); setError(''); jumpToLatest();
     const signal = lifetime.current!.signal;
     try {
-      const reviewKey = snippetKey ?? slash.snippetRows.find(row => isReviewSnippet(row.key) && row.body.trim() === text.trim())?.key;
-      if (reviewKey && isReviewSnippet(reviewKey) && !files.length) {
+      const reviewKey = snippetKey ?? (draftSnippet.current?.text === text ? draftSnippet.current.key : undefined);
+      if ((uncertainSend.startsWith('review-') || (reviewKey && isReviewSnippet(reviewKey))) && !files.length) {
         const launcher = chatReview.launcher;
         if (launcher.unavailable) { setError(launcher.unavailable); return false; }
-        const requestKey = uncertainSend || crypto.randomUUID();
+        const requestKey = uncertainSend || 'review-' + crypto.randomUUID();
+        draftSnippet.current = {key: reviewKey || "review", text};
         setUncertainSend(requestKey);
         setMessage(text);
         persistDraft(text, [], [], requestKey);
         const started = await launcher.start({ scope: 'changes' }, undefined, text, 'code-review-v1', requestKey);
-        if (!started?.run || started.run.state === 'failed') return false;
+        if (!started?.run) return false;
+        if (started.run.state === 'failed') {
+          if (!signal.aborted) { setUncertainSend(''); persistDraft(text, [], []); }
+          return false;
+        }
         if (!signal.aborted) { setUncertainSend(''); setMessage(''); persistDraft('', [], []); }
         return true;
       }
@@ -496,13 +501,14 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     return true;
   };
   const drop = useFileDrop({ canAttach, onFiles: selectFiles, onError: setError });
-  const insertSnippet = (body: string) => {
+  const insertSnippet = (body: string, key: string) => {
     const node = composer.current, start = node?.selectionStart ?? message.length, end = node?.selectionEnd ?? message.length;
     const next = message.slice(0, start) + body + message.slice(end);
     // The text and the caret after it are placed now, not on a later frame: a
     // frame that came late used to move the caret over whatever the person did
     // next (select all, then Delete, deleted nothing).
     flushSync(() => { setMessage(next); setUncertainSend(''); });
+    draftSnippet.current = next === body ? {key, text:body} : undefined;
     persistDraft(next, files, missingFiles); sendAttempt.current = null;
     node?.setSelectionRange(start + body.length, start + body.length);
     // Only the focus waits, for the picker to go (it makes the composer inert);
@@ -551,7 +557,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     if (why) { showMenuNotice(why); return; }
     scroll.revealMessage(block.messageId);
     // Run opens the Terminal panel with the command at the prompt, as the block's own Run does; never a message to the agent.
-    if (myself) codeRuns.openConfirm(block.messageId, block.script); else void codeRuns.runLastTerminal(block.messageId, block.script);
+    if (myself) codeRuns.openConfirm(block.messageId, block.script, false, block.offset); else void codeRuns.runLastTerminal(block.messageId, block.script, block.offset);
   };
   const canRunLast = () => !!codeRuns && activity.current() && !!lastBlock.current;
   useActions({
@@ -599,8 +605,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       if (!stopped.session?.closed || stopped.session.recoveryRequired) {
         throw new Error('Lazybox could not confirm that the previous continuation stopped.');
       }
-      await api.apply({ sessionId: child.id, operationId: branchSelection.requestKey,
+    }
+    if (retry || branchSelection.sideQuestion) {
+      const receipt = await api.apply({ sessionId: child.id, operationId: branchSelection.requestKey,
         operation: { case: 'message', value: { text: retryDraft, attachments: [] } } });
+      if (receipt.error || receipt.delivery === "failed") throw new Error(receipt.error || "The Runner could not deliver this message.");
       savePrompt(viewState, retryDraft, child.conversationId || child.id);
     }
     setBranchSelection(undefined);
@@ -638,7 +647,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     api, viewState, enabled: mode === 'agent' && !!sessionID, session, sessionID, agentName, provider, catalog: transcript.catalog,
     model: transcript.reportedModel || session?.model || '', conversation, shellBlock: !!codeRuns && !!lastShellBlock, detail: activity.detail,
     subscriptions: (profileList || []).filter(p => p.provider === provider).length, canCompose, message,
-    setText: text => { setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); },
+    setText: (text, key) => { draftSnippet.current = key ? {key, text} : undefined; setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); },
     textarea: composer, front: activity.current, onError: setError, reviewLauncher: chatReview.launcher,
     actions: {
       sendText: async text => {
@@ -721,18 +730,18 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {transcript.error && <TranscriptNotice error={transcript.error} onRetry={transcript.retry}/>}
           {handoffMessage && session?.collectionId && onOpenHandoff && <ConversationHandoff source={session} message={handoffMessage}
             open={onOpenHandoff} onClose={() => setHandoffMessage(undefined)}/>}
-          {branchMessage && <ConfirmDialog title={branchMessage.type === 'operation_accepted' ? 'Edit and restart here' : 'Fork after this turn'}
-            confirm={branchMessage.type === 'operation_accepted' ? 'Restart with revised prompt' : 'Fork conversation'} working="Opening conversation…" tone="primary"
-            closeLabel="Close conversation branch" canConfirm={branchMessage.type !== 'operation_accepted' || !!retryDraft.trim()}
+          {branchMessage && <ConfirmDialog title={branchSelection?.sideQuestion ? 'Ask a side question' : branchMessage.type === 'operation_accepted' ? 'Edit and restart here' : 'Fork after this turn'}
+            confirm={branchSelection?.sideQuestion ? 'Ask in new conversation' : branchMessage.type === 'operation_accepted' ? 'Restart with revised prompt' : 'Fork conversation'} working="Opening conversation…" tone="primary"
+            closeLabel="Close conversation branch" canConfirm={(!branchSelection?.sideQuestion && branchMessage.type !== 'operation_accepted') || !!retryDraft.trim()}
             onClose={() => setBranchSelection(undefined)} onConfirm={openBranch}
             details={busy => <>
               {session?.collectionId && onOpenHandoff && <label>Workspace files<select disabled={busy} value={branchFromCheckpoint ? 'checkpoint' : 'current'} onChange={event => setBranchFromCheckpoint(event.target.value === 'checkpoint')}>
                 <option value="checkpoint">New workspace from this turn</option>
                 <option value="current">Use current workspace files</option>
               </select></label>}
-              {branchMessage.type === 'operation_accepted' && <label>Revised prompt<textarea disabled={busy} value={retryDraft} onChange={event => setRetryDraft(event.target.value)}/></label>}
+              {(branchSelection?.sideQuestion || branchMessage.type === 'operation_accepted') && <label>{branchSelection?.sideQuestion ? 'Side question' : 'Revised prompt'}<textarea disabled={busy} value={retryDraft} onChange={event => setRetryDraft(event.target.value)}/></label>}
             </>}>
-            {branchMessage.type === 'operation_accepted'
+            {branchSelection?.sideQuestion ? 'Only the new conversation receives your question. Its history ends at this turn.' : branchMessage.type === 'operation_accepted'
               ? 'Restarting stops the previous continuation and sends your revised prompt. The previous continuation remains available in History.'
               : 'The source conversation can keep working while the fork runs.'}
             {' '}
@@ -744,7 +753,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             Open previous conversation
           </button>}
           <CodeRunContext.Provider value={codeRuns}><MessageArea onBranch={allowStart && !assistant && session?.provider === 'codex'
-            ? entry => { setBranchSelection({ message: entry, source: sessionID, requestKey: crypto.randomUUID() }); setRetryDraft(entry.text); setBranchFromCheckpoint(entry.type !== 'operation_accepted' && !!session.collectionId && !!onOpenHandoff); } : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
+            ? (entry, sideQuestion) => { setBranchSelection({ message: entry, source: sessionID, requestKey: crypto.randomUUID(), sideQuestion }); setRetryDraft(sideQuestion ? "" : entry.text); setBranchFromCheckpoint(entry.type !== 'operation_accepted' && !!session.collectionId && !!onOpenHandoff); } : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             enableFullAccess={session?.provider === 'codex' && !session.closed && session.capabilities?.livePermission && session.permission !== 'yolo' && session.workflow !== 'plan' && !assistant ? () => changePermission('yolo') : undefined}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
             subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>

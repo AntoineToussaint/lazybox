@@ -60,7 +60,7 @@ type Options = {
   subscriptions: number;
   canCompose: boolean;
   message: string;
-  setText(text: string): void;
+  setText(text: string, snippetKey?: string): void;
   textarea: RefObject<HTMLTextAreaElement | null>;
   /** This is the chat in front: the palette's commands mean it. */
   front(): boolean;
@@ -156,8 +156,8 @@ export function useSlashCommands(o: Options) {
 
   // A draft set aside while a command from the palette or a menu borrows the box.
   const stash = useRef<string | null>(null);
-  const setText = (text: string) => {
-    latest.current.setText(text);
+  const setText = (text: string, snippetKey?: string) => {
+    latest.current.setText(text, snippetKey);
     // The caret goes to the end a frame later, once the box holds the text — unless
     // the person typed on meanwhile: what they typed keeps its caret.
     const box = latest.current.textarea.current;
@@ -328,7 +328,7 @@ export function useSlashCommands(o: Options) {
     }
     const command = menu.items[index]?.command;
     if (!command) return;
-    if (command.group === 'snippet') { saveSnippetUse(latest.current.viewState, command.name); stash.current = null; setText(command.body || ''); return; }
+    if (command.group === 'snippet') { saveSnippetUse(latest.current.viewState, command.name); stash.current = null; setText(command.body || '', command.name); return; }
     if (command.disabled) { notice(command.disabled); return; }
     if (complete || command.argumentHint || command.choices?.length || command.needsArgument) { setText(`/${command.name} `); return; }
     if (command.group === 'provider') {
@@ -390,7 +390,7 @@ export function useSlashCommands(o: Options) {
       case 'text': return false;
       case 'lazybox': run(decision.command, decision.args); return true;
       case 'provider': if (decision.command.disabled) { notice(decision.command.disabled); return true; } return false;
-      case 'snippet': setText(decision.command.body || ''); return true;
+      case 'snippet': setText(decision.command.body || '', decision.command.name); return true;
     }
   };
 

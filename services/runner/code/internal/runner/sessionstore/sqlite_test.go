@@ -80,3 +80,44 @@ func TestDeleteRemovesWholeConversationAndRejectsResurrection(t *testing.T) {
 		t.Fatal("legacy import resurrected deletion")
 	}
 }
+
+func TestActionReservationsSurviveRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sessions.db")
+	open := func() *SQLite {
+		db, err := OpenSQLite(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	db := open()
+	for _, id := range []string{"completed", "interrupted", "rejected"} {
+		if claimed, _, err := db.ClaimAction(ctx, id); err != nil || !claimed {
+			t.Fatal(id, claimed, err)
+		}
+	}
+	if err := db.FinishAction(ctx, "completed", []byte("receipt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReleaseAction(ctx, "rejected"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db = open()
+	defer db.Close()
+	for _, tc := range []struct {
+		id      string
+		claim   bool
+		receipt string
+	}{
+		{"completed", false, "receipt"}, {"interrupted", false, ""}, {"rejected", true, ""},
+	} {
+		claimed, receipt, err := db.ClaimAction(ctx, tc.id)
+		if err != nil || claimed != tc.claim || string(receipt) != tc.receipt {
+			t.Fatal(tc.id, claimed, string(receipt), err)
+		}
+	}
+}

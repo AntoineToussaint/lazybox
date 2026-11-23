@@ -88,7 +88,7 @@ export function PlanSheet({ mission, plan, onClose }: { mission: Mission; plan: 
         </> : <>
           <button type="button" className="plan-reject" disabled={busy} onClick={() => setRejecting(true)}>Reject…</button>
           <span className="plan-shortcut">⌘↵</span>
-          <button className="primary" disabled={busy} autoFocus>{busy ? 'Approving…' : cap > 0 ? `Approve with ${usd(cap)} cap` : useCap ? 'Approve with cap' : 'Approve without cap'}</button>
+          <button className="primary" disabled={busy} autoFocus>{busy ? 'Approving…' : cap > 0 ? `Approve with ${usd(cap)} cap` : useCap ? 'Approve with cap' : grant?.ceiling?.budgetUsd ? `Approve and remove ${usd(grant.ceiling.budgetUsd)} grant cap` : 'Approve without cap'}</button>
         </>}
       </footer>
     </form>

@@ -232,6 +232,7 @@ try {
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'no sideways scrolling on a phone');
   await phoneRows.first().getByRole('button', {name: 'Send the failures to Claude'}).click();
   await expect.poll(() => sent('SendPullRequestFailures').length, {timeout: 15_000}).toBe(3);
+  assert.equal(f.tracked.sent.filter(item => item.method === 'SendPullRequestFailures').length, 2, 'the phone recovers the desktop delivery receipt');
   await expect(phoneRows.first().getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
   await expect(phoneRows.first()).toContainText('Auto-dismiss in');
 

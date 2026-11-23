@@ -1001,7 +1001,8 @@ func (s *session) read() {
 				var failure struct {
 					WillRetry bool `json:"willRetry"`
 					Error     struct {
-						Code json.RawMessage `json:"codexErrorInfo"`
+						Message string          `json:"message"`
+						Code    json.RawMessage `json:"codexErrorInfo"`
 					} `json:"error"`
 				}
 				if !fields(&failure) {
@@ -1012,6 +1013,7 @@ func (s *session) read() {
 				detail, _ := json.Marshal(failure.Error)
 				ev.Account = errorObservation(detail)
 				ev.Status = ev.Account.State
+				ev.Text = failure.Error.Message
 				if failure.WillRetry {
 					ev.Type = "provider_retry"
 				}

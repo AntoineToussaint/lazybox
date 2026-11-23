@@ -150,7 +150,7 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
                 {busy && steer && <button type="button" onClick={() => void deliver(message, 'steer')}
                   title={`Give ${agentName} this message now, inside the running turn, without stopping it`}><Icon name="send" size={11}/>Steer</button>}
                 {busy && steer && session.capabilities?.subagents && !origin && <button type="button" onClick={() => void deliver(message, 'delegate')}
-                  title={`Ask ${agentName} to delegate this message to a sub-agent and continue the current task`}>Send to sub-agent</button>}
+                  title={`Ask ${agentName} to delegate this message to a sub-agent and continue the current task`}>Request delegation</button>}
                 {busy && <button type="button" onClick={() => void deliver(message, 'now')}
                   title={`${stops} and send this as the next turn${index === 0 && sendNowKey ? ` (${sendNowKey})` : ''}`}><Icon name="stop" size={11}/>Send now</button>}
                 <button type="button" onClick={() => void deliver(message, 'delete')}

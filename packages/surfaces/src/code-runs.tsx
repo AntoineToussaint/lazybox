@@ -268,9 +268,9 @@ export class CodeRuns {
     return placeFor(target, registeredHomes);
   }
 
-  runLastTerminal(messageId: string, script: string) {
+  runLastTerminal(messageId: string, script: string, offset: number) {
     const message = this.messages.find(value => value.id === messageId);
-    const target = explicitHomeTarget(message?.text || '', script);
+    const target = explicitHomeTarget(message?.text || '', script, offset);
     return this.runIn(messageId, script, this.runPlace(target), 'run', !!target);
   }
 
@@ -410,9 +410,9 @@ export class CodeRuns {
       showMenuNotice(busy ? (server ? 'Queued — starts after the current turn' : 'Queued — runs after the current turn') : `Sent to ${this.agentName}`);
     } catch (error) { showMenuNotice(`Could not send: ${String(error instanceof Error ? error.message : error)}`); }
   }
-  openConfirm(messageId: string, script: string, inline = false) {
+  openConfirm(messageId: string, script: string, inline = false, offset?: number) {
     const message = this.messages.find(value => value.id === messageId);
-    if (needsTerminal(script) || explicitHomeTarget(message?.text || '', script)) {
+    if (needsTerminal(script) || explicitHomeTarget(message?.text || '', script, offset)) {
       showMenuNotice('Use the terminal button for this command');
       return;
     }

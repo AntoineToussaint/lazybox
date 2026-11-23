@@ -24,7 +24,7 @@ export function SnippetPicker({
   canSend: boolean;
   onClose(): void;
   onCatalog(rows: Snippet[]): void;
-  onInsert(text: string): void;
+  onInsert(text: string, key: string): void;
   onSend(text: string, key: string): Promise<boolean>;
 }) {
   const { api } = useRunner(),
@@ -89,7 +89,7 @@ export function SnippetPicker({
   const insert = () => {
     if (selected && !busy) {
       used(selected.key);
-      onInsert(selected.body);
+      onInsert(selected.body, selected.key);
       onClose();
     }
   };

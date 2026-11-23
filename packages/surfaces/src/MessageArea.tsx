@@ -46,7 +46,7 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
   onError(message: string): void;
   onHandoff?(message: HandoffMessage): void;
   enableFullAccess?(): Promise<boolean>;
-  onBranch?(message: TranscriptMessage): void;
+  onBranch?(message: TranscriptMessage, sideQuestion?: boolean): void;
   onOpenHandoff?: OpenHandoffConversation;
   /** The subscription limit card and switch dialog, after the requests. */
   subscription?: ReactNode;

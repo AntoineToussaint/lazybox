@@ -105,7 +105,7 @@ func TestGeneratedTitleMigrationKeepsRenames(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Back to the previous schema, as an older Runner left it.
-	if _, err = store.db.Exec(`ALTER TABLE conversation_metadata DROP COLUMN generated; ALTER TABLE conversation_metadata DROP COLUMN pinned_at; ALTER TABLE conversation_metadata DROP COLUMN archived_at; PRAGMA user_version=3`); err != nil {
+	if _, err = store.db.Exec(`ALTER TABLE conversation_metadata DROP COLUMN generated; ALTER TABLE conversation_metadata DROP COLUMN pinned_at; ALTER TABLE conversation_metadata DROP COLUMN archived_at; DROP TABLE action_receipts; PRAGMA user_version=3`); err != nil {
 		t.Fatal(err)
 	}
 	store.Close()

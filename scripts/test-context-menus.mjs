@@ -293,17 +293,17 @@ try{
  assert.ok((await labels()).includes('Stop agent…'));
  await item('Copy PID').click();assert.match(await copied(),/^\d+$/);
 
- // Terminal: Copy, Paste, Select all, Clear, Send selection to agent.
+ // Terminal: Copy, Paste, Select all, Clear, Add selection to draft.
  await page.getByRole('button',{name:'Open terminal',exact:true}).click();
  const screen=page.locator('.panel-terminal').getByTestId('terminal');
  await expect(screen).toContainText('fixture shell in Alpha feature');
  await open(screen);
- assert.deepEqual((await labels()).slice(0,5),['Copy','Paste','Select all','Clear','Send selection to agent']);
+ assert.deepEqual((await labels()).slice(0,5),['Copy','Paste','Select all','Clear','Add selection to draft']);
  await expect(item('Copy')).toHaveAttribute('aria-disabled','true');
  await item('Select all').click();
  await open(screen);await expect(item('Copy')).not.toHaveAttribute('aria-disabled','true');
  await item('Copy').click();assert.match(await copied(),/fixture shell in Alpha feature/);
- await open(screen);await item('Send selection to agent').click();
+ await open(screen);await item('Add selection to draft').click();
  await expect(composer).toHaveValue(/```\n[^]*fixture shell in Alpha feature/);
  await composer.fill('');
 

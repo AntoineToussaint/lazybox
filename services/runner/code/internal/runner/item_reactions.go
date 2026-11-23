@@ -435,6 +435,15 @@ func (b *Bench) importPullRequestReview(ctx context.Context, workspace string, r
 		}
 		drafts = append(drafts, draft)
 	}
+	if observation != "" {
+		current, err := b.DeliveredLink(workspace, ref)
+		if err != nil {
+			return Reaction{}, err
+		}
+		if current.Session != session || b.refreshNow(ctx, ref).ObservationID() != observation {
+			return Reaction{}, errors.New("the review or its conversation changed while loading feedback; refresh before sending")
+		}
+	}
 	markStarted()
 	added, err := b.Reviews.Import(workspace, drafts)
 	if err != nil {

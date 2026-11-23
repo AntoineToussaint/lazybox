@@ -82,3 +82,9 @@ In a running Codex turn, **Allow and enable Full access** accepts the pending co
 Saved snippet text in drafts and sent prompts appears as a named chip. Hover, focus, or tap the chip to read the full text. **Edit prompt** opens the original draft, and **Collapse snippet text** restores the compact view. Matching uses the current snippet catalog; unmatched text stays visible.
 
 After a successful pull request Inbox action, its button gives way to a delivery receipt and a ten-second auto-dismiss countdown. Dismiss closes it immediately. Failed actions remain available to retry.
+
+Prompt Details shows the acceptance time, last provider-reported model and last reported context. Missing measurements are labeled unreported. An inserted review snippet retains its review action in the draft across reload. Pasting the same text creates an ordinary message. The Review tray records selected findings as sent when the Runner acknowledges the message.
+
+For Codex replies with a turn boundary, **Ask a side question…** opens a separate conversation through that turn. The question goes to the child. The dialog identifies whether its files come from a checkpoint or the current workspace.
+
+The Inbox sends a reaction for the displayed observation and destination. Updated Runners store the acknowledgement so another device or a retry can retrieve it. If the Runner stops between dispatch and saving its receipt, it reports the outcome as unknown and prevents an automatic second dispatch. Feedback requiring a person stays in the Inbox until dismissed. Dismissals from older clients without a Runner and observation identity may appear again.

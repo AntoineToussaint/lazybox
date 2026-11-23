@@ -141,10 +141,22 @@ try {
   await message.fill("");
   await page.getByRole("button", { name: "Snippets", exact: true }).click();
   await dialog.getByRole("searchbox").fill("review");
-  await dialog
-    .getByRole("button", { name: "Start review", exact: true })
-    .click();
-  await expect(dialog).toHaveCount(0);
+  let firstReviewer;
+  await page.route('**/StartReview', async route => {
+    const response = await route.fetch();
+    firstReviewer = (await response.json()).session.id;
+    await route.abort();
+  }, {times: 1});
+  await dialog.getByRole("button", {name: "Start review", exact: true}).click();
+  await expect(dialog.getByRole("alert")).toContainText(/confirm/i);
+  await dialog.getByRole("button", {name: "Close snippets"}).click();
+  await page.getByRole("button", {name: "Send message", exact: true}).click();
+  await expect(message).toHaveValue("");
+  const starts = f.mutations.filter(m => m.method === "StartReview");
+  assert.equal(starts.length, 2);
+  assert.ok(starts[0].body.requestKey);
+  assert.equal(starts[0].body.requestKey, starts[1].body.requestKey);
+  assert.deepEqual(f.reviewOf("alpha").runs.map(r => r.reviewerSessionId), [firstReviewer]);
   assert.equal(f.mutations.filter((m) => m.method === "Apply").length, 0);
   assert.equal(f.mutations.findLast(m => m.method === "StartReview").body.focus, "Review the current change carefully.");
   await expect(message).toHaveValue("");
@@ -166,9 +178,7 @@ try {
   await message.press("Control+b");
   await expect(alpha.locator(".workspace-link")).toBeFocused();
   await page.keyboard.press("ArrowDown");
-  await expect(alpha.locator(".conversation-link:focus")).toContainText("Review");
-  await page.keyboard.press("ArrowDown");
-  await expect(rows.nth(1).locator(".workspace-link")).toBeFocused();
+  await expect(page.getByRole("navigation", {name: "Workspace conversations"}).getByRole("button", {name: /Running: Codex Review/})).toBeFocused();
   // The leader menu is configurable: add an entry, see it in the which-key card, use it.
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("tab", { name: "Shortcuts" }).click();
@@ -179,7 +189,7 @@ try {
   await page.getByLabel("Action for entry 1").selectOption("insert");
   await page.getByRole("button", { name: "Save menu", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: "Menu saved." })).toBeVisible();
-  await page.getByRole("navigation", { name: "Pages" }).getByRole("button").first().click();
+  await page.getByRole("navigation", { name: "Pages" }).getByRole("button", {name:"Work", exact:true}).click();
   await message.fill("");
   await message.focus();
   await message.press("Control+b");
@@ -199,14 +209,14 @@ try {
   });
   await page.getByRole("button", { name: "Refresh workspaces" }).click();
   // Several conversations are listed under the card, one line each; folded,
-  // the row names the one it shows and counts the rest ("+1"), the full count its tooltip.
+  // the row names the one it shows and counts the rest ("+2"), the full count its tooltip.
   await expect(
     page.locator(".workspace-conversations .conversation-row"),
-  ).toHaveCount(2);
+  ).toHaveCount(3);
   await expect(alpha.locator(".workspace-agent")).toHaveCount(0);
-  await alpha.getByRole("button", { name: /^Fold the 2 conversations/ }).click();
-  await expect(alpha.locator(".workspace-agent-more")).toHaveText("+1");
-  await expect(alpha.locator(".workspace-agent-more")).toHaveAttribute("title", "2 conversations");
+  await alpha.getByRole("button", { name: /^Fold the 3 conversations/ }).click();
+  await expect(alpha.locator(".workspace-agent-more")).toHaveText("+2");
+  await expect(alpha.locator(".workspace-agent-more")).toHaveAttribute("title", "3 conversations");
   await expect(page.locator(".workspace-conversations")).toHaveCount(0);
   await page.screenshot({ path: "/tmp/lazybox-navigation-multiple.png" });
   assert.deepEqual(errors, []);

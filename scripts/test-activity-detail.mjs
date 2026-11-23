@@ -48,6 +48,11 @@ try{
  await mkdir('.cache',{recursive:true});
  const messages=page.locator('.messages:visible').first();
  await expect(messages.locator('.prompt-sent-time').last()).toHaveAttribute('title',/fixture-model.*250 \/ 1,000 tokens/);
+ const details=messages.locator('.prompt-metadata').last();
+ await details.getByLabel('Prompt details').click();
+ await expect(details.locator('p')).toContainText(/fixture-model.*250 \/ 1,000 tokens/);
+ await details.getByLabel('Prompt details').press('Escape');
+ await expect(details.locator('p')).toBeHidden();
  const override=messages.getByLabel('Response detail for this prompt').last();
  await override.selectOption('hidden');
  await expect(messages.getByText('Earlier answer',{exact:true})).toBeVisible();

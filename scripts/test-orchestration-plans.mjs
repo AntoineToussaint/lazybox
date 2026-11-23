@@ -43,7 +43,7 @@ async function run(scheme, capped) {
   fixture.openEvents('alpha-session').push({ type: 'message_delta', text: 'Here is how I would split it.' });
   // The person granted it earlier, asking for a plan first.
   const m = fixture.missions.create('Ship search');
-  const grant = fixture.missions.handle('UpdateMission', { missionId: m.id, grant: { sessionId: 'alpha-session', ceiling: { maxChildren: 3, planRequired: true } } });
+  const grant = fixture.missions.handle('UpdateMission', { missionId: m.id, grant: { sessionId: 'alpha-session', ceiling: { maxChildren: 3, planRequired: true, budgetUsd:capped ? 0 : 20 } } });
   assert.ok(!grant.error, JSON.stringify(grant.error));
   const plan = fixture.missions.proposePlan('alpha-session', { summary: 'index first, then rank; docs alongside', tasks: [
     { key: 'index', title: 'Index the corpus', brief: 'Objective: a token index\nDone when: go test ./search passes', role: 'worker', workspace: 'pinned', paths: ['search/'], estimateUsd: 4 },
@@ -100,11 +100,11 @@ async function run(scheme, capped) {
   await expect(sheet.getByLabel('Budget cap in dollars')).toHaveCount(0);
   const toggle = sheet.getByRole('checkbox', { name: 'Set a budget cap' });
   await expect(toggle).not.toBeChecked();
-  await expect(sheet.getByRole('button', { name: 'Approve without cap' })).toBeEnabled();
+  await expect(sheet.getByRole('button', { name: capped ? 'Approve without cap' : 'Approve and remove $20 grant cap' })).toBeEnabled();
   await toggle.check();
   if (!capped) {
     await toggle.uncheck();
-    await sheet.getByRole('button', { name: 'Approve without cap' }).click();
+    await sheet.getByRole('button', { name: capped ? 'Approve without cap' : 'Approve and remove $20 grant cap' }).click();
     await expect(line.locator('.lineage-state')).toHaveText('approved');
     assert.equal(updates().find(u => u.approvePlan).approvePlan.capUsd ?? 0, 0);
     assert.deepEqual(errors, []);

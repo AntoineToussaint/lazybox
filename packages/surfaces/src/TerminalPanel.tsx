@@ -83,7 +83,7 @@ function exitText(status: TerminalStatus) {
   return status.error || (status.signal ? `${program} ended by ${status.signal}` : status.exitCode === undefined ? `${program} ended` : `${program} exited with code ${status.exitCode}`);
 }
 
-export function TerminalPanel({ workspaceId, collections, viewState, onClosePanel, initialTerminalId, initialInput, sessionId = '', onShowSession }: { workspaceId: string; collections: Collection[]; viewState?: ViewStateStore; initialTerminalId?: string; initialInput?: string; onClosePanel?(): void; /** The page's conversation: where Send selection to agent goes. */ sessionId?: string; onShowSession?(target: ViewTarget): void }) {
+export function TerminalPanel({ workspaceId, collections, viewState, onClosePanel, initialTerminalId, initialInput, sessionId = '', onShowSession }: { workspaceId: string; collections: Collection[]; viewState?: ViewStateStore; initialTerminalId?: string; initialInput?: string; onClosePanel?(): void; /** The page's conversation: where Add selection to draft goes. */ sessionId?: string; onShowSession?(target: ViewTarget): void }) {
   const conversation = useWorkConversation(workspaceId, sessionId);
   // A terminal's selection goes to the work conversation's message box, as a block to review and send.
   const sendToAgent = (text: string) => {
@@ -351,7 +351,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
         { label: 'Select all', icon: 'selectAll', run: () => { view?.selectAll(); view?.focus(); } },
         { label: 'Clear', icon: 'clear', run: () => { view?.clear(); view?.focus(); } },
         'separator',
-        ...(terminal.place === 'interactive-command' ? [] : [{ label: 'Send selection to agent', icon: 'send' as const, disabled: !selection ? 'Select text in the terminal first' : !canSend && 'No conversation in this workspace yet', run: () => onSendToAgent(selection) }]),
+        ...(terminal.place === 'interactive-command' ? [] : [{ label: 'Add selection to draft', icon: 'send' as const, disabled: !selection ? 'Select text in the terminal first' : !canSend && 'No conversation in this workspace yet', run: () => onSendToAgent(selection) }]),
         'separator',
         onNewTerminal && { label: 'New terminal', icon: 'plus', run: onNewTerminal },
         { label: live ? 'Close terminal' : 'Remove terminal', icon: 'close', danger: live, run: onCloseTerminal },
@@ -363,7 +363,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
         const view = xterm.current;
         const text = view?.getSelection();
         if (text) { onSendToAgent(text); view?.clearSelection(); }
-      }}><Icon name="send" size={14}/>Send to agent</button>}
+      }}><Icon name="send" size={14}/>Add selection to draft</button>}
     <footer><span className="mono" title={status.shell}>{status.title}</span><span>{status.done ? exitText(status) : connection}</span></footer>
   </div>;
 }

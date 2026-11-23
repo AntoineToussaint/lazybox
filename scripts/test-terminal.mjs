@@ -60,7 +60,7 @@ try {
  const banner=screen.locator('.xterm-rows > div').filter({hasText:'fixture shell in Alpha feature'}).first();
  const bannerBox=await banner.boundingBox();
  await page.mouse.dblclick(bannerBox.x+12,bannerBox.y+bannerBox.height/2);
- const share=panel.getByRole('button',{name:'Send to agent',exact:true});
+ const share=panel.getByRole('button',{name:'Add selection to draft',exact:true});
  await expect(share).toBeVisible();
  const applied=calls('Apply').length;
  await share.click();
@@ -100,7 +100,7 @@ try {
  const linkMenu=page.locator('.context-menu[data-depth="0"]');
  const linkItems=await linkMenu.locator('.context-menu-label').allTextContents();
  assert.deepEqual(linkItems.slice(0,4),['Open in your browser','Open in Lazybox','Open in a new Lazybox panel','Copy link'],`link menu: ${linkItems}`);
- assert.ok(linkItems.includes('Copy')&&linkItems.includes('Send selection to agent'),'the terminal items follow');
+ assert.ok(linkItems.includes('Copy')&&linkItems.includes('Add selection to draft'),'the terminal items follow');
  await linkMenu.getByRole('menuitem',{name:'Open in your browser'}).click();
  await expect.poll(linksOpened).toEqual([signIn,signIn]);
  await page.screenshot({path:'/tmp/lazybox-terminal-link.png'});

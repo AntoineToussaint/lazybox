@@ -5,7 +5,7 @@ import { isAcp } from './providers';
 /** A file of a saved draft. A pasted text box keeps its text, so it comes back after a reload; other attachments reference bytes in local draft storage. */
 export type FileReference = { name: string; size: number; lastModified: number; text?: string; blobId?: string };
 export type ReviewDraft = { text: string; ids: string[] };
-export type Draft = { text: string; files: FileReference[]; operationId: string; reviews?: ReviewDraft[] };
+export type Draft = { text: string; files: FileReference[]; operationId: string; snippetKey?: string; reviews?: ReviewDraft[] };
 /** A console's view of one command: its search, whether it follows the end, where it was read, and the sources it hides. */
 export type ConsoleState = { search: string; follow: boolean; scrollTop: number; hidden?: string[] };
 const blank = (): Draft => ({ text: '', files: [], operationId: '' });
@@ -26,7 +26,7 @@ export function readDraft(store: ViewStateStore | undefined, session: string): D
     files.push({ name: file.name, size: file.size, lastModified: file.lastModified, ...(typeof file.blobId === 'string' ? { blobId: file.blobId } : {}), ...(typeof file.text === 'string' ? { text: file.text } : {}) });
   }
   const reviews = Array.isArray(data.reviews) ? data.reviews.filter((r): r is ReviewDraft => r && typeof r.text === 'string' && r.text && Array.isArray(r.ids) && r.ids.every((id: unknown) => typeof id === 'string')) : [];
-  return { text: data.text, files, ...(reviews.length ? {reviews} : {}), operationId: typeof data.operationId === 'string' && data.operationId.length <= 128 ? data.operationId : '' };
+  return { text: data.text, files, ...(typeof data.snippetKey === "string" ? {snippetKey:data.snippetKey} : {}), ...(reviews.length ? {reviews} : {}), operationId: typeof data.operationId === 'string' && data.operationId.length <= 128 ? data.operationId : '' };
 }
 export function writeDraft(store: ViewStateStore | undefined, session: string, draft: Draft): void {
   store?.setItem(`${store.key}:draft:${session || 'new'}`, JSON.stringify(draft));

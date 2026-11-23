@@ -280,7 +280,9 @@ func TestDoctorChecksTheInstallationAndNamesTheFix(t *testing.T) {
 	for _, k := range report.Checks {
 		status[k.ID] = k
 	}
-	for id, want := range map[string]string{"release": checkOK, "service": checkOK, "endpoint": checkOK, "versions": checkFail, "node": checkOK, "worker": checkOK, "disk": checkOK, "cli": checkWarn, "github": checkWarn} {
+	// Free space is this machine's, not the fixture's: expect what diskCheck
+	// says for the same filesystem (its thresholds are unit-tested on their own).
+	for id, want := range map[string]string{"release": checkOK, "service": checkOK, "endpoint": checkOK, "versions": checkFail, "node": checkOK, "worker": checkOK, "disk": diskCheck(r.home).Status, "cli": checkWarn, "github": checkWarn} {
 		if status[id].Status != want {
 			t.Errorf("%s: %+v, want %s", id, status[id], want)
 		}
@@ -419,5 +421,13 @@ func TestServiceVerbsExplainADevelopmentBuild(t *testing.T) {
 	_, err := powerVerb(c, []string{"service", "status"})
 	if exitCode(err) != exitUnavailable || !strings.Contains(err.Error(), "make dev") {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestDiskStatusThresholds(t *testing.T) {
+	for free, want := range map[uint64]string{512 << 20: checkFail, 1 << 30: checkWarn, 4 << 30: checkWarn, 5 << 30: checkOK, 100 << 30: checkOK} {
+		if got := diskStatus(free); got.Status != want || (want != checkOK && got.Fix == "") {
+			t.Errorf("%d bytes free: %+v, want %s with a fix", free, got, want)
+		}
 	}
 }

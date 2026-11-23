@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -122,12 +121,7 @@ func (b *Bench) AgentCLI() (check *agentshell.Check, done <-chan struct{}) {
 func (b *Bench) probeAgentCLI(program string, done chan struct{}) {
 	s := &b.agentCLI
 	defer s.probes.Done()
-	base := make([]string, 0, 64)
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "LAZYBOX_V2_") {
-			base = append(base, entry)
-		}
-	}
+	base := childEnv()
 	// Without the integration: what the person's startup files do on their own.
 	raw := agentshell.Env(base, "", b.Config.CLIDir)
 	check := agentshell.Probe(b.ctx, agentshell.ProbeShells(os.Getenv), raw, b.withCLI(base), program)

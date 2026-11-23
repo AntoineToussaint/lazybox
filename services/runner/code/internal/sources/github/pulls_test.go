@@ -111,3 +111,38 @@ func TestReviewRequestOutstandingIsReviewRequired(t *testing.T) {
 		t.Fatalf("%+v %v", status, err)
 	}
 }
+
+// A repository that requires up-to-date branches refuses to merge one behind
+// its base, though GitHub calls it mergeable (no conflicts). Updating the
+// branch, pinned to the head the person saw, is what makes it mergeable.
+func TestPullRequestBehindItsBaseIsUpdatedThenMerged(t *testing.T) {
+	ctx := context.Background()
+	fake := githubtest.New(t, "ghp_fixture")
+	fake.Repos["team/api"] = "main"
+	fake.SetHead("team/api", "feature/otter", "abc123")
+	client := github.NewAt(fake.URL)
+	if _, err := client.CreatePullRequest(ctx, "ghp_fixture", "team/api", github.NewPullRequest{Head: "feature/otter", Title: "Add otter"}); err != nil {
+		t.Fatal(err)
+	}
+	fake.Update(func(s *githubtest.Server) { s.Pulls["team/api"][0].MergeableState = "behind" })
+	behind, err := client.PullRequestStatus(ctx, "ghp_fixture", "team/api", "feature/otter")
+	if err != nil || behind.MergeableState != "behind" || !behind.Mergeable {
+		t.Fatalf("behind: %+v %v", behind, err)
+	}
+	if err = client.MergePullRequest(ctx, "ghp_fixture", "team/api", 1, "squash", "abc123"); err == nil || !strings.Contains(err.Error(), "out of date") {
+		t.Fatalf("a branch behind its base was merged, or the refusal was lost: %v", err)
+	}
+	if err = client.UpdatePullRequestBranch(ctx, "ghp_fixture", "team/api", 1, "stale"); err == nil {
+		t.Fatal("updated a branch whose head moved since the person saw it")
+	}
+	if err = client.UpdatePullRequestBranch(ctx, "ghp_fixture", "team/api", 1, "abc123"); err != nil {
+		t.Fatalf("GitHub's 202 (updating in the background) is a success: %v", err)
+	}
+	updated, err := client.PullRequestStatus(ctx, "ghp_fixture", "team/api", "feature/otter")
+	if err != nil || updated.MergeableState != "clean" || updated.HeadSHA == "abc123" || fake.Pull("team/api", 1).BranchUpdates != 1 {
+		t.Fatalf("updated: %+v %v", updated, err)
+	}
+	if err = client.MergePullRequest(ctx, "ghp_fixture", "team/api", 1, "squash", updated.HeadSHA); err != nil {
+		t.Fatalf("merge after the update: %v", err)
+	}
+}

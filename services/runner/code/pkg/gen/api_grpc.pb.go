@@ -143,6 +143,7 @@ const (
 	RunnerService_CreatePullRequest_FullMethodName            = "/lazybox.bench.v1.RunnerService/CreatePullRequest"
 	RunnerService_GetPullRequest_FullMethodName               = "/lazybox.bench.v1.RunnerService/GetPullRequest"
 	RunnerService_MergePullRequest_FullMethodName             = "/lazybox.bench.v1.RunnerService/MergePullRequest"
+	RunnerService_UpdatePullRequestBranch_FullMethodName      = "/lazybox.bench.v1.RunnerService/UpdatePullRequestBranch"
 	RunnerService_ListWorkspaceGitSummaries_FullMethodName    = "/lazybox.bench.v1.RunnerService/ListWorkspaceGitSummaries"
 	RunnerService_ListLinks_FullMethodName                    = "/lazybox.bench.v1.RunnerService/ListLinks"
 	RunnerService_LinkItem_FullMethodName                     = "/lazybox.bench.v1.RunnerService/LinkItem"
@@ -490,6 +491,9 @@ type RunnerServiceClient interface {
 	CreatePullRequest(ctx context.Context, in *CreatePullRequestRequest, opts ...grpc.CallOption) (*PullRequestStatus, error)
 	GetPullRequest(ctx context.Context, in *GetPullRequestRequest, opts ...grpc.CallOption) (*PullRequestStatus, error)
 	MergePullRequest(ctx context.Context, in *MergePullRequestRequest, opts ...grpc.CallOption) (*PullRequestStatus, error)
+	// Brings a tracked pull request up to date with its base, when its
+	// repository requires that before merging (mergeable_state "behind").
+	UpdatePullRequestBranch(ctx context.Context, in *UpdatePullRequestBranchRequest, opts ...grpc.CallOption) (*PullRequestStatus, error)
 	// The sidebar's git state, per workspace and repository: branch, ahead and
 	// behind its pushed branch and the default branch, uncommitted files, and the
 	// last pull request seen for the branch. Local Git only (no fetch); the pull
@@ -2074,6 +2078,16 @@ func (c *runnerServiceClient) MergePullRequest(ctx context.Context, in *MergePul
 	return out, nil
 }
 
+func (c *runnerServiceClient) UpdatePullRequestBranch(ctx context.Context, in *UpdatePullRequestBranchRequest, opts ...grpc.CallOption) (*PullRequestStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PullRequestStatus)
+	err := c.cc.Invoke(ctx, RunnerService_UpdatePullRequestBranch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *runnerServiceClient) ListWorkspaceGitSummaries(ctx context.Context, in *WorkspaceGitSummariesRequest, opts ...grpc.CallOption) (*WorkspaceGitSummaries, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(WorkspaceGitSummaries)
@@ -3409,6 +3423,9 @@ type RunnerServiceServer interface {
 	CreatePullRequest(context.Context, *CreatePullRequestRequest) (*PullRequestStatus, error)
 	GetPullRequest(context.Context, *GetPullRequestRequest) (*PullRequestStatus, error)
 	MergePullRequest(context.Context, *MergePullRequestRequest) (*PullRequestStatus, error)
+	// Brings a tracked pull request up to date with its base, when its
+	// repository requires that before merging (mergeable_state "behind").
+	UpdatePullRequestBranch(context.Context, *UpdatePullRequestBranchRequest) (*PullRequestStatus, error)
 	// The sidebar's git state, per workspace and repository: branch, ahead and
 	// behind its pushed branch and the default branch, uncommitted files, and the
 	// last pull request seen for the branch. Local Git only (no fetch); the pull
@@ -4095,6 +4112,9 @@ func (UnimplementedRunnerServiceServer) GetPullRequest(context.Context, *GetPull
 }
 func (UnimplementedRunnerServiceServer) MergePullRequest(context.Context, *MergePullRequestRequest) (*PullRequestStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method MergePullRequest not implemented")
+}
+func (UnimplementedRunnerServiceServer) UpdatePullRequestBranch(context.Context, *UpdatePullRequestBranchRequest) (*PullRequestStatus, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdatePullRequestBranch not implemented")
 }
 func (UnimplementedRunnerServiceServer) ListWorkspaceGitSummaries(context.Context, *WorkspaceGitSummariesRequest) (*WorkspaceGitSummaries, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListWorkspaceGitSummaries not implemented")
@@ -6627,6 +6647,24 @@ func _RunnerService_MergePullRequest_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_UpdatePullRequestBranch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdatePullRequestBranchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).UpdatePullRequestBranch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_UpdatePullRequestBranch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).UpdatePullRequestBranch(ctx, req.(*UpdatePullRequestBranchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RunnerService_ListWorkspaceGitSummaries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(WorkspaceGitSummariesRequest)
 	if err := dec(in); err != nil {
@@ -9039,6 +9077,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MergePullRequest",
 			Handler:    _RunnerService_MergePullRequest_Handler,
+		},
+		{
+			MethodName: "UpdatePullRequestBranch",
+			Handler:    _RunnerService_UpdatePullRequestBranch_Handler,
 		},
 		{
 			MethodName: "ListWorkspaceGitSummaries",

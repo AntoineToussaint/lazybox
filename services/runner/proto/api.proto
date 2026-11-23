@@ -237,6 +237,9 @@ service RunnerService {
   rpc CreatePullRequest(CreatePullRequestRequest) returns (PullRequestStatus);
   rpc GetPullRequest(GetPullRequestRequest) returns (PullRequestStatus);
   rpc MergePullRequest(MergePullRequestRequest) returns (PullRequestStatus);
+  // Brings a tracked pull request up to date with its base, when its
+  // repository requires that before merging (mergeable_state "behind").
+  rpc UpdatePullRequestBranch(UpdatePullRequestBranchRequest) returns (PullRequestStatus);
   // The sidebar's git state, per workspace and repository: branch, ahead and
   // behind its pushed branch and the default branch, uncommitted files, and the
   // last pull request seen for the branch. Local Git only (no fetch); the pull
@@ -1030,6 +1033,13 @@ message MergePullRequestRequest {
   string expected_head = 5;
   // A tracked pull request this workspace delivers, on any branch; member may then be empty.
   ItemRef item = 6;
+}
+message UpdatePullRequestBranchRequest {
+  string collection_id = 1; int64 number = 2;
+  // The head the person saw; GitHub refuses the update if the branch moved since.
+  string expected_head = 3;
+  // The tracked pull request this workspace delivers.
+  ItemRef item = 4;
 }
 message PullRequestCheck {
   string name = 1;

@@ -262,6 +262,20 @@ async function scenario(browser,scheme){
  await palette.getByRole('combobox').fill('reset the layout and');
  await expect(palette.getByRole('option',{name:/Reset the layout and shortcuts/})).toContainText('⌃⌥⇧Esc');
  await key('Escape');
+ // A focus action chosen in the palette goes where its shortcut goes: the palette, closing, gives focus
+ // back only when nothing asked for it, so it never takes the keyboard from the group the person chose.
+ await composer.click();
+ await key('Meta+Alt+ArrowLeft');
+ const left=await focused();
+ assert.notEqual(left,'chat','there is a group left of the conversation');
+ await composer.click();
+ await key('Meta+k');
+ await palette.getByRole('combobox').fill('focus the panel group to the left');
+ await palette.getByRole('option',{name:/Focus the panel group to the left/}).click();
+ await expect(palette).toHaveCount(0);
+ await expect.poll(focused).toBe(left);
+ await page.evaluate(()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done))));
+ assert.equal(await focused(),left,'the palette closing did not take focus back');
  await key('Meta+/');
  const overlay=page.getByRole('dialog',{name:'Keyboard shortcuts'});
  await overlay.getByRole('searchbox').fill('tab');

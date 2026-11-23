@@ -398,6 +398,9 @@ const (
 	// RunnerServiceMergePullRequestProcedure is the fully-qualified name of the RunnerService's
 	// MergePullRequest RPC.
 	RunnerServiceMergePullRequestProcedure = "/lazybox.bench.v1.RunnerService/MergePullRequest"
+	// RunnerServiceUpdatePullRequestBranchProcedure is the fully-qualified name of the RunnerService's
+	// UpdatePullRequestBranch RPC.
+	RunnerServiceUpdatePullRequestBranchProcedure = "/lazybox.bench.v1.RunnerService/UpdatePullRequestBranch"
 	// RunnerServiceListWorkspaceGitSummariesProcedure is the fully-qualified name of the
 	// RunnerService's ListWorkspaceGitSummaries RPC.
 	RunnerServiceListWorkspaceGitSummariesProcedure = "/lazybox.bench.v1.RunnerService/ListWorkspaceGitSummaries"
@@ -955,6 +958,9 @@ type RunnerServiceClient interface {
 	CreatePullRequest(context.Context, *connect.Request[gen.CreatePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	GetPullRequest(context.Context, *connect.Request[gen.GetPullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	MergePullRequest(context.Context, *connect.Request[gen.MergePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
+	// Brings a tracked pull request up to date with its base, when its
+	// repository requires that before merging (mergeable_state "behind").
+	UpdatePullRequestBranch(context.Context, *connect.Request[gen.UpdatePullRequestBranchRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	// The sidebar's git state, per workspace and repository: branch, ahead and
 	// behind its pushed branch and the default branch, uncommitted files, and the
 	// last pull request seen for the branch. Local Git only (no fetch); the pull
@@ -2014,6 +2020,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("MergePullRequest")),
 			connect.WithClientOptions(opts...),
 		),
+		updatePullRequestBranch: connect.NewClient[gen.UpdatePullRequestBranchRequest, gen.PullRequestStatus](
+			httpClient,
+			baseURL+RunnerServiceUpdatePullRequestBranchProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("UpdatePullRequestBranch")),
+			connect.WithClientOptions(opts...),
+		),
 		listWorkspaceGitSummaries: connect.NewClient[gen.WorkspaceGitSummariesRequest, gen.WorkspaceGitSummaries](
 			httpClient,
 			baseURL+RunnerServiceListWorkspaceGitSummariesProcedure,
@@ -2790,6 +2802,7 @@ type runnerServiceClient struct {
 	createPullRequest            *connect.Client[gen.CreatePullRequestRequest, gen.PullRequestStatus]
 	getPullRequest               *connect.Client[gen.GetPullRequestRequest, gen.PullRequestStatus]
 	mergePullRequest             *connect.Client[gen.MergePullRequestRequest, gen.PullRequestStatus]
+	updatePullRequestBranch      *connect.Client[gen.UpdatePullRequestBranchRequest, gen.PullRequestStatus]
 	listWorkspaceGitSummaries    *connect.Client[gen.WorkspaceGitSummariesRequest, gen.WorkspaceGitSummaries]
 	listLinks                    *connect.Client[gen.ListLinksRequest, gen.Links]
 	linkItem                     *connect.Client[gen.LinkItemRequest, gen.Links]
@@ -3513,6 +3526,11 @@ func (c *runnerServiceClient) GetPullRequest(ctx context.Context, req *connect.R
 // MergePullRequest calls lazybox.bench.v1.RunnerService.MergePullRequest.
 func (c *runnerServiceClient) MergePullRequest(ctx context.Context, req *connect.Request[gen.MergePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error) {
 	return c.mergePullRequest.CallUnary(ctx, req)
+}
+
+// UpdatePullRequestBranch calls lazybox.bench.v1.RunnerService.UpdatePullRequestBranch.
+func (c *runnerServiceClient) UpdatePullRequestBranch(ctx context.Context, req *connect.Request[gen.UpdatePullRequestBranchRequest]) (*connect.Response[gen.PullRequestStatus], error) {
+	return c.updatePullRequestBranch.CallUnary(ctx, req)
 }
 
 // ListWorkspaceGitSummaries calls lazybox.bench.v1.RunnerService.ListWorkspaceGitSummaries.
@@ -4290,6 +4308,9 @@ type RunnerServiceHandler interface {
 	CreatePullRequest(context.Context, *connect.Request[gen.CreatePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	GetPullRequest(context.Context, *connect.Request[gen.GetPullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	MergePullRequest(context.Context, *connect.Request[gen.MergePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
+	// Brings a tracked pull request up to date with its base, when its
+	// repository requires that before merging (mergeable_state "behind").
+	UpdatePullRequestBranch(context.Context, *connect.Request[gen.UpdatePullRequestBranchRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	// The sidebar's git state, per workspace and repository: branch, ahead and
 	// behind its pushed branch and the default branch, uncommitted files, and the
 	// last pull request seen for the branch. Local Git only (no fetch); the pull
@@ -5345,6 +5366,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(runnerServiceMethods.ByName("MergePullRequest")),
 		connect.WithHandlerOptions(opts...),
 	)
+	runnerServiceUpdatePullRequestBranchHandler := connect.NewUnaryHandler(
+		RunnerServiceUpdatePullRequestBranchProcedure,
+		svc.UpdatePullRequestBranch,
+		connect.WithSchema(runnerServiceMethods.ByName("UpdatePullRequestBranch")),
+		connect.WithHandlerOptions(opts...),
+	)
 	runnerServiceListWorkspaceGitSummariesHandler := connect.NewUnaryHandler(
 		RunnerServiceListWorkspaceGitSummariesProcedure,
 		svc.ListWorkspaceGitSummaries,
@@ -6241,6 +6268,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceGetPullRequestHandler.ServeHTTP(w, r)
 		case RunnerServiceMergePullRequestProcedure:
 			runnerServiceMergePullRequestHandler.ServeHTTP(w, r)
+		case RunnerServiceUpdatePullRequestBranchProcedure:
+			runnerServiceUpdatePullRequestBranchHandler.ServeHTTP(w, r)
 		case RunnerServiceListWorkspaceGitSummariesProcedure:
 			runnerServiceListWorkspaceGitSummariesHandler.ServeHTTP(w, r)
 		case RunnerServiceListLinksProcedure:
@@ -6956,6 +6985,10 @@ func (UnimplementedRunnerServiceHandler) GetPullRequest(context.Context, *connec
 
 func (UnimplementedRunnerServiceHandler) MergePullRequest(context.Context, *connect.Request[gen.MergePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.MergePullRequest is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) UpdatePullRequestBranch(context.Context, *connect.Request[gen.UpdatePullRequestBranchRequest]) (*connect.Response[gen.PullRequestStatus], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.UpdatePullRequestBranch is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) ListWorkspaceGitSummaries(context.Context, *connect.Request[gen.WorkspaceGitSummariesRequest]) (*connect.Response[gen.WorkspaceGitSummaries], error) {

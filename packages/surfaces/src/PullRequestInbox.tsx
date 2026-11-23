@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Collection } from '@lazybox/protocol';
 import { Icon } from './Icons';
 import { useRunner } from './RunnerContext';
-import { agentName, pullInboxRows, type PullInboxRow } from './pull-requests-model';
-import { PullStatusIcon, reactionLabel } from './PullRequestsPanel';
+import { agentName, confirmation, pullInboxRows, type PullInboxRow } from './pull-requests-model';
+import { PullStatusIcon, reactionLabel, reactionParts, writesToGitHub } from './PullRequestsPanel';
 import { useDismissedPulls, usePullActions, useTrackedItems, type PullAction } from './useTrackedPulls';
 import type { ViewTarget } from './workspace-model';
 import './pull-requests.css';
@@ -22,7 +22,8 @@ export type DeferredAction = { id: string; label: string; waiting: string; commi
  * The Inbox's "Pull requests" group: each tracked pull request that needs the
  * person — checks failed, changes requested, conflicts, ready to merge — with
  * its reaction prepared: Send the failures to the agent, Address the review,
- * Merge (desktop only, confirmed), Open on GitHub, Dismiss. A dismissed row
+ * Update the branch when it is behind a base its repository requires it to
+ * match, Merge (both desktop only, confirmed), Open on GitHub, Dismiss. A dismissed row
  * comes back when something new happens to it (another head, another review).
  */
 export function PullRequestInboxSection({ collections, phone = false, canRespond = true, deferredStates, defer, onOpen }: {
@@ -54,7 +55,8 @@ export function PullRequestInboxSection({ collections, phone = false, canRespond
 function PullInboxItem({ row, workspace, phone, canRespond, defer, onOpen, onDismiss, receipt, pending }: { pending?: { phase: string; text: string }; receipt?: { text: string; until: number }; row: PullInboxRow; workspace: string; phone: boolean; canRespond: boolean; defer?(action: DeferredAction): void; onOpen(target: ViewTarget): void; onDismiss(): void }) {
   const { info } = useRunner();
   const actions = usePullActions();
-  const [confirmMerge, setConfirmMerge] = useState(false);
+  // Merge and Update branch write to GitHub: each asks first.
+  const [confirming, setConfirming] = useState<'merge' | 'update'>();
   const state = actions.states.get(row.dismissKey);
   const error = state?.phase === 'error' && state.text;
   const [now, setNow] = useState(Date.now);
@@ -67,15 +69,15 @@ function PullInboxItem({ row, workspace, phone, canRespond, defer, onOpen, onDis
   const agent = agentName(info?.sessions.find(s => s.id === row.link.sessionId)?.provider);
   const busy = state?.phase === 'sending';
   const run = async (action: PullAction) => {
-    setConfirmMerge(false);
-    if (defer && action !== 'merge') {
+    setConfirming(undefined);
+    if (defer && action !== 'merge' && action !== 'update') {
       defer({ id: `${row.dismissKey}:${action}`, label: `${reactionLabel(action, agent)} · #${row.number}`, waiting: action === 'send' ? 'Sending the failures…' : 'Sending the review…',
         commit: async () => { const result = await actions.run(row, action); if (!result.ok) throw new Error(result.text); } });
       return;
     }
     await actions.run(row, action);
   };
-  const reaction: PullAction | undefined = row.action === 'send' || row.action === 'review' ? row.action : row.action === 'merge' && !phone ? 'merge' : undefined;
+  const reaction: PullAction | undefined = row.action === 'send' || row.action === 'review' ? row.action : (row.action === 'merge' || row.action === 'update') && !phone ? row.action : undefined;
   const failing = row.link.item?.pullRequest?.failingChecks?.[0]?.url;
   const openLabel = row.status === 'checks-failed' ? 'Open checks' : row.status === 'changes-requested' ? 'Open review' : 'Open';
   const openUrl = row.status === 'checks-failed' && failing ? failing : row.status === 'changes-requested' ? `${row.url}/files` : row.url;
@@ -88,12 +90,13 @@ function PullInboxItem({ row, workspace, phone, canRespond, defer, onOpen, onDis
       </span>
     </button>
     <div className="pr-inbox-actions">
-      {reaction && canRespond && !receipt && !pending && !confirmMerge && <button type="button" className="primary" disabled={busy} onClick={() => reaction === 'merge' ? setConfirmMerge(true) : void run(reaction)}>
-        <Icon name={reaction === 'merge' ? 'merge' : reaction === 'review' ? 'review' : 'send'} size={13}/>{reaction === 'merge' ? 'Merge…' : reactionLabel(reaction, agent)}
+      {reaction && canRespond && !receipt && !pending && !confirming && <button type="button" className="primary" disabled={busy} onClick={() => reaction === 'merge' || reaction === 'update' ? setConfirming(reaction) : void run(reaction)}>
+        <Icon name={reactionParts[reaction].icon} size={13}/>{writesToGitHub(reaction) ? `${reactionParts[reaction].short}…` : reactionLabel(reaction, agent)}
       </button>}
-      {confirmMerge && !receipt && !busy && <span role="group" aria-label="Confirm merge" className="pr-inbox-confirm">
-        <button type="button" className="primary" autoFocus disabled={busy} onClick={() => void run('merge')}>Merge #{row.number}</button>
-        <button type="button" onClick={() => setConfirmMerge(false)}>Cancel</button>
+      {confirming && !receipt && !busy && <span role="group" aria-label={`Confirm ${reactionParts[confirming].confirmName}`} className="pr-inbox-confirm">
+        <span className="pr-inbox-ask">{confirmation(row, confirming, agent)}</span>
+        <button type="button" className="primary" autoFocus disabled={busy} onClick={() => void run(confirming)}>{`${reactionParts[confirming].confirmButton} #${row.number}`}</button>
+        <button type="button" onClick={() => setConfirming(undefined)}>Cancel</button>
       </span>}
       {openUrl && <a href={openUrl} target="_blank" rel="noreferrer">{openLabel}<Icon name="external" size={11}/></a>}
       <button type="button" className="pr-dismiss" onClick={onDismiss} aria-label={`Dismiss ${row.repository}#${row.number}`}>Dismiss</button>

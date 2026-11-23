@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { useBackdropDismiss } from './dismiss';
+import { restoreFocus } from './pending-focus';
 import type { ViewStateStore } from '@lazybox/platform';
 import { actionDefinition, actionDefinitions, actionEnabled, bindings, displayBinding, runAction, useActionRevision, type ActionDefinition } from './actions';
 import { showToast } from './toasts';
@@ -96,7 +97,8 @@ export function CommandPalette({ keymap, navigator, viewState, initialQuery = ''
   useEffect(() => {
     dialog.current?.showModal(); input.current?.focus();
     const previous = returnFocus.current;
-    return () => { if (restore.current && previous?.isConnected) requestAnimationFrame(() => previous.focus?.({ preventScroll: true })); };
+    // A focus the chosen action asked for (a panel, a conversation) wins over giving it back.
+    return () => { if (restore.current) requestAnimationFrame(() => restoreFocus(previous)); };
   }, []);
   const spokenMode = !!spoken && spoken.text === query;
   const scope = spokenMode ? undefined : prefixes.find(value => query.startsWith(value.prefix));

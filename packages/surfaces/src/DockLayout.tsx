@@ -5,6 +5,7 @@ import { createDockview, type DockviewApi, type DockviewGroupPanel, type Dockvie
 import 'dockview/dist/styles/dockview.css';
 import './dock.css';
 import { iconElement } from './Icons';
+import { PendingFocus, trackFocus } from './pending-focus';
 import { focusWhenShown } from './focus';
 import { beginDrag, type DragAxis } from './drag-gesture';
 import { refreshNativeWebViews } from './native-web-view';
@@ -48,6 +49,8 @@ export type DockHandle = {
   /** The popped-out group whose window has the focus, if any. */
   focusedPopout(): string | undefined;
   focusPanel(panelID: string): void;
+  /** Whether the dock shows this panel yet (a focus asked for it waits until it does). */
+  hasPanel(panelID: string): boolean;
   /** The group a panel is in, as its menus see it. */
   groupOf(panelID: string): GroupView | undefined;
   /** Brings a panel's tab to the front without moving focus into it. */
@@ -153,6 +156,8 @@ const sidebarOf = (layout: LayoutNode | null): { group: Group; ids: string[]; at
  * dockview is reported back through `onArrange`.
  */
 export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(props, ref) {
+  const [intoFocus] = useState(() => new PendingFocus<{ panel: string }>());
+  useEffect(() => trackFocus(intoFocus), [intoFocus]);
   const container = useRef<HTMLDivElement>(null);
   const api = useRef<DockviewApi>(undefined);
   const pendingPopouts = useRef(new Map<string, Promise<boolean>>());
@@ -689,16 +694,22 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     if (zoomed && !dock.hasMaximizedGroup() && panel.group.api.location.type === 'grid' && gridGroups(dock).length > 1) dock.maximizeGroup(panel);
   };
   /** Focus into a panel: where the person last was in it, else its message box, else its first field or control. */
-  const focusInto = (panel: IDockviewPanel) => requestAnimationFrame(() => {
-    const host = latest.current.hostFor(panelFrom(panel.id, panel.params));
-    const last = lastFocus.current.get(panel.id);
-    // Not an element of a window that has closed since (a group popped out and put back), and not
-    // the code editor's own input: Monaco tracks its focus with the window it was first shown in,
-    // which a popped-out editor has left (focusing it from here throws). Its tabs take the focus instead.
-    const usable = (element: HTMLElement) => element.isConnected && element.ownerDocument === host.ownerDocument && !!element.ownerDocument.defaultView && host.contains(element) && !element.closest('.monaco-editor') && element.getClientRects().length > 0 && !(element as HTMLButtonElement).disabled;
-    if (last && usable(last)) { last.focus({ preventScroll: true }); return; }
-    (host.querySelector<HTMLElement>('[data-agent-composer]:not(:disabled)') || host.querySelector<HTMLElement>('textarea:not(:disabled), [tabindex="0"], button:not(:disabled), input:not(:disabled)'))?.focus({ preventScroll: true });
-  });
+  const focusInto = (panel: IDockviewPanel) => {
+    // The dock's own focus request (pending-focus.ts): focus moved elsewhere before the next frame stays there.
+    const request = { panel: panel.id };
+    intoFocus.ask(request);
+    requestAnimationFrame(() => {
+      if (!intoFocus.take(request)) return;
+      const host = latest.current.hostFor(panelFrom(panel.id, panel.params));
+      const last = lastFocus.current.get(panel.id);
+      // Not an element of a window that has closed since (a group popped out and put back), and not
+      // the code editor's own input: Monaco tracks its focus with the window it was first shown in,
+      // which a popped-out editor has left (focusing it from here throws). Its tabs take the focus instead.
+      const usable = (element: HTMLElement) => element.isConnected && element.ownerDocument === host.ownerDocument && !!element.ownerDocument.defaultView && host.contains(element) && !element.closest('.monaco-editor') && element.getClientRects().length > 0 && !(element as HTMLButtonElement).disabled;
+      if (last && usable(last)) { last.focus({ preventScroll: true }); return; }
+      (host.querySelector<HTMLElement>('[data-agent-composer]:not(:disabled)') || host.querySelector<HTMLElement>('textarea:not(:disabled), [tabindex="0"], button:not(:disabled), input:not(:disabled)'))?.focus({ preventScroll: true });
+    });
+  };
   const titleIn = (group: { activePanel?: { title?: string } }) => group.activePanel?.title || 'panel';
   const announce = (text: string, edge?: LayoutDirection) => {
     setRing(true);
@@ -804,6 +815,7 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     focusWindow: groupID => { const group = api.current?.getGroup(groupID); if (group?.api.location.type === 'popout') group.api.getWindow().focus(); },
     // While this page has the focus no popped-out window does (the palette here does not offer to put one back).
     focusedPopout: () => document.hasFocus() ? undefined : api.current?.getPopouts().find(popout => { try { return popout.window.document.hasFocus(); } catch { return false; } })?.group.id,
+    hasPanel: panelID => !!api.current?.getPanel(panelID),
     focusPanel: panelID => {
       const panel = api.current?.getPanel(panelID);
       if (!panel) return;

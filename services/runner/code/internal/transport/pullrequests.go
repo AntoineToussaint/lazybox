@@ -238,6 +238,25 @@ func (s *Service) MergePullRequest(ctx context.Context, r *pb.MergePullRequestRe
 	return out, err
 }
 
+// UpdatePullRequestBranch brings a tracked pull request up to date with its
+// base. The workspace must deliver it, and GitHub updates it only if its head
+// is still the one the person saw.
+func (s *Service) UpdatePullRequestBranch(ctx context.Context, r *pb.UpdatePullRequestBranchRequest) (*pb.PullRequestStatus, error) {
+	if !s.githubConnected() {
+		return nil, rpcError(errors.New(connectForPullRequests))
+	}
+	if r.Item == nil || r.Item.Key == "" {
+		return nil, rpcError(errors.New("name the tracked pull request to update"))
+	}
+	ref := refOf(r.Item)
+	status, _, err := s.Bench.UpdateTrackedPullRequestBranch(ctx, r.CollectionId, ref, r.Number, r.ExpectedHead)
+	if err != nil {
+		return nil, reactionError(err)
+	}
+	repository, _, _ := workitems.ParseGitHubKey(ref.Key)
+	return wirePullRequest(&pb.PullRequestStatus{GithubRepository: repository, Branch: status.Head}, status), nil
+}
+
 // mergeTracked merges a pull request the workspace delivers on any branch
 // (the Pull requests panel): the workspace must deliver it, and GitHub
 // merges it only if its head is still the one the person saw.

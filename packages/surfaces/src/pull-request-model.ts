@@ -64,6 +64,17 @@ export function mergeBlocker(pr: PullRequestStatus): string {
   }
 }
 
+/**
+ * Whether the branch must be brought up to date before GitHub merges it: open,
+ * not a draft, checks green, no changes requested, and behind a base its
+ * repository requires it to match. The same rule as the Inbox's "Out of date"
+ * (pull-requests-model.ts `pullStatus`).
+ */
+export function canUpdateBranch(pr: PullRequestStatus): boolean {
+  return pr.state === 'open' && !pr.draft && pr.mergeableState === 'behind'
+    && (pr.checksState === 'success' || pr.checksState === 'none') && pr.reviewDecision !== 'changes_requested' && pr.reviewDecision !== 'review_required';
+}
+
 /** What the person most likely does next, so that one action is primary. */
 export type Step = 'commit' | 'push' | 'create' | 'merge' | 'fix' | 'none';
 export function nextStep(repo: Pick<RepositoryChanges, 'files' | 'ahead' | 'upstream' | 'commits' | 'githubRepository'>, pr?: PullRequestStatus): Step {

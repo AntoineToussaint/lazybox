@@ -1,5 +1,7 @@
 import { conversationName as nameOf } from './conversation-model';
 import { nudgeGitSummaries } from './useGitSummaries';
+import { nudgeTrackedItems } from './tracked-items-poll';
+import { updateConfirmation } from './pull-requests-model';
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Code, ConnectError } from '@lazybox/client-core';
 import type { PullRequestCheck, PullRequestStatus, RepositoryChanges, Session } from '@lazybox/protocol';
@@ -7,7 +9,7 @@ import { DraggableDialog, DialogHeader } from './DraggableDialog';
 import { Icon } from './Icons';
 import { useRunner } from './RunnerContext';
 import { conversationReader } from './transcript-cache';
-import { checkState, checksSummary, commitPaths, defaultCommitMessage, defaultPullRequest, draftRequest, extractDraft, failingChecks, failingChecksMessage, mergeBlocker, nextStep, splitPullRequestDraft, type DraftKind } from './pull-request-model';
+import { checkState, checksSummary, commitPaths, defaultCommitMessage, defaultPullRequest, draftRequest, extractDraft, failingChecks, failingChecksMessage, mergeBlocker, canUpdateBranch, nextStep, splitPullRequestDraft, type DraftKind } from './pull-request-model';
 import './pull-request.css';
 import type { ReviewLauncher } from './review-client';
 import { ReviewWithButton } from './ReviewLauncher';
@@ -190,6 +192,23 @@ function PullRequestCard({ workspaceId, member, pr, fix, launcher, onSendChecks,
     catch (e) { setError(errorText(e)); }
     finally { setBusy(false); }
   };
+  // Behind a base its repository requires it to match: GitHub merges the base into the branch
+  // (at the head shown here), then its checks run again before it can merge.
+  const behind = canUpdateBranch(pr);
+  // The head the person confirmed the update for: a push since closes the question, so the update never runs at a head they did not see.
+  const [confirmingUpdate, setConfirmingUpdate] = useState('');
+  useEffect(() => { setConfirmingUpdate(head => head && (head !== pr.headSha || !behind) ? '' : head); }, [pr.headSha, behind]);
+  const update = async () => {
+    setBusy(true); setError('');
+    try {
+      await api.updatePullRequestBranch({ collectionId: workspaceId, number: pr.number, expectedHead: confirmingUpdate, item: { provider: 'github', key: `${pr.githubRepository}#${pr.number}` } }, { timeoutMs: 60000 });
+      setConfirmingUpdate(''); onRefresh();
+      // The Inbox, the panel and the sidebar show it at once, not at their next poll.
+      nudgeTrackedItems(api); nudgeGitSummaries(api);
+    }
+    catch (e) { setError(errorText(e)); }
+    finally { setBusy(false); }
+  };
   return <section className={`ship-pr is-${state}`} aria-label={`Pull request #${pr.number}`}>
     <header><Icon name={pr.state === 'merged' ? 'merge' : 'pullRequest'} size={15}/><a href={pr.url} target="_blank" rel="noreferrer" title="Open on GitHub"><strong>#{String(pr.number)}</strong> {pr.title}<Icon name="external" size={11}/></a><button type="button" className="ship-icon" aria-label="Refresh pull request status" title="Refresh checks and reviews" onClick={onRefresh}><Icon name="refresh" size={13}/></button></header>
     <p className="ship-pr-meta"><span className={`ship-chip is-${state}`}>{{ open: 'Open', draft: 'Draft', merged: 'Merged', closed: 'Closed' }[state] || state}</span>
@@ -202,6 +221,10 @@ function PullRequestCard({ workspaceId, member, pr, fix, launcher, onSendChecks,
     {pr.state === 'open' && <div className="ship-pr-actions">
       {launcher && <ReviewWithButton launcher={launcher} scope={{ scope: 'pr', member }} label="Review the PR with"/>}
       {failing.length > 0 && <button type="button" className={fix ? 'primary' : ''} onClick={onSendChecks} title="Puts the failing checks and their log links in the conversation's message box for you to send"><Icon name="chat" size={14}/>Send {failing.length === 1 ? 'failing check' : `${failing.length} failing checks`} to the agent</button>}
+      {behind && !confirming && (confirmingUpdate ? <span className="ship-confirm" role="group" aria-label="Confirm updating the branch">
+        <span>{updateConfirmation(pr.number, pr.base)}</span>
+        <button type="button" className="primary" disabled={busy} autoFocus onClick={() => void update()}>{busy ? 'Updating…' : `Update #${pr.number}`}</button><button type="button" disabled={busy} onClick={() => setConfirmingUpdate('')}>Cancel</button>
+      </span> : <button type="button" className="primary" disabled={busy} onClick={() => setConfirmingUpdate(pr.headSha)} title={`Merge ${pr.base} into this branch on GitHub; its checks run again`}><Icon name="refresh" size={14}/>Update branch…</button>)}
       {confirming ? <span className="ship-confirm" role="group" aria-label="Confirm merge">
         <span>{MERGE_METHODS.find(([value]) => value === method)?.[1]} #{String(pr.number)} into {pr.base}?</span>
         <button type="button" className="primary" disabled={busy} autoFocus onClick={() => void merge()}>{busy ? 'Merging…' : 'Confirm merge'}</button><button type="button" disabled={busy} onClick={() => setConfirming(false)}>Cancel</button>

@@ -144,9 +144,15 @@ export function watchCLI({ source, directory, since, build = goBuildCLI, interva
   loop();
   return { async close() { stopped = true; clearTimeout(timer); await current; } };
 }
+/** The Tauri configuration a Working (or Dev) build merges over tauri.conf.json. */
+export function workingTauriConfig(paths) {
+  return { identifier: paths.identifier, productName: paths.productName, bundle: { macOS: { signingIdentity: '-' } } };
+}
 async function buildDesktop(source, paths, target) {
   await run('npm', ['run', 'build:ui', '-w', '@lazybox/desktop'], source);
-  await run(join(source, 'node_modules/.bin/tauri'), ['build', '--debug', '--bundles', 'app', '--config', JSON.stringify({ identifier: paths.identifier, productName: paths.productName })], join(source, 'apps/desktop'), { ...buildEnv, CARGO_TARGET_DIR: target });
+  // Signed ad hoc as a whole bundle, as a release build is (scripts/release/build.mjs): macOS grants
+  // notifications to a bundle's signed identity; a linker-signed executable alone has none to grant.
+  await run(join(source, 'node_modules/.bin/tauri'), ['build', '--debug', '--bundles', 'app', '--config', JSON.stringify(workingTauriConfig(paths))], join(source, 'apps/desktop'), { ...buildEnv, CARGO_TARGET_DIR: target });
   return join(target, 'debug/bundle/macos', paths.productName + '.app');
 }
 async function saveJSON(path, value) {

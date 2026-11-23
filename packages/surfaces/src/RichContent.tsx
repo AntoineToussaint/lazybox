@@ -1,3 +1,4 @@
+import { ApplyWindowArrangement, ReviewLayoutProposal, windowArrangements } from './layout-proposal';
 import { actionEnabled, runAction } from './actions';
 import { fileReference, type FileLink } from './file-reference';
 import { preloadEditor } from './editor-loader';
@@ -32,6 +33,8 @@ function Copy({text}:{text:string}) {
 }
 /** `runnable`: a block of a message's Markdown, which can offer Run when it is a shell block in an agent's message (code-runs.tsx). */
 export const CodeBlock=memo(function CodeBlock({text,language='',label,runnable=false,action,offset}:{text:string;language?:string;label?:string;runnable?:boolean;offset?:number;action?:ReactNode}) {
+ const reviewLayout = useContext(ReviewLayoutProposal);
+ if (language === 'lazybox-layout' && reviewLayout) action = <button type="button" onClick={() => reviewLayout(text)}>Review layout</button>;
  const highlighted=useMemo(()=>text.length<=100000&&hljs.getLanguage(language)?hljs.highlight(text,{language,ignoreIllegals:true}).value:undefined,[text,language]);
  const run=useRunnableBlock(text,language,runnable,offset);
  const name=label||language||'Text';
@@ -77,6 +80,7 @@ function documentComponents(doc:RichDocument){
 export const RichContent=memo(function RichContent({text,onOpenFile,document:doc}:{text:string;onOpenFile?(reference:FileLink,how:OpenModifiers):void;document?:RichDocument}) {
  const fileMenu=(file:FileLink)=>contextMenu('file-link',()=>fileLinkItems(file,onOpenFile!),file);
  // In an agent's message, inline code that reads as a command offers to run it, from its menu only.
+ const arrangeWindows = useContext(ApplyWindowArrangement);
  const run=useRunScope();
  const openSource = useContext(ConversationSourceContext);
  const programs=useMemo(()=>run?pathProgramsIn(text):[],[run,text]);
@@ -85,6 +89,11 @@ export const RichContent=memo(function RichContent({text,onOpenFile,document:doc
  if(docComponents)return <div className="rich-content rich-document"><Markdown remarkPlugins={[remarkGfm]} components={{...components,...docComponents}}>{text}</Markdown></div>;
  return <div className="rich-content">{rawJSON?<CodeBlock text={text} language="json"/>:<Markdown remarkPlugins={[remarkGfm]} components={{...components,
  a:({href,children})=>{
+  if (arrangeWindows && href?.startsWith('#lazybox-arrange-')) {
+    const choice = href.slice('#lazybox-arrange-'.length);
+    const label = windowArrangements.get(choice);
+    if (label) return <button className="file-reference" onClick={() => arrangeWindows(choice)}>{label}</button>;
+  }
   if (href === '#lazybox-add-subscription' && actionEnabled('settings.open')) {
     return <button className="file-reference" onClick={() => runAction('settings.open', 'add-subscription')}>{children}</button>;
   }

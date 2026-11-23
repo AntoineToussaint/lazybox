@@ -33,6 +33,9 @@ import { useAskRequests } from './help-requests';
 export type PanelTitle = { text: string; /** An image URL (a page's icon). */ icon?: string; tooltip?: string; agent?: { sessionId: string; provider: string } };
 export type ExtensionPanelChoice = { id: string; panel: string };
 export type ModuleProps = {
+  onArrangeWindows?(choice: string): void;
+  currentLayoutYaml?(): string;
+  onReviewLayout?(yaml: string): void;
   extensionRequest?: { choice?: ExtensionPanelChoice; onOpened(): void };
   workspaceId: string;
   /** This panel's identity on its page, stable while it is open. */
@@ -84,7 +87,7 @@ function ChatModule({ target, onTarget, viewState, collections, onOpenChat, onNe
  * summary conversation. "Ask Lazybox" from the Help menu, ⌘K or ]] h brings
  * it back to Help and focuses its message box.
  */
-function AssistantModule({ viewState, workspaceId, collections }: ModuleProps) {
+function AssistantModule({ viewState, workspaceId, collections, currentLayoutYaml, onReviewLayout, onArrangeWindows }: ModuleProps) {
   const key = `${viewState?.key}:assistant-session`;
   const [sessionId, setSessionId] = useState(() => viewState?.getItem(key) || '');
   const [purpose, setPurpose] = useState<'help' | 'planning' | 'summary'>(() => { const saved = viewState?.getItem(`${key}:purpose`); return saved === 'planning' || saved === 'summary' ? saved : 'help'; });
@@ -99,7 +102,7 @@ function AssistantModule({ viewState, workspaceId, collections }: ModuleProps) {
     changePurpose('help');
     setFocusToken(token => token + 1);
   });
-  if (purpose === 'help') return <HelpAssistant question={question} setQuestion={setQuestion} key={purpose} workspaceId={workspaceId} workspaceName={collections.find(c => c.id === workspaceId)?.name} viewState={viewState} sessionKey={key} focusToken={focusToken} onPurpose={changePurpose}/>;
+  if (purpose === 'help') return <HelpAssistant onArrangeWindows={onArrangeWindows} currentLayoutYaml={currentLayoutYaml} onReviewLayout={onReviewLayout} question={question} setQuestion={setQuestion} key={purpose} workspaceId={workspaceId} workspaceName={collections.find(c => c.id === workspaceId)?.name} viewState={viewState} sessionKey={key} focusToken={focusToken} onPurpose={changePurpose}/>;
   return <>
     <label className="assistant-purpose">Conversation<select aria-label="Assistant purpose" value={purpose} onChange={e => changePurpose(e.target.value as typeof purpose)}>
       <option value="help">Help</option>

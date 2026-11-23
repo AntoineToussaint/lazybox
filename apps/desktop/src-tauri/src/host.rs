@@ -1266,7 +1266,32 @@ fn apply_placement(
 }
 
 /// Arrange visible Lazybox windows on the focused display. Other displays keep their roles.
-fn arrange_windows(app: &tauri::AppHandle, action: &str) -> Result<(), String> {
+#[tauri::command]
+pub fn arrange_desktop_windows(
+    app: tauri::AppHandle,
+    window: Webview,
+    arrangement: String,
+) -> Result<(), String> {
+    if !is_workspace_window(window.label()) {
+        return Err("Window arrangements require a workspace window".into());
+    }
+    let action = match arrangement.as_str() {
+        "columns" => "layout-columns",
+        "focus" => "layout-focus",
+        "grid" => "layout-grid",
+        "next-display" => "layout-next-display",
+        "save" => "layout-save",
+        "restore" => "layout-restore",
+        _ => return Err("Choose columns, focus, grid, next-display, save, or restore".into()),
+    };
+    arrange_windows(&app, action, Some(window.label()))
+}
+
+fn arrange_windows(
+    app: &tauri::AppHandle,
+    action: &str,
+    fallback: Option<&str>,
+) -> Result<(), String> {
     let host = app.try_state::<Host>().ok_or("Connect a Runner first")?;
     let labels: Vec<_> = host
         .layout
@@ -1329,6 +1354,7 @@ fn arrange_windows(app: &tauri::AppHandle, action: &str) -> Result<(), String> {
     }
     let focus = app
         .get_focused_window()
+        .or_else(|| fallback.and_then(|label| app.get_window(label)))
         .ok_or("Focus a Lazybox window first")?;
     if action == "layout-next-display" {
         if focus.is_fullscreen().map_err(error)? {
@@ -1433,7 +1459,7 @@ pub fn menu_event(app: &tauri::AppHandle, id: &str) {
         | "layout-grid"
         | "layout-next-display"
         | "layout-save"
-        | "layout-restore" => arrange_windows(app, id),
+        | "layout-restore" => arrange_windows(app, id, None),
         "reopen-agent" => open(app, "main"),
         "reopen-closed" => reopen_closed(app.clone()),
         "zoom-in" | "zoom-out" | "zoom-reset" => {

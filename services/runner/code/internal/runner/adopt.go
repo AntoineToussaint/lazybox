@@ -157,7 +157,7 @@ func (b *Bench) Adopt(ctx context.Context) error {
 		err    error
 	}
 	var failed []unadopted
-	var idleLost []string
+	var resumable []string
 	for offset := 0; ; offset += 100 {
 		records, err := b.History.List(ctx, 100, offset)
 		if err != nil {
@@ -179,9 +179,20 @@ func (b *Bench) Adopt(ctx context.Context) error {
 				// left to re-attach; the conversation resumes natively.
 				if sessionhost.Gone(err) && !b.agentAnswers(ctx, r.ID) {
 					attachment, loadErr := b.loadAttachment(r.ID)
-					err = b.agentLost(ctx, r)
-					if err == nil && loadErr == nil && canAutoResume(r.Snapshot, attachment) {
-						idleLost = append(idleLost, r.ID)
+					if loadErr == nil && canAutoResume(r.Snapshot, attachment) {
+						if r.Snapshot.Busy && len(attachment.Queue) == 0 {
+							attachment.Queue = []agent.Operation{{
+								ID: "restart-continue-" + r.ID, Kind: agent.Message,
+								Text:   "Lazybox restarted during your turn. Check the saved conversation and current state, including the outcome of any interrupted command, then continue the unfinished request.",
+								Origin: &agent.Origin{Kind: "restart", Summary: "Continue interrupted turn"},
+							}}
+						}
+						err = b.endInterrupted(ctx, r, attachment, "")
+						if err == nil {
+							resumable = append(resumable, r.ID)
+						}
+					} else {
+						err = b.agentLost(ctx, r)
 					}
 				} else if err != nil {
 					failed = append(failed, unadopted{r, err})
@@ -204,12 +215,13 @@ func (b *Bench) Adopt(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("execution %s not ended after its agent was stopped: %w", f.record.ID, err))
 		}
 	}
-	// Resume only lost hosts whose last durable state was idle. Resume still
+	// Resolve workspace leases before opening successor executions. Resume still
 	// verifies the profile, workspace lease, provider capability and commands.
-	if sweepErr == nil {
-		for _, id := range idleLost {
+	if sweepErr == nil && len(resumable) > 0 {
+		errs = append(errs, b.SettleProvenOwnership(ctx))
+		for _, id := range resumable {
 			if _, err := b.Resume(ctx, id, false); err != nil {
-				log.Printf("restart: idle conversation %s needs manual resume: %v", id, err)
+				log.Printf("restart: conversation %s needs manual resume: %v", id, err)
 			}
 		}
 	}
@@ -220,15 +232,19 @@ func (b *Bench) Adopt(ctx context.Context) error {
 }
 
 func canAutoResume(snapshot engine.Snapshot, attachment engine.Attachment) bool {
-	if snapshot.Closed || snapshot.Busy || snapshot.Fault != "" || snapshot.Queued != 0 ||
-		len(snapshot.Pending) != 0 || len(attachment.Queue) != 0 ||
+	if snapshot.Closed || snapshot.Fault != "" || snapshot.Queued != len(attachment.Queue) ||
+		len(snapshot.Pending) != 0 ||
 		snapshot.Reference == "" || !snapshot.Capabilities.Resume ||
-		(snapshot.Status != agent.Ready && snapshot.Status != agent.Done) {
+		(snapshot.Status != agent.Ready && snapshot.Status != agent.Done && !(snapshot.Busy && snapshot.Status == agent.Running)) {
 		return false
 	}
-	for _, activity := range snapshot.Agents {
+	for id, activity := range snapshot.Agents {
 		switch activity.Status {
-		case agent.Starting, agent.Running, agent.WaitingInput, agent.WaitingApproval:
+		case agent.Running:
+			if !snapshot.Busy || id != "root" {
+				return false
+			}
+		case agent.Starting, agent.WaitingInput, agent.WaitingApproval:
 			return false
 		}
 	}
@@ -495,7 +511,7 @@ func (b *Bench) endInterrupted(ctx context.Context, r sessionstore.Record, recor
 	}
 	snapshot := r.Snapshot
 	if !noted {
-		_, err = spool.Append(agent.Event{Type: AgentLostEvent, Status: lostStatus(why), Text: lostNotice(snapshot, len(record.Queue), why)})
+		_, err = spool.Append(agent.Event{Type: AgentLostEvent, Status: lostStatus(why), Text: lostNotice(snapshot, snapshot.Queued, why)})
 	}
 	if disposeErr := spool.Dispose(); err == nil {
 		err = disposeErr

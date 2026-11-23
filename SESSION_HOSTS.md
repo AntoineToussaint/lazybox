@@ -223,9 +223,10 @@ conversation's host record left on disk with nothing listening on it.
   `agent_lost` event whose text says what happened, what the interruption cost
   (a turn in progress, a request that was waiting, queued messages) and what to
   do; the app shows it as a notice line. After confirming old hosts are gone,
-  the Runner automatically resumes idle conversations with a supported
-  provider reference and no pending or queued work. An interrupted turn needs
-  an explicit resume or a new message. A session ended on purpose stays ended.
+  the Runner resumes eligible conversations using the saved provider reference.
+  Completed turns stay idle. For a running turn it delivers queued messages
+  first, or asks the agent to verify command outcomes and continue unfinished work.
+  A pending approval or input request requires the person to continue. A session ended on purpose stays ended.
 - **The workspace.** Its record still names that session as working in it,
   which a Runner that did not re-attach it reads as "Owner uncertain". The
   Runner checks at startup that none of the session's recorded processes

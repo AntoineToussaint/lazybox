@@ -38,6 +38,7 @@ import (
 // rebootFixture is what the fixture Runner set up before the "reboot".
 type rebootFixture struct {
 	Execution     string `json:"execution"`
+	BusyExecution string `json:"busyExecution"`
 	IdleExecution string `json:"idleExecution"`
 	Conversation  string `json:"conversation"`
 	Finished      string `json:"finished"`
@@ -115,7 +116,18 @@ func fixtureRebootRunner() {
 		record, err := b.History.Get(ctx, idle.ID)
 		return err == nil && canAutoResume(record.Snapshot, engine.Attachment{})
 	})
-	data, _ := json.Marshal(rebootFixture{Execution: e.ID, IdleExecution: idle.ID, Conversation: conversationOf(e), Finished: finished.Status().ID, Running: running.Status().ID, Mission: mission.ID, Task: task})
+	busy, err := b.Open("claude-default", os.Getenv("RUNNER_REPO"), "", accounts.Options{}, "direct", "", "")
+	if err != nil {
+		fail(err)
+	}
+	if _, err := busy.Engine.Apply(ctx, agent.Operation{ID: "active", Kind: agent.Message, Text: "hold until reboot"}); err != nil {
+		fail(err)
+	}
+	until("active turn", func() bool {
+		r, err := b.History.Get(ctx, busy.ID)
+		return err == nil && r.Snapshot.Busy && r.Snapshot.Status == agent.Running
+	})
+	data, _ := json.Marshal(rebootFixture{Execution: e.ID, IdleExecution: idle.ID, BusyExecution: busy.ID, Conversation: conversationOf(e), Finished: finished.Status().ID, Running: running.Status().ID, Mission: mission.ID, Task: task})
 	fmt.Println(string(data))
 	select {}
 }
@@ -200,6 +212,10 @@ func TestRebootBringsBackEverythingAndResumesTheAgent(t *testing.T) {
 		t.Fatalf("a reboot is not a failure to report: %v", err)
 	}
 
+	busy, err := b.History.Successor(ctx, before.BusyExecution)
+	if err != nil || busy.Previous != before.BusyExecution {
+		t.Fatalf("active turn did not resume: %+v, %v", busy, err)
+	}
 	idle, err := b.History.Successor(ctx, before.IdleExecution)
 	if err != nil || idle.Previous != before.IdleExecution || idle.Snapshot.Closed {
 		t.Fatalf("idle conversation did not resume automatically: %+v, %v", idle, err)
@@ -300,7 +316,7 @@ func TestRebootBringsBackEverythingAndResumesTheAgent(t *testing.T) {
 	for end := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		data, _ := os.ReadFile(log)
 		lines := string(data)
-		if strings.Contains(lines, "open resume=fixture-ref") && strings.Contains(lines, "message queued question") {
+		if strings.Contains(lines, "open resume=fixture-ref") && strings.Contains(lines, "message queued question") && strings.Count(lines, "message Lazybox restarted during your turn.") == 1 {
 			break
 		}
 		if time.Now().After(end) {
@@ -361,5 +377,16 @@ func TestAgentLostNoticeIsRecordedOnce(t *testing.T) {
 	got, err := b.Get(e.ID)
 	if err != nil || got.RecoveryRequired || !got.Engine.Snapshot().Closed {
 		t.Fatalf("not resumable: %+v %v", got, err)
+	}
+}
+
+func TestRestartEligibilityForInterruptedTurn(t *testing.T) {
+	s := engine.Snapshot{Busy: true, Status: agent.Running, Reference: "thread", Capabilities: agent.Capabilities{Resume: true}}
+	if !canAutoResume(s, engine.Attachment{}) {
+		t.Fatal("running turn requires manual resume")
+	}
+	s.Pending = map[string]agent.Event{"approval": {}}
+	if canAutoResume(s, engine.Attachment{}) {
+		t.Fatal("pending approval automatically resumed")
 	}
 }

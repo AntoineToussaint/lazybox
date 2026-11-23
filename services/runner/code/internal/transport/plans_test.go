@@ -174,6 +174,15 @@ func TestOrchestratorHoldsNewAgentsWhileReviewIsFull(t *testing.T) {
 func nanos(v int64) *int64 { return &v }
 
 func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
+	for _, tc := range []struct{ name, content, want string }{
+		{"text", `{"schema":"spec.v1","problem":"Reconnect","requirements":["Restore history"],"acceptanceCriteria":["One row after reconnect"]}`, "One row after reconnect"},
+		{"named", `{"schema":"spec.v2","problem":"Reconnect","requirements":["Restore history"],"acceptanceCriteria":[{"id":"reconnect","expected":"One row after reconnect","required":true}]}`, "[reconnect, required] One row after reconnect"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testPinnedPlanSpawnsFromReviewedBaseline(t, tc.content, tc.want) })
+	}
+}
+
+func testPinnedPlanSpawnsFromReviewedBaseline(t *testing.T, content, want string) {
 	o := newOrchestration(t)
 	ctx := timeout(t)
 	source := history(t, "base")
@@ -194,7 +203,7 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 	o.grant(t, &pb.OrchestratorCeiling{MaxChildren: 2, PlanRequired: true})
 	orch, owner := bearer(ctx, o.orchKey), bearer(ctx, ownerToken)
 	req := &pb.ProposePlanRequest{SessionId: o.orch.ID, OperationId: "snapshot", Tasks: []*pb.PlanTask{{Key: "a", Title: "Worker", Workspace: "pinned"}, {Key: "b", Title: "Worker", Workspace: "pinned"}}}
-	spec, err := o.bench.Artifacts.Put(parent.ID, artifacts.Put{Title: "Acceptance", Kind: "spec", Format: "json", Content: `{"schema":"spec.v1","problem":"Reconnect","requirements":["Restore history"],"acceptanceCriteria":["One row after reconnect"]}`})
+	spec, err := o.bench.Artifacts.Put(parent.ID, artifacts.Put{Title: "Acceptance", Kind: "spec", Format: "json", Content: content})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +223,7 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Contract.GetVersion() != 1 || len(plan.Contract.GetAcceptanceCriteria()) != 1 || plan.Contract.Digest != artifacts.Digest(spec.Content) || len(plan.Baseline) != 1 || plan.Baseline[0].Commit != member.BaseCommit {
+	if plan.Contract.GetVersion() != 1 || len(plan.Contract.GetAcceptanceCriteria()) != 1 || plan.Contract.GetAcceptanceCriteria()[0] != want || plan.Contract.Digest != artifacts.Digest(spec.Content) || len(plan.Baseline) != 1 || plan.Baseline[0].Commit != member.BaseCommit {
 		t.Fatalf("proposal missing review inputs: %v", plan)
 	}
 	if _, err = o.bench.Artifacts.Put(parent.ID, artifacts.Put{ID: spec.ID, Content: strings.ReplaceAll(spec.Content, "One row", "Two rows")}); err != nil {

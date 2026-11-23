@@ -33,6 +33,8 @@ without anyone asking:
 - **commits** made through the PR loop;
 - **pull requests** explicitly delivered by the assigned conversation, and their **checks**. Run `lazybox link <PR URL>` in that conversation, or create the PR there with a supported tool such as `gh pr create`. Link it while the conversation has one active task so the Runner can identify the attempt. A workspace branch alone does not associate its PR with a mission. An ambiguous command or result needs an explicit link. When a task changes hands, the replacement attempt starts with its own evidence. Previously recorded workspace-only checks and earlier attempts remain in the expanded history. Verification requires a check observation after delivery to the current attempt.
 
+The collapsed task card and acceptance inbox show the latest run and the most recent failed run when they differ. Expand the card for the full history. A later passing command can test a different part of the work.
+
 Click a run to open its output in the console; click a pull request to open it
 on GitHub. Each delivered PR has its own chip. Linking another PR keeps existing check results visible.
 
@@ -116,3 +118,21 @@ Integration merges the reviewed commits into a dedicated workspace and runs the 
 Retry an interrupted request with its original key, plan and check. The Runner reconciles a recorded check from the command journal. If it cannot identify a check, it preserves the workspace and records the interruption as a failed candidate. A fresh key starts another candidate.
 
 Promotion is an explicit owner decision. It verifies the worker reviews, clean candidate commits and current accepted generation. The accepted manifest advances once. The next candidate starts from those accepted commits, which local Git refs retain. The original base worktrees remain available for planning. Publishing to upstream repositories is a separate operation.
+
+### Naming delivery criteria
+
+A structured spec can use `spec.v2` to give each acceptance criterion a stable ID and mark it required or optional. Publish the JSON as a spec and pin its artifact version in the Mission plan. The approval sheet and worker brief include the IDs and requirement levels.
+
+```json
+{
+  "schema": "spec.v2",
+  "problem": "Deliver an authenticated catalog",
+  "requirements": ["Persist and retrieve work items"],
+  "acceptanceCriteria": [
+    {"id": "storage", "expected": "Duplicate inserts retain one work item", "required": true},
+    {"id": "api", "expected": "An authorized client retrieves that item after restart", "required": true}
+  ]
+}
+```
+
+Existing spec.v1 plans continue to use text criteria. Binding observations to named criteria during live runs is pending.

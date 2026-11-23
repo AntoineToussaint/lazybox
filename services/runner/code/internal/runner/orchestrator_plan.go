@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/delivery"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/artifacts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/telemetry"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
@@ -54,17 +55,37 @@ func (b *Bench) ProposePlan(ctx context.Context, session, operation, summary str
 		if err != nil {
 			return nil, nil, err
 		}
-		var spec struct {
-			Schema             string
-			AcceptanceCriteria []string
+		var header struct{ Schema string }
+		if doc.Kind != "spec" || doc.Format != "json" || json.Unmarshal([]byte(doc.Content), &header) != nil {
+			return nil, nil, fmt.Errorf("%w: the contract needs a structured spec", work.ErrRefused)
 		}
-		if doc.Kind != "spec" || doc.Format != "json" || json.Unmarshal([]byte(doc.Content), &spec) != nil || spec.Schema != "spec.v1" || len(spec.AcceptanceCriteria) == 0 {
-			return nil, nil, fmt.Errorf("%w: the contract needs a structured spec with acceptance criteria", work.ErrRefused)
+		contract := &work.PlanContract{Artifact: artifactID, Version: version, Workspace: c.e.CollectionID, Digest: artifacts.Digest(doc.Content)}
+		switch header.Schema {
+		case "spec.v2":
+			contract.Bindings, err = delivery.ParseSpecV2(doc.Content)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%w: %v", work.ErrRefused, err)
+			}
+			for _, criterion := range contract.Bindings {
+				level := "optional"
+				if criterion.Required {
+					level = "required"
+				}
+				contract.Criteria = append(contract.Criteria, fmt.Sprintf("[%s, %s] %s", criterion.ID, level, criterion.Expected))
+			}
+		case "spec.v1":
+			var legacy struct{ AcceptanceCriteria []string }
+			if json.Unmarshal([]byte(doc.Content), &legacy) != nil || len(legacy.AcceptanceCriteria) == 0 {
+				return nil, nil, fmt.Errorf("%w: missing acceptance criteria", work.ErrRefused)
+			}
+			contract.Criteria = legacy.AcceptanceCriteria
+		default:
+			return nil, nil, fmt.Errorf("%w: unsupported spec schema", work.ErrRefused)
 		}
-		if len(strings.Join(spec.AcceptanceCriteria, "\n")) > 4096 {
+		if len(strings.Join(contract.Criteria, "\n")) > 4096 {
 			return nil, nil, fmt.Errorf("%w: mission acceptance criteria exceed 4 KiB", work.ErrRefused)
 		}
-		payload.Contract = &work.PlanContract{Artifact: artifactID, Version: version, Workspace: c.e.CollectionID, Digest: artifacts.Digest(doc.Content), Criteria: spec.AcceptanceCriteria}
+		payload.Contract = contract
 	}
 	for _, t := range tasks {
 		if t.Workspace == "pinned" {

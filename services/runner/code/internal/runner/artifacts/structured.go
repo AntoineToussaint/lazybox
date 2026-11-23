@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/delivery"
 )
 
 //go:embed templates/*.json
@@ -38,11 +40,16 @@ func validateStructured(kind, content string) error {
 	if err = json.Unmarshal([]byte(content), &body); err != nil {
 		return fmt.Errorf("%w: expected a JSON object", ErrInvalid)
 	}
-	if kind == "plan" {
-		var schema string
-		if json.Unmarshal(body["schema"], &schema) == nil && schema == "roadmap.v1" {
-			return validateRoadmap(content)
+	var schema string
+	_ = json.Unmarshal(body["schema"], &schema)
+	switch {
+	case kind == "plan" && schema == "roadmap.v1":
+		return validateRoadmap(content)
+	case kind == "spec" && schema == "spec.v2":
+		if _, err := delivery.ParseSpecV2(content); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
 		}
+		return nil
 	}
 	for name, shape := range fields {
 		raw := body[name]

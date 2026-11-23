@@ -1195,7 +1195,7 @@ pub fn window_event(window: &tauri::Window, event: &WindowEvent) {
                 if let Some(geometry) = captured {
                     let surface = layout.touch(label)?;
                     if !surface.maximized {
-                        surface.geometry = Some(geometry);
+                        surface.remember_geometry(geometry);
                     }
                 }
                 layout.close(label)
@@ -1220,7 +1220,7 @@ pub fn window_event(window: &tauri::Window, event: &WindowEvent) {
                     .ok_or("Unknown window surface")?;
                 surface.maximized = maximized;
                 if let Some(geometry) = captured {
-                    surface.geometry = Some(geometry);
+                    surface.remember_geometry(geometry);
                 }
                 Ok(())
             })()

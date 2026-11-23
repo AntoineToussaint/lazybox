@@ -77,6 +77,16 @@ pub struct Surface {
     pub geometry: Option<Geometry>,
     pub maximized: bool,
 }
+impl Surface {
+    /// Native resize and display-change events can sample inner and outer sizes
+    /// on different frames. Keep the last restorable geometry in that case.
+    pub fn remember_geometry(&mut self, geometry: Geometry) {
+        if geometry.valid() {
+            self.geometry = Some(geometry);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layout {
@@ -270,11 +280,15 @@ impl Layout {
                 }
                 _ => false,
             };
-            if label != &surface.label
-                || !identity_matches
-                || surface.geometry.as_ref().is_some_and(|g| !g.valid())
-            {
-                return Err("Invalid saved window surface".into());
+            if label != &surface.label || !identity_matches {
+                return Err(format!(
+                    "Invalid saved window surface: target mismatch for {label}"
+                ));
+            }
+            if surface.geometry.as_ref().is_some_and(|g| !g.valid()) {
+                return Err(format!(
+                    "Invalid saved window surface: invalid geometry for {label}"
+                ));
             }
         }
         Ok(())

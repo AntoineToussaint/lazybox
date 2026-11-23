@@ -47,6 +47,8 @@ on GitHub. Each delivered PR has its own chip. Linking another PR keeps existing
 
 ## Accept or send back
 
+For work that spans conversations, keep one versioned roadmap in workspace Artifacts. Record a stable milestone ID, phase, dependencies and definition of done. The roadmap reader groups the work by phase. Only accepted milestones count toward phase completion. Export its mission plan to preserve those details in each remaining task brief. At acceptance, expand **Review task brief and acceptance criteria** in the Inbox and compare the original brief with the report and Runner evidence.
+
 When the work looks finished, **Report done…** on the task's card records what
 was done. An agent an [orchestrator](orchestrator.md) started reports its own
 task with `lazybox agents report`; any other conversation's task is reported

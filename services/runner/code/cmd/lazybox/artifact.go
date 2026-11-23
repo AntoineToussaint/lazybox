@@ -31,7 +31,7 @@ type artifactAPI interface {
 }
 
 const artifactUsage = `Usage:
-  lazybox artifact template KIND|pr-walkthrough|incident-timeline|release-checklist
+  lazybox artifact template KIND|roadmap|pr-walkthrough|incident-timeline|release-checklist
   lazybox artifact put <file|-> --title T [--id ID] [--kind plan|report|spec|notes|todo-list|other] [--format markdown|html|json] [--design ID@VERSION] [--review ID@VERSION] [--supersedes ID[,ID…]]
   lazybox artifact retire ID [--superseded-by ID] [--reason "…"]
   lazybox artifact get ID [--version N]

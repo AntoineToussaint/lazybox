@@ -50,7 +50,7 @@ export function artifactFixture({ workspaceFiles, mutations }) {
         const author = { kind: 'person' }, source = body.source || { kind: 'edit' };
         if (!body.artifactId) {
           if (!body.title?.trim()) return error('invalid_argument', 'a title is required');
-          return json(wire(create({ collectionId: body.collectionId, title: body.title.trim(), kind: body.kind, content, author, source, links: body.links })));
+          return json(wire(create({ collectionId: body.collectionId, title: body.title.trim(), kind: body.kind, content, author, source, format: body.format, links: body.links })));
         }
         const entry = find(body.collectionId, body.artifactId);
         if (!entry) return error('not_found', 'artifact not found');

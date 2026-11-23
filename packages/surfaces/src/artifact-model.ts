@@ -291,3 +291,46 @@ export function artifactChip(artifacts: readonly Artifact[], conversation: Conve
   const title = mine ? `${noun(mine)} from this conversation${artifacts.length > mine ? ` · ${artifacts.length} in this workspace` : ''}` : `${noun(artifacts.length)} in this workspace`;
   return { count: mine || artifacts.length, mine: mine > 0, label: noun(mine || artifacts.length), title };
 }
+
+// Convert the explicit milestone fields in a saved roadmap to the mission CLI's plan format.
+export function roadmapMissionPlan(markdown: string, title: string, artifactId: string, version: number) {
+  const blocks: { title: string; lines: string[]; fields: string[] }[] = [];
+  let fence = '';
+  for (const line of markdown.split(/\r?\n/)) {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (!fence && marker) { fence = marker[1]; blocks.at(-1)?.lines.push(line); continue; }
+    if (fence) {
+      blocks.at(-1)?.lines.push(line);
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = '';
+      continue;
+    }
+    const heading = /^##\s+(.+)$/.exec(line);
+    if (heading) blocks.push({ title: heading[1].trim(), lines: [], fields: [] });
+    else { blocks.at(-1)?.lines.push(line); blocks.at(-1)?.fields.push(line); }
+  }
+  const tasks = blocks.flatMap(block => {
+    const field = (name: string) => block.fields.find(line => line.startsWith('- ' + name + ':'))?.slice(name.length + 3).trim() ?? '';
+    const key = field('Milestone');
+    if (!key && !block.fields.some(line => line.startsWith('- Milestone:'))) return [];
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(key)) throw new Error('Enter a milestone ID for ' + block.title);
+    if (!field('Definition of done') || !field('Deliverable')) throw new Error('Add a deliverable and definition of done for ' + key);
+    return [{ key, title: block.title, after: field('Depends on').split(/[,\s]+/).filter(Boolean),
+      brief: block.lines.join('\n').trim() + '\n\nSource roadmap: ' + artifactId + ' v' + version }];
+  });
+  if (!tasks.length) throw new Error('Add milestone fields to the roadmap before exporting a mission plan.');
+  const byKey = new Map(tasks.map(task => [task.key, task]));
+  if (byKey.size !== tasks.length) throw new Error('Give each milestone a unique ID.');
+  const visiting = new Set<string>(), visited = new Set<string>();
+  function visit(key: string) {
+    if (visited.has(key)) return;
+    if (visiting.has(key)) throw new Error('Milestone dependency cycle at ' + key);
+    const task = byKey.get(key);
+    if (!task) throw new Error('Unknown milestone dependency: ' + key);
+    visiting.add(key);
+    task.after.forEach(visit);
+    visiting.delete(key);
+    visited.add(key);
+  }
+  tasks.forEach(task => visit(task.key));
+  return { summary: title, tasks };
+}

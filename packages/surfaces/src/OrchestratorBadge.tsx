@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent }
 import { subscriptionGroups } from './subscription-groups';
 import { createPortal } from 'react-dom';
 import { ConnectError } from '@lazybox/client-core';
-import type { Mission, Session } from '@lazybox/protocol';
+import type { Collection, Mission, Session } from '@lazybox/protocol';
 import { DraggableDialog, DialogHeader } from './DraggableDialog';
 import { Icon } from './Icons';
 import { useRunner } from './RunnerContext';
@@ -133,30 +133,36 @@ function OrchestratorCard({ mission, conversation, parent, missionTitle, grantId
  * conversation's own and only narrows; nothing here lets it approve, answer
  * or accept anything.
  */
-export function GrantDialog({ session: given, onClose, missionId, candidates }: { session?: Session; onClose(): void; missionId?: string; /** Without a session: the conversations to choose from. */ candidates?: readonly Session[] }) {
+export function GrantDialog({ session: given, onClose, missionId, candidates, collections }: { session?: Session; onClose(): void; missionId?: string; /** Without a session: the conversations to choose from. */ candidates?: readonly Session[]; collections?: readonly Collection[] }) {
   const { info } = useRunner();
-  const [picked, setPicked] = useState(() => given?.id || candidates?.[0]?.id || '');
-  const session = given || candidates?.find(s => s.id === picked) || candidates?.[0];
+  const [picked, setPicked] = useState('');
+  const session = given || candidates?.find(s => s.id === picked);
   const missions = useMissions();
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { dialog.current?.showModal(); }, []);
   const open = useMemo(() => missions.missions.filter(m => !m.canceled), [missions.missions]);
   const [choice, setChoice] = useState<string>(() => missionId || '');
-  const chosen = choice || open[0]?.id || 'new';
+  const chosen = missionId || choice || (open.length ? '' : 'new');
+  const selectedMission = open.find(m => m.id === chosen);
   const [title, setTitle] = useState('');
   const [draft, setDraft] = useState<GrantDraft>(() => defaultGrant(session));
   useEffect(() => { if (!given && session) setDraft(defaultGrant(session)); }, [given, session?.id]);
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
   const profiles = subscriptionGroups((info?.profiles || []).filter(p => p.provider === 'claude' || p.provider === 'codex'), { currentId: session?.profileId }).flatMap(group => group.items);
   const choices = permissionChoices(session?.permission);
-  const problem = (!session ? 'Choose the conversation that orchestrates' : undefined) || grantProblem(draft) || (chosen === 'new' && !title.trim() ? 'Name the mission: the outcome its agents work toward' : undefined);
+  const problem = (!session ? 'Choose the conversation that orchestrates' : undefined) || (chosen !== 'new' && !selectedMission ? 'Choose the mission its agents work on' : undefined) || grantProblem(draft) || (chosen === 'new' && !title.trim() ? 'Name the mission: the outcome its agents work toward' : undefined);
   const agentName = !session ? 'a conversation' : session.provider === 'codex' ? 'Codex' : 'Claude';
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (problem || busy || !session) return;
     setBusy(true); setError('');
     try {
-      const mission = chosen === 'new' ? await missions.create(title.trim(), '') : open.find(m => m.id === chosen)!;
-      await missions.update(mission.id, { case: 'grant', value: { sessionId: session.id, ceiling: { permission: draft.permission, profileIds: draft.profileIds, maxChildren: draft.maxChildren, depth: 1, budgetUsd: draft.budgetUsd, planRequired: draft.planRequired } } });
+      let targetId = chosen;
+      if (chosen === 'new') {
+        const created = await missions.create(title.trim(), '');
+        targetId = created.id;
+        setChoice(targetId);
+      }
+      await missions.update(targetId, { case: 'grant', value: { sessionId: session.id, ceiling: { permission: draft.permission, profileIds: draft.profileIds, maxChildren: draft.maxChildren, depth: 1, budgetUsd: draft.budgetUsd, planRequired: draft.planRequired } } });
       onClose();
     } catch (e) { setError(message(e)); setBusy(false); }
   };
@@ -164,14 +170,14 @@ export function GrantDialog({ session: given, onClose, missionId, candidates }: 
   return <DraggableDialog ref={dialog} className="mission-dialog grant-dialog" aria-label="Let this conversation run agents" onCancel={event => { if (busy) event.preventDefault(); else onClose(); }}>
     <DialogHeader><h2><Icon name="subagent" size={15}/> Let {agentName} run agents</h2><button type="button" aria-label="Close" disabled={busy} onClick={onClose}>×</button></DialogHeader>
     <form onSubmit={submit}>
-      {!given && <label>Conversation<select aria-label="Conversation" value={session?.id || ''} onChange={e => setPicked(e.target.value)}>{(candidates || []).map(s => <option key={s.id} value={s.id}>{s.title || 'Untitled conversation'}{s.lineage?.grantId ? ' · already an orchestrator' : ''}</option>)}</select></label>}
+      {!given && <label>Conversation<select aria-label="Conversation" value={session?.id || ''} onChange={e => setPicked(e.target.value)}><option value="">Choose a conversation…</option>{(candidates || []).map(s => <option key={s.id} value={s.id}>{s.title || 'Untitled conversation'}{' · '}{collections?.find(c => c.id === s.collectionId)?.name || s.collectionId}</option>)}</select></label>}
       <p className="mission-muted">This conversation becomes an <b>orchestrator</b>: it may start agents for one mission, message them, wait on them and stop them. Each one is a task on the mission's board.</p>
-      <fieldset className="grant-missions"><legend>Mission</legend>
-        {open.slice(0, 6).map(m => <label key={m.id} className={chosen === m.id ? 'chosen' : ''}><input type="radio" name="grant-mission" checked={chosen === m.id} onChange={() => setChoice(m.id)}/><span>{m.title}</span><small>{m.tasks.length} tasks</small></label>)}
+      {missionId ? <p>Mission <strong>{selectedMission?.title}</strong></p> : <fieldset className="grant-missions"><legend>Mission</legend>
+        {open.map(m => <label key={m.id} className={chosen === m.id ? 'chosen' : ''}><input type="radio" name="grant-mission" checked={chosen === m.id} onChange={() => setChoice(m.id)}/><span>{m.title}</span><small>{m.tasks.length} tasks</small></label>)}
         <label className={chosen === 'new' ? 'chosen grant-new' : 'grant-new'}><input type="radio" name="grant-mission" checked={chosen === 'new'} onChange={() => setChoice('new')}/>
           <input aria-label="New mission" placeholder="New mission: what should be true when it is done?" value={title} maxLength={200} onFocus={() => setChoice('new')} onChange={e => setTitle(e.target.value)}/></label>
-      </fieldset>
-      <fieldset className="grant-ceiling"><legend>Its agents get at most</legend>
+      </fieldset>}
+      <fieldset className="grant-ceiling" disabled={!session}><legend>Its agents get at most</legend>
         <div className="grant-row" role="radiogroup" aria-label="Permission">
           <span>Permission</span>
           {choices.map(c => <label key={c.mode} title={c.disabled} className={c.disabled ? 'disabled' : ''}><input type="radio" name="grant-permission" disabled={!!c.disabled} checked={draft.permission === c.mode} onChange={() => setDraft(d => ({ ...d, permission: c.mode }))}/>{permissionLabel[c.mode]}</label>)}

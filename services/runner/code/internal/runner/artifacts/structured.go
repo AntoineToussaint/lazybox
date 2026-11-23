@@ -11,9 +11,11 @@ import (
 //go:embed templates/*.json
 var templates embed.FS
 
-// Template returns an editable example for the supported artifact kind.
+var starterNames = []string{"pr-walkthrough", "incident-timeline", "release-checklist", "roadmap"}
+
+// Template returns an editable artifact example by kind or named starter.
 func Template(kind string) (string, error) {
-	if !slices.Contains(Kinds, kind) {
+	if !slices.Contains(Kinds, kind) && !slices.Contains(starterNames, kind) {
 		return "", fmt.Errorf("%w: unknown artifact kind %q", ErrInvalid, kind)
 	}
 	data, err := templates.ReadFile("templates/" + kind + ".json")
@@ -35,6 +37,12 @@ func validateStructured(kind, content string) error {
 	var body map[string]json.RawMessage
 	if err = json.Unmarshal([]byte(content), &body); err != nil {
 		return fmt.Errorf("%w: expected a JSON object", ErrInvalid)
+	}
+	if kind == "plan" {
+		var schema string
+		if json.Unmarshal(body["schema"], &schema) == nil && schema == "roadmap.v1" {
+			return validateRoadmap(content)
+		}
 	}
 	for name, shape := range fields {
 		raw := body[name]

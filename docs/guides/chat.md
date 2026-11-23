@@ -61,7 +61,14 @@ it did.
   code). Hover it to scroll through it; click it to read or edit it. ⌘Z right
   after the paste, or the box's ⋯ → **Insert inline**, puts the text in the
   message instead. A pasted box counts as one of the four files, and it is
-  kept with your draft if the window reloads.
+  kept with your draft if the window reloads. Large pasted boxes use the local
+  attachment store and can still be edited after reloading.
+- Attached files, including screenshots, are saved with the draft on this device.
+  The composer remembers their names immediately. Binary files and large pasted
+  boxes finish saving in the background. Closing or reloading the window before
+  that write finishes can leave a name without its contents. The composer lists
+  each missing file so you can reattach or remove it before sending.
+
 - **Every agent gets your attachments**, Claude, Codex and ACP agents alike,
   after your text and in the order of the boxes: an image as an image (when
   the agent sees images), text (a pasted box, a source file, up to 256 KiB)

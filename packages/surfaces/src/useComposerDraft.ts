@@ -1,23 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ViewStateStore } from '@lazybox/platform';
 import { readDraft, writeDraft, type FileReference } from './view-state';
+import { draftFileId, loadDraftFiles, saveDraftFiles } from './draft-files';
 import { DRAFT_TEXT_BYTES, pastedTextOf, restorePastedText } from './attachment-boxes';
 
-/** The most pasted text one saved draft holds; the store refuses a draft over 1 MiB. */
-const DRAFT_TEXT_TOTAL = 3 * DRAFT_TEXT_BYTES;
-
-/**
- * The saved form of a draft's files: a pasted box with its text (within the
- * draft's budget), any other file by name, size and time.
- */
-export function fileReferences(files: readonly File[]): FileReference[] {
-  let budget = DRAFT_TEXT_TOTAL;
-  return files.map(file => {
-    const text = pastedTextOf(file);
-    const keep = text !== undefined && text.length <= DRAFT_TEXT_BYTES && text.length <= budget;
-    if (keep) budget -= text.length;
-    return { name: file.name, size: file.size, lastModified: file.lastModified, ...(keep ? { text } : {}) };
-  });
+/** Keep small pastes inline as long as the serialized draft fits the native view store. */
+function fileReferences(files: readonly File[], text: string, missing: FileReference[], operationId: string): FileReference[] {
+  const refs: FileReference[] = files.map(file => ({
+    name: file.name, size: file.size, lastModified: file.lastModified, blobId: draftFileId(file),
+  }));
+  if (!files.some(file => pastedTextOf(file) !== undefined)) return refs;
+  const encoder = new TextEncoder();
+  const encodedSize = (value: unknown) => encoder.encode(JSON.stringify(value)).length;
+  let available = DRAFT_TEXT_BYTES - encodedSize({ text, files: [...refs, ...missing], operationId });
+  for (const [index, file] of files.entries()) {
+    const pasted = pastedTextOf(file);
+    if (pasted === undefined || pasted.length > available) continue;
+    const { blobId, ...metadata } = refs[index];
+    const inline = { ...metadata, text: pasted };
+    const added = encodedSize(inline) - encodedSize(refs[index]);
+    if (added <= available) { refs[index] = inline; available -= added; }
+  }
+  return refs;
 }
 
 /** The message and files of a send whose delivery is not yet confirmed. */
@@ -36,19 +40,59 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
   const [uncertainSend, setUncertainSend] = useState('');
   const sendAttempt = useRef<SendAttempt | null>(null);
 
+  const [restoring, setRestoring] = useState(false);
+  const saved = useRef<{ destination: string; files: File[] } | undefined>(undefined);
   useEffect(() => {
-    try {
+    let active = true;
+    saved.current = undefined;
+    async function restore() {
       const draft = readDraft(viewState, sessionID);
-      // A pasted box comes back with its text; other files are attached again.
-      setMessage(draft.text); setMissingFiles(draft.files.filter(file => file.text === undefined));
-      setFiles(draft.files.flatMap(file => file.text === undefined ? [] : [restorePastedText(file.name, file.text, file.lastModified)])); setUncertainSend(draft.operationId); sendAttempt.current = null;
-    } catch (e) { onError(`Could not restore this window's draft: ${String(e)}`); }
+      setFiles([]); setMissingFiles([]);
+      setMessage(draft.text);
+      setUncertainSend(draft.operationId);
+      sendAttempt.current = null;
+      let blobs = new Map<string, File>();
+      if (viewState && draft.files.some(ref => ref.blobId)) {
+        setRestoring(true);
+        try { blobs = await loadDraftFiles(viewState, sessionID); } catch { /* Metadata still permits explicit reattachment. */ }
+      }
+      if (!active) return;
+      const found: File[] = [], missing: FileReference[] = [];
+      for (const ref of draft.files) {
+        const file = ref.text !== undefined ? restorePastedText(ref.name, ref.text, ref.lastModified) : blobs.get(ref.blobId || '');
+        if (file) found.push(file); else missing.push(ref);
+      }
+      if (!missing.length) {
+        saved.current = { destination: sessionID, files: found.filter((_, i) => draft.files[i].blobId) };
+      }
+      setFiles(found); setMissingFiles(missing); setRestoring(false);
+    }
+    void restore().catch(error => {
+      if (!active) return;
+      setMessage(''); setFiles([]); setMissingFiles([]); setUncertainSend('');
+      sendAttempt.current = null;
+      setRestoring(false); onError(String(error));
+    });
+    return () => { active = false; };
   }, [viewState, sessionID]);
 
-  const persistDraft = (text: string, selected: File[], missing: FileReference[], operationId = '') => {
-    try { writeDraft(viewState, sessionID, { text, files: [...fileReferences(selected), ...missing], operationId }); }
-    catch (e) { onError(`Could not save this window's draft: ${String(e)}`); }
+  const persistDraft = (text: string, selected: File[], missing: FileReference[], operationId = '', destination = sessionID) => {
+    try {
+      const refs = fileReferences(selected, text, missing, operationId);
+      writeDraft(viewState, destination, { text, files: [...refs, ...missing], operationId });
+      if (!viewState) return;
+      const binary = selected.filter((_, i) => refs[i].blobId);
+      const previous = saved.current;
+      if (previous?.destination === destination && previous.files.length === binary.length && binary.every((file, i) => previous.files[i] === file)) return;
+      const snapshot = { destination, files: binary };
+      saved.current = snapshot;
+      void saveDraftFiles(viewState, destination, binary).catch(() => {
+        if (saved.current !== snapshot) return;
+        saved.current = undefined;
+        if (binary.length) onError('Attachment available in this window only. Local draft storage is unavailable.');
+      });
+    } catch (e) { onError(`Could not save this window's draft: ${String(e)}`); }
   };
 
-  return { message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft };
+  return { restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft };
 }

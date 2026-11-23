@@ -1,0 +1,170 @@
+{
+  "schema": "roadmap.v1",
+  "milestones": [
+    {
+      "id": "A1",
+      "title": "Discover workspace capabilities",
+      "phase": "Unified plugins",
+      "owner": "Runner and adapters",
+      "status": "open",
+      "deliverable": "Read-only workspace inventory of native, external and Lazybox-managed skills, tools, panels and policies. Record runtime version, origin, scope and reason for unavailability.",
+      "dependsOn": [],
+      "definitionOfDone": [
+        "Fixture discovery on Claude SDK, Codex app-server and Gemini ACP; absence of a provider gives an actionable result. No global changes during discovery."
+      ],
+      "evidence": [],
+      "openDecisions": []
+    },
+    {
+      "id": "A2",
+      "title": "Manage workspace activation",
+      "phase": "Unified plugins",
+      "owner": "Runner and client",
+      "status": "open",
+      "deliverable": "Workspace enable/disable with digest, reviewed effects, conversation-purpose restrictions and rollback. Catalog card exposes current-chat versus new-chat activation.",
+      "dependsOn": [
+        "A1"
+      ],
+      "definitionOfDone": [
+        "Two workspaces share a package without sharing grants. Retried installs converge. Failed updates restore prior state. A remote client reopening the screen reads Runner state."
+      ],
+      "evidence": [],
+      "openDecisions": []
+    },
+    {
+      "id": "A3",
+      "title": "Ship the shared debugging skill",
+      "phase": "Unified plugins",
+      "owner": "Provider adapters and command UI",
+      "status": "open",
+      "deliverable": "Pinned systematic-debugging skill attached to Debug this failure. Pass command reference and return evidence of reproduction and verification.",
+      "dependsOn": [
+        "A2"
+      ],
+      "definitionOfDone": [
+        "Same fixture on each available runtime, exercised through Lazybox. Excluded session purposes cannot invoke it. Show unverified explicitly until each live test passes."
+      ],
+      "evidence": [],
+      "openDecisions": []
+    },
+    {
+      "id": "A4",
+      "title": "Integrate a shared symbol tool",
+      "phase": "Unified plugins",
+      "owner": "Provider adapters",
+      "status": "open",
+      "deliverable": "One shared MCP symbol tool scoped to worktree. Claude merges approved additions, Codex reconciles configured entries, Gemini passes selected servers on the supported ACP session paths.",
+      "dependsOn": [
+        "A2"
+      ],
+      "definitionOfDone": [
+        "Same filename in two worktrees returns distinct expected symbols. Verify restart, resume, revoked access, missing dependency and disconnected remote Runner."
+      ],
+      "evidence": [],
+      "openDecisions": []
+    },
+    {
+      "id": "A5",
+      "title": "Unify the plugin catalog",
+      "phase": "Unified plugins",
+      "owner": "Client and Runner operations",
+      "status": "open",
+      "deliverable": "One catalog with contextual invocation, redacted receipts, update/revert and uninstall. Document authorship, external ownership and compatibility testing.",
+      "dependsOn": [
+        "A3",
+        "A4"
+      ],
+      "definitionOfDone": [
+        "Discover → enable → use → inspect → remove succeeds on desktop and remote Runner, without erasing externally managed configuration."
+      ],
+      "evidence": [],
+      "openDecisions": []
+    },
+    {
+      "id": "A6",
+      "title": "Explain account routing and cache usage",
+      "phase": "Unified plugins",
+      "owner": "Runner policies and telemetry",
+      "status": "open",
+      "deliverable": "Explain account choice and exclusions; offer passive cache analysis when counters reconcile. Separate future proposal for paid, scheduled warming or an API gateway.",
+      "dependsOn": [
+        "A5"
+      ],
+      "definitionOfDone": [
+        "Explicit skip reason for a full account, unknown state for missing data. No autonomous provider requests from enabling analysis."
+      ],
+      "evidence": [],
+      "openDecisions": []
+    },
+    {
+      "id": "B1",
+      "title": "Pin design and review revisions",
+      "phase": "Artifact delivery",
+      "owner": "Artifact store and protocol",
+      "status": "awaiting-acceptance",
+      "deliverable": "Add typed, workspace-scoped derivative references. Store each input artifact ID, revision and role (design or review) in the derived plan revision. Keep a reverse lookup. Older artifacts need no migration of content.",
+      "dependsOn": [],
+      "definitionOfDone": [
+        "Create one plan from two sources, retry without duplicates, reject unavailable/cross-workspace revisions, and preserve links after title changes and retirement."
+      ],
+      "evidence": [
+        "Implemented in PR #69. Acceptance review pending."
+      ],
+      "openDecisions": []
+    },
+    {
+      "id": "B2",
+      "title": "Create and review derived roadmaps",
+      "phase": "Artifact delivery",
+      "owner": "Artifact reader and agent handoff",
+      "status": "in-progress",
+      "deliverable": "Create implementation roadmap from a selected revision. Let a person include review findings, inspect the brief and choose the author agent. Save as a new plan. Display source revision, unresolved decisions and derived plans on both sides.",
+      "dependsOn": [
+        "B1"
+      ],
+      "definitionOfDone": [
+        "Exercise from an older revision in a detached window. Cancel leaves no draft artifact. A newer source marks the plan eligible for review without overwriting it."
+      ],
+      "evidence": [
+        "Partially implemented in PR #69. Pinned navigation and newer-source indication exist. Decision tracking and full workflow acceptance remain open."
+      ],
+      "openDecisions": []
+    },
+    {
+      "id": "B3",
+      "title": "Map milestones to proposed mission tasks",
+      "phase": "Artifact delivery",
+      "owner": "Mission planning",
+      "status": "in-progress",
+      "deliverable": "Convert selected roadmap milestones into a proposed mission DAG. Preserve milestone keys, dependencies, acceptance criteria, budget and source revision. Support an explicit no-work decision for rejected findings.",
+      "dependsOn": [
+        "B2"
+      ],
+      "definitionOfDone": [
+        "Reject cycles or missing keys. Retrying proposal returns the same task mapping. Planning creates no running workers. Existing mission approval authorizes execution separately."
+      ],
+      "evidence": [
+        "Local commit 9f8f08c exports a validated dependency graph and preserves definitions of done. All ten milestone keys and dependencies were verified against v4 of this roadmap. Type checking, model tests and artifact browser export passed. Live mission submission, selected subsets, task mapping and acceptance remain open."
+      ],
+      "openDecisions": []
+    },
+    {
+      "id": "B4",
+      "title": "Collect and export milestone evidence",
+      "phase": "Artifact delivery",
+      "owner": "Evidence and rendering",
+      "status": "open",
+      "deliverable": "Show task, PR, command receipt or artifact evidence for each milestone. Add accessible roadmap and review layouts with independent offline HTML export.",
+      "dependsOn": [
+        "B3"
+      ],
+      "definitionOfDone": [
+        "Reopen from phone or detached desktop. Follow a milestone back to the exact reviewed revision. Download HTML and read milestones, dependencies, status and diagrams offline in light and dark modes."
+      ],
+      "evidence": [
+        "Local commit 9f8f08c exposes the original task brief at Inbox acceptance. Missions browser tests passed. Milestone evidence reconciliation and offline milestone views remain open."
+      ],
+      "openDecisions": []
+    }
+  ]
+}

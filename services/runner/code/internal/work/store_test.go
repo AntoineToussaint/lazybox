@@ -95,6 +95,15 @@ func TestTrustLadderThroughTheStore(t *testing.T) {
 	if v = row(t, s, m.ID, task, live("c1", LiveIdle)); v.Trust != TrustObserved || contains(v.Flags, FlagFailing) {
 		t.Fatalf("a passing run is observed: %+v", v)
 	}
+	// Checks only attach once the conversation links that pull request.
+	pr := Evidence{Kind: EvidencePR, Ref: "pr:team/api#4@aaa", Member: "api", Repository: "team/api", Number: 4, Head: "aaa", Outcome: OutcomePass}
+	if n, err := s.Record(Origin{Workspace: "ws"}, Actor{Kind: ActorCheck}, pr); n != 0 || err != nil {
+		t.Fatalf("workspace-only checks attached: %d %v", n, err)
+	}
+	link := Evidence{Kind: EvidencePR, Ref: PullRequestLinkRef("team/api", 4), Repository: "team/api", Number: 4, Outcome: OutcomeUnknown}
+	if n, err := s.Record(Origin{Conversation: "c1"}, Actor{Kind: ActorLazybox}, link); n != 1 || err != nil {
+		t.Fatalf("delivery link: %d %v", n, err)
+	}
 	// Checks on an older head do not verify it.
 	s.Record(Origin{Workspace: "ws"}, Actor{Kind: ActorCheck}, Evidence{Kind: EvidencePR, Ref: "pr:team/api#4", Member: "api", Repository: "team/api", Number: 4, Head: "aaa", Outcome: OutcomePass})
 	if v = row(t, s, m.ID, task, live("c1", LiveIdle)); v.Trust != TrustObserved || !contains(v.Flags, FlagStale) {
@@ -376,5 +385,81 @@ func TestPolicyComesFromTheProcessAndIsPinned(t *testing.T) {
 	old, err := policyOf(ProcessPayload{Preset: "retired", ReportGate: "accept", DoneGate: "accept"})
 	if err != nil || old.ReportGate() != "accept" {
 		t.Fatalf("pinned gates ignored: %v", err)
+	}
+}
+
+func TestPullRequestEvidenceFollowsLinkedAttempt(t *testing.T) {
+	s := newStore(t, t.TempDir())
+	assign := func(title, conversation string) (string, string) {
+		m := mustOK[*State](t)(s.Create(Human, "", title, ""))
+		_, task, err := s.AddTask(m.ID, Human, "", "", title, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.Assign(m.ID, task, Human, "", AttemptPayload{Conversation: conversation, Workspace: "shared"}); err != nil {
+			t.Fatal(err)
+		}
+		return m.ID, task
+	}
+	one, task := assign("One", "worker")
+	two, other := assign("Two", "neighbor")
+	link := Evidence{Kind: EvidencePR, Ref: PullRequestLinkRef("team/api", 12), Repository: "team/api", Number: 12, Outcome: OutcomeUnknown}
+	pr := Evidence{Kind: EvidencePR, Ref: "pr:team/api#12@abc", Repository: "team/api", Member: "api", Number: 12, Head: "abc", Outcome: OutcomePass}
+	record := func(origin Origin, e Evidence, want int) {
+		t.Helper()
+		if n, err := s.Record(origin, Actor{Kind: ActorLazybox}, e); n != want || err != nil {
+			t.Fatalf("%v %s recorded %d, want %d: %v", origin, e.Ref, n, want, err)
+		}
+	}
+	record(Origin{Workspace: "shared"}, pr, 0)
+	record(Origin{Conversation: "worker"}, link, 1)
+	record(Origin{Workspace: "shared"}, pr, 1)
+	if len(mustOK[*State](t)(s.Mission(two)).Task(other).Evidence) != 0 {
+		t.Fatal("another mission in the same workspace received checks")
+	}
+	if _, _, err := s.Assign(one, task, Human, "", AttemptPayload{Conversation: "replacement", Workspace: "shared"}); err != nil {
+		t.Fatal(err)
+	}
+	if trust, flags, _ := judge(mustOK[*State](t)(s.Mission(one)).Task(task)); trust != TrustClaimed || !contains(flags, FlagNoEvidence) {
+		t.Fatalf("replacement inherited earlier checks: %s %v", trust, flags)
+	}
+	pr.Outcome = OutcomeFail
+	record(Origin{Workspace: "shared"}, pr, 0)
+	assign("Three", "replacement")
+	record(Origin{Conversation: "replacement"}, link, 0)
+	if len(mustOK[*State](t)(s.Mission(one)).Task(task).Evidence) != 2 {
+		t.Fatal("historical evidence changed after reassignment")
+	}
+}
+
+func TestRefreshAfterLinkingLegacyPullRequest(t *testing.T) {
+	s := newStore(t, t.TempDir())
+	m := mustOK[*State](t)(s.Create(Human, "", "Upgrade", ""))
+	_, task, err := s.AddTask(m.ID, Human, "", "", "Delivery", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, attempt, err := s.Assign(m.ID, task, Human, "", AttemptPayload{Workspace: "ws", Conversation: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := Evidence{Kind: EvidencePR, Repository: "team/api", Member: "api", Number: 12, Ref: "pr:team/api#12@abc", Head: "abc", Outcome: OutcomePass, Task: task, Attempt: attempt}
+	if _, _, err := s.Append(m.ID, Draft{Subject: TaskSubject(task), Type: EvidenceRecorded, Actor: Actor{Kind: ActorCheck}, Payload: pr}); err != nil {
+		t.Fatal(err)
+	}
+	record := func(origin Origin, ev Evidence) {
+		t.Helper()
+		if n, err := s.Record(origin, Actor{Kind: ActorLazybox}, ev); n != 1 || err != nil {
+			t.Fatalf("record %s: %d %v", ev.Ref, n, err)
+		}
+	}
+	record(Origin{Conversation: "worker"}, Evidence{Kind: EvidencePR, Repository: pr.Repository, Number: pr.Number, Ref: PullRequestLinkRef(pr.Repository, pr.Number)})
+	record(Origin{Workspace: "ws"}, pr)
+	next := pr
+	next.Ref, next.Head = "pr:team/api#12@def", "def"
+	record(Origin{Workspace: "ws"}, next)
+	record(Origin{Workspace: "ws"}, pr)
+	if trust, flags, reason := judge(mustOK[*State](t)(s.Mission(m.ID)).Task(task)); trust != TrustVerified || len(flags) != 0 {
+		t.Fatalf("%s %v: %s", trust, flags, reason)
 	}
 }

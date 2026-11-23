@@ -61,6 +61,8 @@ Move between conversations and workspaces. Chords with ⌘ (Ctrl) work even whil
 | Go to workspace 1…9 | `⌘1` … `⌘9` | `Ctrl+1` … `Ctrl+9` |
 | Go to file | `]] f` or `⌘P` | `]] f` or `Ctrl+P` |
 | Focus the sidebar | `]]` | `]]` |
+| Show missions | — | — |
+| Open the missions board | — | — |
 
 ## Workspace
 
@@ -86,8 +88,6 @@ Open the parts of the workspace in front.
 | Open this workspace in a new window | — | — |
 | Customize this page | — | — |
 | Layout configuration | — | — |
-| Show missions | — | — |
-| Open the missions board | — | — |
 | Show pull requests | — | — |
 
 ## Layout

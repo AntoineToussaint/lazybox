@@ -2,16 +2,17 @@ package transport
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sources/github"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
@@ -144,6 +145,22 @@ func (s *Service) UpdateMission(ctx context.Context, r *pb.UpdateMissionRequest)
 // chosen workspace, and optionally sends it the task's brief as the
 // conversation's next message (recorded as a mission prompt).
 func (s *Service) assign(ctx context.Context, store *work.Store, mission, key string, a *pb.TaskAssign) (*work.State, string, string, error) {
+	// OpenSession allocates a conversation before Store.Assign records its ID.
+	// Serialize this task's requests so a concurrent retry sees the saved ID.
+	scope := [2]string{mission, a.GetTaskId()}
+	done := make(chan struct{})
+	for {
+		active, busy := s.assigning.LoadOrStore(scope, done)
+		if !busy {
+			break
+		}
+		select {
+		case <-active.(chan struct{}):
+		case <-ctx.Done():
+			return nil, "", "", ctx.Err()
+		}
+	}
+	defer func() { s.assigning.Delete(scope); close(done) }()
 	current, err := store.Mission(mission)
 	if err != nil {
 		return nil, "", "", err
@@ -156,9 +173,15 @@ func (s *Service) assign(ctx context.Context, store *work.Store, mission, key st
 		// A retried assignment opens no second conversation.
 		if e, ok := current.Event(key); ok {
 			var p work.AttemptPayload
-			_ = json.Unmarshal(e.Payload, &p)
-			return current, p.Attempt, p.Execution, nil
+			if e.Type != work.TaskAssigned || json.Unmarshal(e.Payload, &p) != nil || p.Task != task.ID {
+				return nil, "", "", fmt.Errorf("%w: operation already belongs to another change", work.ErrRefused)
+			}
+			err := s.sendAssignmentBrief(ctx, current, task, p)
+			return current, p.Attempt, p.Execution, err
 		}
+	}
+	if current.Canceled || task.Canceled || current.Done(task) {
+		return nil, "", "", fmt.Errorf("%w: only an open task can be assigned", work.ErrRefused)
 	}
 	var e *runner.Execution
 	switch {
@@ -187,24 +210,41 @@ func (s *Service) assign(ctx context.Context, store *work.Store, mission, key st
 	if conversation == "" {
 		conversation = e.ID
 	}
-	state, attempt, err := store.Assign(mission, task.ID, work.Human, key, work.AttemptPayload{Conversation: conversation, Workspace: e.CollectionID, Execution: e.ID, New: a.Open != nil})
+	payload := work.AttemptPayload{Conversation: conversation, Workspace: e.CollectionID, Execution: e.ID, New: a.Open != nil}
+	if a.SendBrief {
+		operation := key
+		if operation == "" {
+			operation = commands.ID()
+		}
+		payload.BriefOperation = fmt.Sprintf("mission-brief-%x", sha256.Sum256([]byte(mission+"/"+operation)))
+	}
+	state, attempt, err := store.Assign(mission, task.ID, work.Human, key, payload)
 	if err != nil {
 		return nil, "", "", err
 	}
-	if a.SendBrief {
-		text := briefMessage(current, task)
-		operation := key
-		if operation == "" {
-			operation = attempt
-		}
-		origin := &agent.Origin{Kind: agent.OriginMissionBrief, Summary: "Task assigned · " + task.Title, Detail: current.Title}
-		_, err = s.apply(ctx, &pb.ApplyRequest{SessionId: e.ID, OperationId: operation + "/brief", Operation: &pb.ApplyRequest_Message{Message: &pb.Message{Text: text, Source: &pb.PromptSource{Kind: work.SourceMission, MissionId: mission, TaskId: task.ID}}}}, origin)
-		if err != nil {
-			// The assignment stands; say the brief did not go.
-			return state, attempt, e.ID, fmt.Errorf("assigned, but the brief was not delivered: %w", err)
-		}
+	payload.Attempt = attempt
+	err = s.sendAssignmentBrief(ctx, state, state.Task(task.ID), payload)
+	return state, attempt, e.ID, err
+}
+
+// The operation is persisted with the assignment before delivery. Old assignments
+// carry no pending operation; a retry returns their original result.
+func (s *Service) sendAssignmentBrief(ctx context.Context, state *work.State, task *work.Task, p work.AttemptPayload) error {
+	if p.BriefOperation == "" || (s.Bench.Prompts != nil && s.Bench.Prompts.Submitted(p.Conversation, p.BriefOperation)) {
+		return nil
 	}
-	return state, attempt, e.ID, nil
+	if at := task.Current(); at == nil || at.ID != p.Attempt || at.Ended || task.Canceled || state.Canceled || state.Done(task) {
+		return fmt.Errorf("%w: assignment ended before its brief was delivered", work.ErrRefused)
+	}
+	origin := &agent.Origin{Kind: agent.OriginMissionBrief, Summary: "Task assigned · " + task.Title, Detail: state.Title}
+	receipt, err := s.apply(ctx, &pb.ApplyRequest{SessionId: p.Execution, OperationId: p.BriefOperation, Operation: &pb.ApplyRequest_Message{Message: &pb.Message{Text: briefMessage(state, task), Source: &pb.PromptSource{Kind: work.SourceMission, MissionId: state.ID, TaskId: task.ID}}}}, origin)
+	if err != nil {
+		return fmt.Errorf("assigned, but the brief was not delivered: %w", err)
+	}
+	if receipt.Error != "" {
+		return fmt.Errorf("assigned, but the brief was not delivered: %s", receipt.Error)
+	}
+	return nil
 }
 
 // briefMessage is the message a conversation receives when a task is
@@ -219,44 +259,38 @@ func briefMessage(m *work.State, t *work.Task) string {
 	return b.String()
 }
 
-// refreshPullRequests reads the pull request of every repository of the
-// mission's live attempts, at most once a minute each, in the background:
-// GetPullRequest records what it reads as evidence.
+// Refresh only PRs explicitly delivered on the selected mission's live attempts.
 func (s *Service) refreshPullRequests(state *work.State) {
-	if s.Bench.Collections == nil || !s.githubConnected() {
+	if !s.githubConnected() {
 		return
 	}
 	for _, t := range state.Tasks {
 		a := t.Current()
-		if a == nil || a.Ended || a.Workspace == "" {
+		if a == nil || a.Ended || state.Canceled || t.Canceled || state.Done(t) {
 			continue
 		}
-		workspace, err := s.Bench.Collections.Get(a.Workspace)
-		if err != nil {
-			continue
-		}
-		for _, m := range workspace.Members {
-			key := a.Workspace + "/" + m.Name
-			now := time.Now()
-			if last, ok := prRefreshed.Load(key); ok && now.Sub(last.(time.Time)) < time.Minute {
+		for _, entry := range t.Evidence {
+			if entry.Attempt != a.ID || !entry.IsPullRequestLink() {
 				continue
 			}
-			prRefreshed.Store(key, now)
-			go func(collection, member string) {
+			key := entry.Workspace + "/" + entry.Ref
+			now := time.Now()
+			last, loaded := s.prRefreshed.LoadOrStore(key, now)
+			if loaded && (now.Sub(last.(time.Time)) < time.Minute || !s.prRefreshed.CompareAndSwap(key, last, now)) {
+				continue
+			}
+			go func(link work.Evidence) {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				_, _ = s.GetPullRequest(ctx, &pb.GetPullRequestRequest{CollectionId: collection, Member: member})
-			}(a.Workspace, m.Name)
+				s.Bench.RefreshMissionPullRequest(ctx, link)
+			}(entry.Evidence)
 		}
 	}
 }
 
-// prRefreshed throttles background pull request reads per workspace repository.
-var prRefreshed sync.Map
-
 // observePullRequest records what the PR loop read about a member's branch:
 // the workspace delivers that pull request (a tracked item whose transitions
-// fire hooks), and it is evidence on the attempts in the workspace.
+// fire hooks). Checks reach only attempts explicitly linked to this PR.
 func (s *Service) observePullRequest(collection, member string, out *pb.PullRequestStatus) {
 	if out == nil || !out.Found {
 		return
@@ -271,13 +305,6 @@ func (s *Service) observeLoop(collection, member string, out *pb.PullRequestStat
 		return
 	}
 	s.Bench.ObservePullRequestLoop(collection, member, out.GithubRepository, status, created, readAt)
-	pr := runner.PullRequestObservation{Workspace: collection, Member: member, Repository: out.GithubRepository, Title: out.Title, URL: out.Url, State: out.State, Head: out.HeadSha, Checks: out.ChecksState, Number: out.Number, Total: len(out.Checks)}
-	for _, c := range out.Checks {
-		if c.Status == "completed" && (c.Conclusion == "failure" || c.Conclusion == "timed_out" || c.Conclusion == "cancelled" || c.Conclusion == "action_required") {
-			pr.Failed = append(pr.Failed, c.Name)
-		}
-	}
-	s.Bench.RecordPullRequest(pr)
 }
 
 func (s *Service) ListPromptHistory(ctx context.Context, r *pb.ListPromptHistoryRequest) (*pb.PromptHistory, error) {
@@ -367,12 +394,8 @@ func (s *Service) wireMission(ctx context.Context, state *work.State, readErr er
 			task.Report, task.ReportedAtUnixMillis = report.Summary, millis(report.At)
 		}
 		// What it cost so far, against what its plan estimated.
-		seen := map[string]bool{}
 		for _, a := range v.Attempts {
-			if !seen[a.Conversation] {
-				seen[a.Conversation] = true
-				task.CostUsd += s.Bench.ConversationCost(ctx, a.Conversation)
-			}
+			task.CostUsd += s.Bench.AttemptCost(ctx, state, v.Task, a)
 		}
 		for _, p := range state.Plans {
 			for key, created := range p.Created {
@@ -393,8 +416,12 @@ func (s *Service) wireMission(ctx context.Context, state *work.State, readErr er
 				break
 			}
 		}
+		currentEvidence := v.CurrentEvidenceSeqs()
 		for i := len(v.Evidence) - 1; i >= 0; i-- {
-			task.Evidence = append(task.Evidence, wireEvidence(v.Evidence[i]))
+			record := v.Evidence[i]
+			evidence := wireEvidence(record)
+			evidence.Historical = !currentEvidence[record.Seq]
+			task.Evidence = append(task.Evidence, evidence)
 		}
 		if v.Attempt != nil && !v.Attempt.Ended && s.Bench.Prompts != nil {
 			memory := s.Bench.Prompts.Snippets(v.Attempt.Conversation, "")
@@ -467,7 +494,7 @@ func wireMissionEvent(state *work.State, e work.Event) *pb.MissionEvent {
 func eventSummary(state *work.State, e work.Event) string {
 	var p struct {
 		Title, Brief, Summary, Note, Reason, Gate, Outcome, Kind, Preset string
-		Task, Conversation                                               string
+		Task, Conversation, Ref, Repository                              string
 		ExitCode                                                         *int `json:"exit_code"`
 		Number                                                           int64
 		Head                                                             string
@@ -521,6 +548,9 @@ func eventSummary(state *work.State, e work.Event) string {
 			}
 			return "Piped " + p.Title
 		case work.EvidencePR:
+			if p.Ref == work.PullRequestLinkRef(p.Repository, p.Number) {
+				return fmt.Sprintf("Linked %s#%d to this task", p.Repository, p.Number)
+			}
 			return fmt.Sprintf("Pull request #%d · checks %s", p.Number, p.Outcome)
 		case work.EvidenceCommit:
 			return "Committed " + p.Title

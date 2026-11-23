@@ -59,12 +59,12 @@ type Source struct {
 	Path           string `json:"path,omitempty"`
 }
 
-// Link ties an artifact to a mission or task. Stored, but refused on write
-// until the Runner has missions (ORCHESTRATION.md, slice 1).
+// Link pins an input revision for a derived roadmap.
 type Link struct {
-	Kind string `json:"kind"`
-	ID   string `json:"id"`
-	Role string `json:"role"`
+	Version uint32 `json:"version,omitempty"`
+	Kind    string `json:"kind"`
+	ID      string `json:"id"`
+	Role    string `json:"role"`
 }
 
 type Version struct {
@@ -78,6 +78,7 @@ type Version struct {
 }
 
 type Artifact struct {
+	CreationDigest       string    `json:"creationDigest,omitempty"`
 	ID                   string    `json:"id"`
 	Workspace            string    `json:"workspace"`
 	Title                string    `json:"title"`
@@ -140,6 +141,7 @@ type Document struct {
 
 // Put creates an artifact (ID empty) or appends a version to one.
 type Put struct {
+	CreationKey                      string
 	ID, Title, Kind, Format, Content string
 	Author                           Author
 	Source                           Source
@@ -333,9 +335,24 @@ func validContent(content string) error {
 	return nil
 }
 
-func validLinks(links []Link) error {
-	if len(links) > 0 {
-		return errors.New("missions and tasks are not available on this Runner yet, so an artifact cannot be linked to one")
+func (s *Store) validateInputs(ws string, p Put) error {
+	roles := map[string]bool{}
+	ids := map[string]bool{}
+	for _, link := range p.Links {
+		if link.Kind != "artifact" {
+			return errors.New("mission and task links are not supported")
+		}
+		if p.ID != "" || p.Kind != "plan" || (link.Role != "design" && link.Role != "review") || roles[link.Role] || ids[link.ID] {
+			return fmt.Errorf("%w: roadmap inputs require a new plan and distinct sources and roles", ErrInvalid)
+		}
+		source, err := s.find(ws, link.ID)
+		if err != nil {
+			return err
+		}
+		if link.Version == 0 || link.Version > source.Latest() {
+			return fmt.Errorf("%w: unknown source revision", ErrInvalid)
+		}
+		roles[link.Role], ids[link.ID] = true, true
 	}
 	return nil
 }
@@ -358,13 +375,35 @@ func (s *Store) Put(ws string, p Put) (Document, error) {
 	if err := validContent(p.Content); err != nil {
 		return Document{}, err
 	}
-	if err := validLinks(p.Links); err != nil {
-		return Document{}, err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	id := ""
+	creationDigest := ""
+	if p.CreationKey != "" {
+		if p.ID != "" || !segment.MatchString(p.CreationKey) {
+			return Document{}, fmt.Errorf("%w: invalid artifact creation key", ErrInvalid)
+		}
+		id = "create-" + Digest(p.Author.Kind+"\x00"+p.Author.SessionID+"\x00"+p.CreationKey)
+		encoded, err := json.Marshal(p)
+		if err != nil {
+			return Document{}, err
+		}
+		creationDigest = Digest(string(encoded))
+		if existing := s.items[ws][id]; existing != nil {
+			if existing.CreationDigest != creationDigest {
+				return Document{}, fmt.Errorf("%w: creation key was already used with different inputs", ErrConflict)
+			}
+			return s.document(existing, 1)
+		}
+	}
+	if err := s.validateInputs(ws, p); err != nil {
+		return Document{}, err
+	}
 	if p.ID == "" {
-		return s.createWithID(ws, newID(), p.Title, p.Kind, p.Content, p.Author, p.Source, "", "", p.Format)
+		if id == "" {
+			id = newID()
+		}
+		return s.createWithID(ws, id, p.Title, p.Kind, p.Content, p.Author, p.Source, "", "", p.Format, creationDigest, p.Links...)
 	}
 	a, err := s.find(ws, p.ID)
 	if err != nil {
@@ -410,7 +449,7 @@ func (s *Store) Put(ws string, p Put) (Document, error) {
 }
 
 func (s *Store) create(ws, title, kind, content string, author Author, source Source, tracked string) (Document, error) {
-	return s.createWithID(ws, newID(), title, kind, content, author, source, tracked, "", "markdown")
+	return s.createWithID(ws, newID(), title, kind, content, author, source, tracked, "", "markdown", "")
 }
 
 // PublishReview retains each round under the review run ID. Source.TurnID
@@ -442,10 +481,10 @@ func (s *Store) PublishReview(ws, id, title, content, schema string, source Sour
 		}
 		return s.document(existing, existing.Latest())
 	}
-	return s.createWithID(ws, id, title, "report", content, Author{Kind: "agent", SessionID: source.SessionID}, source, "", schema, "markdown")
+	return s.createWithID(ws, id, title, "report", content, Author{Kind: "agent", SessionID: source.SessionID}, source, "", schema, "markdown", "")
 }
 
-func (s *Store) createWithID(ws, id, title, kind, content string, author Author, source Source, tracked, schema, format string) (Document, error) {
+func (s *Store) createWithID(ws, id, title, kind, content string, author Author, source Source, tracked, schema, format, creationDigest string, links ...Link) (Document, error) {
 	title, err := normalizeTitle(title)
 	if err != nil {
 		return Document{}, err
@@ -484,7 +523,7 @@ func (s *Store) createWithID(ws, id, title, kind, content string, author Author,
 		return Document{}, fmt.Errorf("%w: unknown artifact format %q", ErrInvalid, format)
 	}
 	now := s.now().UnixMilli()
-	a := Artifact{ID: id, Workspace: ws, Title: title, Kind: kind, Format: format, CreatedAt: now, TrackedPath: tracked}
+	a := Artifact{CreationDigest: creationDigest, Links: append([]Link(nil), links...), ID: id, Workspace: ws, Title: title, Kind: kind, Format: format, CreatedAt: now, TrackedPath: tracked}
 	if source.Kind == "message" || source.Kind == "agent" {
 		a.OriginSessionID, a.OriginConversationID = source.SessionID, source.ConversationID
 	}

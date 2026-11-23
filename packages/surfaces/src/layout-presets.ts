@@ -21,7 +21,7 @@ const sidebar = column([1 - AGENTS_SHARE, AGENTS_SHARE], g('collections'), g('ag
  * declares them (scripts/action-manifest.test.ts keeps the two in step). The
  * Runner checks layout files against it (actions.manifest.json).
  */
-export const layoutPanelKinds = ['collections', 'agents', 'chat', 'console', 'terminal', 'assistant', 'training', 'changes', 'usage', 'sessions', 'missions', 'pulls', 'processes', 'actions', 'preview', 'web', 'browser', 'files', 'editor', 'artifacts', 'extension'] as const;
+export const layoutPanelKinds = ['collections', 'agents', 'chat', 'console', 'terminal', 'assistant', 'training', 'changes', 'usage', 'sessions', 'pulls', 'processes', 'actions', 'preview', 'web', 'browser', 'files', 'editor', 'artifacts', 'extension'] as const;
 
 export const DEFAULT_PRESET = 'chat-focus';
 export const builtinPresets: readonly LayoutPreset[] = [
@@ -104,12 +104,32 @@ export function parseSavedLayouts(text: string | null): LayoutPreset[] {
     const value: unknown = JSON.parse(text || '[]');
     if (!Array.isArray(value)) return [];
     return value.filter((item): item is LayoutPreset => !!item && typeof item === 'object' && typeof item.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(item.id) && typeof item.name === 'string' && !!item.name.trim() && item.name.length <= 48 && validTemplate(item.layout))
-      .slice(0, 24).map(item => ({ id: item.id, name: item.name, description: typeof item.description === 'string' ? item.description.slice(0, 120) : '', layout: stackTemplateSidebar(item.layout) }));
+      .slice(0, 24).map(item => ({ id: item.id, name: item.name, description: typeof item.description === 'string' ? item.description.slice(0, 120) : '', layout: restoreTemplate(item.layout) }));
   } catch { return []; }
 }
 /** A saved layout keeps its arrangement, except that Agents tabbed with Workspaces now sits under them. */
-export function stackTemplateSidebar(node: TemplateNode): TemplateNode {
+function stackTemplateSidebar(node: TemplateNode): TemplateNode {
   if (node.type === 'split') return { ...node, children: node.children.map(stackTemplateSidebar) };
   const both = node.kinds.includes('collections') && node.kinds.includes('agents') && node.kinds.every(kind => kind === 'collections' || kind === 'agents');
   return both ? sidebar : node;
+}
+
+/** Read saved arrangements from before Missions moved to Runner navigation. */
+export function restoreTemplate(template: TemplateNode): TemplateNode {
+  if (!templateKinds(template).includes('missions')) return stackTemplateSidebar(template);
+  const visit = (node: TemplateNode): TemplateNode | undefined => {
+    if (node.type === 'group') {
+      const kinds = node.kinds.filter(kind => kind !== 'missions');
+      return kinds.length ? { ...node, kinds } : undefined;
+    }
+    const children: TemplateNode[] = [], sizes: number[] = [];
+    node.children.forEach((child, index) => {
+      const kept = visit(child);
+      if (kept) { children.push(kept); sizes.push(node.sizes[index]); }
+    });
+    if (children.length < 2) return children[0];
+    const total = sizes.reduce((sum, size) => sum + size, 0);
+    return { ...node, children, sizes: sizes.map(size => size / total) };
+  };
+  return stackTemplateSidebar(visit(template) ?? builtinPresets[0].layout);
 }

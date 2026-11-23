@@ -99,10 +99,15 @@ export function createMissionFake({ sessions, collections, events }) {
       t.evidence.unshift(e); t.updated = ms(); append(m, 'evidence.recorded', 'task:' + t.id, e, 'lazybox');
     }
   };
+  const linkPullRequest = (sessionId, repository, number) => {
+    const active = missions.filter(m => !m.canceled).flatMap(m => m.tasks.filter(t => !t.accepted && !t.canceled))
+      .map(t => t.attempts.at(-1)).filter(a => a && !a.ended && a.conversationId === conversationOf(sessionId));
+    if (active.length === 1) (active[0].linkedPRs ??= new Set()).add(repository + '#' + number);
+  };
   const recordPullRequest = (collectionId, { number, head, outcome, repository = 'fixture-team/api' }) => {
     for (const m of missions) for (const t of m.tasks) {
       const a = t.attempts.at(-1);
-      if (!a || a.ended || t.accepted || t.canceled || a.collectionId !== collectionId) continue;
+      if (!a || a.ended || t.accepted || t.canceled || m.canceled || a.collectionId !== collectionId || !a.linkedPRs?.has(repository + '#' + number)) continue;
       const e = { ref: `pr:${repository}#${number}@${head}`, kind: 'pr', title: 'Pull request', outcome, piped: false, member: 'api', repository, head, number: String(number), url: `https://github.com/${repository}/pull/${number}`, state: 'open', collectionId, sessionId: '', commandId: '', outputPath: '', detail: outcome === 'pass' ? '3 checks passed' : 'failed: test', atUnixMillis: ms() };
       t.evidence.unshift(e); t.updated = ms(); append(m, 'evidence.recorded', 'task:' + t.id, e, 'check');
     }
@@ -280,5 +285,5 @@ export function createMissionFake({ sessions, collections, events }) {
     if (snippet) source = { kind: 'snippet', snippetKey: snippet.key };
     prompts.unshift({ text, conversationId: conversationOf(body.sessionId), collectionId: session?.collectionId || '', sessionId: body.sessionId, atUnixMillis: ms(), source, next });
   };
-  return { handle, missions, prompts, create, addTask, assign, recordRun, recordPullRequest, recordApply, spawnChild, agentMessage, reportChild, proposePlan, setBudget, setCost, addLease, addOverlap };
+  return { handle, missions, prompts, create, addTask, assign, recordRun, linkPullRequest, recordPullRequest, recordApply, spawnChild, agentMessage, reportChild, proposePlan, setBudget, setCost, addLease, addOverlap };
 }

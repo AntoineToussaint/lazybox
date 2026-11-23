@@ -20,6 +20,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/reviews"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sources/github"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sources/github/githubtest"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -151,11 +152,18 @@ func TestTrackingFindsWhatAgentsOpenAndEmitsTransitionsOnce(t *testing.T) {
 	call := func(data string) { f.agent.Events <- agent.Event{Type: "tool_activity", Data: json.RawMessage(data)} }
 	call(`{"type":"tool_call","id":"t1","name":"Bash","status":"running","input":{"command":"gh pr create --fill"}}`)
 	call(`{"type":"tool_call","id":"t1","status":"completed","output":"Creating pull request for agent/two into main in team/api\n\nhttps://github.com/team/api/pull/2\n"}`)
+	call(`{"type":"tool_call","id":"failed","name":"Bash","status":"failed","input":{"command":"gh pr create"},"output":"a pull request already exists: https://github.com/team/api/pull/33"}`)
 	call(`{"type":"tool_call","id":"t2","name":"Bash","status":"completed","input":{"command":"gh issue view 9"},"output":"see https://github.com/team/api/issues/9"}`)
-	until(t, "agent output never linked", func() bool { l := f.links(t); return l["team/api#2"] != nil && l["team/api#9"] != nil })
+	until(t, "agent output never linked", func() bool {
+		l := f.links(t)
+		return l["team/api#2"] != nil && l["team/api#9"] != nil && l["team/api#33"] != nil
+	})
 	links := f.links(t)
 	if two := links["team/api#2"]; two.Role != "delivers" || two.Source != "agent-output" || two.SessionId != f.session.ID {
 		t.Fatalf("agent output: %+v", two)
+	}
+	if failed := links["team/api#33"]; failed.Role != "mentions" {
+		t.Fatalf("failed creation linked a delivery: %+v", failed)
 	}
 	if nine := links["team/api#9"]; nine.Role != "mentions" {
 		t.Fatalf("mention: %+v", nine)
@@ -484,5 +492,134 @@ func TestAgentLinksAreBounded(t *testing.T) {
 	// The person is not rate limited.
 	if _, err = f.service.LinkItem(context.Background(), &pb.LinkItemRequest{CollectionId: f.mine.Id, Url: "https://github.com/team/api/pull/200"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A Mission refresh reads its explicitly linked PR even after the workspace's branch changes.
+func TestMissionRefreshesDeliveredPRByNumber(t *testing.T) {
+	f := newItemsFixture(t)
+	ctx := bearer(timeout(t), ownerToken)
+	mission, task := missionWithTask(t, f.terminalFixture, ctx)
+	if _, err := f.client.UpdateMission(ctx, &pb.UpdateMissionRequest{MissionId: mission, OperationId: "assign", Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: task, SessionId: f.session.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	f.github.Update(func(s *githubtest.Server) {
+		s.Pulls["team/api"] = []*githubtest.PR{{Number: 7, Title: "Linked delivery", Head: "other-branch", Base: "main", HeadSHA: "linked-head", State: "open"}}
+		s.Checks["linked-head"] = []githubtest.Check{{Name: "test", Status: "completed", Conclusion: "success"}}
+	})
+	if _, err := f.client.LinkItem(ctx, &pb.LinkItemRequest{SessionId: f.session.ID, Url: "https://github.com/team/api/pull/7", Role: "delivers"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.GetMission(ctx, &pb.GetMissionRequest{MissionId: mission, RefreshEvidence: true}); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "checks from linked PR did not arrive", func() bool {
+		m := getMission(t, f.terminalFixture, ctx, mission)
+		for _, e := range taskOf(t, m, task).Evidence {
+			if e.Head == "linked-head" && e.Number == 7 && e.Outcome == "pass" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// A cached pass from before the task was linked is evidence only once GitHub
+// validates it for this task. Both a per-PR failure and a batch failure keep it out.
+func TestMissionRefreshRequiresValidatedChecks(t *testing.T) {
+	f := newItemsFixture(t)
+	ctx := bearer(timeout(t), ownerToken)
+	link := work.Evidence{Workspace: f.mine.Id, Member: "api", Repository: "team/api", Number: 7}
+	url := "https://github.com/team/api/pull/7"
+	good := &githubtest.PR{Number: 7, Title: "Delivery", Head: "feature", Base: "main", HeadSHA: "sha-a", State: "open"}
+	f.github.Update(func(s *githubtest.Server) {
+		s.Pulls["team/api"] = []*githubtest.PR{good}
+		s.Checks["sha-a"] = []githubtest.Check{{Name: "lint", Status: "completed", Conclusion: "success"}}
+	})
+	if _, err := f.client.LinkItem(ctx, &pb.LinkItemRequest{CollectionId: f.mine.Id, Url: url}); err != nil {
+		t.Fatal(err)
+	}
+	f.bench.RefreshMissionPullRequest(ctx, link)
+	if got := f.links(t)["team/api#7"].Item.PullRequest; got == nil || got.Checks != "success" {
+		t.Fatalf("expected a cached pass, got %v", got)
+	}
+	mission, task := missionWithTask(t, f.terminalFixture, ctx)
+	if _, err := f.client.UpdateMission(ctx, &pb.UpdateMissionRequest{MissionId: mission, Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: task, SessionId: f.session.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.LinkItem(ctx, &pb.LinkItemRequest{SessionId: f.session.ID, Url: url}); err != nil {
+		t.Fatal(err)
+	}
+	before := getMission(t, f.terminalFixture, ctx, mission).Seq
+	f.github.Update(func(s *githubtest.Server) { delete(s.Pulls, "team/api") })
+	f.bench.RefreshMissionPullRequest(ctx, link)
+	if got := getMission(t, f.terminalFixture, ctx, mission); got.Seq != before {
+		t.Fatalf("failed per-item lookup published cached evidence: %+v", taskOf(t, got, task))
+	}
+	f.github.Update(func(s *githubtest.Server) { s.RateLimited = true })
+	f.bench.RefreshMissionPullRequest(ctx, link)
+	if got := getMission(t, f.terminalFixture, ctx, mission); got.Seq != before {
+		t.Fatalf("failed batch lookup published cached evidence: %+v", taskOf(t, got, task))
+	}
+	f.github.Update(func(s *githubtest.Server) {
+		s.RateLimited = false
+		s.Pulls["team/api"] = []*githubtest.PR{good}
+	})
+	f.bench.RefreshMissionPullRequest(ctx, link)
+	if got := taskOf(t, getMission(t, f.terminalFixture, ctx, mission), task); got.EvidenceTrust != work.TrustVerified || got.Evidence[0].Head != "sha-a" {
+		t.Fatalf("validated checks were not recorded: %+v", got)
+	}
+	if f.github.NotModified == 0 {
+		t.Fatal("expected conditional GitHub validation")
+	}
+	// An older Runner could save a branch response with a different body's
+	// validators. Reading this state after upgrade must fetch the actual body.
+	var legacy map[string]any
+	tracked := f.bench.WorkItems().Tracked()[0]
+	if err := json.Unmarshal([]byte(tracked.Tracking.ETag), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy, "version")
+	etag, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached := tracked.Item
+	pr := *cached.PR
+	pr.Checks = "failure"
+	cached.PR = &pr
+	if _, err := f.bench.WorkItems().Observe(cached, string(etag), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	f.bench.RefreshMissionPullRequest(ctx, link)
+	if got := f.links(t)["team/api#7"].Item.PullRequest.Checks; got != "success" {
+		t.Fatalf("unpaired legacy ETag validated the wrong snapshot: %s", got)
+	}
+}
+
+func TestMissionDropsOvertakenCheckRead(t *testing.T) {
+	f := newItemsFixture(t)
+	ctx := bearer(timeout(t), ownerToken)
+	mission, task := missionWithTask(t, f.terminalFixture, ctx)
+	if _, err := f.client.UpdateMission(ctx, &pb.UpdateMissionRequest{MissionId: mission, Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: task, SessionId: f.session.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.LinkItem(ctx, &pb.LinkItemRequest{SessionId: f.session.ID, Url: "https://github.com/team/api/pull/7"}); err != nil {
+		t.Fatal(err)
+	}
+	x := &pb.PullRequestStatus{Found: true, GithubRepository: "team/api", Number: 7, HeadSha: "same", State: "open", ChecksState: "failure"}
+	start := f.bench.ItemReadStart()
+	f.service.observeLoop(f.mine.Id, "api", x, statusOf(x), false, start.Add(time.Second))
+	failed := getMission(t, f.terminalFixture, ctx, mission)
+	if got := taskOf(t, failed, task).Evidence[0]; got.Outcome != work.OutcomeFail {
+		t.Fatalf("expected failing CI before stale response, got %+v", got)
+	}
+	x.ChecksState = "success"
+	f.service.observeLoop(f.mine.Id, "api", x, statusOf(x), false, start)
+	if got := getMission(t, f.terminalFixture, ctx, mission); got.Seq != failed.Seq {
+		t.Fatalf("older pass superseded newer failure: %+v", taskOf(t, got, task))
+	}
+	if got := f.links(t)["team/api#7"].Item.PullRequest.Checks; got != "failure" {
+		t.Fatalf("item tracker and mission disagree about the latest check: %s", got)
 	}
 }

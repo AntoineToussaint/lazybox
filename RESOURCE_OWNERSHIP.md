@@ -103,7 +103,7 @@ dropped from agent and command environments, so an owner endpoint exported in
 the Runner's shell does not leak through either.
 
 The transport (`internal/transport/auth.go`, `agentRPCs`) accepts that
-credential for twelve RPCs only: the ones `lazybox run` and `lazybox log`
+credential for a bounded set of RPCs, including the ones `lazybox run` and `lazybox log`
 publish a console with (`RegisterPipe` for its own execution, and `Publish`,
 `FinishPipe` and `FollowPipe` for pipes that execution owns); the ones
 `lazybox ls` and `lazybox stop` use on the execution's own commands
@@ -114,7 +114,8 @@ uses on its own execution's workspace (`ListArtifacts`, `GetArtifact`,
 (`ListWorkspaceRepositories` for its own workspace, `RequestRepository` for
 its own execution, `WaitRepositoryRequest` for its own requests — asking,
 never adding; see [workspaces](WORKSPACES.md#when-an-agent-needs-another-repository)).
-Every other RPC, including any added later, answers `PermissionDenied`; a test
+The agent may also rename its own workspace display name with `RenameCollection`.
+Every RPC outside the allowlist, including any added later, answers `PermissionDenied`; a test
 walks the generated service description to keep that exhaustive. Comparisons are constant-time, and the credential never
 appears in an error, journal or response.
 

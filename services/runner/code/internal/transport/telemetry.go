@@ -43,5 +43,8 @@ func (s *Service) RenameCollection(ctx context.Context, r *pb.RenameCollectionRe
 	if err != nil {
 		return nil, rpcError(err)
 	}
+	if callerSession(ctx) != "" {
+		return &pb.CollectionResponse{Collection: &pb.Collection{Id: c.ID, Name: c.Name}}, nil
+	}
 	return &pb.CollectionResponse{Collection: wireCollection(c)}, nil
 }

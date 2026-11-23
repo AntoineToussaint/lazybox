@@ -8,8 +8,8 @@ import (
 
 // reportedUsage records an ACP agent's usage_update: the context it uses of
 // its window, and the session's cost when the agent reports one in US
-// dollars. The cost is the agent's own cumulative figure, kept as one
-// record per attempt that each report replaces; Lazybox does not price ACP
+// dollars. The cost is the agent's own cumulative figure; the store records
+// its changes within each attempt; Lazybox does not price ACP
 // agents' tokens, which ACP does not report.
 func (s *session) reportedUsage(ctx context.Context, actor string, body map[string]any) error {
 	c := ContextSnapshot{Scope: s.scope, Agent: actor, Source: "acp", Used: count(body["used"]), Capacity: count(body["size"])}

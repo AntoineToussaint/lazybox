@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
@@ -37,7 +38,9 @@ import (
 type Service struct {
 	Inspector gitinspect.Inspector
 	pb.UnimplementedRunnerServiceServer
-	Bench *runner.Bench
+	Bench       *runner.Bench
+	assigning   sync.Map // mission/task -> channel closed when the assignment finishes
+	prRefreshed sync.Map // workspace/delivered PR -> last mission refresh time
 	// Restart is the launcher that starts this Runner again after RestartRunner;
 	// nil when nothing would (a plain `codefly run`, a test, a Codefly service).
 	Restart Restarter
@@ -771,7 +774,7 @@ func (s *Service) RegisterPipe(ctx context.Context, r *pb.RegisterPipeRequest) (
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	c, err := s.Bench.RegisterPipe(e, r.Title)
+	c, err := s.Bench.RegisterPipe(e, r.Title, r.CreatesPullRequest)
 	if err != nil {
 		return nil, rpcError(err)
 	}

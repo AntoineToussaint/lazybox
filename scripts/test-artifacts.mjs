@@ -226,6 +226,10 @@ try{
  await expect(page.getByRole('article',{name:'Plan from Beta'})).toBeVisible();
  await page.screenshot({path:'.cache/artifacts-panel.png'});
  const fromBeta=page.getByRole('article',{name:'Plan from Beta'});
+ await fromBeta.getByLabel('Artifact actions',{exact:true}).click();
+ await expect(fromBeta.getByRole('button',{name:'Copy mission proposal brief'})).toBeVisible();
+ await expect(fromBeta.getByRole('button',{name:'Draft mission proposal in chat…'})).toHaveCount(0);
+ await fromBeta.getByLabel('Artifact actions',{exact:true}).click();
  if(await fromBeta.getByRole('button',{name:'Back to artifacts'}).isVisible())await fromBeta.getByRole('button',{name:'Back to artifacts'}).click();
  await scopes.getByRole('radio',{name:'This workspace'}).click();
  await expect(fromBeta).toHaveCount(0);

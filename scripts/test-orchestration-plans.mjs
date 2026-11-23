@@ -74,14 +74,13 @@ async function run(scheme, capped) {
   await expect(inbox.locator('.agents-summary')).toHaveText('1 waiting for you');
   await page.screenshot({ path: `${shots}orchestration-inbox-${scheme}.png` });
   // …and on the board, from where it opens too.
-  await page.locator('summary[aria-label="Panels"]').click();
-  await page.getByRole('button', { name: 'Show Missions', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   const panel = page.getByRole('region', { name: 'Missions and tasks', exact: true });
   await expect(panel.locator('.mission-plan-waiting')).toContainText('Plan waiting for you: 3 agents · est. $8.50 · 1 shared path');
   await expect(panel.locator('.mission-orchestrator-ceiling')).toContainText('plan first');
 
   // The sheet: in order, the shared path flagged, the estimate, a cap.
-  await line.getByRole('button', { name: 'Review plan…' }).click();
+  await panel.getByRole('button', { name: 'Review plan…' }).click();
   const sheet = page.getByRole('dialog', { name: 'Plan for Ship search' });
   await expect(sheet).toBeVisible();
   await expect(sheet).toContainText('Spec search-spec · version 2');
@@ -131,14 +130,19 @@ async function run(scheme, capped) {
   // Approved: three tasks, the line says so, the cap is the tree's.
   await expect(panel.locator('.mission-card')).toHaveCount(3, { timeout: 10_000 });
   await expect(panel.locator('.mission-plan-waiting')).toHaveCount(0);
-  await expect(chat.locator('.lineage-line.kind-plan_decided')).toContainText('You approved the plan: 3 tasks, $12.00 cap.');
-  await expect(line.locator('.lineage-state')).toHaveText('approved');
   await expect(panel.locator('.mission-orchestrator-budget')).toHaveText('$0 spent · $12 cap', { timeout: 10_000 });
 
   // A task's cost against its estimate.
   const index = fixture.missions.missions.find(v => v.id === m.id).tasks.find(t => t.title === 'Index the corpus');
   fixture.missions.setCost(index.id, 2.1);
   await expect(panel.locator(`.mission-card[data-task="${index.id}"] .mission-cost`)).toHaveText('$2.10 / $4', { timeout: 10_000 });
+
+  // At phone width the financial figures have their own row and the cap appears once.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const grantCard = panel.locator('.mission-orchestrator').first();
+  assert.equal((await grantCard.innerText()).split('$12 cap').length - 1, 1);
+  assert.ok(await grantCard.evaluate(node => node.scrollWidth <= node.clientWidth + 1));
+  await page.setViewportSize({ width: 1440, height: 900 });
 
   // The tree reaches its cap: new agents paused; the board raises it.
   fixture.missions.setBudget(fixture.missions.missions.find(v => v.id === m.id).grants[0].id, { spentUsd: 9.4, reservedUsd: 3, budgetState: 'exhausted' });
@@ -150,6 +154,9 @@ async function run(scheme, capped) {
   await stop.getByRole('button', { name: 'Raise budget' }).click();
   await expect(stop).toHaveCount(0, { timeout: 10_000 });
   assert.equal(updates().find(u => u.raiseBudget).raiseBudget.capUsd, 25);
+  await page.getByRole('navigation', {name: 'Pages'}).getByRole('button', {name: 'Workspaces', exact: true}).click();
+  await expect(chat.locator('.lineage-line.kind-plan_decided')).toContainText('You approved the plan: 3 tasks, $12.00 cap.');
+  await expect(line.locator('.lineage-state')).toHaveText('approved');
   assert.deepEqual(errors, []);
   await context.close();
 }

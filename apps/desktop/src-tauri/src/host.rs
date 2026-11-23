@@ -40,12 +40,13 @@ pub struct Host {
 /// The app's own webviews: its windows' pages. A capability names these and
 /// nothing else, so a Web panel's viewer (a child webview inside one of these
 /// windows, labelled `viewer-…`) holds no capability, whatever window it is in.
-pub const APP_WEBVIEWS: [&str; 6] = [
+pub const APP_WEBVIEWS: [&str; 7] = [
     "main",
     "workspace-*",
     "console-*",
     "chat-*",
     "artifact-*",
+    "mission-*",
     "web-*",
 ];
 
@@ -454,6 +455,8 @@ fn open_with_updates(
         "Workspace"
     } else if label.starts_with("chat-") {
         "Chat"
+    } else if label.starts_with("mission-") {
+        "Mission"
     } else if label.starts_with("artifact-") {
         "Artifact"
     } else if label.starts_with("web-") {
@@ -575,6 +578,8 @@ pub fn runner_bootstrap(window: Webview, host: State<'_, Host>) -> Result<Window
         },
         kind: if window.label() == "main" || window.label().starts_with("workspace-") {
             "workspace"
+        } else if window.label().starts_with("mission-") {
+            "mission"
         } else if window.label().starts_with("artifact-") {
             "artifact"
         } else if window.label().starts_with("web-") {
@@ -668,6 +673,11 @@ pub fn dock_web(app: tauri::AppHandle, window: Webview, url: String) -> Result<(
         window.close().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+#[tauri::command]
+pub fn open_mission(app: tauri::AppHandle, mission_id: String) -> Result<(), String> {
+    let label = mutate(&app, |layout| layout.mission(mission_id))?;
+    open(&app, &label)
 }
 #[tauri::command]
 pub fn open_artifact(

@@ -34,6 +34,9 @@ func (GitHub) Resolve(url string) (Resolved, bool) { return ResolveGitHub(url) }
 // head they were read on, and the parts a partial read reuses.
 type githubETag struct {
 	github.PullETags
+	// Older Runners could retain validators after replacing the snapshot from
+	// the branch API. Read such an item unconditionally once after upgrading.
+	Version   int       `json:"version"`
 	CreatedAt time.Time `json:"createdAt,omitzero"`
 }
 
@@ -51,7 +54,7 @@ func (g GitHub) Refresh(ctx context.Context, list []Item, etags map[string]strin
 			}
 			var previous *github.PullRead
 			var tag githubETag
-			if raw := etags[item.Ref.ID()]; raw != "" && item.PR != nil && json.Unmarshal([]byte(raw), &tag) == nil {
+			if raw := etags[item.Ref.ID()]; raw != "" && item.PR != nil && json.Unmarshal([]byte(raw), &tag) == nil && tag.Version == 1 {
 				previous = pullReadOf(item, tag)
 			}
 			read, err := g.API.ReadPullRequest(ctx, token, repository, number, previous)
@@ -72,7 +75,7 @@ func (g GitHub) Refresh(ctx context.Context, list []Item, etags map[string]strin
 			fresh := itemOf(repository, read)
 			fresh.Ref = item.Ref
 			out.Items = append(out.Items, fresh)
-			encoded, _ := json.Marshal(githubETag{PullETags: read.ETags, CreatedAt: read.CreatedAt})
+			encoded, _ := json.Marshal(githubETag{Version: 1, PullETags: read.ETags, CreatedAt: read.CreatedAt})
 			out.ETags[item.Ref.ID()] = string(encoded)
 		}
 		return nil

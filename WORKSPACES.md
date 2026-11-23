@@ -352,7 +352,7 @@ registering a parent repository.
 
 New workspace folders use a unique three-word petname generated once. The display
 name can be edited in its sidebar row with **Rename workspace** (Enter to save,
-Escape to cancel). The editor retains its original workspace identity if selection
+Escape to cancel). In a conversation, `lazybox workspace rename "DISPLAY NAME"` changes the same sidebar label for the current workspace. The editor retains its original workspace identity if selection
 changes, without changing its folder, member
 paths or branches. Existing workspace folders remain in place. Double-clicking a
 repository selects it while retaining other selections; checkboxes support

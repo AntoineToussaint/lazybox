@@ -62,6 +62,16 @@ test('evidence chips say what ran and how it ended', () => {
   assert.deepEqual(latest.map(e => e.ref), ['r2', 'p']);
 });
 
+test('delivering another PR keeps unresolved checks visible', () => {
+  const fail = evidence({ kind: 'pr', repository: 'team/api', number: 42n, outcome: 'fail' });
+  const link = evidence({ kind: 'pr', repository: 'team/api', number: 43n, ref: 'pr-link:team/api#43', outcome: 'unknown' });
+  assert.deepEqual(headlineEvidence([link, fail]), [link, fail]);
+  assert.equal(evidenceChip(link).title, 'Delivered team/api#43');
+  assert.deepEqual(headlineEvidence([link, { ...fail, number: 43n, historical: true }]), [link]);
+  const pass = { ...fail, number: 43n, outcome: 'pass' };
+  assert.deepEqual(headlineEvidence([link, pass, fail]), [pass, fail]);
+});
+
 test('liveness reads briefly', () => {
   assert.equal(liveLabel('running', 'Bash'), 'Running · Bash');
   assert.equal(liveLabel('closed', 'provider failed'), 'Stopped');

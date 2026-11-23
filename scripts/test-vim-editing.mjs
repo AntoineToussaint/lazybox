@@ -40,7 +40,7 @@ try {
     await page.getByRole('switch', { name: 'Vim editing in the file editor' }).check();
     await expect(page.getByRole('switch', { name: 'Vim editing in the message box' })).toBeChecked();
     await page.screenshot({ path: `/tmp/lazybox-vim-settings-${engine.name()}.png` });
-    await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+    await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
 
     // An empty message box starts in insert mode; Esc switches to normal.
     await message.click();

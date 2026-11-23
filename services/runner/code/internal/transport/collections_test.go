@@ -169,7 +169,7 @@ func TestCollectionLeaseSurvivesClosingAgentWithRunningCommand(t *testing.T) {
 	if _, err := s.Bench.Start(e, "too late", []string{"true"}); err == nil {
 		t.Fatal("closed execution started command")
 	}
-	if _, err := s.Bench.RegisterPipe(e, "too late"); err == nil {
+	if _, err := s.Bench.RegisterPipe(e, "too late", false); err == nil {
 		t.Fatal("closed execution registered pipe")
 	}
 }

@@ -12,7 +12,7 @@ import { formatBytes, isLocalImage } from './attachment-images';
 export const PASTE_BOX_CHARS = 800;
 /** A paste of more lines than this becomes a box, however short. */
 export const PASTE_BOX_LINES = 12;
-/** The most text of one box the composer keeps in its saved draft, so a pasted box survives a reload. */
+/** Byte limit of a saved native view-state value; larger draft attachments live in IndexedDB. */
 export const DRAFT_TEXT_BYTES = 256 * 1024;
 /** The most text a box previews; the file itself is sent whole. */
 export const PREVIEW_CHARS = 64 * 1024;
@@ -119,8 +119,8 @@ export function replaceText(file: File, text: string): File {
 }
 
 /** A restored pasted box (from a saved draft). */
-export function restorePastedText(name: string, text: string, lastModified: number): File {
-  const file = new File([text], name, { type: 'text/plain', lastModified });
+export function restorePastedText(name: string, text: string, lastModified: number, type = 'text/plain'): File {
+  const file = new File([text], name, { type, lastModified });
   pastedTexts.set(file, text);
   return file;
 }

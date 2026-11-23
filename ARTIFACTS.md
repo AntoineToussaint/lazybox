@@ -19,7 +19,7 @@ Each artifact has:
 | `versions` | Append-only, oldest first. Each version has a number, a time, a sha256 digest, a size, an **author** and a **source**. The author is `person`, `agent` (with its execution) or `file` (the tracked file changed on disk). The source is `message` (execution, conversation, message cursor, turn), `file` (workspace path), `agent` or `edit`. |
 | `origin_session_id`, `origin_conversation_id` | The conversation the artifact was first taken from. Later messages of that conversation offer "Update from this message". |
 | `tracked_path`, `tracking_problem` | The workspace file the Runner follows, and why it could not follow it lately (removed, not text, larger than 1 MiB). |
-| `links` | Reserved for missions and tasks (see [Orchestration](#orchestration)). Any link is refused until the Runner has missions. |
+| `links` | An implementation roadmap can pin its source design and review by workspace artifact ID and revision. Direct mission/task links are reserved. |
 | `retired` | Set while the artifact is retired (see [Retiring and merging](#retiring-and-merging)): when, by whom (`person` or `agent` with its execution), the artifact that `superseded_by` it, and a one-line reason. |
 
 These rules hold for every caller:
@@ -36,6 +36,27 @@ These rules hold for every caller:
 - **Retiring never deletes.** A retired artifact keeps every version, is
   left out of `ListArtifacts` unless `include_retired`, and is restored as
   it was.
+
+## Design and review to roadmap
+
+New roadmaps are plan artifacts stored as versioned JSON using `roadmap.v1`. Use **Edit roadmap milestones** on the latest revision to update typed fields and save another revision. The reader groups milestones by phase and counts accepted, blocked and awaiting-acceptance work. These summaries are included in standalone exports. Mission plans omit already accepted milestones and retain their IDs in dependent task briefs. Concurrent edits are checked against the revision opened. Use `lazybox artifact template roadmap` for the JSON starter and publish it with `--kind plan --format json`. Older Markdown and plan.v1 documents stay readable.
+
+For a milestone roadmap, **Export → Download mission plan** saves a proposal for `lazybox mission plan FILE`. Enter one dependency ID per line, and leave the field empty for an independent milestone. The Runner validates milestone IDs and the dependency graph on save. Mission export also requires a deliverable and definition of done for each task. Each task includes its source revision and milestone brief. Submitting the file requires an orchestrator grant. Execution has a separate approval step.
+
+In **Artifact actions → Create implementation roadmap**, the reader seeds an editable milestone form from the headings in the displayed revision. Each milestone starts open with an editable ID, phase, deliverable, dependencies, definition of done, verification evidence and open decisions. Keep its ID when moving it between phases. Update the same plan as evidence arrives. Edit the milestones, optionally include a workspace review, then save a separate plan. The plan records each source revision. Source documents list their roadmaps; opening a source from a roadmap returns to the pinned revision even after the source changes. A deleted source leaves its ID and revision in the plan. Source links describe the plan’s origin and persist across edits.
+
+**Draft mission proposal in chat** prepares a handoff containing the plan and pinned source references. In a window without a target conversation the handoff is copied. The person reviews and sends the draft. Mission creation and execution use the separate orchestration and approval flow.
+
+### Artifact types and the Hub boundary
+
+| Deliverable | A single Runner can support | Hub opportunity |
+|---|---|---|
+| Design, review and implementation roadmap | Versioned source, pinned revisions, editable milestones, side chat and offline export | Shared organization library and review across Runners |
+| PR walkthrough or investigation timeline | Local diffs, findings, command references and evidence snapshots | Stable team URLs, authenticated external viewers and notifications |
+| Dashboard | A snapshot from authorized Runner telemetry; a panel can show fresh local data | Federated queries and viewer-specific access across Runners |
+| Slides or visual prototype | Standalone HTML with a local preview and downloadable source; a dedicated editor is a separate feature | Organization design systems, collaborative annotations and publication |
+
+Local artifact identity belongs to the Runner. A future Hub can resolve Runner and workspace identities and enforce sharing rights. A local pinned reference grants no network access and creates no public URL.
 
 ## Proposed artifact extensions
 
@@ -399,24 +420,11 @@ The **Export** menu has:
 
 ## Orchestration
 
-Missions and tasks ([ORCHESTRATION.md](ORCHESTRATION.md), slice 1) are not
-in the Runner yet: `internal/work` is still a scaffold. The hookup is ready
-on the artifact side:
+The mission planner accepts proposed tasks and dependencies. Approving that proposal and starting work are separate operations (see ORCHESTRATION.md). The artifact store accepts pinned design and review inputs. Direct mission/task brief and evidence links are reserved for a later integration.
 
-- `Artifact.links` and `PutArtifactRequest.links` carry
-  `{kind: mission|task, id, role: brief|evidence}`. The store keeps them;
-  the Runner refuses any link today with "missions and tasks are not
-  available on this Runner yet".
-- When slice 1 lands, `PutArtifact` validates a link against `internal/work`.
-  A `brief` link sets the mission's or task's brief. An `evidence` link
-  records an `evidence.recorded` event that points at
-  `artifact:<id>@v<N>`: a version, never the moving latest, so evidence
-  cannot change after a verdict.
-- The page then gains "Attach to mission/task…" (choose the mission or task
-  and the role), and the mission board shows its brief and evidence
-  artifacts. Agents pass `--mission`/`--task`/`--role` to
-  `lazybox artifact put`. That uses the same agent scope, limited to tasks
-  of the agent's own workspace.
+Agents can publish a derived roadmap with `lazybox artifact put plan.md --title "Implementation roadmap" --kind plan --design ID@VERSION --review ID@VERSION`. Either input can be used alone. To continue work, update the saved plan by ID; later revisions keep its original inputs.
+
+Use `lazybox artifact template pr-walkthrough`, `incident-timeline`, or `release-checklist` for editable JSON starters. The first two use the report schema. The checklist uses the existing interactive to-do renderer. Fill in real evidence and publish the file with the normal artifact command.
 
 ## Known limits
 

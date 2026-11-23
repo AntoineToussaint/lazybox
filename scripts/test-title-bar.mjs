@@ -147,7 +147,7 @@ try {
       // The page tabs, the pills and the menus are pressed, not dragged: a real click on Settings opens it.
       await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Settings' }).click();
       assert.deepEqual(await page.evaluate(() => window.titleBarCalls), [], 'a page tab never moves the window');
-      await page.getByRole('navigation', { name: 'Pages' }).getByRole('button').first().click();
+      await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
 
       // A panel group popped out: its tab bar is that window's title bar.
       if (scheme === 'dark') {

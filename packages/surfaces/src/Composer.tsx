@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { conversationName } from './conversation-model';
 import { ComposerAttachment } from './AttachmentThumbnail';
 import { ErrorBox } from './AttachmentBox';
@@ -70,6 +70,16 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
   /** The agent, model and context, first on the controls' row (ComposerInfo.tsx). */
   info?: ReactNode;
 }) {
+  // Keep native edits in the textarea. Reapplying a controlled value on a
+  // background render can replace a WebKit insert before its input handler
+  // sees it. Only external edits (restore, recall, dictation, send) write back.
+  const lastInput = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    const box = textarea.current;
+    if (!box || message === lastInput.current) return;
+    if (box.value !== message) box.value = message;
+    lastInput.current = message;
+  }, [message, textarea]);
   const vimEditing = useVimPreferences(viewState).composer;
   const reservedKeys = useMemo(() => leaderKeys(keymap), [keymap]);
   const vim = useComposerVim({ textarea, enabled: vimEditing, value: message, resetKey: sessionID, reserved: reservedKeys, onSend: () => { if (canSend || missingFiles.length > 0 || !!message.trim()) textarea.current?.form?.requestSubmit(); } });
@@ -154,10 +164,10 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
       ? <span key={i}>{part}</span> : <SnippetChip key={i} snippet={part} draft/>)}
       <button type="button" className="text-button" onClick={() => { setEditingSnippet(true); textarea.current?.focus(); }}>Edit prompt</button>
     </div>}
-    <textarea ref={textarea} data-agent-composer data-folded-snippet={folded || undefined} aria-label="Message" placeholder={dictation.active ? 'Listening… speak now' : limited ? `Message ${agentName}… (sent when the conversation continues)` : `Message ${agentName}… (/ for commands)`} value={message}
+    <textarea ref={textarea} data-agent-composer data-folded-snippet={folded || undefined} aria-label="Message" placeholder={dictation.active ? 'Listening… speak now' : limited ? `Message ${agentName}… (sent when the conversation continues)` : `Message ${agentName}… (/ for commands)`}
       className={dictation.active ? 'is-dictating' : undefined}
       aria-busy={dictation.active || undefined}
-      onChange={e => { if (folded) setEditingSnippet(true); dictation.takeOver(); onChange(e.target.value); }}
+      onChange={e => { if (folded) setEditingSnippet(true); const text = e.currentTarget.value; lastInput.current = text; dictation.takeOver(); onChange(text); }}
       // Read-only, not disabled, while a send is in flight: WebKit blurs a
       // disabled field, and the box would lose the keyboard after every send.
       disabled={!canCompose}

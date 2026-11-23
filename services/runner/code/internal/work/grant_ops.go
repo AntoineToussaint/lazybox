@@ -71,9 +71,6 @@ func (s *Store) IssueGrant(mission string, actor Actor, key string, g GrantPaylo
 			}
 		}
 	}
-	if held, ok := s.HeldBy(g.Holder); ok && held.Mission.ID != mission {
-		return nil, "", refuse("that conversation already orchestrates “%s”; revoke that first", held.Mission.Title)
-	}
 	title, err := cleanText(g.Title, maxTitle, "title")
 	if err != nil {
 		return nil, "", err

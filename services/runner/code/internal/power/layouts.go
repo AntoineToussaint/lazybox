@@ -146,7 +146,8 @@ func (p *parser) layoutNode(n *yaml.Node, path string, depth int) LayoutNode {
 			p.fail(panels, path+".panels", "a group holds at most %d panels", maxGroupPanels)
 		}
 		for _, kind := range kinds {
-			if !registry.ValidPanel(kind) {
+			// Old layouts may contain Missions. Clients remove its retired workspace slot on load.
+			if kind != "missions" && !registry.ValidPanel(kind) {
 				p.fail(panels, path+".panels", "there is no panel %q%s (panels: %s)", kind, didYouMean(kind, registry.LayoutPanels), strings.Join(registry.LayoutPanels, ", "))
 			}
 		}

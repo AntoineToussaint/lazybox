@@ -52,6 +52,11 @@ leave out.
 
 ### Workspaces and tabs
 
+- **Mission evidence after a handoff** Each assignment tracks its own delivered PRs. The board and inbox show each PR’s checks separately, and the timeline links conversations you can still open.
+- **Pull requests belong to the task that delivered them** Mission tasks receive PR checks after the assigned conversation links or creates the pull request. Sharing a workspace no longer attaches its PR checks to other tasks.
+- **Readable mission timelines** Narrow windows show who acted above each event, with conversation names you can open directly.
+- **Missions in the main navigation** Open an outcome across workspaces or detach it into its own window. Task assignments and orchestrator grants ask you to choose a destination. Mission budgets count usage during the grant.
+
 - **No separate title bar** On a Mac every window's own header is its title bar, as in VS Code or Slack: the close, minimize and zoom buttons sit at its left, its empty parts move the window, and a double-click there does what System Settings says. Full screen gives the room back.
 - **Runners on your other computers (preview)** Settings → Runners → Add a computer lists your ~/.ssh/config hosts, installs and starts Lazybox's Runner there over your own ssh, and adds this Mac as its owner with a key of its own. Its workspaces then open here as the whole page, the sidebar groups Runners by computer with the round trip and Reconnecting…, and its agents keep working while your laptop sleeps. From a terminal: lazybox remote add, ls and rm.
 - **Each window shows its own Runner** Dev's window no longer lists Working's workspaces and agents by default, or the reverse, so the two never look as if they shared state. The brand says Dev or Working, a hint says once when another Lazybox runs on this Mac, and Settings → Runners → Show in this window brings it in. A computer you added still shows.
@@ -85,6 +90,8 @@ leave out.
 - **Agents know where it is** Agents are told each repository's home, that it is yours, to use it rather than a temporary clone, and to hand logins back to you in so many words. lazybox repos and lazybox repo home api print the paths.
 
 ### Chat and Send now
+
+- **Draft attachments survive a reload** Reopen a conversation to pick up its unsent files and pasted text. If a file could not be saved, the composer identifies it before sending.
 
 - **Send now** While the agent works, ↵ queues your message and ⌘↵ sends it now: the current step stops and your message is the next turn. A queued message shows once, above the message box.
 - **Who answers, and how full the context is** Under your message: the agent and model, and a context meter that turns amber at 60% and red at 85%. /model lists the models you can switch to.

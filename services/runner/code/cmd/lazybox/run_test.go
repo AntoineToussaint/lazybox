@@ -17,12 +17,14 @@ import (
 
 type recordingConsole struct {
 	pipeClient
-	title     string
-	published bytes.Buffer
+	createsPullRequest bool
+	title              string
+	published          bytes.Buffer
 }
 
 func (c *recordingConsole) RegisterPipe(_ context.Context, r *connect.Request[pb.RegisterPipeRequest]) (*connect.Response[pb.CommandStatus], error) {
 	c.title = r.Msg.Title
+	c.createsPullRequest = r.Msg.CreatesPullRequest
 	return connect.NewResponse(&pb.CommandStatus{Id: "command"}), nil
 }
 func (c *recordingConsole) Publish(_ context.Context, r *connect.Request[pb.PublishRequest]) (*connect.Response[pb.CommandStatus], error) {
@@ -31,6 +33,28 @@ func (c *recordingConsole) Publish(_ context.Context, r *connect.Request[pb.Publ
 	}
 	c.published.Write(r.Msg.Data)
 	return connect.NewResponse(&pb.CommandStatus{}), nil
+}
+
+func TestRunClassifiesRealCommandIndependentlyOfTitle(t *testing.T) {
+	dir := t.TempDir()
+	gh := filepath.Join(dir, "gh")
+	if err := os.WriteFile(gh, []byte("#!/bin/sh\nprintf 'https://github.com/team/api/pull/12\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		title   string
+		argv    []string
+		creates bool
+	}{
+		{"gh pr create", []string{"echo", "https://github.com/team/api/pull/1216"}, false},
+		{"Open delivery", []string{gh, "pr", "create", "--fill"}, true},
+	} {
+		c := &recordingConsole{}
+		err := runCommand(context.Background(), c, nil, runOptions{session: "execution", title: tc.title, outputDir: dir}, tc.argv, &bytes.Buffer{}, &bytes.Buffer{})
+		if err != nil || c.createsPullRequest != tc.creates {
+			t.Fatalf("title=%s, argv=%v: creates=%t, err=%v", tc.title, tc.argv, c.createsPullRequest, err)
+		}
+	}
 }
 
 func TestRunStreamsEverythingToConsoleAndKeepsExitStatus(t *testing.T) {

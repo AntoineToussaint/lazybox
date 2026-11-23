@@ -1,0 +1,14 @@
+{
+  "schema": "report.v1",
+  "scope": "Affected service, time window, user impact and current status",
+  "findings": [
+    "UTC timestamp \u00b7 symptom or observation \u00b7 source",
+    "UTC timestamp \u00b7 intervention \u00b7 observed outcome"
+  ],
+  "evidence": [
+    "Command receipt, metric or commit supporting each event."
+  ],
+  "verificationGaps": [
+    "Which causal explanation still needs a reproduction?"
+  ]
+}

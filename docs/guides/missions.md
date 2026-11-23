@@ -11,13 +11,13 @@ can tell *claimed* from *verified* at a glance, across many agents.
 
 ## Create a mission
 
-1. Open the **Missions** panel: the **Panels** menu in the header → Missions, or
-   find *Missions* in the command palette (`⌘K`).
-2. Create a mission with a title and a brief, then add its tasks. Tasks can
-   depend on each other.
+1. Choose **Missions** in the main navigation, or find **Open the missions board** in the command palette (`⌘K`). The board belongs to the connected Runner. **Workspaces** returns to the layout you were using.
+2. Create a mission with an outcome and an optional brief. Choose **Add first task** to describe one deliverable. The board appears when you add that task. Later tasks can depend on earlier ones.
 3. **Assign** a task: pick a workspace and start a new conversation there (or
    hand it to one you already have), optionally sending the task's brief as the
-   first message.
+   first message. If the response is lost, retry the same form. The Runner reuses the assignment and completes any pending brief delivery.
+
+Choose **Detach mission** to keep the selected mission in its own window while you switch workspaces. The detached window stays on that mission across reloads. Opening the same mission again focuses its window. Opening a task conversation from a detached mission brings the main window forward or reopens it.
 
 The board has four columns — **Ready**, **Working**, **Needs you**, **Done** —
 and each card shows the task's status, its trust, its evidence, the
@@ -31,11 +31,10 @@ without anyone asking:
 - every **`lazybox run`** (or `lazybox log`) that finishes, with its exit
   status, the full output and what the agent saw;
 - **commits** made through the PR loop;
-- **pull requests** and their **checks**, re-read about once a minute while the
-  board is open.
+- **pull requests** explicitly delivered by the assigned conversation, and their **checks**. Run `lazybox link <PR URL>` in that conversation, or create the PR there with a supported tool such as `gh pr create`. Link it while the conversation has one active task so the Runner can identify the attempt. A workspace branch alone does not associate its PR with a mission. An ambiguous command or result needs an explicit link. When a task changes hands, the replacement attempt starts with its own evidence. Previously recorded workspace-only checks and earlier attempts remain in the expanded history. Verification requires a check observation after delivery to the current attempt.
 
 Click a run to open its output in the console; click a pull request to open it
-on GitHub.
+on GitHub. Each delivered PR has its own chip. Linking another PR keeps existing check results visible.
 
 ## Trust, derived — never declared
 
@@ -43,10 +42,12 @@ on GitHub.
 | --- | --- |
 | **claimed** | Reported done, with no passing evidence. A failing last run is flagged. |
 | **observed** | The last real `lazybox run` exited 0, or the agent is running. |
-| **verified** | Checks passed on a pull request whose head is the newest Lazybox has seen. A later commit makes it *stale*. |
+| **verified** | Current checks passed on an explicitly delivered PR for this attempt. Failing, pending or stale checks on another delivered PR block verification. A newer local revision can make checks *stale*. |
 | **accepted** | You passed the task's gate. |
 
 ## Accept or send back
+
+For work that spans conversations, keep one versioned roadmap in workspace Artifacts. Record a stable milestone ID, phase, dependencies and definition of done. The roadmap reader groups the work by phase. Only accepted milestones count toward phase completion. Export its mission plan to preserve those details in each remaining task brief. At acceptance, expand **Review task brief and acceptance criteria** in the Inbox and compare the original brief with the report and Runner evidence.
 
 When the work looks finished, **Report done…** on the task's card records what
 was done. An agent an [orchestrator](orchestrator.md) started reports its own

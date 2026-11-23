@@ -1,6 +1,10 @@
 package work
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // The operations a person (through the owner's RPCs) and the Runner (through
 // its evidence hooks) perform on missions. Each is a batch of drafts the log
@@ -207,8 +211,8 @@ type Origin struct {
 	Attempt string
 	// Conversation: an agent's own run belongs to that conversation's attempts.
 	Conversation string
-	// Workspace: a terminal run, a commit or a pull request belongs to every
-	// attempt in that workspace.
+	// Workspace scopes terminal runs and commits. Pull request checks also
+	// require a delivery link recorded on the same attempt.
 	Workspace string
 }
 
@@ -222,6 +226,11 @@ func (o Origin) matches(a Attempt) bool {
 	return o.Workspace != "" && a.Workspace == o.Workspace
 }
 
+// PullRequestLinkRef identifies an explicit delivery separately from observed checks.
+func PullRequestLinkRef(repository string, number int64) string {
+	return fmt.Sprintf("pr-link:%s#%d", strings.ToLower(repository), number)
+}
+
 // Record attaches evidence to every live attempt it belongs to, at most once
 // per reference and state: the same pull request with the same head and
 // checks is not recorded twice. It returns how many tasks it was recorded on.
@@ -229,30 +238,63 @@ func (s *Store) Record(origin Origin, actor Actor, ev Evidence) (int, error) {
 	if ev.Ref == "" {
 		return 0, refuse("evidence needs a reference")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attempts := s.attemptsLocked()
+	if ev.Kind == EvidencePR && origin.Conversation != "" && origin.Attempt == "" {
+		count := 0
+		for _, at := range attempts {
+			if origin.matches(at.Attempt) {
+				count++
+			}
+		}
+		if count != 1 {
+			return 0, nil
+		}
+	}
 	recorded := 0
 	var errs []error
-	for _, at := range s.Attempts() {
+	for _, at := range attempts {
 		if !origin.matches(at.Attempt) {
 			continue
 		}
-		state, err := s.Mission(at.Mission)
-		if err != nil {
-			continue
-		}
-		if t := state.Task(at.Task); t != nil {
-			if last, ok := t.LastEvidence(ev.Ref); ok && last.Seq >= at.Attempt.StartSeq && sameEvidence(last.Evidence, ev) {
+		m := s.missions[at.Mission]
+		task := m.state.Task(at.Task)
+		if ev.Kind == EvidencePR && origin.Conversation == "" && origin.Attempt == "" {
+			link, ok := task.LastEvidence(PullRequestLinkRef(ev.Repository, ev.Number))
+			if !ok || link.Attempt != at.Attempt.ID {
 				continue
 			}
 		}
+		if last, ok := task.lastObservation(ev, at.Attempt.ID); ok && sameEvidence(last.Evidence, ev) {
+			continue
+		}
 		item := ev
 		item.Task, item.Attempt = at.Task, at.Attempt.ID
-		if _, _, err := s.Append(at.Mission, Draft{Subject: TaskSubject(at.Task), Type: EvidenceRecorded, Actor: actor, Evidence: []string{ev.Ref}, Payload: item}); err != nil {
+		if _, err := s.appendLocked(m, at.Mission, []Draft{{Subject: TaskSubject(at.Task), Type: EvidenceRecorded, Actor: actor, Evidence: []string{ev.Ref}, Payload: item}}); err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		recorded++
 	}
 	return recorded, errors.Join(errs...)
+}
+
+// For a delivered PR, deduplicate against the latest observation of the PR.
+// Comparing by head-specific ref would suppress a return to an earlier head,
+// or the first validated observation after linking a PR from an old journal.
+func (t *Task) lastObservation(ev Evidence, attempt string) (Recorded, bool) {
+	if ev.Kind != EvidencePR || ev.IsPullRequestLink() {
+		last, ok := t.LastEvidence(ev.Ref)
+		return last, ok && last.Attempt == attempt
+	}
+	for i := len(t.Evidence) - 1; i >= 0; i-- {
+		last := t.Evidence[i]
+		if last.Attempt == attempt && last.Kind == EvidencePR && last.Number == ev.Number && strings.EqualFold(last.Repository, ev.Repository) {
+			return last, !last.IsPullRequestLink()
+		}
+	}
+	return Recorded{}, false
 }
 
 func sameEvidence(a, b Evidence) bool {

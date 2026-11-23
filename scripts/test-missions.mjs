@@ -20,7 +20,8 @@ let browser;
 try {
   await server.listen();
   browser = await (process.env.TEST_CHROMIUM ? chromium : webkit).launch();
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
   // A reload cuts every panel's in-flight poll, which WebKit reports as page
   // errors ("access control checks") on the page being left: not failures.
   let navigating = false;
@@ -28,24 +29,56 @@ try {
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
   await expect(page.locator('.panel-chat').getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
 
-  // The Panels menu shows the Missions panel like any other; with no mission it explains itself.
-  await page.locator('summary[aria-label="Panels"]').click();
-  await page.getByRole('button', { name: 'Show Missions', exact: true }).click();
+  // The Runner-wide page opens outside the workspace layout.
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   const panel = page.getByRole('region', { name: 'Missions and tasks', exact: true });
   await expect(panel).toBeVisible();
-  await expect(panel.getByRole('heading', { name: 'Track work you hand to agents' })).toBeVisible();
-  await expect(panel).toContainText('claimed');
+  await expect(page.locator('.workspace-tools')).toHaveCount(0);
+  await expect(page.getByRole('navigation', { name: 'Pages' }).getByRole('button', {name: 'Missions', exact: true})).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('tab',{name:'Missions',exact:true})).toHaveCount(0);
+  await expect(panel.getByRole('heading', { name: 'Create your first mission' })).toBeVisible();
+  await expect(panel).toContainText('different workspaces');
 
   // A mission: an outcome, an optional brief. Its process is pinned and said.
   await panel.getByLabel('Outcome').fill('Ship the parser split');
   await panel.getByLabel(/Brief/).fill('parser.go is 4,000 lines; split it without changing behaviour.');
+  // Keep a pre-creation list response in flight until the mutation completes.
+  const staleList = Promise.withResolvers();
+  const releaseList = Promise.withResolvers();
+  const listFinished = Promise.withResolvers();
+  let held = false;
+  await page.route('**/ListMissions', async route => {
+    if (held) return route.continue();
+    held = true;
+    staleList.resolve();
+    await releaseList.promise;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"missions":[]}' });
+    listFinished.resolve();
+  });
+  await panel.getByRole('button', { name: 'Refresh missions' }).click();
+  await staleList.promise;
+  const createKeys = [];
+  await page.route('**/CreateMission', async route => {
+    createKeys.push(route.request().postDataJSON().requestKey);
+    if (createKeys.length === 1) await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({code:'unavailable',message:'Retry creation'}) });
+    else await route.continue();
+  });
   await panel.getByRole('button', { name: 'Create mission' }).click();
+  await expect(panel.getByRole('alert')).toContainText('Retry creation');
+  await panel.getByRole('button', { name: 'Create mission' }).click();
+  await expect.poll(() => createKeys.length).toBe(2);
+  assert.equal(createKeys[0],createKeys[1]);
+  await page.unroute('**/CreateMission');
   await expect(panel.getByRole('heading', { name: 'Ship the parser split' })).toBeVisible();
+  releaseList.resolve();
+  await listFinished.promise;
+  await page.unroute('**/ListMissions');
   await expect(panel.locator('.mission-process')).toHaveText('One agent per task · you accept each task');
-  await expect(panel.locator('.mission-summary')).toHaveText('No tasks yet');
+  await expect(panel.getByRole('heading', { name: 'Start with one task' })).toBeVisible();
+  await expect(panel.locator('.mission-column')).toHaveCount(0);
 
   // Tasks: the brief starts from V1's four lines; a dependency makes the second wait.
-  await panel.getByRole('button', { name: 'Add task' }).click();
+  await panel.getByRole('button', { name: 'Add first task' }).click();
   await panel.getByLabel('Task', { exact: true }).fill('Split the parser');
   await panel.getByLabel(/Brief/).focus();
   await expect(panel.getByLabel(/Brief/)).toHaveValue(/^Objective: \nDone when:/);
@@ -54,7 +87,23 @@ try {
   await expect(panel.getByLabel('Task', { exact: true })).toHaveValue('');
   await panel.getByLabel('Task', { exact: true }).fill('Document the parser');
   await panel.getByLabel(/Starts after/).selectOption({ label: 'Split the parser' });
+  // The Runner applied this task before its response was lost. Retrying
+  // the unchanged form must replay the operation and leave one task.
+  const taskKeys = [];
+  await page.route('**/UpdateMission', async route => {
+    const { addTask, operationId } = route.request().postDataJSON();
+    if (!addTask) return route.continue();
+    taskKeys.push(operationId);
+    if (taskKeys.length > 1) return route.continue();
+    await route.fetch();
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({code:'unavailable', message:'Task response lost'}) });
+  });
   await panel.getByRole('button', { name: 'Add task', exact: true }).click();
+  await expect(panel.getByRole('alert').first()).toContainText('Task response lost');
+  await panel.getByRole('button', { name: 'Add task', exact: true }).click();
+  await expect.poll(() => taskKeys.length).toBe(2);
+  assert.equal(taskKeys[0], taskKeys[1]);
+  await page.unroute('**/UpdateMission');
   await panel.getByRole('button', { name: 'Done', exact: true }).click();
   const card = title => panel.locator('.mission-card').filter({ has: page.getByRole('button', { name: title, exact: true }) });
   const column = key => panel.locator(`.column-${key}`);
@@ -69,7 +118,9 @@ try {
   const assign = page.getByRole('dialog', { name: 'Assign Split the parser' });
   await expect(assign).toBeVisible();
   await expect(assign.getByRole('radio', { name: 'A new conversation' })).toBeChecked();
-  await expect(assign.getByLabel('Workspace')).toHaveValue('alpha');
+  await expect(assign.getByLabel('Workspace')).toHaveValue('');
+  await expect(assign.getByRole('button', { name: 'Start conversation' })).toBeDisabled();
+  await assign.getByLabel('Workspace').selectOption('alpha');
   await expect(assign.getByLabel('Brief to send')).toContainText('Done when: go test passes');
   await page.screenshot({ path: '/tmp/lazybox-missions-assign.png' });
   await assign.getByRole('button', { name: 'Start conversation' }).click();
@@ -119,10 +170,17 @@ try {
   await expect(awaiting.locator('.trust-badge')).toHaveText('Claimed');
   await expect(inbox.locator('.agents-summary')).toHaveText('1 waiting for you');
 
+  const reopenBoard = async () => {
+    await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
+  };
+  await reopenBoard();
   // A passing run makes it observed; checks passing on the PR verify it.
   fixture.missions.recordRun(taskSession, { title: 'go test ./...', exitCode: 0 });
   await expect(split.locator('.trust-badge')).toHaveText('Observed', { timeout: 10_000 });
   await expect(split.locator('.mission-flag')).toHaveCount(0);
+  fixture.missions.recordPullRequest('alpha', { number: 1216, head: 'abcd123', outcome: 'pass' });
+  assert.ok(!fixture.missions.missions[0].tasks[0].evidence.some(e => e.kind === 'pr'));
+  fixture.missions.linkPullRequest(taskSession, 'fixture-team/api', 12);
   fixture.missions.recordPullRequest('alpha', { number: 12, head: '3f9c2e1aa0', outcome: 'pass' });
   await expect(split.locator('.trust-badge')).toHaveText('Verified', { timeout: 10_000 });
   await expect(split.locator('.evidence-chip').filter({ hasText: 'PR #12' })).toBeVisible();
@@ -133,6 +191,7 @@ try {
   await expect(page.getByRole('combobox', { name: 'Session', exact: true })).toHaveValue(taskSession);
   await page.screenshot({ path: '/tmp/lazybox-missions-verified.png' });
 
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   // Accepted from the inbox: done, accepted; the dependent task is ready.
   await inboxButton.click();
   await expect(awaiting.locator('.trust-badge')).toHaveText('Verified');
@@ -140,6 +199,7 @@ try {
   await awaiting.getByRole('button', { name: 'Accept' }).click();
   await expect(awaiting).toHaveCount(0);
   await expect(inboxButton).not.toHaveAccessibleName(/awaits acceptance/);
+  await reopenBoard();
   await expect(split.locator('.mission-status')).toHaveText('Done');
   await expect(split.locator('.trust-badge')).toHaveText('Accepted');
   await expect(card('Document the parser').locator('.mission-status')).toHaveText('Ready');
@@ -151,6 +211,7 @@ try {
   await docs.getByRole('button', { name: 'Assign…' }).click();
   const assignDocs = page.getByRole('dialog', { name: 'Assign Document the parser' });
   await assignDocs.getByRole('radio', { name: 'A conversation you have' }).check();
+  await expect(assignDocs.getByLabel('Conversation', { exact: true })).toHaveValue('');
   await assignDocs.getByLabel('Conversation', { exact: true }).selectOption('alpha-session');
   await assignDocs.getByLabel("Send the task's brief to the agent now").uncheck();
   await assignDocs.getByRole('button', { name: 'Assign', exact: true }).click();
@@ -210,12 +271,28 @@ try {
 
   // Docked narrow, columns stack and nothing scrolls sideways; on a phone too.
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole('navigation', { name: 'Workspace panels' }).getByRole('button', { name: 'Missions' }).click();
+  await expect(page.getByRole('navigation', {name: 'Pages'}).getByRole('button', {name: 'Workspaces', exact: true})).toBeVisible();
   const body = page.locator('.missions-body');
   await expect(body).toBeVisible();
   assert.ok(await body.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'no sideways scroll on a phone');
   await page.screenshot({ path: '/tmp/lazybox-missions-phone.png', fullPage: false });
   assert.deepEqual(errors, []);
+  const popup = page.waitForEvent('popup');
+  await panel.getByRole('button', {name: 'Detach mission'}).click();
+  const detached = await popup;
+  const missionHeading = detached.getByRole('heading', {name: 'Ship the parser split'});
+  await expect(missionHeading).toBeVisible();
+  await expect(panel).toHaveCount(0);
+  await detached.reload();
+  await expect(missionHeading).toBeVisible();
+  await expect(detached.getByRole('button', {name: 'New mission'})).toHaveCount(0);
+  // A detached mission stays usable after closing its main window.
+  await page.close();
+  const reopened = detached.waitForEvent('popup', { timeout: 6000 });
+  await detached.locator('.mission-card').filter({ has: detached.getByRole('button', {name: 'Split the parser', exact: true}) }).locator('.mission-conversation').click();
+  const workspace = await reopened;
+  await expect(workspace.locator('.panel-chat').getByRole('textbox', {name: 'Message', exact: true})).toBeVisible();
+  await expect(workspace.getByRole('tab', {selected: true}).filter({hasText: /Split the parser/i})).toBeVisible();
   console.log('missions: create, assign, evidence, report, accept and changes requested pass');
 } finally {
   await browser?.close();

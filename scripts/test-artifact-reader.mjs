@@ -55,10 +55,49 @@ try {
   // The system print dialog is stubbed: the print sheet stays for the print media checks.
   await context.addInitScript(() => { window.__printed = 0; window.print = () => { window.__printed++; }; });
   const page = await context.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', e => errors.push(String(e)));
+  await page.goto(standalone);
+  await page.getByLabel('Version', { exact: true }).selectOption('1');
+  await page.getByLabel('Artifact actions', { exact: true }).click();
+  await page.getByText('Create implementation roadmap…', { exact: true }).click();
+  const roadmap = page.getByRole('dialog', { name: 'Create implementation roadmap' });
+  await roadmap.getByLabel('Include a review').selectOption(structuredDocs.find(item => item.record.kind === 'report').record.id);
+  while (await roadmap.getByRole('button', { name: 'Remove milestone' }).count() > 1) await roadmap.getByRole('button', { name: 'Remove milestone' }).last().click();
+  await roadmap.getByLabel('Milestone title').fill('Deliver the first slice');
+  await roadmap.getByLabel('Deliverable').fill('Ship the fix');
+  await roadmap.getByLabel('Definition of done (one per line)').fill('Verify the original regression.');
+  await roadmap.getByRole('button', { name: 'Save roadmap' }).click();
+  await expect(page.getByRole('heading', { name: 'Deliver the first slice' })).toBeVisible();
+  await page.getByLabel('Export', { exact: true }).click();
+  const missionDownload = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Download mission plan' }).click();
+  const savedMission = JSON.parse(await readFile(await (await missionDownload).path(), 'utf8'));
+  assert.equal(savedMission.tasks[0].key, 'M1');
+  assert.match(savedMission.tasks[0].brief, /Verify the original regression/);
+  await page.getByLabel('Artifact actions', { exact: true }).click();
+  await page.getByRole('button', { name: 'Edit roadmap milestones…' }).click();
+  const editMilestones = page.getByRole('dialog', { name: 'Edit roadmap milestones' });
+  await editMilestones.getByLabel('Phase', { exact: true }).fill('Verification');
+  await editMilestones.getByRole('button', { name: 'Save roadmap' }).click();
+  await expect(page.getByLabel('Version', { exact: true })).toHaveValue('2');
+  await expect(page.getByText('Phase: Verification', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Source review.*Structured report/ })).toBeVisible();
+  await page.getByLabel('Artifact actions', { exact: true }).click();
+  await page.getByText('Draft mission proposal in chat…').click();
+  await page.getByRole('combobox', { name: 'Conversation', exact: true }).selectOption(session.id);
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue(/Prepare a mission proposal[\s\S]*Source design:[\s\S]*--version 1/);
+  await page.getByRole('button', { name: /Source design.*v1/ }).click();
+  await expect(page.getByLabel('Version', { exact: true })).toHaveValue('1');
+  await expect(page.getByRole('button', { name: /Roadmap · Implementation roadmap/ })).toBeVisible();
   for (const { record, field } of structuredDocs) {
     await page.goto(standalone.replace(doc.id, record.id));
     await expect(page.getByRole('heading', { name: field[0].toUpperCase() + field.slice(1), exact: true })).toBeVisible();
   }
+  const structuredSpec = structuredDocs.find(item => item.record.kind === 'spec').record;
+  await page.goto(standalone.replace(doc.id, structuredSpec.id));
+  await page.getByLabel('Artifact actions', { exact: true }).click();
+  await page.getByText('Create implementation roadmap…', { exact: true }).click();
+  assert.ok((await roadmap.getByLabel('Milestone title').evaluateAll(nodes => nodes.map(node => node.value))).includes('Requirements'));
+  await roadmap.getByRole('button', { name: 'Cancel' }).click();
   await page.goto(standalone.replace(doc.id, todo.id));
   const checkbox = page.getByRole('checkbox', { name: 'Verify phone' });
   await expect(page.getByText('0 of 1 complete', { exact: true })).toBeVisible();
@@ -420,7 +459,7 @@ try {
   await expect.poll(() => [...fixture.terminals.values()].at(-1)?.input).toEqual(['printf workspace']);
   await panelPage.getByRole('button', { name: 'Hide artifact terminal' }).click();
   await panelPage.getByRole('button', { name: 'Back to artifacts' }).click();
-  const row = list.getByRole('option', { name: /Datasource migration/ });
+  const row = list.getByRole('option', { name: /^Datasource migration/ });
   await expect(row).toContainText('Spec · v2 · by an agent');
   await expect(row.locator('.artifact-kind-icon')).toBeVisible();
   await expect(row.getByRole('img', { name: 'Updated since you last looked' })).toBeVisible();

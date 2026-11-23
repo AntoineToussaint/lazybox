@@ -229,3 +229,21 @@ func TestArtifactVerbRetiresAndSupersedes(t *testing.T) {
 		t.Fatalf("%q %v", out, err)
 	}
 }
+
+func TestArtifactRoadmapInputFlags(t *testing.T) {
+	f := &fakeArtifacts{workspace: "ws", items: map[string]*pb.Artifact{}, contents: map[string][]string{}}
+	run := func(ref string) error {
+		var out bytes.Buffer
+		return artifactCommand(context.Background(), f, "ws", []string{"put", "-", "--title", "Steps", "--kind", "plan", "--design", ref, "--review", "review@4"}, strings.NewReader("Deliver"), &out, &out)
+	}
+	if err := run("spec@0"); err == nil || len(f.puts) != 0 {
+		t.Fatal("accepted invalid input", err)
+	}
+	if err := run("spec@2"); err != nil {
+		t.Fatal(err)
+	}
+	links := f.puts[0].Links
+	if len(links) != 2 || links[0].Role != "design" || links[0].Version != 2 || links[1].Id != "review" || links[1].Version != 4 {
+		t.Fatal(links)
+	}
+}

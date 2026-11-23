@@ -2,7 +2,11 @@ package items
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"regexp"
+	"slices"
+
+	"mvdan.cc/sh/v3/syntax"
 	"strconv"
 	"strings"
 )
@@ -77,40 +81,129 @@ func ParseGitHubKey(key string) (string, int64, bool) {
 	return repository, n, err == nil && n > 0
 }
 
-var creates = regexp.MustCompile(`(?:^|[^A-Za-z0-9_-])(?:gh\s+pr\s+create|hub\s+pull-request|glab\s+mr\s+create)\b|create_pull_request`)
-
-// CreatesPullRequest reports a command line (or a tool's name and input)
-// that opens a pull request.
-func CreatesPullRequest(command string) bool {
-	return creates.MatchString(command)
-}
-
-// ToolCommand is what a tool call runs, for CreatesPullRequest: its name and
-// the strings of its input, decoded. Matched as raw JSON, a command on its
-// own line after a heredoc follows the escape `\n` and goes unseen.
-func ToolCommand(name string, input []byte) string {
-	var value any
-	if json.Unmarshal(input, &value) != nil {
-		return name + " " + string(input)
+// CreatesPullRequestArgv identifies a supported create invocation from the
+// actual arguments. Help, preview and browser modes do not deliver a PR.
+func CreatesPullRequestArgv(argv []string) bool {
+	if len(argv) == 0 {
+		return false
 	}
-	parts := []string{name}
-	var walk func(any)
-	walk = func(v any) {
-		switch v := v.(type) {
-		case string:
-			parts = append(parts, v)
-		case []any:
-			for _, item := range v {
-				walk(item)
-			}
-		case map[string]any:
-			for _, item := range v {
-				walk(item)
-			}
+	switch filepath.Base(argv[0]) {
+	case "lazybox":
+		if len(argv) > 3 && argv[1] == "run" && argv[2] == "--" {
+			return CreatesPullRequestArgv(argv[3:])
+		}
+		return false
+	case "sh", "bash", "zsh":
+		return len(argv) == 3 && (argv[1] == "-c" || argv[1] == "-lc") && createsPullRequestCommand(argv[2])
+	case "gh":
+		if len(argv) < 3 || argv[1] != "pr" || argv[2] != "create" {
+			return false
+		}
+	case "hub":
+		if len(argv) < 2 || argv[1] != "pull-request" {
+			return false
+		}
+	case "glab":
+		if len(argv) < 3 || argv[1] != "mr" || argv[2] != "create" {
+			return false
+		}
+	default:
+		return false
+	}
+	for _, arg := range argv[1:] {
+		flag, _, _ := strings.Cut(arg, "=")
+		if slices.Contains([]string{"--help", "--dry-run", "--web", "--browse", "--noop", "-h", "-w", "-o"}, flag) {
+			return false
 		}
 	}
-	walk(value)
-	return strings.Join(parts, "\n")
+	return true
+}
+
+// Only accept a literal final create command. A preceding push, directory
+// change or heredoc to a body file is common. More complex shell programs
+// can exit successfully without executing the create and require an explicit link.
+func createsPullRequestCommand(command string) bool {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil || len(file.Stmts) == 0 {
+		return false
+	}
+	var valid func(*syntax.Stmt, bool) bool
+	valid = func(stmt *syntax.Stmt, final bool) bool {
+		if stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown {
+			return false
+		}
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			return binary.Op == syntax.AndStmt && valid(binary.X, false) && valid(binary.Y, final)
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 || len(call.Assigns) != 0 {
+			return false
+		}
+		argv := make([]string, 0, len(call.Args))
+		for _, word := range call.Args {
+			var arg strings.Builder
+			for _, part := range word.Parts {
+				switch part := part.(type) {
+				case *syntax.Lit:
+					arg.WriteString(part.Value)
+				case *syntax.SglQuoted:
+					arg.WriteString(part.Value)
+				case *syntax.DblQuoted:
+					for _, nested := range part.Parts {
+						lit, ok := nested.(*syntax.Lit)
+						if !ok {
+							return false
+						}
+						arg.WriteString(lit.Value)
+					}
+				default:
+					return false
+				}
+			}
+			argv = append(argv, arg.String())
+		}
+		if final {
+			return len(stmt.Redirs) == 0 && CreatesPullRequestArgv(argv)
+		}
+		switch argv[0] {
+		case "git":
+			return len(argv) > 1 && argv[1] == "push"
+		case "cd":
+			return len(argv) == 2
+		case "cat":
+			return len(argv) == 1 && len(stmt.Redirs) == 2 && slices.ContainsFunc(stmt.Redirs, func(r *syntax.Redirect) bool { return r.Hdoc != nil })
+		}
+		return false
+	}
+	for i, stmt := range file.Stmts {
+		if !valid(stmt, i == len(file.Stmts)-1) {
+			return false
+		}
+	}
+	return true
+}
+
+// ToolCreatesPullRequest reads only a recognized tool's executable input.
+// Descriptions, prompts and other arbitrary text never identify a delivery.
+func ToolCreatesPullRequest(name string, input []byte) bool {
+	switch name {
+	case "create_pull_request", "mcp__github__create_pull_request":
+		return true
+	case "Shell command", "Bash", "exec_command":
+		var command string
+		if json.Unmarshal(input, &command) != nil {
+			var args struct{ Command, Cmd string }
+			if json.Unmarshal(input, &args) != nil {
+				return false
+			}
+			command = args.Command
+			if command == "" {
+				command = args.Cmd
+			}
+		}
+		return createsPullRequestCommand(command)
+	}
+	return false
 }
 
 // Found is a URL in output, and whether the output's command created it.
@@ -122,6 +215,54 @@ type Found struct {
 // maxFound bounds what one output contributes: a listing of many pull
 // requests is not a list of things the workspace did.
 const maxFound = 5
+
+// A GitHub create tool returns the object directly or wrapped in a single
+// MCP text block. Only its PR URL field identifies the created object.
+func createdResultURL(output string) string {
+	finalLine := func(text string) string {
+		text = strings.TrimSpace(text)
+		return strings.TrimSpace(text[strings.LastIndexByte(text, '\n')+1:])
+	}
+	type block struct{ Type, Text string }
+	var object struct {
+		HTMLURL string  `json:"html_url"`
+		URL     string  `json:"url"`
+		Content []block `json:"content"`
+		IsError bool    `json:"isError"`
+	}
+	var blocks []block
+	switch {
+	case json.Unmarshal([]byte(output), &object) == nil:
+		if object.IsError {
+			return ""
+		}
+		if object.HTMLURL != "" {
+			return object.HTMLURL
+		}
+		if object.URL != "" {
+			return object.URL
+		}
+		blocks = object.Content
+	case json.Unmarshal([]byte(output), &blocks) == nil:
+	default:
+		// The CLI prints progress and then the new URL on its own final line.
+		return finalLine(output)
+	}
+	if len(blocks) != 1 || blocks[0].Type != "text" {
+		return ""
+	}
+	var pr struct {
+		HTMLURL string `json:"html_url"`
+		URL     string `json:"url"`
+	}
+	if json.Unmarshal([]byte(blocks[0].Text), &pr) != nil {
+		return finalLine(blocks[0].Text)
+	}
+	if pr.HTMLURL != "" {
+		return pr.HTMLURL
+	}
+	return pr.URL
+}
 
 // Scan finds the items an output names. created says the output is from a
 // command that opens a pull request: the pull request URL it printed last is
@@ -140,9 +281,11 @@ func Scan(output string, created bool) []Found {
 	}
 	delivered := -1
 	if created {
+		result := createdResultURL(strings.TrimSpace(output))
 		for i, f := range all {
-			if f.Kind == KindPullRequest {
+			if f.Kind == KindPullRequest && result == f.URL {
 				delivered = i
+				break
 			}
 		}
 	}

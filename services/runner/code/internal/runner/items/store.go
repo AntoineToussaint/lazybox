@@ -376,13 +376,16 @@ type TrackedItem struct {
 // etag is the provider's validator ("" keeps the old one). readAt is when the
 // read began (zero: now, and never stale).
 func (s *Store) Observe(item Item, etag string, readAt time.Time) ([]Event, error) {
-	return s.ObserveAll([]Observation{{Item: item, ETag: etag, ReadAt: readAt}})
+	events, _, err := s.ObserveAll([]Observation{{Item: item, ETag: etag, ReadAt: readAt}})
+	return events, err
 }
 
 // Observation is one fresh read.
 type Observation struct {
 	Item Item
 	ETag string
+	// Unconditional snapshots from the branch API have no matching validator.
+	InvalidateETag bool
 	// ReadAt is when the read began, on the store's clock (Now). A read that
 	// began before the snapshot kept was observed is stale — two reads of
 	// one item can finish out of order — and is dropped, so an older answer
@@ -391,9 +394,10 @@ type Observation struct {
 	ReadAt time.Time
 }
 
-// ObserveAll records several reads with one write.
-func (s *Store) ObserveAll(reads []Observation) ([]Event, error) {
+// ObserveAll records several reads with one write and returns the accepted snapshots.
+func (s *Store) ObserveAll(reads []Observation) ([]Event, []Item, error) {
 	var out []Event
+	var accepted []Item
 	now := s.Now()
 	err := s.update(func(st *state) bool {
 		for _, read := range reads {
@@ -417,9 +421,10 @@ func (s *Store) ObserveAll(reads []Observation) ([]Event, error) {
 				}
 			}
 			st.Items[id] = item
+			accepted = append(accepted, item)
 			t := st.Tracking[id]
 			t.CheckedAt, t.Failures, t.LastError = now, 0, ""
-			if read.ETag != "" {
+			if read.ETag != "" || read.InvalidateETag {
 				t.ETag = read.ETag
 			}
 			st.Tracking[id] = t
@@ -439,24 +444,12 @@ func (s *Store) ObserveAll(reads []Observation) ([]Event, error) {
 		if len(st.Events) > eventsKept {
 			st.Events = st.Events[len(st.Events)-eventsKept:]
 		}
-		return true
+		return len(accepted) > 0
 	})
-	return out, err
-}
-
-// Unchanged records a read the provider answered with "not modified".
-func (s *Store) Unchanged(ref Ref) error {
-	now := s.Now()
-	return s.update(func(st *state) bool {
-		t := st.Tracking[ref.ID()]
-		t.CheckedAt, t.Failures, t.LastError = now, 0, ""
-		st.Tracking[ref.ID()] = t
-		if item, ok := st.Items[ref.ID()]; ok {
-			item.ObservedAt = now
-			st.Items[ref.ID()] = item
-		}
-		return true
-	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, accepted, nil
 }
 
 // Failed records a read that failed, so the next one backs off.

@@ -152,6 +152,8 @@ type (
 		Execution    string    `json:"execution,omitempty"`
 		// New: the conversation was started for this task.
 		New bool `json:"new,omitempty"`
+		// BriefOperation identifies the requested delivery, so an interrupted assignment can finish it.
+		BriefOperation string `json:"briefOperation,omitempty"`
 		// Outcome, on attempt.ended: deleted, handoff or stopped.
 		Outcome string `json:"outcome,omitempty"`
 		// Lineage, on an assignment an orchestrator made (grant.go): the
@@ -222,6 +224,12 @@ type Evidence struct {
 	// Review: the open findings by severity when it was recorded.
 	Blockers int `json:"blockers,omitempty"`
 	Findings int `json:"findings,omitempty"`
+}
+
+// IsPullRequestLink distinguishes the conversation's explicit delivery from
+// check observations, including ones recorded by older Runner versions.
+func (e Evidence) IsPullRequestLink() bool {
+	return e.Kind == EvidencePR && e.Number > 0 && e.Repository != "" && e.Ref == PullRequestLinkRef(e.Repository, e.Number)
 }
 
 // Subjects.

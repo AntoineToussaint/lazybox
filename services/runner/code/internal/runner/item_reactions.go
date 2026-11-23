@@ -122,6 +122,7 @@ func (b *Bench) refreshNow(ctx context.Context, ref workitems.Ref) workitems.Ite
 	etags := map[string]string{}
 	for _, t := range store.Tracked() {
 		if t.Item.Ref == ref {
+			item = t.Item
 			etags[ref.ID()] = t.Tracking.ETag
 		}
 	}

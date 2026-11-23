@@ -33,7 +33,7 @@ import './style.css';
 import './chat-header.css';
 import { awaitingFirstMessage } from './agent-status';
 import { appendToDraft, composeRunMessage, useComposerOffers, useSharedRuns } from './command-runs';
-import { fileReferences, useComposerDraft } from './useComposerDraft';
+import { useComposerDraft } from './useComposerDraft';
 import { useComposerAttachments } from './useComposerAttachments';
 import { usePromptRecall } from './usePromptRecall';
 import { useSessionRefresh, useSessionWorkspace } from './useSessionPolling';
@@ -189,7 +189,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const scroll = useChatScroll(transcript.reader, conversation, session?.pending.length);
   const { jumpToLatest } = scroll;
   const [error, setError] = useState('');
-  const { message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
+  const { restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
   const [commandsOpen, setCommandsOpen] = useState(initialCommandsOpen ?? !!initialCommandId);
   const [sending, setSending] = useState(false);
   const [commands, setCommands] = useState<CommandStatus[]>([]);
@@ -208,7 +208,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const fileInput = useRef<HTMLInputElement>(null);
   const canResumeOnSend = !!session?.closed && !session.resumeBlocked && !session.recoveryRequired && !!session.providerReference && !!session.capabilities?.resume;
   const [permissionRestarting, setPermissionRestarting] = useState(false);
-  const canCompose = !permissionRestarting && !!session && (!session.closed || canResumeOnSend);
+  const canCompose = !restoring && !permissionRestarting && !!session && (!session.closed || canResumeOnSend);
   const canAttach = !!session?.capabilities?.files && !!info?.attachmentLimits && canCompose && !sending;
   const boxes = useComposerAttachments({ draft: { message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft }, limits: info?.attachmentLimits, canAttach, textarea: composer, sessionID, onError: setError });
   // At a subscription limit a message waits and is sent once the conversation continues.
@@ -321,7 +321,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
         destination = resumed.session.id;
         // A view may close while delivery is in flight. Retain the same draft
         // and operation identity under the successor before sending any bytes.
-        writeDraft(viewState, destination, { text, files: fileReferences(files), operationId: attempt.id });
+        persistDraft(text, files, [], attempt.id, destination);
       }
       // A delivery that never answers (a Runner restarting mid-request) must not
       // block sending forever. The operation id is kept, so sending again cannot
@@ -334,7 +334,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       refreshSession();
       // Behind a busy turn the message was queued: it goes next, the turn stopped for it.
       if (now && destination === sessionID && session?.busy && !session.closed) void queuedDelivery.deliver(attempt.id, 'now', true);
-      if (!signal.aborted) { setMessage(''); setFiles([]); boxes.clearRejected(); setUncertainSend(''); sendAttempt.current = null; persistDraft('', [], []); if (destination !== sessionID) { writeDraft(viewState, destination, { text: '', files: [], operationId: '' }); setSessionID(destination); onSessionChange?.(destination); refresh(); } }
+      if (!signal.aborted) { setMessage(''); setFiles([]); boxes.clearRejected(); setUncertainSend(''); sendAttempt.current = null; persistDraft('', [], []); if (destination !== sessionID) { persistDraft('', [], [], '', destination); setSessionID(destination); onSessionChange?.(destination); refresh(); } }
       return !signal.aborted;
     } catch (e) { if (!signal.aborted) { setError(humanError(e)); if (snippetText) setMessage(text); } return false; }
     finally { if (!signal.aborted) { sendingRef.current = false; setSending(false); } }

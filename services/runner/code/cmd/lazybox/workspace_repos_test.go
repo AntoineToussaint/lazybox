@@ -197,3 +197,26 @@ func TestWorkspaceDefinitionRoundTrip(t *testing.T) {
 		t.Fatal("incorrect realization identity", a)
 	}
 }
+
+func TestWorkspaceRenameFromAgentCLI(t *testing.T) {
+	r := newTestRunner(t)
+	session, native := r.open("parser")
+	env := r.agentEnv(session, native.Open.Env)
+	out := r.cli(env, "", "workspace", "rename", "Plugins and Mods")
+	if out.code != 0 || !strings.Contains(out.stdout, "Plugins and Mods") {
+		t.Fatalf("rename: %+v", out)
+	}
+	out = r.cli(env, "", "workspace", "repos")
+	if out.code != 0 || !strings.Contains(out.stdout, "Plugins and Mods · branch ") || !strings.Contains(out.stdout, r.collection.Root) {
+		t.Fatalf("renamed workspace: %+v", out)
+	}
+	foreign, err := r.service.CreateCollection(t.Context(), &pb.CreateCollectionRequest{RequestKey: "foreign", Spec: &pb.CollectionSpec{Name: "Other workspace"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env["LAZYBOX_V2_COLLECTION_ID"] = foreign.Collection.Id
+	out = r.cli(env, "", "workspace", "rename", "another name")
+	if out.code != exitDenied {
+		t.Fatalf("foreign workspace: %+v", out)
+	}
+}

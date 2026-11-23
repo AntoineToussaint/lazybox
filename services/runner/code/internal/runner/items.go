@@ -19,6 +19,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 	workitems "github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/items"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sources/github"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 )
 
 // Tracked pull requests (GITHUB.md "Tracked pull requests",
@@ -47,6 +48,8 @@ type itemsState struct {
 	wake      chan struct{}
 	// pass serializes tracking passes.
 	pass sync.Mutex
+	// observations keeps accepted snapshots and their mission journal writes in the same order.
+	observations sync.Mutex
 
 	mu          sync.Mutex
 	pausedUntil time.Time
@@ -55,7 +58,7 @@ type itemsState struct {
 	subscribers []func(workitems.Event)
 	// tools remembers, per execution, which running tool calls open a pull
 	// request: a provider reports a call's input and its result apart.
-	tools   map[string]map[string]bool
+	tools   map[string]map[string]string
 	origins map[string]originEntry
 	// linked: per execution, when its agent's recent `lazybox link` calls
 	// were (agentLinkRate).
@@ -99,7 +102,7 @@ func (b *Bench) openItems() error {
 	}
 	b.workItems.store = store
 	b.workItems.wake = make(chan struct{}, 1)
-	b.workItems.tools = map[string]map[string]bool{}
+	b.workItems.tools = map[string]map[string]string{}
 	b.workItems.origins = map[string]originEntry{}
 	b.workItems.linked = map[string][]time.Time{}
 	every := b.Config.ItemPoll
@@ -309,15 +312,21 @@ func (b *Bench) refreshItems(ctx context.Context, provider workitems.Provider, b
 	for _, item := range refreshed.Items {
 		reads = append(reads, workitems.Observation{Item: item, ETag: refreshed.ETags[item.Ref.ID()], ReadAt: readAt})
 	}
+	// A 304 confirms the snapshot supplied with this request. Give it the same
+	// read ordering as a changed response, even if another read finished first.
+	for _, item := range batch {
+		if item.Kind != "" && slices.Contains(refreshed.Unchanged, item.Ref) {
+			item.ObservedAt = time.Time{}
+			reads = append(reads, workitems.Observation{Item: item, ETag: etags[item.Ref.ID()], ReadAt: readAt})
+		}
+	}
 	if len(reads) > 0 {
-		events, werr := store.ObserveAll(reads)
+		events, werr := b.observeItems(reads)
 		if werr != nil {
+			err = errors.Join(err, werr)
 			log.Printf("tracked items: %v", werr)
 		}
 		b.dispatchItemEvents(events)
-	}
-	for _, ref := range refreshed.Unchanged {
-		_ = store.Unchanged(ref)
 	}
 	for id, cause := range refreshed.Failed {
 		for _, item := range batch {
@@ -327,6 +336,28 @@ func (b *Bench) refreshItems(ctx context.Context, provider workitems.Provider, b
 		}
 	}
 	return err
+}
+
+// observeItems publishes CI evidence only for reads accepted by the item store.
+// A later-started response may arrive first. Serialize the two local writes so
+// journal order agrees with the accepted snapshots in that case as well.
+func (b *Bench) observeItems(reads []workitems.Observation) ([]workitems.Event, error) {
+	t := &b.workItems
+	t.observations.Lock()
+	defer t.observations.Unlock()
+	events, accepted, err := t.store.ObserveAll(reads)
+	if err != nil || b.Work == nil || len(accepted) == 0 {
+		return events, err
+	}
+	links := t.store.Links(workitems.Filter{Live: true, Roles: []string{workitems.RoleDelivers, workitems.RoleOrigin}})
+	for _, item := range accepted {
+		for _, link := range links {
+			if link.Ref == item.Ref {
+				err = errors.Join(err, b.recordPullRequest(link.Link, item))
+			}
+		}
+	}
+	return events, err
 }
 
 // lookUpBranch asks which pull requests come from a pushed branch, and links
@@ -499,6 +530,29 @@ func (b *Bench) itemsWorkspaceGone(id, name string) {
 // recorded as a mention: an agent cannot make Lazybox track, react to and
 // notify about any repository's pull requests.
 func (b *Bench) linkItem(l workitems.Link) (bool, error) {
+	return b.storeItemLink(l, "")
+}
+
+// deliveryAttempt snapshots the unique live assignment at the source of a
+// delivery. A delayed result must never discover a replacement assignment.
+func (b *Bench) deliveryAttempt(conversation string) string {
+	if conversation == "" || b.Work == nil {
+		return ""
+	}
+	var attempt string
+	for _, at := range b.Work.Attempts() {
+		if at.Attempt.Conversation != conversation {
+			continue
+		}
+		if attempt != "" {
+			return ""
+		}
+		attempt = at.Attempt.ID
+	}
+	return attempt
+}
+
+func (b *Bench) storeItemLink(l workitems.Link, attempt string) (bool, error) {
 	store := b.workItems.store
 	if store == nil {
 		return false, errors.New("item tracking is unavailable")
@@ -524,6 +578,13 @@ func (b *Bench) linkItem(l workitems.Link) (bool, error) {
 		l.Role = workitems.RoleMentions
 	}
 	added, err := store.Link(l)
+	if err == nil && attempt != "" && l.Conversation != "" && l.Role == workitems.RoleDelivers && b.Work != nil {
+		repository, number, ok := workitems.ParseGitHubKey(l.Ref.Key)
+		if l.Ref.Provider == "github" && ok {
+			evidence := work.Evidence{Kind: work.EvidencePR, Ref: work.PullRequestLinkRef(repository, number), Outcome: work.OutcomeUnknown, Title: fmt.Sprintf("%s#%d", repository, number), Repository: repository, Number: number, Workspace: l.Workspace, Member: l.Member, Execution: l.Session, URL: fmt.Sprintf("https://github.com/%s/pull/%d", repository, number)}
+			_, err = b.Work.Record(work.Origin{Attempt: attempt, Conversation: l.Conversation}, work.Actor{Kind: work.ActorLazybox, Conversation: l.Conversation, Execution: l.Session}, evidence)
+		}
+	}
 	if err == nil && added && l.Role != workitems.RoleMentions {
 		b.wakeItems()
 	}
@@ -544,7 +605,7 @@ func (b *Bench) LinkItemURL(session, workspace, url, role, source string) (worki
 	if session != "" && workitems.AgentMade(source) && !b.allowAgentLink(session, time.Now()) {
 		return resolved, ErrLinkRate
 	}
-	conversation := ""
+	conversation, attempt := "", ""
 	if session != "" {
 		e, err := b.Get(session)
 		if err != nil {
@@ -554,6 +615,7 @@ func (b *Bench) LinkItemURL(session, workspace, url, role, source string) (worki
 			return resolved, errors.New("this conversation is not in a workspace")
 		}
 		workspace, conversation = e.CollectionID, conversationOf(e)
+		attempt = b.deliveryAttempt(conversation)
 	}
 	if workspace == "" {
 		return resolved, errors.New("workspace required")
@@ -577,7 +639,7 @@ func (b *Bench) LinkItemURL(session, workspace, url, role, source string) (worki
 	if role == workitems.RoleDelivers && resolved.Kind != workitems.KindPullRequest {
 		return resolved, errors.New("only a pull request can be delivered; link an issue as a mention")
 	}
-	_, err := b.linkItem(workitems.Link{Ref: resolved.Ref, Workspace: workspace, Session: session, Conversation: conversation, Role: role, Source: source})
+	_, err := b.storeItemLink(workitems.Link{Ref: resolved.Ref, Workspace: workspace, Session: session, Conversation: conversation, Role: role, Source: source}, attempt)
 	return resolved, err
 }
 
@@ -638,7 +700,7 @@ func (b *Bench) ObservePullRequestLoop(workspace, member, repository string, sta
 	if _, err := b.linkItem(link); err != nil {
 		return
 	}
-	events, err := store.Observe(item, "", readAt)
+	events, err := b.observeItems([]workitems.Observation{{Item: item, ReadAt: readAt, InvalidateETag: true}})
 	if err != nil {
 		log.Printf("tracked items: %v", err)
 	}
@@ -658,22 +720,29 @@ func (b *Bench) itemToolEvent(e *Execution, ev agent.Event) {
 	}
 	t := &b.workItems
 	creates := call.creates()
+	attempt := ""
+	if creates {
+		attempt = b.deliveryAttempt(conversationOf(e))
+	}
 	key := ev.AgentID + "\x00" + call.ID
 	t.mu.Lock()
 	calls := t.tools[e.ID]
-	if calls == nil {
-		calls = map[string]bool{}
-		t.tools[e.ID] = calls
+	if original, ok := calls[key]; ok {
+		creates, attempt = true, original
 	}
-	if creates && call.ID != "" {
-		if len(calls) >= toolCallsKept {
-			clear(calls)
+	if call.ID != "" {
+		if len(call.Output) > 0 || call.Status == "failed" || call.Status == "completed" {
+			delete(calls, key)
+		} else if creates {
+			if calls == nil {
+				calls = map[string]string{}
+				t.tools[e.ID] = calls
+			}
+			if len(calls) >= toolCallsKept {
+				clear(calls)
+			}
+			calls[key] = attempt
 		}
-		calls[key] = true
-	}
-	if len(call.Output) > 0 && call.ID != "" {
-		creates = creates || calls[key]
-		delete(calls, key)
 	}
 	t.mu.Unlock()
 	if len(call.Output) == 0 {
@@ -681,8 +750,8 @@ func (b *Bench) itemToolEvent(e *Execution, ev agent.Event) {
 	}
 	// Linking reads the worktrees' origins and writes the store: off the
 	// engine's event path.
-	if found := workitems.Scan(call.output(), creates); len(found) > 0 {
-		go b.linkFound(e, found)
+	if found := workitems.Scan(call.output(), creates && call.Status == "completed"); len(found) > 0 {
+		go b.linkFound(e, found, attempt)
 	}
 }
 
@@ -706,7 +775,7 @@ func toolCallOf(ev agent.Event) (toolCall, bool) {
 
 // creates reports a call whose command opens a pull request.
 func (c toolCall) creates() bool {
-	return len(c.Input) > 0 && workitems.CreatesPullRequest(workitems.ToolCommand(c.Name, c.Input))
+	return len(c.Input) > 0 && workitems.ToolCreatesPullRequest(c.Name, c.Input)
 }
 
 // output is the result's text (a JSON string decoded).
@@ -718,7 +787,7 @@ func (c toolCall) output() string {
 	return string(c.Output)
 }
 
-func (b *Bench) linkFound(e *Execution, found []workitems.Found) {
+func (b *Bench) linkFound(e *Execution, found []workitems.Found, attempt string) {
 	for _, f := range found {
 		if f.Role == workitems.RoleMentions {
 			// A pull request this workspace already delivers is not a mention.
@@ -726,7 +795,7 @@ func (b *Bench) linkFound(e *Execution, found []workitems.Found) {
 				continue
 			}
 		}
-		_, _ = b.linkItem(workitems.Link{Ref: f.Ref, Workspace: e.CollectionID, Session: e.ID, Conversation: conversationOf(e), Role: f.Role, Source: workitems.SourceAgentOutput})
+		_, _ = b.storeItemLink(workitems.Link{Ref: f.Ref, Workspace: e.CollectionID, Session: e.ID, Conversation: conversationOf(e), Role: f.Role, Source: workitems.SourceAgentOutput}, attempt)
 	}
 }
 
@@ -735,7 +804,7 @@ func (b *Bench) linkFound(e *Execution, found []workitems.Found) {
 // ends with the URL.
 func (b *Bench) itemPipeFinished(c *commands.Command) {
 	state := c.Status()
-	if b.workItems.store == nil || state.Spec.SessionID == "" || !workitems.CreatesPullRequest(state.Spec.Title+" "+strings.Join(state.Spec.Argv, " ")) {
+	if b.workItems.store == nil || state.Spec.SessionID == "" || !state.Spec.CreatesPullRequest {
 		return
 	}
 	e, err := b.Get(state.Spec.SessionID)
@@ -744,7 +813,8 @@ func (b *Bench) itemPipeFinished(c *commands.Command) {
 	}
 	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
 	defer cancel()
-	b.linkFound(e, workitems.Scan(string(c.Tail(ctx, 64<<10)), true))
+	success := state.Report != nil && !state.Report.Piped && state.Report.ExitCode == 0 && state.Error == "" && state.Signal == ""
+	b.linkFound(e, workitems.Scan(string(c.Tail(ctx, 64<<10)), success), state.Spec.DeliveryAttempt)
 }
 
 // dispatchItemEvents sends each transition to the hooks that follow it, the

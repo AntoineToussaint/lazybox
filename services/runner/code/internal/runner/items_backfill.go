@@ -135,7 +135,7 @@ func (b *Bench) backfillAttempt(id, workspace, conversation string, limit int) i
 			continue
 		}
 		delete(creates, key)
-		for _, f := range workitems.Scan(call.output(), true) {
+		for _, f := range workitems.Scan(call.output(), call.Status == "completed") {
 			if f.Role != workitems.RoleDelivers {
 				continue
 			}

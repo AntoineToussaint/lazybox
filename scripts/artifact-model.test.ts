@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { agentReference, ago, artifactChip, artifactPaletteEntries, authorShort, diffStats, fromConversation, groupByWorkspace, guessKind, hunks, lineDiff, linkedMarkdownFiles, mostlyNamesFile, slug, suggestedPath, titleFromMarkdown, trackableFile, updatedLine, updatedSinceSeen, type FoundArtifact } from '../packages/surfaces/src/artifact-model.ts';
+import { roadmapMissionPlan, agentReference, ago, artifactChip, artifactPaletteEntries, authorShort, diffStats, fromConversation, groupByWorkspace, guessKind, hunks, lineDiff, linkedMarkdownFiles, mostlyNamesFile, slug, suggestedPath, titleFromMarkdown, trackableFile, updatedLine, updatedSinceSeen, type FoundArtifact } from '../packages/surfaces/src/artifact-model.ts';
 
 // Artifacts as the Runner lists them, for the finding helpers.
 const made = (id: string, collectionId: string, at: number, extra: Record<string, unknown> = {}) => ({ id, collectionId, title: `Title ${id}`, kind: 'plan', trackedPath: '', originSessionId: '', originConversationId: '', updatedAtUnixMillis: BigInt(at), versions: [{ number: 1 }], ...extra }) as never;
@@ -156,4 +156,37 @@ test('a short message that names a file prefers the file; a long reply or a code
   assert.equal(mostlyNamesFile('Wrote `docs/PLAN.md`:\n```md\n# Plan\n```'), false);
   assert.equal(trackableFile('docs/PLAN.MD'), true);
   assert.equal(trackableFile('src/main.go'), false);
+});
+
+test('mission export carries the definition and pinned evidence, rejects broken dependency graphs', () => {
+  const milestone = (key: string, deps = '') => [
+    '## Ship ' + key, '- Milestone: ' + key, '- Deliverable: Package', '- Depends on: ' + deps,
+    '- Definition of done: Build passes', '- Verification evidence: CI receipt',
+  ].join('\n');
+  const exportPlan = (body: string) => roadmapMissionPlan(body, 'Ship', 'art', 3);
+  const plan = exportPlan(milestone('A') + '\n' + milestone('B', 'A'));
+  assert.deepEqual(plan.tasks[1].after, ['A']);
+  assert.match(plan.tasks[1].brief, /Build passes[\s\S]*CI receipt[\s\S]*art v3/);
+  assert.throws(() => exportPlan(milestone('B', 'A')), /Unknown milestone/);
+  assert.throws(() => exportPlan(milestone('A', 'A')), /cycle/);
+  assert.throws(() => exportPlan(milestone('A') + '\n' + milestone('A')), /unique/);
+  assert.throws(() => exportPlan(milestone('A').replace('Build passes', '')), /definition of done/);
+});
+
+test('phase progress and mission export distinguish accepted work from pending review', async () => {
+  const { newMilestone, roadmapMarkdown, typedMissionPlan } = await import('../packages/surfaces/src/roadmap.ts');
+  const a = newMilestone('A', 'Foundation'), b = newMilestone('B', 'Review');
+  a.phase = b.phase = 'Release';
+  a.status = 'accepted';
+  b.status = 'awaiting-acceptance';
+  b.dependsOn = ['A'];
+  b.definitionOfDone = ['Passing receipt'];
+  b.deliverable = 'Package';
+  const roadmap = { schema: 'roadmap.v1' as const, milestones: [a, b] };
+  assert.match(roadmapMarkdown(roadmap), /## Release\n\n1 of 2 accepted · 1 awaiting acceptance/);
+  const proposal = typedMissionPlan(roadmap, 'Release', 'art', 4);
+  assert.deepEqual(proposal.tasks.map(t => [t.key, t.after]), [['B', []]]);
+  assert.match(proposal.tasks[0].brief, /Depends on: A/);
+  b.status = 'accepted';
+  assert.throws(() => typedMissionPlan(roadmap, 'Release', 'art', 4), /already been accepted/);
 });

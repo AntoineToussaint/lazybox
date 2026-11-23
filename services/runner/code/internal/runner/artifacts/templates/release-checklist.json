@@ -1,0 +1,25 @@
+{
+  "schema": "todo-list.v1",
+  "items": [
+    {
+      "id": "candidate",
+      "text": "Record candidate revision and rollback target",
+      "status": "todo"
+    },
+    {
+      "id": "verify",
+      "text": "Verify release gates and attach receipts",
+      "status": "todo"
+    },
+    {
+      "id": "promote",
+      "text": "Confirm the selected candidate and promote",
+      "status": "todo"
+    },
+    {
+      "id": "observe",
+      "text": "Check the deployed revision and smoke-test the user flow",
+      "status": "todo"
+    }
+  ]
+}

@@ -861,8 +861,22 @@ export function redockPopouts(page: WorkspacePage): WorkspacePage {
   for (const group of page.popouts) layout = dockAt(layout, group, 'right', 0.3, group.panels[0]?.kind);
   return { ...page, layout, popouts: [] };
 }
+/** Retire the old workspace Missions surface, including popped-out and floating copies. */
+function retireMissionPanels(layout: WorkspaceLayout, agents?: SidebarAgents): WorkspaceLayout {
+  const pages = layout.pages.flatMap(page => {
+    const obsolete = allPanels(page).filter(panel => panel.kind === 'missions');
+    if (!obsolete.length) return [page];
+    const next = obsolete.reduce((rest, panel) => removeFromPage(rest, panel.id), page);
+    return allPanels(next).length ? [next] : [];
+  });
+  if (!pages.length) return defaultLayout(layout.pages.find(page => page.id === layout.selectedPage)?.selection, agents);
+  if (pages.length === layout.pages.length && pages.every((page, index) => page === layout.pages[index])) return layout;
+  return { ...layout, pages, selectedPage: pages.some(page => page.id === layout.selectedPage) ? layout.selectedPage : pages[0].id };
+}
+
 /** What loading a saved page fixes: windows that are gone, chats that follow the page (they become its preview tab), duplicate chats, Agents hidden behind Workspaces, and Agents as the window has it (`agents`, see fitSidebarAgents). */
 export function repairLayout(layout: WorkspaceLayout, agents?: SidebarAgents, previews = true): WorkspaceLayout {
+  layout = retireMissionPanels(layout, agents);
   const pages = layout.pages.map(page => {
     const docked = redockPopouts(page), stacked = stackSidebar(docked.layout);
     const next = fitSidebarAgents(dedupeChats(settleChats(stacked === docked.layout ? docked : { ...docked, layout: stacked }, previews), page.selection), agents);

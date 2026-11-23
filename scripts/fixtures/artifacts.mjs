@@ -23,9 +23,9 @@ export function artifactFixture({ workspaceFiles, mutations }) {
     entry.versions.push({ header: { number, createdAtUnixMillis: String(at), author, source, digest: digest(content), size: String(Buffer.byteLength(content)) }, content });
     entry.meta.updatedAtUnixMillis = String(at);
   };
-  const create = ({ collectionId, title, kind, content, author, source, trackedPath = '', format = 'markdown' }) => {
+  const create = ({ collectionId, title, kind, content, author, source, trackedPath = '', format = 'markdown', links = [] }) => {
     const id = randomUUID().replace(/-/g, '').slice(0, 20).toUpperCase(), at = now();
-    const entry = { meta: { id, collectionId, title, kind: KINDS.has(kind) ? kind : 'other', format, createdAtUnixMillis: String(at), updatedAtUnixMillis: String(at), originSessionId: source?.sessionId || '', originConversationId: source?.conversationId || '', trackedPath, trackingProblem: '' }, versions: [] };
+    const entry = { meta: { id, collectionId, links, title, kind: KINDS.has(kind) ? kind : 'other', format, createdAtUnixMillis: String(at), updatedAtUnixMillis: String(at), originSessionId: source?.sessionId || '', originConversationId: source?.conversationId || '', trackedPath, trackingProblem: '' }, versions: [] };
     append(entry, content, author, source);
     artifacts.set(id, entry);
     return entry;
@@ -50,7 +50,7 @@ export function artifactFixture({ workspaceFiles, mutations }) {
         const author = { kind: 'person' }, source = body.source || { kind: 'edit' };
         if (!body.artifactId) {
           if (!body.title?.trim()) return error('invalid_argument', 'a title is required');
-          return json(wire(create({ collectionId: body.collectionId, title: body.title.trim(), kind: body.kind, content, author, source })));
+          return json(wire(create({ collectionId: body.collectionId, title: body.title.trim(), kind: body.kind, content, author, source, format: body.format, links: body.links })));
         }
         const entry = find(body.collectionId, body.artifactId);
         if (!entry) return error('not_found', 'artifact not found');

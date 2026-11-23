@@ -145,10 +145,19 @@ func TestMissionEvidenceAttachesAutomatically(t *testing.T) {
 	if task.Evidence[0].Kind != work.EvidenceCommit || task.Evidence[0].Head != committed.Commit || task.Evidence[0].Title != "Split the parser" {
 		t.Fatalf("commit evidence: %+v", task.Evidence[0])
 	}
-	// Checks passing on that head verify it; checks on an older head would not.
+	// A branch observation, even on the same commit, is not a task delivery.
+	observation := &pb.PullRequestStatus{Found: true, GithubRepository: "team/api", Number: 7, HeadSha: committed.Commit, State: "open", ChecksState: "success"}
+	f.service.observePullRequest(f.mine.Id, "api", observation)
+	if current := taskOf(t, getMission(t, f, owner, missionID), taskID); current.Evidence[0].Kind == work.EvidencePR {
+		t.Fatalf("unlinked PR attached: %+v", current)
+	}
+	if _, err := f.client.LinkItem(owner, &pb.LinkItemRequest{SessionId: f.conversation.ID, Url: "https://github.com/team/api/pull/7", Role: "delivers"}); err != nil {
+		t.Fatal(err)
+	}
+	// Checks passing on that linked head verify it; checks on an older head would not.
 	f.service.observePullRequest(f.mine.Id, "api", &pb.PullRequestStatus{Found: true, GithubRepository: "team/api", Number: 7, HeadSha: committed.Commit, State: "open", ChecksState: "success", Checks: []*pb.PullRequestCheck{{Name: "test", Status: "completed", Conclusion: "success"}}})
 	task = taskOf(t, getMission(t, f, owner, missionID), taskID)
-	if task.Trust != work.TrustVerified || task.Evidence[0].Kind != work.EvidencePR || task.Evidence[0].Number != 7 {
+	if task.Trust != work.TrustVerified || task.Evidence[0].Kind != work.EvidencePR || task.Evidence[0].Number != 7 || task.Evidence[0].Historical {
 		t.Fatalf("checks on the newest head verify: %+v", task)
 	}
 	before := getMission(t, f, owner, missionID).Seq
@@ -289,6 +298,9 @@ func TestAssigningToANewConversationAndDeletingIt(t *testing.T) {
 	if prompts, _ := f.client.ListPromptHistory(owner, &pb.ListPromptHistoryRequest{CollectionId: f.theirs.Id}); len(prompts.Prompts) != 1 {
 		t.Fatalf("brief not recorded: %+v", prompts)
 	}
+	if n, err := f.bench.Work.Record(work.Origin{Workspace: f.theirs.Id}, work.Actor{Kind: work.ActorLazybox}, work.Evidence{Kind: work.EvidenceCommit, Ref: "commit:api@abc", Member: "api", Head: "abc"}); err != nil || n != 1 {
+		t.Fatalf("record first attempt commit: n=%d err=%v", n, err)
+	}
 	if _, err = f.client.DeleteConversation(owner, &pb.DeleteConversationRequest{SessionId: opened.ID, StopSessions: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -303,8 +315,57 @@ func TestAssigningToANewConversationAndDeletingIt(t *testing.T) {
 	if m, err = f.client.UpdateMission(owner, &pb.UpdateMissionRequest{MissionId: missionID, Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: taskID, SessionId: f.conversation.ID}}}); err != nil {
 		t.Fatal(err)
 	}
-	if task = taskOf(t, m, taskID); len(task.Attempts) != 2 || task.Status == work.StatusFailed {
+	if task = taskOf(t, m, taskID); len(task.Attempts) != 2 || task.Status == work.StatusFailed || len(task.Evidence) != 1 || !task.Evidence[0].Historical {
 		t.Fatalf("reassigned: %+v", task)
+	}
+}
+
+// Race two identical requests at the RPC boundary. The losing request must
+// return the same session and leave no extra conversation in the workspace.
+func TestConcurrentMissionAssignmentStartsOneConversation(t *testing.T) {
+	f := newTerminalFixture(t)
+	owner := bearer(timeout(t), ownerToken)
+	mission, task := missionWithTask(t, f, owner)
+	started := len(f.bench.List())
+	request := &pb.UpdateMissionRequest{MissionId: mission, OperationId: "retry", Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: task, Open: &pb.OpenSessionRequest{ProfileId: "claude-default", CollectionId: f.theirs.Id}, SendBrief: true}}}
+	type reply struct {
+		mission *pb.Mission
+		err     error
+	}
+	results := make(chan reply, 2)
+	for i := 0; i < 2; i++ {
+		go func() { m, err := f.client.UpdateMission(owner, request); results <- reply{m, err} }()
+	}
+	first, second := <-results, <-results
+	if first.err != nil || second.err != nil || first.mission.SessionId == "" || first.mission.SessionId != second.mission.SessionId || len(f.bench.List()) != started+1 {
+		t.Fatalf("concurrent assignment: %+v %+v sessions %d -> %d", first, second, started, len(f.bench.List()))
+	}
+	history, err := f.client.ListPromptHistory(owner, &pb.ListPromptHistoryRequest{CollectionId: f.theirs.Id})
+	if err != nil || len(history.Prompts) != 1 {
+		t.Fatalf("wanted one assigned brief: %v %v", history, err)
+	}
+}
+
+// Model a Runner interruption after persisting an assignment but before its
+// brief. Retrying twice must complete that delivery once, to the original agent.
+func TestMissionAssignmentRetryFinishesMissingBrief(t *testing.T) {
+	f := newTerminalFixture(t)
+	owner := bearer(timeout(t), ownerToken)
+	mission, task := missionWithTask(t, f, owner)
+	e := f.conversation
+	_, attempt, err := f.bench.Work.Assign(mission, task, work.Human, "interrupted", work.AttemptPayload{Execution: e.ID, Conversation: e.Saved.ConversationID, Workspace: e.CollectionID, BriefOperation: "persisted-brief"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		m, err := f.client.UpdateMission(owner, &pb.UpdateMissionRequest{MissionId: mission, OperationId: "interrupted", Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: task, SessionId: e.ID, SendBrief: true}}})
+		if err != nil || m.CreatedId != attempt || m.SessionId != e.ID {
+			t.Fatalf("retry %d: %v %v", i, m, err)
+		}
+	}
+	history, err := f.client.ListPromptHistory(owner, &pb.ListPromptHistoryRequest{ConversationId: e.ID})
+	if err != nil || len(history.Prompts) != 1 || history.Prompts[0].Source.GetTaskId() != task {
+		t.Fatalf("wanted the missing brief: %v %v", history, err)
 	}
 }
 

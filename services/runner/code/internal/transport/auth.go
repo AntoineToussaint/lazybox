@@ -94,6 +94,10 @@ var agentRPCs = map[string]func(agents AgentCredentials, who principal, req any)
 		r, ok := req.(*pb.RetireArtifactRequest)
 		return ok && !r.Restore && inOwnWorkspace(agents, who.session, r.CollectionId)
 	},
+	pb.RunnerService_RenameCollection_FullMethodName: func(agents AgentCredentials, who principal, req any) bool {
+		r, ok := req.(*pb.RenameCollectionRequest)
+		return ok && inOwnWorkspace(agents, who.session, r.CollectionId)
+	},
 	pb.RunnerService_ListWorkspaceRepositories_FullMethodName: func(agents AgentCredentials, who principal, req any) bool {
 		r, ok := req.(*pb.ListWorkspaceRepositoriesRequest)
 		return ok && inOwnWorkspace(agents, who.session, r.CollectionId)

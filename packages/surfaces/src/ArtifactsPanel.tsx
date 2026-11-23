@@ -59,11 +59,12 @@ export function ArtifactsPanel({ workspaceId, collections, viewState, target, on
   const setShowRetired = (next: boolean) => { setShowRetiredState(next); try { if (retiredKey) viewState!.setItem(retiredKey, next ? 'shown' : 'hidden'); } catch { /* a convenience */ } };
   const [selected, setSelectedState] = useState(() => { try { return key ? viewState!.getItem(key) || '' : ''; } catch { return ''; } });
   const setSelected = (id: string) => { setElsewhere(undefined); setSelectedState(id); try { if (key) viewState!.setItem(key, id); } catch { /* a convenience */ } };
+  const [history, setHistory] = useState<{ collectionId: string; id: string; version: number }[]>([]);
   const [scope, setScopeState] = useState<Scope>(() => { try { return scopeKey && viewState!.getItem(scopeKey) === 'all' ? 'all' : 'workspace'; } catch { return 'workspace'; } });
   const setScope = (next: Scope) => { setScopeState(next); if (next === 'all') setFromConversation(undefined); else setElsewhere(undefined); try { if (scopeKey) viewState!.setItem(scopeKey, next); } catch { /* a convenience */ } };
   // Only this conversation's artifacts, when the chat header's chip asked for them.
   const [fromChat, setFromConversation] = useState<ConversationRef & { title?: string }>();
-  const [focus, setFocus] = useState<{ artifactId: string; version?: number; compareWith?: number; at: number }>();
+  const [focus, setFocus] = useState<{ artifactId: string; version?: number; pinned?: boolean; compareWith?: number; at: number }>();
   const { artifacts, retired, loaded, error } = useArtifacts(workspaceId);
   const { api } = useRunner();
   const [actionError, setActionError] = useState('');
@@ -98,6 +99,7 @@ export function ArtifactsPanel({ workspaceId, collections, viewState, target, on
       setFromConversation(request.conversation);
       setQuery('');
     }
+    setHistory([]);
     setSelected(request.artifactId);
     setFocus(request.artifactId && (request.version || request.compareWith) ? { artifactId: request.artifactId, version: request.version, compareWith: request.compareWith, at: Date.now() } : undefined);
   });
@@ -119,7 +121,22 @@ export function ArtifactsPanel({ workspaceId, collections, viewState, target, on
   useEffect(() => { onCurrentChange?.(currentCollectionId, current?.id || ''); }, [currentCollectionId, current?.id]);
   if (!workspaceId && !retained.length) return <p className="module-empty">Choose a workspace to see its artifacts.</p>;
   const focusRow = (id: string) => requestAnimationFrame(() => list.current?.querySelector<HTMLElement>(`[data-artifact-id="${CSS.escape(id)}"]`)?.focus());
-  const choose = (collectionId: string, id: string) => collectionId === workspaceId ? setSelected(id) : setElsewhere({ collectionId, id });
+  const navigate = (collectionId: string, id: string, version?: number) => {
+    if (collectionId === workspaceId) setSelected(id);
+    else setElsewhere({ collectionId, id });
+    setFocus(version ? { artifactId: id, version, pinned: true, at: Date.now() } : undefined);
+  };
+  const choose = (collectionId: string, id: string) => { setHistory([]); navigate(collectionId, id); };
+  const back = () => {
+    const previous = history.at(-1);
+    if (previous) {
+      setHistory(items => items.slice(0, -1));
+      navigate(previous.collectionId, previous.id, previous.version);
+    } else {
+      if (other) setElsewhere(undefined); else setSelected('');
+      if (current) focusRow(current.id);
+    }
+  };
   // Retire and Restore are reversible and keep every version, so neither asks first.
   const setRetired = (artifact: Artifact, retire: boolean) => {
     setActionError('');
@@ -222,9 +239,13 @@ export function ArtifactsPanel({ workspaceId, collections, viewState, target, on
     </section>
     <Resizer split={SPLITS.artifactsList} label="artifact list"/>
     {current ? <ArtifactPage key={currentCollectionId + '/' + current.id} collectionId={currentCollectionId} artifactId={current.id} summary={current} collection={other ? collections.find(c => c.id === other.collectionId) : collection}
-      onBack={() => { const id = current.id; if (other) setElsewhere(undefined); else setSelected(''); focusRow(id); }} onShowSession={onShowSession}
-      focus={focus && !other && focus.artifactId === current.id ? focus : undefined}
-      conversationId={conversation?.id} conversationTitle={conversation?.title} onDeleted={() => setSelected('')}/>
+      onNavigateRelated={(next, fromVersion) => {
+        setHistory(items => [...items, { collectionId: currentCollectionId, id: current.id, version: fromVersion }]);
+        navigate(currentCollectionId, next.id, next.version);
+      }}
+      onBack={back} onShowSession={onShowSession}
+      focus={focus?.artifactId === current.id ? focus : undefined}
+      conversationId={other ? undefined : conversation?.id} conversationTitle={other ? undefined : conversation?.title} onDeleted={back}/>
       : (all ? everywhere.items.length > 0 : artifacts.length > 0) && <div className="artifact-page is-placeholder"><p className="module-empty">Choose an artifact to read it.</p></div>}
     {menu && <ContextMenu menu={menu} onClose={() => setMenu(undefined)}/>}
     {deleting && <DeleteArtifactDialog artifact={deleting} onClose={() => setDeleting(undefined)} onDeleted={() => { if (deleting.id === selected) setSelected(''); setDeleting(undefined); }}/>}

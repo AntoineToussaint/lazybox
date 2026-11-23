@@ -440,13 +440,18 @@ func TestManagedBuildActionUsesApprovedHomeAndRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := &Execution{ID: "requester", CollectionID: c.ID, Previous: "earlier"}
-	const key = "lazybox/rebuild-dev-working"
-	start := func() error {
+	start := func(key string) error {
 		_, err := b.agentAction(ctx, e, "start_action", key, false)
 		return err
 	}
-	if err := start(); err == nil {
-		t.Fatal("build started before approval")
+	builds := []struct{ key, channel string }{
+		{"lazybox/rebuild-dev", "Dev"},
+		{"lazybox/stage-working", "Working"},
+	}
+	for _, build := range builds {
+		if err := start(build.key); err == nil {
+			t.Fatalf("%s started before approval", build.key)
+		}
 	}
 	view, err := b.WorkspaceRuntime(ctx, c.ID)
 	if err != nil {
@@ -455,21 +460,31 @@ func TestManagedBuildActionUsesApprovedHomeAndRoot(t *testing.T) {
 	if err := b.ApproveWorkspaceScripts(ctx, c.ID, "lazybox", view.Members[0].Config.Hash(), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := start(); err != nil {
-		t.Fatal(err)
-	}
-	view = waitState(t, b, c.ID, action(key), "failed")
-	commandID := view.Actions[0].State.CommandID
-	log, err := b.toolWithEnv(ctx, e, "lazybox_command", []byte(`{"action":"read","id":"`+commandID+`"}`), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.toolWithEnv(ctx, e, "lazybox_command", []byte(`{"action":"cancel","id":"`+commandID+`"}`), nil); err == nil {
-		t.Fatal("reading the action must not grant cancellation")
-	}
-	for _, channel := range []string{"Dev", "Working"} {
-		if !strings.Contains(log, "["+channel+"] skipped: Repository home must be a clean checkout") {
-			t.Fatalf("missing %s outcome in %q", channel, log)
+	for _, build := range builds {
+		if err := start(build.key); err != nil {
+			t.Fatal(err)
+		}
+		view = waitState(t, b, c.ID, action(build.key), "failed")
+		var commandID string
+		for _, a := range view.Actions {
+			if a.Key == build.key {
+				commandID = a.State.CommandID
+			}
+		}
+		log, err := b.toolWithEnv(ctx, e, "lazybox_command", []byte(`{"action":"read","id":"`+commandID+`"}`), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.toolWithEnv(ctx, e, "lazybox_command", []byte(`{"action":"cancel","id":"`+commandID+`"}`), nil); err == nil {
+			t.Fatal("reading the action must not grant cancellation")
+		}
+		for _, other := range builds {
+			if other.key != build.key && strings.Contains(log, "["+other.channel+"] skipped:") {
+				t.Fatalf("%s also attempted %s", build.key, other.channel)
+			}
+		}
+		if !strings.Contains(log, "["+build.channel+"] skipped: Repository home must be a clean checkout") {
+			t.Fatalf("missing %s outcome in %q", build.channel, log)
 		}
 	}
 }

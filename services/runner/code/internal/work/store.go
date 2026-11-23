@@ -235,6 +235,14 @@ func (s *Store) appendLocked(m *mission, missionID string, drafts []Draft) ([]Ev
 		if err != nil {
 			return nil, err
 		}
+		if e.Type == GrantIssued {
+			g, _ := decode[GrantPayload](e)
+			for otherID, other := range s.missions {
+				if otherID != missionID && other.err == nil && other.state.HeldBy(g.Holder) != nil {
+					return nil, refuse("that conversation already orchestrates “%s”; revoke that first", other.state.Title)
+				}
+			}
+		}
 		events = append(events, e)
 	}
 	// Rules of the pinned process, for the events of this batch.
@@ -281,6 +289,10 @@ type Attachment struct {
 func (s *Store) Attempts() []Attachment {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.attemptsLocked()
+}
+
+func (s *Store) attemptsLocked() []Attachment {
 	var out []Attachment
 	for id, m := range s.missions {
 		if m.err != nil || m.state.Canceled {

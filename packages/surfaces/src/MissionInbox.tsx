@@ -60,6 +60,7 @@ function AwaitingTask({ row: { mission, task }, onOpen, update }: { row: Awaitin
     <span className="inbox-task-meta">{mission.title}{task.report ? ` · “${task.report}”` : ''}</span>
     <p className="inbox-task-reason">{task.reason}{task.flags.filter(f => f !== 'no_evidence').map(f => ` · ${flagLabel[f] || f}`).join('')}</p>
     {headlineEvidence(task.evidence).length > 0 && <span className="inbox-task-meta">{headlineEvidence(task.evidence).map(e => { const chip = evidenceChip(e); return `${chip.mark} ${chip.label}`; }).join('   ')}</span>}
+    {task.brief && <details className="mission-brief"><summary>Review task brief and acceptance criteria</summary><p className="mission-card-brief">{task.brief}</p></details>}
     {error && <p className="missions-error" role="alert">{error}</p>}
     <div className="inbox-task-actions">
       {changes === null ? <>

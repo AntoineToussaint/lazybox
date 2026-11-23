@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func scope() Scope {
@@ -500,6 +501,38 @@ func TestCodexLongContextRequestIsPricedAndSplitWithoutDoubleCounting(t *testing
 	for i, tokens := range []int64{66000, 300000, 800, 300} {
 		if value(report.Contexts[0].Categories[i].Tokens) != tokens {
 			t.Fatalf("unexpected category: %+v", report.Contexts[0].Categories[i])
+		}
+	}
+}
+
+func TestReportedCostKeepsGrantBoundariesAcrossUpgrade(t *testing.T) {
+	s := store(t)
+	ctx := context.Background()
+	at := func(second int64) time.Time { return time.Unix(second, 0).UTC() }
+	r := Record{ID: "acp-cost:session/attempt/root", Scope: scope(), Source: "reported", Status: "complete", ObservedAt: at(10), Nanos: number(100)}
+	// A pre-upgrade database has just the most recently reported total.
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec("INSERT INTO usage VALUES(?,?,?,?)", r.ID, r.Scope.Workspace, r.Scope.Execution, raw); err != nil {
+		t.Fatal(err)
+	}
+	for i, total := range []int64{125, 125, 130} {
+		r.ObservedAt, r.Nanos = at(int64(i+20)), number(total)
+		if err := s.Put(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		start, end time.Time
+		want       int64
+	}{
+		{time.Time{}, at(20), 100}, {at(20), at(22), 25}, {at(22), time.Time{}, 5}, {time.Time{}, time.Time{}, 130},
+	} {
+		rep, err := s.Report(ctx, Query{Conversation: r.Scope.Conversation, Since: tc.start, Until: tc.end})
+		if err != nil || len(rep.Groups) != 1 || value(rep.Groups[0].Nanos) != tc.want {
+			t.Fatalf("window [%v,%v) expected %d, got %+v, err %v", tc.start, tc.end, tc.want, rep.Groups, err)
 		}
 	}
 }

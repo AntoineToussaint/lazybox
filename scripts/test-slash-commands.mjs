@@ -415,7 +415,7 @@ try{
  await go(`${base}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
  await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('tab',{name:'Shortcuts'}).click();
  await page.getByRole('switch',{name:'Vim editing in the message box'}).check();
- await page.getByRole('navigation',{name:'Pages'}).getByRole('button').first().click();
+ await page.getByRole('navigation',{name:'Pages'}).getByRole('button', { name: 'Work', exact: true }).click();
  await message.click();const chip=chat.locator('.vim-mode-chip');await expect(chip).toHaveText('INSERT');
  await page.keyboard.type('/perm');await expect(menu).toBeVisible();
  await page.keyboard.press('Escape');await expect(menu).toBeHidden();await expect(chip).toHaveText('INSERT','the first Esc only closes the menu');

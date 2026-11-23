@@ -1873,6 +1873,8 @@ message RegisterPipeRequest {
   // With collection_id: the conversation (id or title) whose message box receives
   // the run's compact view when it finishes. The person still decides to send it.
   string share_with = 4;
+  // The CLI recognized actual argv as a PR create command. Display titles can be customized.
+  bool creates_pull_request = 5;
 }
 message PublishRequest {
   string command_id = 1;
@@ -3490,6 +3492,8 @@ message MissionEvidence {
   int64 at_unix_millis = 18;
   map<string,string> revisions = 19;
   string contract_digest = 20;
+  // Preserved in history, excluded from the current attempt’s evidence.
+  bool historical = 21;
 }
 message MissionEvent {
   uint64 seq = 1; int64 at_unix_millis = 2; string type = 3; uint32 version = 4;
@@ -3559,15 +3563,14 @@ message ArtifactSource {
   // A file: its workspace path ("member/path").
   string path = 6;
 }
-// A reference from an artifact to work it belongs to. Reserved for missions
-// and tasks (ORCHESTRATION.md, slice 1): until the Runner has them, a link of
-// any kind is refused.
+// A pinned input to a derived plan. Mission/task links remain reserved.
 message ArtifactLink {
-  // "mission" or "task".
+  // "artifact" for a roadmap input.
   string kind = 1;
   string id = 2;
-  // "brief" or "evidence".
+  // "design" or "review" for a roadmap input.
   string role = 3;
+  uint32 version = 4;
 }
 message ArtifactVersion {
   uint32 number = 1;
@@ -3652,6 +3655,8 @@ message PutArtifactRequest {
   repeated string supersedes = 9;
   // Empty defaults to markdown on create and preserves format on update.
   string format = 10;
+  // Optional key for replaying the same creation after a lost response.
+  string creation_key = 11;
 }
 message TrackArtifactFileRequest {
   string collection_id = 1;

@@ -21,6 +21,10 @@ import (
 )
 
 type Spec struct {
+	// The CLI classified the actual command arguments when registering this pipe.
+	CreatesPullRequest bool `json:"createsPullRequest,omitempty"`
+	// The unique active task attempt at registration, if any.
+	DeliveryAttempt string `json:"deliveryAttempt,omitempty"`
 	// Isolated records that the command owner applied verification isolation.
 	Isolated      bool   `json:"isolated,omitempty"`
 	MaxDurationMs int64  `json:"maxDurationMs,omitempty"`

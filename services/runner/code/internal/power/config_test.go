@@ -125,6 +125,13 @@ extra: 1
 	}
 }
 
+func TestLegacyMissionsLayoutCanBeReadForMigration(t *testing.T) {
+	_, issues, err := ParseLayout([]byte("name: Old board\nlayout: {panels: [chat, missions]}\n"))
+	if err != nil || len(issues) != 0 {
+		t.Fatalf("legacy layout: %v %+v", err, issues)
+	}
+}
+
 func TestLayoutParse(t *testing.T) {
 	good := `name: Review wide
 description: Changes and the file

@@ -259,6 +259,9 @@ func TestACPJournalFixtureIsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(filepath.Join(e.Cwd, "README.md"), []byte("# Fixture\nhello readme\n"), 0o644)
+	// Finish ACP session initialization before sending the first message. Otherwise
+	// the initial permission event races the engine's operation acceptance receipt.
+	awaitEvent(t, b, e.ID, "agent_permission")
 	if _, err = e.Engine.Apply(context.Background(), agent.Operation{ID: "tour", Kind: agent.Message, Text: "tour"}); err != nil {
 		t.Fatal(err)
 	}

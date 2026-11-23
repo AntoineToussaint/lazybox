@@ -40,6 +40,7 @@ import { builtinPanels, sentence, type ExtensionPanelChoice, type ModuleProps, t
 import { WorkspaceHeader } from './WorkspaceHeader';
 import { OtherWindows, type OtherWindow } from './OtherWindows';
 import type { ConversationCopy } from './NewSessionForm';
+import { MissionsPanel } from './MissionsPanel';
 import { NewConversationDialog } from './NewConversationDialog';
 import { NewTaskHost } from './NewTaskSheet';
 import { useHandoffMenus, useTerminalAction } from './handoff';
@@ -112,7 +113,7 @@ function runnerViewState(store: ViewStateStore, runner: string): ViewStateStore 
 }
 /** The host as another Runner's page sees it: windows the host opens are the window's own Runner's, so they are not offered. */
 function foreignHost(host: WorkspaceHost): WorkspaceHost {
-  const { openWorkspace: _w, openArtifact: _a, focusWindow: _f, captureWindow: _c, expectRunnerRestart: _e, reconnect: _r, ...rest } = host;
+  const { openWorkspace: _w, openMission: _m, openArtifact: _a, focusWindow: _f, captureWindow: _c, expectRunnerRestart: _e, reconnect: _r, ...rest } = host;
   return rest;
 }
 /** Another computer's Runner: a folder picked on this computer means nothing there. */
@@ -209,7 +210,20 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const [navigatorOpen, setNavigatorOpen] = useState(false);
   const [mobilePanelId, setMobilePanelId] = useState('');
   const display = useDisplayDetail(viewState);
-  const [settings, setSettings] = useState(false);
+  const missionsKey = `${viewState?.key || 'window'}:missions-open`;
+  const [surface, setSurface] = useState<'workspace' | 'settings' | 'missions'>(() => {
+    try { return !fixedWorkspaceId && sessionStorage.getItem(missionsKey) === '1' ? 'missions' : 'workspace'; } catch { return 'workspace'; }
+  });
+  const missionOpen = surface === 'missions';
+  const workspaceOpen = surface === 'workspace';
+  const settings = surface === 'settings';
+  const setSettings = (open: boolean) => setSurface(open ? 'settings' : 'workspace');
+  useEffect(() => {
+    try {
+      if (surface === 'missions') sessionStorage.setItem(missionsKey, '1');
+      else sessionStorage.removeItem(missionsKey);
+    } catch { /* navigation still works without browser storage */ }
+  }, [surface, missionsKey]);
   const [extensionRequest, setExtensionRequest] = useState<{ panelId: string; request: NonNullable<ModuleProps['extensionRequest']> }>();
   const [addSubscription, setAddSubscription] = useState(false);
   useEffect(() => { if (!settings) setAddSubscription(false); }, [settings]);
@@ -351,15 +365,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     const review: WorkspacePage = { id, name: 'Changes', selection: { ...page.selection, collectionId: workspaceID }, layout: { type: 'group', id: `g-${panel.id}`, panels: [panel], active: panel.id }, floating: [], popouts: [], detached: [] };
     if (commit({ ...current.current, selectedPage: id, pages: [...current.current.pages, review] })) setSettings(false);
   };
-  // The missions board is a page of its own: its columns, timeline and messages need the room.
-  const showMissionsPage = () => {
-    const existing = current.current.pages.find(value => shownPanels(value).some(panel => panel.kind === 'missions'));
-    if (existing) { commit({ ...current.current, selectedPage: existing.id }); setSettings(false); return; }
-    if (current.current.pages.length >= PAGE_LIMIT) { setError(pageFull('Missions')); return; }
-    const id = crypto.randomUUID(), panel: Panel = { id: crypto.randomUUID(), kind: 'missions', binding: { mode: 'follow' }, detached: false };
-    const board: WorkspacePage = { id, name: 'Missions', selection: { ...page.selection, collectionId: workspaceID }, layout: { type: 'group', id: `g-${panel.id}`, panels: [panel], active: panel.id }, floating: [], popouts: [], detached: [] };
-    if (commit({ ...current.current, selectedPage: id, pages: [...current.current.pages, board] })) setSettings(false);
-  };
+  const showMissionsPage = () => { if (fixedWorkspaceId) return; setSurface('missions'); setBeside(undefined); };
   useMissionsPageHost(showMissionsPage);
   // A switch from another Runner asked for this conversation (or workspace): shown once the page is up.
   useEffect(() => { if (reveal?.sessionId) showSession(reveal); else if (reveal?.collectionId) select(reveal); }, []);
@@ -391,6 +397,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   }, [layout]);
   /** Show the page's panel of this kind, or dock a new one where this kind was last docked (or beside the group ⌘\ asked from). */
   const showModule = (kind: string) => {
+    if (kind === 'missions') { showMissionsPage(); return ''; }
     const live = livePage(), placement = beside;
     setBeside(undefined);
     if (kind === 'console') putConsoleAway(false);
@@ -439,12 +446,12 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   });
   const focusFiles = () => { if (showCode('files')) workbench?.focusTree(); };
   // Go to file (Mod+P or ] ] f, from the keymap) works wherever focus is, as in any editor.
-  useKeyboardAction('files.find', () => { if (workbench) setQuickOpen(true); }, () => !!workbench);
-  useKeyboardAction('files.explorer', () => { if (workbench) focusFiles(); }, () => !!workbench);
+  useKeyboardAction('files.find', () => { if (workbench) setQuickOpen(true); }, () => !missionOpen && !!workbench);
+  useKeyboardAction('files.explorer', () => { if (workbench) focusFiles(); }, () => !missionOpen && !!workbench);
   // An artifact asked for (tracked from a message or a file) is shown in the Artifacts panel.
   useOpenArtifactRequests(workspaceID, () => void showModule('artifacts'));
   const showWorkspaceArtifacts = () => { if (workspaceID) openArtifact({ collectionId: workspaceID, artifactId: '' }); };
-  useKeyboardAction('artifacts.open', showWorkspaceArtifacts, () => !!workspaceID);
+  useKeyboardAction('artifacts.open', showWorkspaceArtifacts, () => !missionOpen && !!workspaceID);
   /** A web page in the page's Web panel (the one used last), or in a new one beside the work. */
   useLinkPreferences(viewState);
   const openWeb = ({ url, newPanel }: ViewerRequest): boolean => {
@@ -461,7 +468,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     return true;
   };
   useWebViewer(openWeb);
-  useKeyboardAction('web.open', () => { openWeb({ url: '', newPanel: !shownPanels(livePage()).some(panel => panel.kind === 'web' && !panel.detached) }); });
+  useKeyboardAction('web.open', () => { openWeb({ url: '', newPanel: !shownPanels(livePage()).some(panel => panel.kind === 'web' && !panel.detached) }); }, () => !missionOpen);
   // Ask Lazybox (Help menu, ⌘K, ]] h): its panel on this page, with the message box focused.
   useKeyboardAction('help.training', () => showModule('training'));
   useKeyboardAction('help.ask', question => {
@@ -489,6 +496,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   };
   /** Show the panel of this kind for target: its workspace and conversation first, then the panel. */
   const showPanelFor = (kind: string, requested?: RunnerTarget) => {
+    if (kind === 'missions') { showMissionsPage(); return; }
     if (requested && switched(requested)) return;
     const target = requested && localTarget(requested);
     if (target && target.collectionId !== workspaceID && !fixedWorkspaceId) {
@@ -545,7 +553,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     if (output && group && group.active === output.id && !group.minimized && !dock.current?.groupOf(output.id)?.canMinimize) { closePanel(output); return; }
     if (output && group && group.active === output.id && !group.minimized) { setMinimized(group.id, true); return; }
     showModule('console');
-  }, () => !!workspaceID && !settings);
+  }, () => !!workspaceID && workspaceOpen);
   const beginConversation = (collectionId = workspaceID, copy?: ConversationCopy, autoStart = false) => {
     if (collectionId !== workspaceID) select({ collectionId, sessionId: '', commandId: '' });
     setNavigatorOpen(false); setQuickStart(autoStart); setConversationCopy(copy); setNewSession(true);
@@ -566,6 +574,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
    * page's panel of that kind moves there, or a new one is made (always for Web).
    */
   const openHere = (groupID: string, kind: string) => {
+    if (kind === 'missions') { showMissionsPage(); return; }
     const live = livePage(), target = groupById(live, groupID);
     if (!target || sidebarKinds.has(kind)) return;
     const multiple = !!registry[kind]?.multiple;
@@ -773,13 +782,13 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   // ⇧⌘D (or the Window menu) with a popped-out group's window in front: that group goes back.
   useKeyboardAction('window.put-back', () => { const group = dock.current?.focusedPopout(); if (group) dock.current?.dockBack(group); }, () => !!dock.current?.focusedPopout());
   const navigator = useWorkspaceCommands({
-    root: viewState?.root || '', main: !fixedWorkspaceId && ownWindows, collections, selection: page.selection, workspaceId: workspaceID, workbench, registry,
-    windows: otherWindows, canStartConversation: !!info && !pending && canShowNewSession, terminalReady, canOpenWorkspaceWindow: !!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId,
-    showSession, selectWorkspace: select, closeSettings: () => setSettings(false),
+    root: viewState?.root || '', main: !fixedWorkspaceId && ownWindows, canShowMissions: !fixedWorkspaceId, missionOpen, collections, selection: missionOpen ? emptyTarget() : page.selection, workspaceId: missionOpen ? '' : workspaceID, workbench: missionOpen ? undefined : workbench, registry,
+    windows: missionOpen ? [] : otherWindows, canStartConversation: !missionOpen && !!info && !pending && canShowNewSession, terminalReady: !missionOpen && terminalReady, canOpenWorkspaceWindow: !missionOpen && !!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId,
+    showRun: target => showPanelFor('console', target), showSession, selectWorkspace: select, closeSettings: () => setSettings(false),
     showPanel: kind => kind === 'terminal' ? showTerminal() : kind === 'changes' ? showChanges() : kind === 'agents' ? void bringBackAgents() : void showModule(kind),
     openSettings: tab => { setAddSubscription(tab === 'add-subscription'); setSettingsTab(tab === 'add-subscription' ? 'subscriptions' : tab as SettingsTab); setSettings(true); },
     newConversation: () => beginConversation(), openWorkspaceWindow: () => void host?.openWorkspace?.(workspaceID),
-    toggleEditing: () => { if (!settings) setEditing(value => !value); }, toggleConfiguring: () => { if (!settings) { setJSON(JSON.stringify(current.current, null, 2)); setConfiguring(value => !value); } },
+    toggleEditing: () => { if (workspaceOpen) setEditing(value => !value); }, toggleConfiguring: () => { if (workspaceOpen) { setJSON(JSON.stringify(current.current, null, 2)); setConfiguring(value => !value); } },
   });
   const kindIcons = useMemo(() => Object.fromEntries(Object.entries(registry).map(([kind, module]) => [kind, module.icon])), [registry]);
   /** A preview tab stays on its conversation (a regular tab); a regular tab becomes the preview tab, on the selected conversation. */
@@ -861,7 +870,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   };
   const commandsRef = useRef<() => LayoutCommand[]>(() => []);
   commandsRef.current = () => {
-    const docked = !narrow && !settings && !locked, panel = activePanel(), group = dock.current?.activeGroup();
+    const docked = !narrow && workspaceOpen && !locked, panel = activePanel(), group = dock.current?.activeGroup();
     const command = (id: string, label: string, group: LayoutCommand['group'], run: () => void, enabled = () => docked, keys?: string): LayoutCommand => ({ id, label, group, run, enabled, keys });
     return [
       command('layout.split', 'Split right', 'Layout', () => splitActive('right'), () => docked && !!panel, keymap['layout.split']),
@@ -880,15 +889,15 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         command(`layout.resize-${direction}`, `Resize: move the active group’s edge ${direction}`, 'Layout', () => dock.current?.resize(direction, false), () => docked && !!panel, keymap[`layout.resize-${direction}`]),
       ]),
       command('layout.add', 'New tab in the active group…', 'Layout', () => group && openAddMenu(group.id), () => docked && canAdd(group), keymap['layout.add']),
-      command('layout.reset', 'Reset layout to default', 'Layouts', () => applyLayout(builtinPresets.find(value => value.id === DEFAULT_PRESET)!), () => !locked),
-      command('layout.reset-all', 'Reset the layout and shortcuts', 'Layouts', () => resetEverything(), () => true, keymap['layout.reset-all']),
-      ...[...builtinPresets, ...savedLayouts].map(preset => command(`layout.preset:${preset.id}`, `Layout: ${preset.name}`, 'Layouts', () => applyLayout(preset), () => !locked)),
-      ...Object.entries(registry).map(([kind, module]) => command(`panel.show:${kind}`, `Show ${module.title}`, 'Panels', () => kind === 'terminal' ? showTerminal() : kind === 'chat' ? showSession(livePage().selection) : kind === 'artifacts' ? showWorkspaceArtifacts() : kind === 'agents' ? void bringBackAgents() : void showModule(kind), () => !locked && !settings && (kind !== 'terminal' || terminalReady))),
+      command('layout.reset', 'Reset layout to default', 'Layouts', () => applyLayout(builtinPresets.find(value => value.id === DEFAULT_PRESET)!), () => workspaceOpen && !locked),
+      command('layout.reset-all', 'Reset the layout and shortcuts', 'Layouts', () => resetEverything(), () => workspaceOpen, keymap['layout.reset-all']),
+      ...[...builtinPresets, ...savedLayouts].map(preset => command(`layout.preset:${preset.id}`, `Layout: ${preset.name}`, 'Layouts', () => applyLayout(preset), () => workspaceOpen && !locked)),
+      ...Object.entries(registry).map(([kind, module]) => command(`panel.show:${kind}`, `Show ${module.title}`, 'Panels', () => kind === 'terminal' ? showTerminal() : kind === 'chat' ? showSession(livePage().selection) : kind === 'artifacts' ? showWorkspaceArtifacts() : kind === 'agents' ? void bringBackAgents() : void showModule(kind), () => !locked && workspaceOpen && (kind !== 'terminal' || terminalReady))),
     ];
   };
   useEffect(() => provideLayoutCommands(() => commandsRef.current()), []);
   // The registry's layout actions (keys, palette, menus) run the same functions.
-  const docked = () => !narrow && !settings && !locked && !!dock.current;
+  const docked = () => !narrow && workspaceOpen && !locked && !!dock.current;
   const hasActive = () => docked() && !!activePanel();
   useKeyboardAction('layout.split', () => splitActive('right'), hasActive);
   useKeyboardAction('layout.split-down', () => splitActive('below'), hasActive);
@@ -901,12 +910,12 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   useKeyboardAction('layout.float', () => { const panel = activePanel(); if (panel) dock.current?.float(panel.id); }, () => hasActive() && dock.current?.activeGroup()?.location === 'grid');
   useKeyboardAction('layout.window', () => { const panel = activePanel(); if (panel && dock.current) groupCommands.openWindow(panel, dock.current); }, () => hasActive() && groupCommands.canOpenWindow(activePanel()!));
   useKeyboardAction('layout.minimize', () => { const group = dock.current?.activeGroup(); if (group) setMinimized(group.id, !group.minimized); }, () => docked() && !!dock.current?.activeGroup()?.canMinimize);
-  useKeyboardAction('layout.panels', () => requestAnimationFrame(() => { if (panelsMenu.current) panelsMenu.current.open = true; }), () => !narrow && !settings);
-  useKeyboardAction('layout.presets', () => requestAnimationFrame(() => { if (layoutMenu.current) layoutMenu.current.open = true; }), () => !narrow && !settings);
-  useKeyboardAction('layout.reset', () => applyLayout(builtinPresets.find(value => value.id === DEFAULT_PRESET)!), () => !locked);
-  useKeyboardAction('layout.cycle', cycleLayout, () => !narrow && !settings && !locked);
-  useKeyboardAction('layout.copy', () => copyLayout(), () => !narrow && !settings && !!page.layout);
-  useKeyboardAction('layout.import', (argument?: unknown) => setImporting(typeof argument === 'string' ? argument : ''), () => !narrow && !settings && !locked);
+  useKeyboardAction('layout.panels', () => requestAnimationFrame(() => { if (panelsMenu.current) panelsMenu.current.open = true; }), () => !narrow && workspaceOpen);
+  useKeyboardAction('layout.presets', () => requestAnimationFrame(() => { if (layoutMenu.current) layoutMenu.current.open = true; }), () => !narrow && workspaceOpen);
+  useKeyboardAction('layout.reset', () => applyLayout(builtinPresets.find(value => value.id === DEFAULT_PRESET)!), () => workspaceOpen && !locked);
+  useKeyboardAction('layout.cycle', cycleLayout, () => !narrow && workspaceOpen && !locked);
+  useKeyboardAction('layout.copy', () => copyLayout(), () => !narrow && workspaceOpen && !!page.layout);
+  useKeyboardAction('layout.import', (argument?: unknown) => setImporting(typeof argument === 'string' ? argument : ''), () => !narrow && workspaceOpen && !locked);
 
   // Panel groups from the keyboard (dock-keyboard.ts): focus, move or swap, resize, tabs, +.
   const moveActive = (direction: LayoutDirection) => {
@@ -933,7 +942,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     ...directional('resize', (direction, argument) => dock.current?.resize(direction, !!(argument as { repeat?: boolean } | undefined)?.repeat)),
     ...tabSlots,
     'layout.add': { run: () => { const group = dock.current?.activeGroup(); if (group) openAddMenu(group.id); }, enabled: () => hasActive() && canAdd(dock.current?.activeGroup()) },
-    'layout.reset-all': () => resetEverything(),
+    'layout.reset-all': { run: () => resetEverything(), enabled: () => workspaceOpen },
   } as Parameters<typeof useActions>[0]);
   /** Whether a group has a `+`: not the sidebar (its panels are the workspace list), and not a group in a window of its own. */
   const canAdd = (group?: { panels: Panel[]; location: string }) => !!group && group.location !== 'popout' && !group.panels.every(panel => sidebarKinds.has(panel.kind));
@@ -992,7 +1001,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     dock: panel => void bringBack(panel),
   };
   const moduleProps: SharedModuleProps = {
-    workspaceId: workspaceID, chooseRepositoryFolder: host?.chooseRepositoryFolder, collections, error: catalogError, loaded: catalogLoaded, refresh: refreshCatalog,
+    workspaceId: workspaceID, openMission: host?.openMission, chooseRepositoryFolder: host?.chooseRepositoryFolder, collections, error: catalogError, loaded: catalogLoaded, refresh: refreshCatalog,
     onWorkspaceCreated: (id: string) => beginConversation(id, undefined, true),
     onNewConversation: beginConversation, onShowSession: showSession,
     onOpenHandoff: target => {
@@ -1016,13 +1025,13 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     shown={narrow ? panel.id === mobilePanel?.id : frontPanels.has(panel.id)}/>;
   const kindsShown = new Map<string, 'shown' | 'window'>([...detachedPanels.map(panel => [panel.kind, 'window'] as const), ...page.popouts.flatMap(group => group.panels.map(panel => [panel.kind, 'window'] as const)), ...shown.filter(panel => !page.popouts.some(group => group.panels.includes(panel)) && !panel.detached).map(panel => [panel.kind, 'shown'] as const)]);
 
-  return <WorkbenchContext.Provider value={workbench}><main className="workspace-shell" data-workspace-details={display.workspaceDetails}>
+  return <WorkbenchContext.Provider value={missionOpen ? undefined : workbench}><main className="workspace-shell" data-workspace-details={display.workspaceDetails}>
     <LeaderMenu hint={keyboardHint}/>
     <CommandCenter viewState={viewState} navigator={navigator}/>
-    <WorkspaceHeader app={fixedWorkspaceId ? undefined : host?.app} pages={layout.pages} selectedPage={page.id} settings={settings} pending={!!pending} fixedWorkspace={!!fixedWorkspaceId} navigatorOpen={navigatorOpen}
-      collections={collections} selection={page.selection} viewState={viewState} workspaceID={workspaceID} info={info} terminalReady={terminalReady} canShowNewSession={canShowNewSession}
+    <WorkspaceHeader app={fixedWorkspaceId ? undefined : host?.app} pages={layout.pages} selectedPage={page.id} missions={missionOpen} onOpenMissions={showMissionsPage} settings={settings} pending={!!pending} fixedWorkspace={!!fixedWorkspaceId} navigatorOpen={navigatorOpen}
+      collections={collections} selection={missionOpen ? emptyTarget() : page.selection} viewState={viewState} workspaceID={missionOpen ? '' : workspaceID} info={info} terminalReady={terminalReady} canShowNewSession={canShowNewSession}
       editing={editing} canOpenWorkspaceWindow={!!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId}
-      layoutMenu={!settings && !narrow && <>
+      layoutMenu={workspaceOpen && !narrow && <>
         <PanelsMenu menu={panelsMenu} registry={registry} shown={kindsShown} beside={beside?.title} disabled={kind => locked || (kind === 'terminal' && !terminalReady)}
           onShow={kind => { if (kind === 'terminal') showTerminal(); else if (kind === 'chat' && !beside) showSession(page.selection); else if (kind === 'artifacts') showWorkspaceArtifacts(); else { const id = kind === 'agents' ? bringBackAgents() : showModule(kind); if (id) focusAfter.current = { panel: id }; } }}
           onClose={() => setBeside(undefined)}/>
@@ -1032,7 +1041,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
           onReset={() => applyLayout(builtinPresets.find(value => value.id === DEFAULT_PRESET)!)}/>
       </>}
       onOpenNavigator={() => setNavigatorOpen(true)}
-      onSelectPage={id => { setSettings(false); commit({ ...layout, selectedPage: id }); }}
+      onSelectPage={id => { setSettings(false); if (id !== layout.selectedPage) commit({ ...layout, selectedPage: id }); }}
       onOpenSettings={() => { if (settingsTab === 'extensions') setSettingsTab('subscriptions'); setSettings(true); }}
       extensionsOpen={settings && settingsTab === 'extensions'} onManageExtensions={manageExtensions}
       onOpenAttention={target => { setSettings(false); showSession(target); }}
@@ -1045,7 +1054,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       onToggleEditing={() => setEditing(value => !value)}
       onToggleConfiguring={() => { setJSON(JSON.stringify(layout, null, 2)); setConfiguring(value => !value); }}
       onShowModule={kind => kind === 'terminal' ? showTerminal() : kind === 'web' ? void openWeb({ url: '', newPanel: true }) : void showModule(kind)}/>
-    {!settings && <OtherWindows windows={otherWindows} putBackKeys={putBackKeys} onPutAllBack={putAllBack}/>}
+    {surface === 'workspace' && <OtherWindows windows={otherWindows} putBackKeys={putBackKeys} onPutAllBack={putAllBack}/>}
     {repositoryWorkspace && <WorkspaceRepositories workspace={collections.find(value => value.id === repositoryWorkspace.id) || repositoryWorkspace} onClose={() => setRepositoryWorkspace(undefined)} onSaved={refreshCatalog} chooseRepositoryFolder={host?.chooseRepositoryFolder}/>}
     {!fixedWorkspaceId && <NewTaskHost viewState={viewState} onStarted={target => { refreshCatalog(); refreshRunner(); showSession(target, target.sessionId ? 'tab' : 'preview'); }}/>}
     <NewConversationDialog open={newSession} quickStart={quickStart} copy={conversationCopy} workspaceID={workspaceID} workspaceName={collections.find(value => value.id === workspaceID)?.name} viewState={sessionStore}
@@ -1063,7 +1072,11 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         <button type="button" className="icon-button" aria-label="Dismiss" title="Dismiss" onClick={() => setError('')}><Icon name="close" size={14}/></button>
       </div>)}
     {!fixedWorkspaceId && <AccountNotices onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }}/>}
-    {settings
+    {surface === 'missions'
+      ? <MissionsPanel openMission={host?.openMission} collections={collections} viewState={viewState} onReturn={() => setSettings(false)}
+          onShowSession={target => { setSettings(false); showSession(target); }}
+          onShowPanel={(kind, target) => { setSettings(false); showPanelFor(kind, target); }}/>
+      : settings
       ? <SettingsPage initialAddSubscription={addSubscription} onOpenExtensionPanel={openExtensionPanel} app={host?.app} zoom={host?.zoom} tab={settingsTab} onTab={setSettingsTab} onShowProcesses={() => showModule('processes')} onRunInShell={runInShell} chooseRepositoryFolder={host?.chooseRepositoryFolder} viewState={viewState} openSignIn={host?.openSignIn} copySignInCode={host?.copySignInCode}/>
       : <>
         {locked && <div className="layout-locked" role="status">
@@ -1117,12 +1130,12 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     <PeekHost navigation={{ showSession, showModule: kind => void showModule(kind), showTerminal, openArtifact: (collectionId, artifactId) => { if (!openArtifact({ collectionId, artifactId })) showModule('artifacts'); },
       openFile: (collectionId, path, line) => { if (!workbench || collectionId !== workspaceID) return false; workbench.open(path, { line, focus: true }); return true; } }}/>
     {!fixedWorkspaceId && <ProviderUpdateNotices store={viewState} onOpen={() => { setSettingsTab('agents'); setSettings(true); }}/> }
-    <Onboarding workspaceId={workspaceID} viewState={viewState} collections={collections} collectionsLoaded={catalogLoaded} settingsOpen={settings} onWorkspace={id => select({ collectionId: id, sessionId: '', commandId: '' })} automatic={!fixedWorkspaceId} host={host} sessionId={page.selection.sessionId} onOpenSettings={tab => { if (fixedWorkspaceId && tab !== 'about') return; setSettingsTab(tab); setSettings(true); }}/>
+    {surface !== 'missions' && <Onboarding workspaceId={workspaceID} viewState={viewState} collections={collections} collectionsLoaded={catalogLoaded} settingsOpen={settings} onWorkspace={id => select({ collectionId: id, sessionId: '', commandId: '' })} automatic={!fixedWorkspaceId} host={host} sessionId={page.selection.sessionId} onOpenSettings={tab => { if (fixedWorkspaceId && tab !== 'about') return; setSettingsTab(tab); setSettings(true); }}/>}
     {quickOpen && workbench && <QuickOpen key={workbench.workspaceId} workbench={workbench} onClose={() => setQuickOpen(false)}/>}
     {quickLook && workspaceID && <FilePreview key={`${workspaceID}:${quickLook.path}`} workspaceId={workspaceID} reference={quickLook} viewState={viewState} onClose={() => setQuickLook(undefined)}/>}
-    {workspaceID && <ReviewActions workspaceId={workspaceID} sessionId={page.selection.collectionId === workspaceID ? page.selection.sessionId : ''}/>}
+    {!missionOpen && workspaceID && <ReviewActions workspaceId={workspaceID} sessionId={page.selection.collectionId === workspaceID ? page.selection.sessionId : ''}/>}
     {importing !== null && <LayoutImportDialog initial={importing} onClose={() => setImporting(null)} onImported={layout => { applyLayout(layout); showToast({ id: 'layout-file', tone: 'info', title: `Imported “${layout.name}”`, body: `${layout.file}.yaml in your layouts folder`, timeout: 3600 }); }}/>}
-    <PowerLayer workspaceId={workspaceID} selection={{ collectionId: page.selection.collectionId || workspaceID, sessionId: page.selection.sessionId }} primary={!fixedWorkspaceId && ownWindows} host={host} viewState={viewState}
+    <PowerLayer workspaceId={missionOpen ? '' : workspaceID} selection={missionOpen ? emptyTarget() : { collectionId: page.selection.collectionId || workspaceID, sessionId: page.selection.sessionId }} primary={!fixedWorkspaceId && ownWindows} host={host} viewState={viewState}
       onSelect={target => select({ ...target, commandId: '' })} onShowSession={target => showSession({ ...target, commandId: '' })}
       onShowPanel={(kind, target) => kind === 'terminal' ? showTerminal() : kind === 'changes' ? showChanges() : showPanelFor(kind, { ...target, commandId: '' })}
       onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }} onQuickLook={(path, line) => setQuickLook({ path, line })}

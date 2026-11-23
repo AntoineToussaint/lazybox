@@ -24,9 +24,6 @@
    "status": "working",
    "trust": "observed",
    "evidence_trust": "observed",
-   "flags": [
-    "ci_failing"
-   ],
    "live": "running",
    "reason": "The agent is working: Bash"
   }

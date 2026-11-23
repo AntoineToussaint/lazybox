@@ -49,7 +49,8 @@ the next word gets a capital.
 
 Send explicitly with the keyboard, the Send button, or an enabled spoken send command. With Vim editing on, it works in
 any mode: in normal mode the words go after the cursor, as with `a`, and `Esc`
-cancels the dictation without changing your mode.
+cancels the dictation without changing your mode. After stopping or canceling,
+you can immediately select and edit the text in the composer.
 
 ### When the key does nothing
 

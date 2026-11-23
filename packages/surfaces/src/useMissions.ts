@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { ConnectError, type RunnerClient } from '@lazybox/client-core';
 import type { Mission } from '@lazybox/protocol';
 import { useRunner } from './RunnerContext';
@@ -17,6 +17,7 @@ const POLL_MS = 4000;
  */
 class MissionStore {
   private snapshot: Snapshot = empty;
+  readonly details = new Map<string, Mission>();
   private listeners = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
   private reading = false;
@@ -38,20 +39,31 @@ class MissionStore {
   private refreshNow = () => { void this.refresh(); };
   async refresh() {
     if (this.reading) return; this.reading = true;
-    try { const list = await this.api.listMissions({}, { timeoutMs: 8000 }); this.set({ missions: list.missions, loaded: true, error: '' }); }
+    const before = new Set(this.snapshot.missions);
+    try {
+      const list = await this.api.listMissions({}, { timeoutMs: 8000 });
+      // A mutation can finish while the list request is in flight. Keep its
+      // result until a list started after the mutation can supersede it.
+      const missions = new Map(list.missions.map(mission => [mission.id, mission]));
+      for (const mission of this.snapshot.missions) {
+        const listed = missions.get(mission.id);
+        if (!before.has(mission) && (!listed || listed.seq <= mission.seq)) missions.set(mission.id, mission);
+      }
+      this.set({ missions: [...missions.values()], loaded: true, error: '' });
+    }
     catch (error) { this.set({ loaded: true, error: ConnectError.from(error).rawMessage || String(error) }); }
     finally { this.reading = false; }
   }
   /** A mission the Runner just returned (a change, a detailed read) replaces the listed one. */
   put(mission: Mission) {
-    if (mission.events.length) detailCache.set(mission.id, mission);
-    const rest = this.snapshot.missions.filter(m => m.id !== mission.id);
+    const previous = this.snapshot.missions.find(m => m.id === mission.id);
+    if (previous && previous.seq > mission.seq) return;
+    if (mission.events.length) this.details.set(mission.id, mission);
     const listed: Mission = { ...mission, events: [] };
-    this.set({ missions: this.snapshot.missions.some(m => m.id === mission.id) ? this.snapshot.missions.map(m => m.id === mission.id ? listed : m) : [listed, ...rest] });
+    this.set({ missions: previous ? this.snapshot.missions.map(m => m.id === mission.id ? listed : m) : [listed, ...this.snapshot.missions] });
   }
 }
 
-const detailCache = new Map<string, Mission>();
 const stores = new WeakMap<RunnerClient, MissionStore>();
 function storeFor(api: RunnerClient) {
   let store = stores.get(api);
@@ -67,15 +79,28 @@ export function useMissions() {
   const { api } = useRunner();
   const store = storeFor(api);
   const snapshot = useSyncExternalStore(store.subscribe, store.get);
+  const pendingCreate = useRef<{ api: RunnerClient; title: string; brief: string; key: string } | undefined>(undefined);
   const create = useCallback(async (title: string, brief: string) => {
-    const mission = await api.createMission({ requestKey: crypto.randomUUID(), title, brief }, { timeoutMs: 10000 });
+    let attempt = pendingCreate.current;
+    if (!attempt || attempt.api !== api || attempt.title !== title || attempt.brief !== brief) {
+      attempt = { api, title, brief, key: crypto.randomUUID() };
+      pendingCreate.current = attempt;
+    }
+    const mission = await api.createMission({ requestKey: attempt.key, title, brief }, { timeoutMs: 10000 });
+    if (pendingCreate.current === attempt) pendingCreate.current = undefined;
     store.put(mission); return mission;
   }, [api, store]);
-  /** One typed change; a retry of the same change reuses its operation id. */
-  const update = useCallback(async (missionId: string, change: ChangeInput, operationId = crypto.randomUUID()) => {
-    const mission = await api.updateMission({ missionId, operationId, change }, { timeoutMs: 30000 });
+  // An acknowledgement can be lost after the Runner writes the event. Keep
+  // that operation id until success; a later intentional repeat gets a new id.
+  const pendingChanges = useMemo(() => new Map<string, string>(), [api]);
+  const update = useCallback(async (missionId: string, change: ChangeInput, operationId?: string) => {
+    const signature = JSON.stringify([missionId, change], (_, value) => typeof value === 'bigint' ? value.toString() : value);
+    const key = operationId || pendingChanges.get(signature) || crypto.randomUUID();
+    pendingChanges.set(signature, key);
+    const mission = await api.updateMission({ missionId, operationId: key, change }, { timeoutMs: 30000 });
+    if (pendingChanges.get(signature) === key) pendingChanges.delete(signature);
     store.put(mission); return mission;
-  }, [api, store]);
+  }, [api, store, pendingChanges]);
   return { ...snapshot, refresh: () => store.refresh(), create, update, put: (mission: Mission) => store.put(mission) };
 }
 
@@ -96,7 +121,7 @@ export function useMissionDetail(missionId: string, put: (mission: Mission) => v
     return () => { alive = false; clearInterval(timer); };
   }, [api, missionId]);
   const listed = snapshot.missions.find(m => m.id === missionId);
-  const detail = detailCache.get(missionId);
+  const detail = store.details.get(missionId);
   // The list is fresher for the board; the detail adds the history.
-  return listed ? { ...listed, events: detail?.events || [] } as Mission : detail;
+  return listed ? { ...listed, events: detail?.events || [], messages: detail?.messages || [] } as Mission : detail;
 }

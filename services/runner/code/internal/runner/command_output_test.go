@@ -116,7 +116,7 @@ func TestRunReportIsKeptForTheConsoleAndTelemetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pipe, err := b.RegisterPipe(e, "go test ./...")
+	pipe, err := b.RegisterPipe(e, "go test ./...", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestRunReportIsKeptForTheConsoleAndTelemetry(t *testing.T) {
 	if err != nil || len(runs) != 1 || runs[0].ID != pipe.Status().ID || runs[0].AgentBytes != 2048 || runs[0].OutputBytes != 1<<20 || runs[0].Filter != "go-test" || runs[0].Scope.Conversation != e.Saved.ConversationID {
 		t.Fatalf("run not measured: %v %+v", err, runs)
 	}
-	plain, err := b.RegisterPipe(e, "tail -f log")
+	plain, err := b.RegisterPipe(e, "tail -f log", false)
 	if err != nil {
 		t.Fatal(err)
 	}

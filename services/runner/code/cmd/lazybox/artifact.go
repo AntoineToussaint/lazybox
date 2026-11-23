@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -30,8 +31,8 @@ type artifactAPI interface {
 }
 
 const artifactUsage = `Usage:
-  lazybox artifact template KIND
-  lazybox artifact put <file|-> --title T [--id ID] [--kind plan|report|spec|notes|todo-list|other] [--format markdown|html|json] [--supersedes ID[,ID…]]
+  lazybox artifact template KIND|roadmap|pr-walkthrough|incident-timeline|release-checklist
+  lazybox artifact put <file|-> --title T [--id ID] [--kind plan|report|spec|notes|todo-list|other] [--format markdown|html|json] [--design ID@VERSION] [--review ID@VERSION] [--supersedes ID[,ID…]]
   lazybox artifact retire ID [--superseded-by ID] [--reason "…"]
   lazybox artifact get ID [--version N]
   lazybox artifact list [--all]
@@ -106,6 +107,8 @@ func artifactCommand(ctx context.Context, client artifactAPI, workspace string, 
 	format := flags.String("format", "", "put: markdown, html or json (set at creation)")
 	kind := flags.String("kind", "", "put: plan, report, spec, notes, todo-list or other")
 	version := flags.Uint("version", 0, "get: this version instead of the latest")
+	design := flags.String("design", "", "new roadmap: source design ID@VERSION")
+	review := flags.String("review", "", "new roadmap: source review ID@VERSION")
 	supersedes := flags.String("supersedes", "", "put: retire these artifacts (comma-separated IDs) as superseded by the one published")
 	supersededBy := flags.String("superseded-by", "", "retire: the artifact that replaces it")
 	reason := flags.String("reason", "", "retire: one line on why")
@@ -165,6 +168,17 @@ func artifactCommand(ctx context.Context, client artifactAPI, workspace string, 
 		request := &pb.PutArtifactRequest{CollectionId: *collection, ArtifactId: *id, Title: *title, Kind: *kind, Format: *format, Content: string(data)}
 		if request.ArtifactId == "" && request.Kind != "" && request.Format == "" {
 			request.Format = "json"
+		}
+		for _, input := range []struct{ role, ref string }{{"design", *design}, {"review", *review}} {
+			if input.ref == "" {
+				continue
+			}
+			source, rev, ok := strings.Cut(input.ref, "@")
+			n, err := strconv.ParseUint(rev, 10, 32)
+			if !ok || source == "" || err != nil || n == 0 {
+				return fmt.Errorf("--%s needs ID@VERSION", input.role)
+			}
+			request.Links = append(request.Links, &pb.ArtifactLink{Kind: "artifact", Role: input.role, Id: source, Version: uint32(n)})
 		}
 		for _, old := range replaced {
 			request.Supersedes = append(request.Supersedes, old.Id)

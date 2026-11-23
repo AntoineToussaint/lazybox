@@ -37,6 +37,13 @@ export function useComposerDictation({ textarea, destination, value, enabled, st
   const [active, setActive] = useState(false);
   const pendingSend = useRef<string | null>(null);
   const target = useRef<DictationTarget | null>(null);
+  const pendingCaret = useRef<{ text: string; at: number } | null>(null);
+  useLayoutEffect(() => {
+    const caret = pendingCaret.current, box = textarea.current;
+    if (!caret || !box || box.value !== caret.text) return;
+    pendingCaret.current = null;
+    if (document.activeElement === box) box.setSelectionRange(caret.at, caret.at);
+  }, [value, active, textarea]);
   /** Send once the box holds `text` (the chat sends what it shows); now, if it already does. */
   const sendWhenShown = (text: string) => {
     pendingSend.current = text;
@@ -66,34 +73,41 @@ export function useComposerDictation({ textarea, destination, value, enabled, st
         const before = original.slice(0, from), after = original.slice(to);
         box.focus({ preventScroll: true });
         setActive(true);
-        const place = (at: number) => requestAnimationFrame(() => { const node = textarea.current; if (node && document.activeElement === node) { node.setSelectionRange(at, at); } });
+        // Position the caret with the matching text commit. A later animation
+        // frame can overwrite a selection the person has already made.
+        const place = (text: string, at: number) => {
+          pendingCaret.current = null;
+          if (box.value !== text) pendingCaret.current = { text, at };
+          else if (document.activeElement === box) box.setSelectionRange(at, at);
+        };
         // Words were shown in the box: its text, and so its caret, changed.
         let previewed = false;
         return {
           update(view) {
             if (view.text) previewed = true;
             const merged = mergeDictation(before, after, view.text);
+            place(merged.text, merged.end);
             latest.current.onPreview(merged.text);
             setLive(view.liveStart < view.text.length ? { start: merged.start + view.liveStart, end: merged.end } : null);
-            place(merged.end);
           },
           end(reason, view) {
             setActive(false); setLive(null);
+            pendingCaret.current = null;
             if (reason === 'takeover') return;
             // Nothing said: the draft stays exactly as it was (a selection is not replaced by silence).
             if (reason === 'cancel' || reason === 'error' || !view.text) {
-              latest.current.onCommit(original);
               // Put the caret back only where words had moved it. Untouched, it stays where the
               // person has it: a later placement would undo the key that ended this dictation
               // (⌥→ after Right ⌥, a slow ⌥ chord) and send the next dictation to the old spot.
-              if (previewed) place(to);
+              if (previewed) place(original, to);
+              latest.current.onCommit(original);
               // ⌘↵ with nothing new said still sends what the box holds.
               if (reason === 'send') sendWhenShown(original);
               return;
             }
             const merged = mergeDictation(before, after, view.text);
+            place(merged.text, merged.end);
             latest.current.onCommit(merged.text);
-            place(merged.end);
             if (reason === 'send') sendWhenShown(merged.text);
           },
         };

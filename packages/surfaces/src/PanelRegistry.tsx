@@ -16,7 +16,6 @@ import { ActionsPanel } from './ActionsPanel';
 import { PreviewPanel } from './PreviewPanel';
 import { WebPanel } from './WebPanel';
 import { BrowserPanel } from './BrowserPanel';
-import { MissionsPanel } from './MissionsPanel';
 import { PullRequestsPanel } from './PullRequestsPanel';
 import { useRunner } from './RunnerContext';
 import { TelemetryPanel } from './TelemetryPanel';
@@ -50,6 +49,7 @@ export type ModuleProps = {
   onOpenChat?(): void;
   onWorkspaceCreated?(workspaceId: string): void;
   onNewConversation?(workspaceId: string): void;
+  openMission?(id: string): Promise<void>;
   onShowSession?(target: ViewTarget): void;
   onOpenHandoff?: OpenHandoffConversation;
   onShowPanel?(kind: string, target?: ViewTarget): void;
@@ -123,7 +123,6 @@ export const builtinPanels: Readonly<Record<string, PanelModule>> = {
   changes: { title: 'Changes', icon: 'branch', Component: ({ workspaceId, viewState, target, onShowSession }) => <ChangesPanel key={workspaceId} workspaceId={workspaceId} sessionId={target.collectionId === workspaceId ? target.sessionId : ''} onShowSession={onShowSession} viewState={viewState}/> },
   usage: { title: 'Usage & cost', icon: 'sliders', Component: ({ workspaceId }) => <TelemetryPanel workspaceId={workspaceId}/> },
   sessions: { title: 'Sessions', icon: 'history', Component: ({ workspaceId, target, onTarget }) => <ConversationList collectionId={workspaceId} target={target} onTarget={onTarget}/> },
-  missions: { title: 'Missions', icon: 'target', Component: MissionsPanel },
   pulls: { title: 'Pull requests', icon: 'pullRequest', Component: ({ collections, onShowSession }) => <PullRequestsPanel collections={collections} onShowSession={onShowSession}/> },
   processes: { title: 'Processes', icon: 'processes', Component: ({ workspaceId, onShowSession, onShowPanel }) => <ProcessesPanel workspaceId={workspaceId} onShowSession={onShowSession} onShowPanel={onShowPanel}/> },
   actions: { title: 'Actions', icon: 'play', Component: ({ workspaceId, viewState, onShowPanel }) => <ActionsPanel key={workspaceId} workspaceId={workspaceId} viewState={viewState} onShowPanel={onShowPanel}/> },

@@ -4,7 +4,7 @@ import { mergeConversations } from '../packages/surfaces/src/conversation-model.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { activatePanel, adoptGeometry, openBesideChat, pageShowing, PANEL_LIMIT, groupOf, allPanels, clonePage, dedupeChats, defaultDock, defaultLayout, detachChat, detachedChats, detachedFor, largestGroup, returnDetached, dockPanel, dockedSide, emptyPage, emptyTarget, groups, insertDocked, mapGroups, mapPagePanels, mapPanels, normalize, panels, parseLayout, redockPopouts, removeFromPage, removePanel, repairLayout, resolveTarget, fitSidebarAgents, fitAgentsEverywhere, sidebarAgentsGroup, retireMonitor, returnChat, routeChat, shownPanels, showCodePanel, showPanel, sidebarAt, sidebarGroupIDs, minimumWidth, fitWidth, splitBeside, type Group, type LayoutNode, type Panel, type WorkspacePage } from '../packages/surfaces/src/workspace-model.ts';
-import { applyTemplate, builtinPresets, parseSavedLayouts } from '../packages/surfaces/src/layout-presets.ts';
+import { applyTemplate, builtinPresets, parseSavedLayouts, restoreTemplate } from '../packages/surfaces/src/layout-presets.ts';
 
 const sidebar = ['column', ['collections', 'agents']];
 const kinds = (node: LayoutNode | null): unknown => !node ? null : node.type === 'group' ? node.panels.map(panel => panel.kind).join('+') : [node.direction, node.children.map(kinds)];
@@ -421,3 +421,30 @@ test('continuations replace predecessor rows without changing conversation order
  assert.deepEqual(mergeConversations([next,other],[first,next,other]).map(s=>s.id),['other','next']);
 });
 
+
+test('restoring a workspace retires Missions in tabs, floating groups, popouts and dedicated pages', () => {
+  const group = (id: string, kinds: string[]): Group => ({
+    id, type: 'group', panels: kinds.map(kind => follow(id + kind, kind)), active: id + kinds[0],
+  });
+  const mixed = emptyPage('mixed', 'Custom', target('active'), group('docked', ['missions', 'files']));
+  mixed.floating.push({ group: group('floating', ['missions']), box: { width: 300, height: 200 } });
+  mixed.popouts.push(group('popped', ['missions', 'changes']));
+  const dedicated = emptyPage('older', 'Missions', target('active'), group('board', ['missions']));
+  const saved = { version: 2 as const, selectedPage: dedicated.id, pages: [dedicated, mixed] };
+  const restored = repairLayout(saved);
+  assert.equal(restored.selectedPage, mixed.id);
+  assert.deepEqual(restored.pages.map(page => page.name), ['Custom']);
+  assert.deepEqual(allPanels(restored.pages[0]).map(panel => panel.kind), ['files', 'changes']);
+  const fallback = repairLayout({ ...saved, pages: [dedicated] });
+  assert.deepEqual(fallback, repairLayout(defaultLayout(target('active'))));
+});
+
+test('old layout presets retain the other panels and their relative shares', () => {
+  const node = restoreTemplate({ type: 'split', direction: 'row', sizes: [0.25, 0.5, 0.25], children: [
+    { type: 'group', kinds: ['missions', 'files'] }, { type: 'group', kinds: ['missions'] }, { type: 'group', kinds: ['changes'] },
+  ]});
+  assert.deepEqual(node, { type: 'split', direction: 'row', sizes: [0.5, 0.5], children: [
+    { type: 'group', kinds: ['files'] }, { type: 'group', kinds: ['changes'] },
+  ]});
+  assert.deepEqual(restoreTemplate({ type: 'group', kinds: ['missions'] }), builtinPresets[0].layout);
+});

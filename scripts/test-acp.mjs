@@ -96,7 +96,7 @@ try{
  await page.screenshot({path:'.cache/acp-settings.png'});
 
  // ── New conversation: the picker lists every agent the Runner can start, with icons; keyboard only.
- await page.getByRole('navigation',{name:'Pages'}).getByRole('button').first().click();
+ await page.getByRole('navigation',{name:'Pages'}).getByRole('button', { name: 'Work', exact: true }).click();
  await page.getByRole('button',{name:'New conversation',exact:true}).click();
  const setup=page.getByRole('dialog',{name:'New conversation',exact:true});
  const picker=setup.getByRole('combobox',{name:'Agent',exact:true});

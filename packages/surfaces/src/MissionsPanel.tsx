@@ -258,7 +258,7 @@ function TaskCard({ task, goal, now, collections, titles, orchestrators, overlap
     {chips.length > 0 && <ul className="mission-evidence" aria-label="Evidence">{chips.map(e => {
       const chip = evidenceChip(e);
       const actionable = (e.kind === 'run' && !!e.commandId) || !!e.url;
-      return <li key={e.ref + e.atUnixMillis}><button type="button" className={`evidence-chip tone-${chip.tone}`} title={chip.title + (actionable ? '\n\n' + (e.kind === 'run' ? 'Open its output' : 'Open on GitHub') : '')} disabled={!actionable} onClick={() => onEvidence(e)}><span aria-hidden="true">{chip.mark}</span>{e.historical ? 'History · ' : ''}{chip.label}<time>{ago(e.atUnixMillis, now)}</time></button></li>;
+      return <li key={e.ref + e.atUnixMillis}><button type="button" className={`evidence-chip tone-${chip.tone}`} title={chip.label + '\n' + chip.title + (actionable ? '\n\n' + (e.kind === 'run' ? 'Open its output' : 'Open on GitHub') : '')} disabled={!actionable} onClick={() => onEvidence(e)}><span aria-hidden="true">{chip.mark}</span><span className="evidence-label">{e.historical ? 'History · ' : ''}{chip.label}</span><time>{ago(e.atUnixMillis, now)}</time></button></li>;
     })}</ul>}
     {expanded && <div className="mission-card-detail">
       {task.brief && <><h5>Brief</h5><p className="mission-card-brief">{task.brief}</p></>}

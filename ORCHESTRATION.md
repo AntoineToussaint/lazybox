@@ -680,7 +680,8 @@ panel): missions, a board in four columns (Ready, Working, Needs you, Done)
 with status, trust badge, flags, evidence chips (a run opens its output in
 the console, a pull request opens on GitHub), the conversation working on the
 task and its liveness, the snippet chain (*After review, next: fixall*), and
-the log as History. Assign opens a new conversation in a chosen workspace (or
+the log as History. Long evidence labels fit inside the card; hover over a chip
+to read its full label. Assign opens a new conversation in a chosen workspace (or
 takes one you have) and can send the brief. The inbox lists *Awaiting
 acceptance* first, counted in its badge, with Accept and Ask for changes.
 

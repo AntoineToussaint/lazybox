@@ -17,7 +17,7 @@ import { RunnerDirectoryProvider, RunnerScope, useRunnerDirectory, useRunnerIden
 import { elsewhere, localTarget, OWN_RUNNER, type RunnerTarget } from './runner-directory';
 import { AppearanceSync } from './appearance/AppearanceSync';
 import { UserThemeSync } from './appearance/useUserThemes';
-import { consolePlace, followConsole, noteConsoleUse, readFollowRuns, useRunFollowing } from './console-follow';
+import { consolePlace, noteConsoleUse, readFollowRuns, useRunFollowing } from './console-follow';
 import { requestTerminal } from './TerminalPanel';
 import { writeWhenReady } from './home-shell';
 import { AccountNotices } from './AccountNotices';
@@ -339,11 +339,10 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   // A run starting in the viewed session is offered to the console, which moves
   // to it only when nobody is reading it and never comes forward over another
   // tab (console-follow.ts). Put away, it stays away. Focus stays put.
-  useRunFollowing(api, page.selection.sessionId, () => ({ follow: readFollowRuns(sessionStore), place: consolePlace(livePage(), isConsolePutAway()), shown: livePage().selection.commandId }), ({ commandId, open }) => {
+  useRunFollowing(api, page.selection.sessionId, () => ({ follow: readFollowRuns(sessionStore), place: consolePlace(livePage(), isConsolePutAway()), shown: livePage().selection.commandId }), ({ commandId }) => {
     const live = livePage();
     if (!live || locked || live.selection.sessionId !== page.selection.sessionId) return;
-    const output = followConsole(live);
-    changePage({ ...(open && output ? activatePanel(live, output.id) : live), selection: { ...live.selection, commandId } });
+    changePage({ ...live, selection: { ...live.selection, commandId } });
   });
   // A new conversation opens in a tab: the page needs room for one, or a preview tab to show it in.
   const canShowNewSession = shownPanels(page).some(p => isChatTab(p) && p.preview) || allPanels(page).length < PANEL_LIMIT;

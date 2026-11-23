@@ -25,7 +25,7 @@ func TestEachBuiltinSectionTextIsPinnedToItsVersion(t *testing.T) {
 		version int
 		sum     string
 	}{
-		"workspace":     {8, "146604a48bd31ccc"},
+		"workspace":     {9, "c9f3a2749e6d30e6"},
 		"run":           {3, "5e6c4cdceaa73f01"},
 		"documents":     {6, "f57f81ccf9d13ef7"},
 		"conversations": {2, "9eef1f6b082a54f4"},
@@ -121,7 +121,7 @@ func TestANewConversationIsUpToDateAndRecordsItsVersions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "8" {
+	if saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "9" {
 		t.Fatalf("versions not recorded at the start: %v", saved.Briefing)
 	}
 	if !strings.Contains(saved.Context, "--provider codex") || !strings.Contains(saved.Context, "never changes its provider") || !strings.Contains(saved.Context, "only starts copies of yourself") {
@@ -165,7 +165,7 @@ func TestAnOldConversationHearsWhatLazyboxAddedOnceWithItsNextMessage(t *testing
 	}
 	journaled(t, e, `"briefing_updated"`, `"operationId":"m1"`, `"status":"features"`, `"conversations":"2"`, `with any agent`)
 	saved, err := b.History.Get(t.Context(), e.ID)
-	if err != nil || saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "8" {
+	if err != nil || saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "9" {
 		t.Fatalf("the versions it now has are durable: %v %v", err, saved.Briefing)
 	}
 
@@ -190,8 +190,8 @@ func TestAConversationBehindHearsOnlyTheChangesItMissed(t *testing.T) {
 		t.Fatalf("sections %v", u.Sections)
 	}
 	lines := strings.Split(strings.TrimPrefix(u.Text, briefingPreamble+"\n"), "\n")
-	if len(lines) != 7 || !strings.Contains(lines[3], "interactive action") || !strings.Contains(lines[4], "repeat the destination") {
-		t.Fatalf("workspace versions 3 to 8 and the conversation line, one line each:\n%s", u.Text)
+	if len(lines) != 8 || !strings.Contains(lines[6], "blocking question tool") || !strings.Contains(lines[3], "interactive action") || !strings.Contains(lines[4], "repeat the destination") {
+		t.Fatalf("workspace versions 3 to 9 and the conversation line, one line each:\n%s", u.Text)
 	}
 	if want := "`\"" + filepath.Join(b.Config.CLIDir, "lazybox") + "\"`"; !strings.Contains(lines[0], want) {
 		t.Fatalf("a note names this Runner's CLI: %q", lines[0])
@@ -205,6 +205,18 @@ func TestAConversationBehindHearsOnlyTheChangesItMissed(t *testing.T) {
 	asIfStartedBefore(t, b, e, strings.Replace(e.Saved.Context, b.cliText(conversationBriefing), v1, 1), nil)
 	if u := b.BriefingUpdate(e); !slices.Equal(u.Sections, []string{"conversations"}) || strings.Count(u.Text, "\n- ") != 1 {
 		t.Fatalf("a conversation at version 1 hears version 2 only: %+v", u)
+	}
+}
+
+func TestDecisionWaitUpdateReachesExistingConversations(t *testing.T) {
+	b, _, e := briefed(t)
+	versions := briefingVersions(b.briefingSections("codex", "", "", false))
+	versions["workspace"] = "8"
+	asIfStartedBefore(t, b, e, e.Saved.Context, versions)
+	update := b.BriefingUpdate(e)
+	if !slices.Equal(update.Sections, []string{"workspace"}) || strings.Count(update.Text, "\n- ") != 1 ||
+		!strings.Contains(update.Text, "ask once using a blocking question tool") || !strings.Contains(update.Text, "Silence is not authorization") {
+		t.Fatalf("expected just the decision-wait guidance, got %q", update.Text)
 	}
 }
 

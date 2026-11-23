@@ -349,7 +349,7 @@ actions:
 	web, _ := b.Commands.Get(v.Actions[0].State.CommandID)
 	deleting, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if _, err = b.DeleteWorkspace(deleting, c.ID, c.Name, true, true); err != nil {
+	if _, err = b.DeleteWorkspace(deleting, c.ID, c.Name, true, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if !web.Status().Done {

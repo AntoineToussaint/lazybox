@@ -85,7 +85,7 @@ func (m *Manager) PreviewDeletion(ctx context.Context, id string, active func(st
 }
 
 // BeginDeletion durably fences new attachments before any process is stopped.
-func (m *Manager) BeginDeletion(ctx context.Context, id, name string, discard, stop bool, active func(string) bool) (Collection, error) {
+func (m *Manager) BeginDeletion(ctx context.Context, id, name string, discard, stop, keepArtifacts bool, active func(string) bool) (Collection, error) {
 	c, err := m.Get(id)
 	if err != nil {
 		return Collection{}, err
@@ -114,6 +114,10 @@ func (m *Manager) BeginDeletion(ctx context.Context, id, name string, discard, s
 	if (len(p.Dirty) > 0 || p.FilesOutsideRepositories) && !discard {
 		return Collection{}, errors.New("workspace contains changed, untracked or ignored files; explicitly choose discard to delete them")
 	}
+	if c.State == "deleting" && c.KeepArtifacts != keepArtifacts {
+		return Collection{}, errors.New("artifact choice cannot change once workspace deletion has begun")
+	}
+	c.KeepArtifacts = keepArtifacts
 	c.State = "deleting"
 	c.Error = ""
 	if err = m.save(c); err != nil {

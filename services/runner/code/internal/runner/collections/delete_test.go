@@ -19,10 +19,10 @@ func TestDeleteWorktreesFencesStartsAndPreservesSourcesBranchesAndRetryIdentity(
 		t.Fatal(err)
 	}
 	inactive := func(string) bool { return false }
-	if _, err = m.BeginDeletion(ctx, c.ID, "wrong", false, false, inactive); err == nil {
+	if _, err = m.BeginDeletion(ctx, c.ID, "wrong", false, false, false, inactive); err == nil {
 		t.Fatal("name not checked")
 	}
-	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, inactive); err != nil {
+	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = m.Acquire(ctx, c.ID, "new-session", inactive); err == nil {
@@ -84,14 +84,14 @@ func TestDeletionRequiresConsentAndPreservesChangedFilesOnFailure(t *testing.T) 
 		t.Fatal(p, err)
 	}
 	for _, choice := range [][2]bool{{false, false}, {true, false}, {false, true}} {
-		if _, err = m.BeginDeletion(ctx, c.ID, c.Name, choice[0], choice[1], active); err == nil {
+		if _, err = m.BeginDeletion(ctx, c.ID, c.Name, choice[0], choice[1], false, active); err == nil {
 			t.Fatal("missing explicit consent accepted", choice)
 		}
 	}
 	if _, err = os.Stat(file); err != nil {
 		t.Fatal("preview/blocked delete touched files")
 	}
-	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, true, true, active); err != nil {
+	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, true, true, false, active); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = m.FinishDeletion(ctx, c.ID, true, active); err == nil {
@@ -110,7 +110,7 @@ func TestCleanupRefusesReplacedRootAndRetriesPartialDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	inactive := func(string) bool { return false }
-	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, inactive); err != nil {
+	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err != nil {
 		t.Fatal(err)
 	}
 	gitTest(t, repo.Path, "worktree", "remove", c.Members[0].Path)
@@ -130,7 +130,7 @@ func TestCleanupRefusesReplacedRootAndRetriesPartialDeletion(t *testing.T) {
 	if err = os.Symlink(other, c.Root); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, true, true, inactive); err == nil {
+	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, true, true, false, inactive); err == nil {
 		t.Fatal("followed replaced workspace root")
 	}
 	if _, err = os.Stat(marker); err != nil {
@@ -150,7 +150,7 @@ func TestDeletionCleanupDoesNotBlockWorkspaceReads(t *testing.T) {
 	if _, err := m.Acquire(ctx, c.ID, "owner", inactive); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, inactive); err != nil {
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err != nil {
 		t.Fatal(err)
 	}
 
@@ -204,13 +204,13 @@ func TestDeleteRepairsMissingGitLinkOnlyAfterDiscardConsent(t *testing.T) {
 	if err != nil || len(preview.Dirty) != 1 || preview.Dirty[0] != member.Name {
 		t.Fatalf("preview: %+v, %v", preview, err)
 	}
-	if _, err := m.BeginDeletion(ctx, workspace.ID, workspace.Name, false, false, inactive); err == nil {
+	if _, err := m.BeginDeletion(ctx, workspace.ID, workspace.Name, false, false, false, inactive); err == nil {
 		t.Fatal("missing link accepted without discard consent")
 	}
 	if _, err := os.Lstat(link); !os.IsNotExist(err) {
 		t.Fatalf("preview repaired metadata: %v", err)
 	}
-	if _, err := m.BeginDeletion(ctx, workspace.ID, workspace.Name, true, false, inactive); err != nil {
+	if _, err := m.BeginDeletion(ctx, workspace.ID, workspace.Name, true, false, false, inactive); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.FinishDeletion(ctx, workspace.ID, true, inactive); err != nil {
@@ -235,10 +235,10 @@ func TestDeleteUnregisteredMemberWithoutGitLink(t *testing.T) {
 	}
 	gitTest(t, repo.Path, "worktree", "prune", "--expire", "now")
 	inactive := func(string) bool { return false }
-	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, inactive); err == nil {
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err == nil {
 		t.Fatal("discard consent required")
 	}
-	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, true, false, inactive); err != nil {
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, true, false, false, inactive); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.FinishDeletion(ctx, c.ID, true, inactive); err != nil {
@@ -261,7 +261,7 @@ func TestOrphanDeletionPreservesReplacementBareRepository(t *testing.T) {
 	gitTest(t, repo.Path, "worktree", "remove", member.Path)
 	gitTest(t, repo.Path, "clone", "--bare", repo.Path, member.Path)
 	inactive := func(string) bool { return false }
-	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, true, false, inactive); err == nil {
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, true, false, false, inactive); err == nil {
 		t.Fatal("accepted deletion of a replacement bare repository")
 	}
 }

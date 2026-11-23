@@ -110,7 +110,7 @@ func TestArtifactVerbPublishesReadsAndLists(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Flags may follow the file.
-	out, err := run("", "put", plan, "--title", "Rollout plan", "--kind", "plan")
+	out, err := run("", "put", plan, "--title", "Rollout plan", "--kind", "plan", "--format", "markdown")
 	if err != nil || !strings.Contains(out, "Published “Rollout plan” as artifact arta, version 1 (plan)") || !strings.Contains(out, "--id arta") {
 		t.Fatal(out, err)
 	}
@@ -141,6 +141,12 @@ func TestArtifactVerbPublishesReadsAndLists(t *testing.T) {
 	example, err := run("", "template", "spec")
 	if err != nil || !strings.Contains(example, "acceptanceCriteria") {
 		t.Fatal(example, err)
+	}
+	if _, err := run(example, "put", "-", "--title", "Acceptance", "--kind", "spec"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.puts[len(f.puts)-1].Format; got != "json" {
+		t.Fatalf("new spec format %q, want json", got)
 	}
 	const html = "<h1>Preview</h1>"
 	if _, err = run(html, "put", "-", "--title", "Preview", "--format", "html"); err != nil {
@@ -181,11 +187,11 @@ func TestArtifactVerbRetiresAndSupersedes(t *testing.T) {
 		return out.String(), err
 	}
 	for _, title := range []string{"Milestone plan", "What's left", "Limitations"} {
-		if _, err := run("# "+title, "put", "-", "--title", title, "--kind", "plan"); err != nil {
+		if _, err := run("# "+title, "put", "-", "--title", title, "--kind", "plan", "--format", "markdown"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	out, err := run("# Status", "put", "-", "--title", "Status", "--kind", "plan", "--supersedes", "arta, artb,arta")
+	out, err := run("# Status", "put", "-", "--title", "Status", "--kind", "plan", "--format", "markdown", "--supersedes", "arta, artb,arta")
 	if err != nil {
 		t.Fatal(err)
 	}

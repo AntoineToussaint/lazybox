@@ -204,7 +204,7 @@ func TestAWorkspaceNeverTouchesTheHome(t *testing.T) {
 	}
 	ctx2, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if _, err = b.DeleteWorkspace(ctx2, c.ID, c.Name, true, true); err != nil {
+	if _, err = b.DeleteWorkspace(ctx2, c.ID, c.Name, true, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if after := snapshot(); after != before {

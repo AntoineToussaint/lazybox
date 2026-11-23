@@ -277,7 +277,11 @@ In the Pull requests panel: `j`/`k` move, `↵` opens the workspace at the
 conversation that delivered it, `s` sends the failures, `r` addresses the
 review, `m` merges (each asks first), `o` opens it on GitHub. The Inbox's
 **Dismiss** hides a row until something new happens to it (a new push, a new
-review).
+review). The Inbox and Pull requests panel share action progress in this browser.
+After a successful send, the button disappears and the Inbox receipt closes
+after ten seconds. Returning or reloading keeps the original deadline.
+A failed send shows the error and lets you retry. Another CI run with a
+different failing check URL can appear even on the same commit.
 
 Open pull requests are checked about every minute while Lazybox has your
 focus and every five minutes otherwise; merged or closed ones once a day for

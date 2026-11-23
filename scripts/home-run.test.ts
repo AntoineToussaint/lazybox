@@ -116,3 +116,20 @@ test('repeating the destination gives each command its own home handoff', () => 
   assert.deepEqual(homeOffers(text).map(({ command, target }) => ({ command, target })),
     commands.map(command => ({ command, target: { kind: 'repository', repository: 'api' } })));
 });
+
+test('an explicit home handoff preserves a long shell expression exactly', () => {
+  const line = "bash -o pipefail -c 'for root in alpha beta; do " +
+    'printf "%s" "$root" | jq -e --arg label "keep  both  spaces" ' +
+    '"[.resources[] | select((.instances | length) > 0)]" || exit 1; ' +
+    ': "' + 'long command '.repeat(20) + '"; done' + "'";
+  assert.deepEqual(homeOffers('Run in the home checkout of infra-base: `' + line + '`'),
+    [{ command: line, target: { kind: 'repository', repository: 'infra-base' }, explicit: true }]);
+  assert.deepEqual(homeOffers('I ran `' + line + '` yesterday.'), []);
+});
+
+test('the same command in two named homes uses the clicked occurrence', () => {
+  const message = 'Run in the home checkout of api: `git status`\nRun in the home checkout of web: `git status`';
+  assert.deepEqual(homeOffers(message).map(o => o.target), [ {kind: 'repository', repository: 'api'}, {kind: 'repository', repository: 'web'} ]);
+  assert.deepEqual(explicitHomeTarget(message, 'git status', message.lastIndexOf('`git')), {kind: 'repository', repository: 'web'});
+  assert.equal(explicitHomeTarget(message, 'git status'), undefined);
+});

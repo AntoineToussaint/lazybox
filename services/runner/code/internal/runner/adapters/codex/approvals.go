@@ -30,6 +30,26 @@ type approvalParams struct {
 	GrantRoot                       string            `json:"grantRoot"`
 }
 
+// An omitted decision list uses the standard Codex choices. Never select a
+// persistent exec or network policy amendment for a one-command approval.
+func offersCommandAccept(params json.RawMessage) bool {
+	var p struct {
+		AvailableDecisions []json.RawMessage `json:"availableDecisions"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return false
+	}
+	if p.AvailableDecisions == nil {
+		return true
+	}
+	for _, decision := range p.AvailableDecisions {
+		if string(decision) == `"accept"` {
+			return true
+		}
+	}
+	return false
+}
+
 // permissionsMethod is Codex asking for more access than its sandbox gives
 // (network, folders to read or write): PermissionsRequestApprovalParams.
 const permissionsMethod = "item/permissions/requestApproval"

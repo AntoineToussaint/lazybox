@@ -880,7 +880,7 @@ title, brief, role, permission and subscription (within the ceiling),
 workspace (`same`/`new`), paths (relative; a trailing `/` is a folder), an
 estimate and `after` keys (no cycles). A new proposal supersedes one still
 waiting. `plan.approved` and `plan.rejected` are a person's only; approval
-carries the $ cap and the fan-out, which become the grant's, and the same
+defaults to no budget cap. The reviewer can select **Set a budget cap** before approving. The decision carries the optional cap and the fan-out, which become the grant's, and the same
 batch creates the plan's tasks with their `blocks` edges (actor `rule`,
 role `plan`). `Plan.Overlaps` lists paths more than one task names. The
 orchestrator is told the decision as a turn (`agent.Origin` kind

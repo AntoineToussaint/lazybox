@@ -51,6 +51,7 @@ fixes it:
 
 ## What it can do
 
+- **Create or adjust a workspace layout.** Describe the arrangement you want, such as “put changes beside my agent and leave the terminal below.” A new help conversation receives the current docked layout. Choose **Review layout** on its proposal to edit the YAML, then **Import** to validate, save, and apply it. For scripting, `lazybox do --list layout` lists the available actions. `lazybox do layout.import "<layout YAML>"` opens the same importer. For detached windows, ask for equal columns or a grid and choose the arrangement button in the reply. From the CLI, run `lazybox do layout.arrange-windows columns`. It also accepts `focus`, `grid`, `next-display`, `save`, and `restore`, mirroring the desktop’s **Surfaces → Arrange Windows** menu.
 - **Answer from the documentation.** It searches and reads these pages (the
   same ones Help → Documentation shows) and tells you which page it used.
 - **Start adding a subscription.** Choose **Add subscription** in the answer to open the sign-in dialog, then choose your provider and sign in.

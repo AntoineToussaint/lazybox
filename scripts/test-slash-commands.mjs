@@ -121,12 +121,43 @@ try{
  await expect(chat.locator('.command-line').filter({hasText:'MCP servers: fixture (2 tools)'})).toBeVisible();
  await expect(message).toHaveValue('');
 
+ // Picker insertion keeps the draft editable and collapses a recognized body.
+ await chat.getByRole('button',{name:'Snippets',exact:true}).click();
+ const picker=page.getByRole('dialog',{name:'Snippets',exact:true});
+ await picker.getByLabel('Find snippets').fill('review');
+ await picker.getByRole('button',{name:'Insert',exact:true}).click();
+ await expect(chat.locator('.snippet-draft-summary').getByRole('button',{name:'Preview snippet review'})).toBeVisible();
+ await message.fill('');
  // A snippet is inserted, not sent.
  const before=applies().length;
  await page.keyboard.type('/test');await expect(menu.getByRole('option',{selected:true})).toContainText('Run tests');
  await page.keyboard.press('Enter');await expect(message).toHaveValue('Run the relevant tests.');
  assert.equal(applies().length,before,'inserting a snippet sends nothing');
- await message.fill('');
+ const draftChip=chat.locator('.composer').getByRole('button',{name:'Preview snippet test'});
+ await expect(draftChip).toBeVisible();
+ await expect(message).toHaveAttribute('data-folded-snippet','true');
+ await draftChip.hover();
+ await expect(page.getByRole('tooltip').filter({hasText:'Run the relevant tests.'})).toBeVisible();
+ await chat.getByRole('button',{name:'Edit prompt',exact:true}).click();
+ await expect(message).not.toHaveAttribute('data-folded-snippet','true');
+ await message.fill('Run the relevant tests.\nInclude the CLI.');
+ await chat.getByRole('button',{name:'Collapse snippet text'}).click();
+ await expect(chat.locator('.snippet-draft-summary')).toContainText('Include the CLI.');
+ f.runner.journalMessages=true;
+ await message.press('Enter');
+ await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe('Run the relevant tests.\nInclude the CLI.');
+ await expect(message).toHaveValue('');
+ const sentChip=chat.locator('.messages').getByRole('button',{name:'Preview snippet test'}).last();
+ await expect(sentChip).toBeVisible();
+ await expect(sentChip.locator('xpath=ancestor::article[1]')).toContainText('Include the CLI.');
+ await sentChip.click();
+ const pinnedPreview=page.getByRole('tooltip').filter({hasText:'Run the relevant tests.'});
+ await pinnedPreview.dispatchEvent('pointerdown',{pointerType:'touch'});
+ await expect(sentChip).toHaveAttribute('aria-expanded','true');
+ await expect(page.getByRole('tooltip').filter({hasText:'Run the relevant tests.'})).toBeVisible();
+ await sentChip.press('Escape');
+ f.runner.journalMessages=false;
+ await message.focus();
 
  // An unknown /word goes to the agent on the first Enter.
  await page.keyboard.type('/deploy now');await expect(menu).toBeHidden();
@@ -289,7 +320,7 @@ try{
  await expect(codexMessage).toBeEnabled();
  await codexMessage.click();await page.keyboard.type('/model ');
  const codexModels=codexChat.getByRole('listbox',{name:'/model choices'});
- await expect(codexModels.getByRole('option')).toHaveText([/GPT-6\.1-Sol.*Current/,/GPT-5\.5/,/GPT-6-Astra/,/GPT-6-Luna/,/GPT-6-Luna · high/,/GPT-6-Luna · low/]);
+ await expect(codexModels.getByRole('option')).toHaveText([/GPT-6\.1-Sol.*Current/,/GPT-5\.5/,/GPT-6-Astra/,/GPT-6-Luna/]);
  await page.keyboard.press('ArrowUp');await page.keyboard.press('Enter');
  await expect(codexModels).toBeHidden();await expect(codexChat.locator('.restart-model')).toHaveCount(0);
  assert.equal(applies().filter(m=>m.body.sessionId==='codex-session').length,0,'the current Codex model applies nothing');
@@ -303,6 +334,13 @@ try{
  await efforts.getByRole('button',{name:'low',exact:true}).click();
  await expect.poll(()=>applies().findLast(m=>m.body.sessionId==='codex-session')?.body.model?.effort).toBe('low');
  await expect(codexChat.locator('.restart-model')).toHaveCount(0);
+
+ // Effort belongs to the current model and appears in increasing order.
+ await codexMessage.fill('/effort ');
+ const effortList=codexChat.getByRole('listbox',{name:'/effort choices'});
+ await expect(effortList.getByRole('option')).toHaveText([/low.*Current/,/high/]);
+ await effortList.getByRole('option').last().click();
+ await expect.poll(()=>applies().findLast(m=>m.body.sessionId==='codex-session')?.body.model?.effort).toBe('high');
 
  // /mcp is a provider inventory request, even while composing another turn.
  await codexMessage.fill('/mcp');
@@ -366,7 +404,7 @@ try{
  // More shows the rest in place (the menu stays open) and the keyboard moves to the first one it revealed; a model there switches live.
  await more.click();
  await expect(modelGroup.locator('button[data-model]')).toHaveCount(13);
- await expect(modelGroup.getByRole('button',{name:'GPT-5.5',exact:true})).toBeFocused();
+ await expect(modelGroup.locator('button[data-model]').nth(4)).toBeFocused();
  await modelGroup.getByRole('button',{name:'GPT-5.4',exact:true}).click();
  await expect.poll(()=>applies().findLast(m=>m.body.sessionId==='codex-default-session')?.body.model?.model).toBe('gpt-5.4');
  await expect(workChat.locator('.command-line').filter({hasText:'Switched model to gpt-5.4'})).toBeVisible();

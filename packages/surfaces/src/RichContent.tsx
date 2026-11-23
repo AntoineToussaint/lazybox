@@ -1,3 +1,4 @@
+import { ApplyWindowArrangement, ReviewLayoutProposal, windowArrangements } from './layout-proposal';
 import { actionEnabled, runAction } from './actions';
 import { fileReference, type FileLink } from './file-reference';
 import { preloadEditor } from './editor-loader';
@@ -31,9 +32,11 @@ function Copy({text}:{text:string}) {
  return <button type="button" aria-label="Copy code" onClick={()=>void navigator.clipboard.writeText(text).then(()=>setState('Copied'),()=>setState('Copy failed'))}>{state}</button>;
 }
 /** `runnable`: a block of a message's Markdown, which can offer Run when it is a shell block in an agent's message (code-runs.tsx). */
-export const CodeBlock=memo(function CodeBlock({text,language='',label,runnable=false,action}:{text:string;language?:string;label?:string;runnable?:boolean;action?:ReactNode}) {
+export const CodeBlock=memo(function CodeBlock({text,language='',label,runnable=false,action,offset}:{text:string;language?:string;label?:string;runnable?:boolean;offset?:number;action?:ReactNode}) {
+ const reviewLayout = useContext(ReviewLayoutProposal);
+ if (language === 'lazybox-layout' && reviewLayout) action = <button type="button" onClick={() => reviewLayout(text)}>Review layout</button>;
  const highlighted=useMemo(()=>text.length<=100000&&hljs.getLanguage(language)?hljs.highlight(text,{language,ignoreIllegals:true}).value:undefined,[text,language]);
- const run=useRunnableBlock(text,language,runnable);
+ const run=useRunnableBlock(text,language,runnable,offset);
  const name=label||language||'Text';
  return <div className={'code-block'+(run?' is-runnable':'')} tabIndex={run?0:undefined} role={run?'group':undefined} aria-label={run?`${name} commands`:undefined} aria-keyshortcuts={run?'Enter Alt+Enter':undefined} onKeyDown={run?.onKeyDown}
   onContextMenu={contextMenu('code-block',()=>run?[...run.menu(),'separator',...codeBlockItems(text,language)]:codeBlockItems(text,language),{text,language})}>
@@ -44,12 +47,12 @@ export const CodeBlock=memo(function CodeBlock({text,language='',label,runnable=
 const mermaidSource=(text:string)=><CodeBlock text={text} language="mermaid"/>;
 function codeText(node:ReactNode):string {if(typeof node==='string')return node;if(Array.isArray(node))return node.map(codeText).join('');return '';}
 const components={
- pre:({children}:{children?:ReactNode})=>{
+ pre:({children,node}:{children?:ReactNode;node?:{position?:{start:{offset?:number}}}})=>{
   const child=Children.toArray(children)[0];
   if(!isValidElement<{className?:string;children?:ReactNode}>(child))return <pre>{children}</pre>;
   const language=/language-([^\s]+)/.exec(child.props.className||'')?.[1]?.toLowerCase()||'';
   const text=codeText(child.props.children).replace(/\n$/,'');
-  return language==='mermaid'?<MermaidDiagram text={text} sourceView={mermaidSource}/>:<CodeBlock text={text} language={language} runnable/>;
+  return language==='mermaid'?<MermaidDiagram text={text} sourceView={mermaidSource}/>:<CodeBlock text={text} language={language} runnable offset={node?.position?.start.offset}/>;
  },
  a:({href,children}:{href?:string;children?:ReactNode})=>href&&/^https?:\/\//i.test(href)?<a href={href} target="_blank" rel="noopener noreferrer">{children}</a>:<span className="content-reference">{children}</span>,
  // Do not load external images from model output just by viewing a message.
@@ -77,6 +80,7 @@ function documentComponents(doc:RichDocument){
 export const RichContent=memo(function RichContent({text,onOpenFile,document:doc}:{text:string;onOpenFile?(reference:FileLink,how:OpenModifiers):void;document?:RichDocument}) {
  const fileMenu=(file:FileLink)=>contextMenu('file-link',()=>fileLinkItems(file,onOpenFile!),file);
  // In an agent's message, inline code that reads as a command offers to run it, from its menu only.
+ const arrangeWindows = useContext(ApplyWindowArrangement);
  const run=useRunScope();
  const openSource = useContext(ConversationSourceContext);
  const programs=useMemo(()=>run?pathProgramsIn(text):[],[run,text]);
@@ -85,6 +89,11 @@ export const RichContent=memo(function RichContent({text,onOpenFile,document:doc
  if(docComponents)return <div className="rich-content rich-document"><Markdown remarkPlugins={[remarkGfm]} components={{...components,...docComponents}}>{text}</Markdown></div>;
  return <div className="rich-content">{rawJSON?<CodeBlock text={text} language="json"/>:<Markdown remarkPlugins={[remarkGfm]} components={{...components,
  a:({href,children})=>{
+  if (arrangeWindows && href?.startsWith('#lazybox-arrange-')) {
+    const choice = href.slice('#lazybox-arrange-'.length);
+    const label = windowArrangements.get(choice);
+    if (label) return <button className="file-reference" onClick={() => arrangeWindows(choice)}>{label}</button>;
+  }
   if (href === '#lazybox-add-subscription' && actionEnabled('settings.open')) {
     return <button className="file-reference" onClick={() => runAction('settings.open', 'add-subscription')}>{children}</button>;
   }
@@ -93,6 +102,6 @@ export const RichContent=memo(function RichContent({text,onOpenFile,document:doc
   const file=href&&fileReference(href);return file&&onOpenFile?<button className="file-reference" title={fileTitle} onPointerEnter={preloadEditor} onClick={event=>onOpenFile(file,event)} onContextMenu={fileMenu(file)}>{children}</button>:components.a({href,children});},
  code:({children,className,node})=>{const file=!className&&typeof children==='string'?fileReference(children,'automatic'):undefined;if(file&&onOpenFile)return <button className="file-reference inline-file" title={fileTitle} onPointerEnter={preloadEditor} onClick={event=>onOpenFile(file,event)} onContextMenu={fileMenu(file)}>{children}</button>;
   const command=run&&!className&&typeof children==='string'?inlineCommand(children,programAt(programs,node?.position?.start.offset)):'';
-  return <code className={className} onContextMenu={command?contextMenu('inline-code',()=>inlineRunItems(run!.host,run!.messageId,command,run!.text),{text:children,command}):undefined}>{children}</code>;}
+  return <code className={className} onContextMenu={command?contextMenu('inline-code',()=>inlineRunItems(run!.host,run!.messageId,command,run!.text,node?.position?.start.offset),{text:children,command}):undefined}>{children}</code>;}
  }}>{text}</Markdown>}</div>;
 });

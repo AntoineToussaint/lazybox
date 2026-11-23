@@ -39,7 +39,7 @@ try {
   await expect(box).toBeFocused();
   await expect(header).toContainText('Help');
   await expect(header).toContainText('using Claude (Claude CLI sign-in)');
-  await expect(panel.getByRole('list', {name: 'Suggested questions'}).getByRole('button')).toHaveCount(4);
+  await expect(panel.getByRole('list', {name: 'Suggested questions'}).getByRole('button')).toHaveCount(5);
   await page.screenshot({path: '.cache/help-ready.png'});
   // The switch menu lists every subscription with its state.
   await panel.locator('summary[aria-label="Choose the agent for Ask Lazybox"]').click();
@@ -70,6 +70,10 @@ try {
 
   // The first question starts the assistant: no form, Enter sends it.
   await box.focus();
+  const yaml = 'name: Review wide\nlayout:\n  panels: [chat, changes]';
+  const proposal = fixture.openEvents('assistant-' + fixture.sessions.length);
+  proposal.push({type: 'message_delta', text: ['```lazybox-layout', yaml, '```'].join('\n')});
+  proposal.push({type: 'turn_ended'});
   await box.fill('How do I add a second subscription?');
   await page.keyboard.press('Enter');
   await expect.poll(() => fixture.mutations.filter(m => m.method === 'OpenAssistant').length).toBe(1);
@@ -79,6 +83,7 @@ try {
   // Its usage is attributed to the workspace it is asked from, which the assistant is told; it is not listed as the workspace's work.
   assert.equal(opened.body.collectionId, 'alpha');
   assert.match(opened.body.context, /Alpha feature/);
+  assert.match(opened.body.context, /Docked layout[\s\S]*layout:/);
   await expect.poll(() => fixture.mutations.some(m => m.method === 'Apply' && m.body.message?.text === 'How do I add a second subscription?')).toBe(true);
   const sessionId = fixture.sessions.at(-1).id;
   assert.equal(fixture.mutations.find(m => m.method === 'Apply' && m.body.message?.text).body.sessionId, sessionId);
@@ -86,6 +91,11 @@ try {
   await expect(box).toHaveCount(0);
   await expect(panel.locator('.agent-window')).toBeVisible();
   await expect(header).toContainText('using Claude (Claude CLI sign-in)');
+  await panel.getByRole('button', {name: 'Review layout'}).click();
+  const importer = page.getByRole('dialog', {name: 'Import a layout'});
+  await expect(importer.getByRole('textbox', {name: 'Layout YAML'})).toHaveValue(yaml);
+  await importer.getByRole('button', {name: 'Cancel'}).click();
+  await expect(importer).toHaveCount(0);
   await page.screenshot({path: '.cache/help-conversation.png'});
   // Help is not the workspace's work: the sidebar does not list it.
   await expect(page.getByRole('navigation', {name: 'Workspaces'}).getByText('Conversation alpha-session')).toBeVisible();

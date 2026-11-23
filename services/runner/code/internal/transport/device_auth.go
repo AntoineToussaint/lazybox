@@ -198,7 +198,7 @@ func DeviceAuthority(verifier DeviceVerifier) []grpc.ServerOption {
 // account by name only. Usage, email addresses, sign-in flows and gateways
 // stay on the owner's screen.
 func deviceInfo(full *pb.InfoResponse) *pb.InfoResponse {
-	out := &pb.InfoResponse{Sessions: full.Sessions, DefaultModel: full.DefaultModel, AttachmentLimits: full.AttachmentLimits, InstanceId: full.InstanceId}
+	out := &pb.InfoResponse{Sessions: full.Sessions, DefaultModel: full.DefaultModel, AttachmentLimits: full.AttachmentLimits, InstanceId: full.InstanceId, RunnerId: full.RunnerId}
 	for _, p := range full.Profiles {
 		out.Profiles = append(out.Profiles, &pb.Profile{Id: p.Id, Provider: p.Provider, Label: p.Label, Managed: p.Managed, Isolation: p.Isolation})
 	}

@@ -237,6 +237,13 @@ func (s *Store) find(ws, id string) (*Artifact, error) {
 	return nil, fmt.Errorf("artifact %q: %w", id, fs.ErrNotExist)
 }
 
+// HasWorkspace reports whether a deleted workspace still has documents to list.
+func (s *Store) HasWorkspace(ws string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.items[ws]) > 0
+}
+
 // List returns a workspace's artifacts, most recently updated first.
 func (s *Store) List(ws string) ([]Artifact, error) {
 	if err := validWorkspace(ws); err != nil {
@@ -279,7 +286,14 @@ func (s *Store) document(a *Artifact, version uint32) (Document, error) {
 	if err != nil {
 		return Document{}, err
 	}
-	return Document{Artifact: clone(a), Content: string(raw), ContentVersion: version}, nil
+	if version == 0 || uint64(version) > uint64(len(a.Versions)) || a.Versions[version-1].Number != version {
+		return Document{}, fmt.Errorf("artifact %q has inconsistent metadata for version %d", a.ID, version)
+	}
+	content := string(raw)
+	if Digest(content) != a.Versions[version-1].Digest {
+		return Document{}, fmt.Errorf("artifact %q version %d failed its content integrity check", a.ID, version)
+	}
+	return Document{Artifact: clone(a), Content: content, ContentVersion: version}, nil
 }
 
 func (s *Store) dir(ws, id string) string { return filepath.Join(s.root, ws, id) }
@@ -697,6 +711,25 @@ func (s *Store) Delete(ws, id string) error {
 	}
 	delete(s.items[ws], id)
 	delete(s.pending, ws+"/"+id)
+	return nil
+}
+
+// FinishWorkspaceDeletion stops following removed files when their saved versions are kept.
+func (s *Store) FinishWorkspaceDeletion(ws string, keep bool) error {
+	if !keep {
+		return s.DeleteWorkspace(ws)
+	}
+	items, err := s.List(ws)
+	if err != nil {
+		return err
+	}
+	for _, a := range items {
+		if a.TrackedPath != "" {
+			if _, err = s.Update(ws, a.ID, "", "", true); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

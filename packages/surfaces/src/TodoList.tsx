@@ -1,5 +1,10 @@
 type Item = { id: string; text: string; status: 'todo' | 'done' };
 
+export function todoProgress(content: string) {
+  const { items } = JSON.parse(content) as { items: Item[] };
+  return { total: items.length, remaining: items.filter(item => item.status === 'todo').length };
+}
+
 export function todoMarkdown(content: string) {
   const list = JSON.parse(content) as { items: Item[] };
   return list.items.map(item => `- [${item.status === 'done' ? 'x' : ' '}] ${item.text}`).join('\n');

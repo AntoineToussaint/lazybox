@@ -105,7 +105,7 @@
 .embedded-chat .message p{font-size:var(--chat-font-size,14px);line-height:var(--chat-line-height,1.5);color:var(--text-secondary);margin:0}
 .embedded-chat .message.notice{padding:6px 14px;margin:0 0 14px;border-left:2px solid var(--info-line)}
 .embedded-chat .message.notice p{font-size:calc(12px * var(--text-scale));line-height:1.6;color:var(--text-subtle)}
-.embedded-chat .message.operation_accepted{padding:14px 18px;background:var(--surface-active);border:1px solid var(--accent-line-subtle);border-radius:10px;margin-bottom:16px}
+.embedded-chat .message.operation_accepted{width:fit-content;max-width:100%;box-sizing:border-box;padding:6px 10px;background:var(--surface-active);border:1px solid var(--accent-line-subtle);border-radius:10px;margin-bottom:16px}
 /* A message steered into the running turn: a small tag in the bubble's corner, not a name over it. */
 .message.operation_accepted>.message-tag{float:right;margin:0 -6px 4px 10px;padding:1px 7px;border:1px solid var(--line-strong);border-radius:999px;color:var(--text-muted);font-size:calc(10.5px * var(--text-scale));line-height:calc(16px * var(--text-scale));cursor:help}
 .embedded-chat .empty{margin:auto;padding:50px 24px;max-width:430px}.embedded-chat .empty h2{font-size:calc(22px * var(--text-scale));letter-spacing:-.5px}.embedded-chat .empty p{font-size:calc(12px * var(--text-scale));color:var(--text-faint)}

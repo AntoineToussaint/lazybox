@@ -31,7 +31,7 @@ test('placeholders: angle names, ellipses and YOUR_ names; never redirections, h
 
 test('fenced shell blocks of a message, indented ones included, as the renderer shows them', () => {
   const message = 'First:\n\n```bash\nacme login --profile dev\n```\n\nThen:\n\n1. Add it:\n   ```sh\n   claude mcp add acme\n   ```\n\n```json\n{"a":1}\n```\n\n```console\n$ make test\nok\n```';
-  assert.deepEqual(shellBlocksIn(message), [{ language: 'bash', script: 'acme login --profile dev' }, { language: 'sh', script: 'claude mcp add acme' }, { language: 'console', script: 'make test' }]);
+  assert.deepEqual(shellBlocksIn(message).map(({language, script}) => ({language, script})), [{ language: 'bash', script: 'acme login --profile dev' }, { language: 'sh', script: 'claude mcp add acme' }, { language: 'console', script: 'make test' }]);
 });
 
 test('inline commands: whole commands, and conservative bare subcommands of a path program', () => {

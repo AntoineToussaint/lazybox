@@ -132,7 +132,8 @@ const tail = [
   // Layouts as files (POWER.md, "Config files"): the presets, then the person's layouts/*.yaml.
   { id: 'layout.cycle', title: 'Next layout', group: 'Layout', icon: 'layout', keys: 'Mod+Shift+l', scope: 'global', safe: true, keywords: 'dock preset arrangement cycle switch rotate' },
   { id: 'layout.copy', title: 'Copy the layout as YAML', group: 'Layout', icon: 'copy', keys: '', scope: 'global', keywords: 'dock preset arrangement share export clipboard file yaml' },
-  { id: 'layout.import', title: 'Import a layout…', group: 'Layout', icon: 'download', keys: '', scope: 'global', keywords: 'dock preset arrangement share paste clipboard file yaml' },
+  { id: 'layout.arrange-windows', title: 'Arrange desktop windows', argument: 'columns, focus, grid, next-display, save, or restore', group: 'Layout', icon: 'panels', keys: '', scope: 'global', palette: false },
+  { id: 'layout.import', argument: 'layout YAML to review', title: 'Import a layout…', group: 'Layout', icon: 'download', keys: '', scope: 'global', keywords: 'dock preset arrangement share paste clipboard file yaml' },
   { id: 'layout.reset', title: 'Reset the layout to default', group: 'Layout', icon: 'refresh', keys: '', scope: 'global', keywords: 'dock preset chat focus' },
   // Panel groups from the keyboard (DockLayout, dock-keyboard.ts). A Mac's ⌘ and ⌃ are both Ctrl
   // elsewhere, so Windows and Linux get keys of their own (`otherKeys`); every one is rebindable.

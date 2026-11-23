@@ -786,6 +786,18 @@ fn build_menu(
             )?,
         ],
     )?;
+    let arrangements = Submenu::new(app, "Arrange Windows", true)?;
+    for (id, title) in [
+        ("layout-columns", "Equal Columns on This Display"),
+        ("layout-focus", "Focused Window + Stack on This Display"),
+        ("layout-grid", "Grid on This Display"),
+        ("layout-next-display", "Move Focused Window to Next Display"),
+        ("layout-save", "Save Current Window Positions"),
+        ("layout-restore", "Restore Saved Window Positions"),
+    ] {
+        arrangements.append(&MenuItem::with_id(app, id, title, true, None::<&str>)?)?;
+    }
+    surfaces.append(&arrangements)?;
     menu.append(&surfaces)?;
     // Zoom shortcuts apply to the focused window.
     let zoom = Submenu::with_items(
@@ -1238,6 +1250,188 @@ pub fn window_event(window: &tauri::Window, event: &WindowEvent) {
     }
 }
 
+fn apply_placement(
+    w: &tauri::Window,
+    p: &placement::Placement,
+    maximized: bool,
+) -> tauri::Result<()> {
+    w.unmaximize()?;
+    w.set_min_size(Some(tauri::LogicalSize::new(p.min_width, p.min_height)))?;
+    w.set_position(tauri::PhysicalPosition::new(p.x, p.y))?;
+    w.set_size(tauri::LogicalSize::new(p.width, p.height))?;
+    if maximized {
+        w.maximize()?;
+    }
+    Ok(())
+}
+
+/// Arrange visible Lazybox windows on the focused display. Other displays keep their roles.
+#[tauri::command]
+pub fn arrange_desktop_windows(
+    app: tauri::AppHandle,
+    window: Webview,
+    arrangement: String,
+) -> Result<(), String> {
+    if !is_workspace_window(window.label()) {
+        return Err("Window arrangements require a workspace window".into());
+    }
+    let action = match arrangement.as_str() {
+        "columns" => "layout-columns",
+        "focus" => "layout-focus",
+        "grid" => "layout-grid",
+        "next-display" => "layout-next-display",
+        "save" => "layout-save",
+        "restore" => "layout-restore",
+        _ => return Err("Choose columns, focus, grid, next-display, save, or restore".into()),
+    };
+    arrange_windows(&app, action, Some(window.label()))
+}
+
+fn arrange_windows(
+    app: &tauri::AppHandle,
+    action: &str,
+    fallback: Option<&str>,
+) -> Result<(), String> {
+    let host = app.try_state::<Host>().ok_or("Connect a Runner first")?;
+    let labels: Vec<_> = host
+        .layout
+        .lock()
+        .map_err(|e| e.to_string())?
+        .surfaces
+        .keys()
+        .cloned()
+        .collect();
+    let key = format!("{}:window-arrangement", host.authority);
+    let mut windows = Vec::new();
+    for label in labels {
+        if let Some(window) = app.get_window(&label) {
+            windows.push((label, window));
+        }
+    }
+    let error = |e: tauri::Error| e.to_string();
+    if action == "layout-save" {
+        let mut saved = std::collections::BTreeMap::new();
+        for (label, w) in windows {
+            if w.is_fullscreen().map_err(error)? || w.is_minimized().map_err(error)? {
+                continue;
+            }
+            saved.insert(label, (geometry(&w)?, w.is_maximized().map_err(error)?));
+        }
+        if saved.is_empty() {
+            return Err("No visible windows to save".into());
+        }
+        let json = serde_json::to_string(&saved).map_err(|e| e.to_string())?;
+        return host
+            .views
+            .lock()
+            .map_err(|e| e.to_string())?
+            .save(&key, &json);
+    }
+    if action == "layout-restore" {
+        let saved: std::collections::BTreeMap<String, (Geometry, bool)> = {
+            let views = host.views.lock().map_err(|e| e.to_string())?;
+            serde_json::from_str(
+                views
+                    .values
+                    .get(&key)
+                    .ok_or("Save a window arrangement first")?,
+            )
+            .map_err(|e| e.to_string())?
+        };
+        let displays = monitors(app)?;
+        for (label, w) in windows {
+            let Some((g, maximized)) = saved.get(&label) else {
+                continue;
+            };
+            if w.is_fullscreen().map_err(error)? {
+                continue;
+            }
+            let p = placement::fit(Some(g), &displays)?;
+            w.unminimize().map_err(error)?;
+            apply_placement(&w, &p, *maximized).map_err(error)?;
+        }
+        return Ok(());
+    }
+    let focus = app
+        .get_focused_window()
+        .or_else(|| fallback.and_then(|label| app.get_window(label)))
+        .ok_or("Focus a Lazybox window first")?;
+    if action == "layout-next-display" {
+        if focus.is_fullscreen().map_err(error)? {
+            return Err("Exit full screen before moving this window".into());
+        }
+        let current = geometry(&focus)?;
+        let mut displays = monitors(app)?;
+        displays.retain(Display::valid);
+        displays.sort_by(|a, b| {
+            a.work
+                .x
+                .total_cmp(&b.work.x)
+                .then(a.work.y.total_cmp(&b.work.y))
+        });
+        if displays.len() < 2 {
+            return Err("Connect a second display to move this window".into());
+        }
+        let index = displays
+            .iter()
+            .position(|d| d.work == current.display.work)
+            .ok_or("The display arrangement changed; try again")?;
+        let destination = &displays[(index + 1) % displays.len()];
+        // fit centers a window when its old display is unavailable, preserving
+        // logical dimensions across monitors with different pixel densities.
+        let p = placement::fit(Some(&current), std::slice::from_ref(destination))?;
+        let maximized = focus.is_maximized().map_err(error)?;
+        apply_placement(&focus, &p, maximized).map_err(error)?;
+        return Ok(());
+    }
+    let work = geometry(&focus)?.display.work;
+    let mut local = Vec::new();
+    for (label, w) in windows {
+        if w.is_minimized().map_err(error)? || w.is_fullscreen().map_err(error)? {
+            continue;
+        }
+        let g = geometry(&w)?;
+        if g.display.work == work {
+            local.push((label, w, g));
+        }
+    }
+    if local.len() < 2 {
+        return Err("Open two Lazybox windows on this display first".into());
+    }
+    local.sort_by_key(|(label, _, _)| label != focus.label());
+    let pattern = match action {
+        "layout-columns" => placement::Pattern::Columns,
+        "layout-focus" => placement::Pattern::Focus,
+        "layout-grid" => placement::Pattern::Grid,
+        _ => return Err("Unknown window arrangement".into()),
+    };
+    let count = local.len();
+    let mut moves = Vec::new();
+    for (i, (_, w, g)) in local.into_iter().enumerate() {
+        let rect = placement::cell(&work, pattern, i, count);
+        let width = (rect.width - (g.outer.width - g.inner_width)) / g.display.scale;
+        let height = (rect.height - (g.outer.height - g.inner_height)) / g.display.scale;
+        if width < 320.0 || height < 240.0 {
+            return Err("These windows do not fit on this display. Move some to another display or choose another arrangement.".into());
+        }
+        moves.push((
+            w,
+            placement::Placement {
+                x: rect.x as i32,
+                y: rect.y as i32,
+                width,
+                height,
+                min_width: width.min(580.0),
+                min_height: height.min(600.0),
+            },
+        ));
+    }
+    for (w, p) in moves {
+        apply_placement(&w, &p, false).map_err(error)?;
+    }
+    Ok(())
+}
+
 pub fn menu_event(app: &tauri::AppHandle, id: &str) {
     if let Some(action) = id.strip_prefix("action:") {
         // The window in front runs it; with none in front, the main window.
@@ -1260,6 +1454,12 @@ pub fn menu_event(app: &tauri::AppHandle, id: &str) {
         return;
     }
     let result = match id {
+        "layout-columns"
+        | "layout-focus"
+        | "layout-grid"
+        | "layout-next-display"
+        | "layout-save"
+        | "layout-restore" => arrange_windows(app, id, None),
         "reopen-agent" => open(app, "main"),
         "reopen-closed" => reopen_closed(app.clone()),
         "zoom-in" | "zoom-out" | "zoom-reset" => {

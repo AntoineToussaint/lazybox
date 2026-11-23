@@ -497,13 +497,13 @@ func (b *Bench) startUnderGrant(ctx context.Context, e *Execution, r Conversatio
 // artifacts), it is the artifact's text.
 func (b *Bench) artifactBrief(r ConversationStart, inline bool) (string, error) {
 	if inline {
-		doc, err := b.Artifacts.Get(r.Workspace, r.Artifact, 0)
+		doc, err := b.Artifacts.Get(r.Workspace, r.Artifact, r.ArtifactVersion)
 		if err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("Your brief is the Lazybox artifact “%s” (version %d):\n\n%s", doc.Title, doc.ContentVersion, doc.Content), nil
 	}
-	return fmt.Sprintf("Your brief is the Lazybox artifact “%s” (id %s, version %d): read it with `lazybox artifact get %s` before you start, and keep it current with `lazybox artifact put … --id %s` if the plan changes.", r.ArtifactTitle, r.Artifact, r.ArtifactVersion, r.Artifact, r.Artifact), nil
+	return fmt.Sprintf("Your brief is the Lazybox artifact “%s” (id %s, version %d): read it with `lazybox artifact get %s --version %d` before you start, and keep it current with `lazybox artifact put … --id %s` if the plan changes.", r.ArtifactTitle, r.Artifact, r.ArtifactVersion, r.Artifact, r.ArtifactVersion, r.Artifact), nil
 }
 
 // WaitConversationStart waits, at most timeout, for the person's answer. An
@@ -716,13 +716,13 @@ func (b *Bench) startPeer(ctx context.Context, r ConversationStart) (*Execution,
 	return e, nil
 }
 
-// copyArtifact puts the brief artifact's latest version in another workspace.
+// copyArtifact puts the brief artifact's approved version in another workspace.
 func (b *Bench) copyArtifact(r ConversationStart, workspace string) (artifacts.Document, error) {
-	doc, err := b.Artifacts.Get(r.Workspace, r.Artifact, 0)
+	doc, err := b.Artifacts.Get(r.Workspace, r.Artifact, r.ArtifactVersion)
 	if err != nil {
 		return artifacts.Document{}, err
 	}
-	return b.Artifacts.Put(workspace, artifacts.Put{Title: doc.Title, Kind: doc.Kind, Content: doc.Content,
+	return b.Artifacts.Put(workspace, artifacts.Put{Title: doc.Title, Kind: doc.Kind, Format: doc.Format, Content: doc.Content,
 		Author: artifacts.Author{Kind: "agent", SessionID: r.Session}, Source: artifacts.Source{Kind: "agent", SessionID: r.Session, ConversationID: r.Conversation}})
 }
 

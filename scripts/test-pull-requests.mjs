@@ -48,7 +48,8 @@ try {
   await server.listen();
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({headless: true});
-  const page = await browser.newPage({viewport: {width: 1500, height: 950}});
+  const desktop = await browser.newContext({viewport: {width: 1500, height: 950}});
+  const page = await desktop.newPage();
   page.setDefaultTimeout(10_000);
   const errors = []; page.on('pageerror', e => errors.push(String(e)));
   await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
@@ -157,28 +158,63 @@ try {
   // 5. The Inbox (the page's Agents panel, or its dialog where the page has none): a row per
   // pull request that needs the person, with its reaction.
   const inboxButton = page.locator('.inbox-action');
+  await page.reload();
+  await expect(inboxButton).toHaveAccessibleName(/1 pull request/);
+  await inboxButton.click();
+  const prior = page.locator('.pr-inbox-item', {hasText: 'acme/api#812'});
+  await expect(prior.getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
+  assert.equal(sent('SendPullRequestFailures').length, 1);
+  f.tracked.links[0].item.pullRequest.failingChecks[0].url = 'https://github.com/acme/api/actions/runs/42/job/lint';
+  await page.reload();
   await expect(inboxButton).toHaveAccessibleName(/2 pull requests need you/);
   await inboxButton.click();
   const pullRows = page.locator('.group-pulls .pr-inbox-item');
   await expect(pullRows).toHaveCount(2);
   await expect(pullRows.first()).toContainText('acme/api#812 checks failed · lint, unit-api (2 of 14)');
-  await expect(pullRows.first().getByRole('link', {name: 'Open checks'})).toHaveAttribute('href', 'https://github.com/acme/api/actions/runs/41/job/lint');
+  await expect(pullRows.first().getByRole('link', {name: 'Open checks'})).toHaveAttribute('href', 'https://github.com/acme/api/actions/runs/42/job/lint');
+  const sibling = await page.context().newPage();
+  await sibling.goto(page.url().split('#')[0] + '#token=' + f.token);
+  await sibling.locator('.inbox-action').click();
+  const siblingFailure = sibling.locator('.pr-inbox-item', {hasText: 'acme/api#812'});
+  const siblingSend = siblingFailure.getByRole('button', {name: 'Send the failures to Claude'});
+  await expect(siblingSend).toBeEnabled();
+  let releaseSend;
+  const release = new Promise(resolve => { releaseSend = resolve; });
+  await page.route('**/SendPullRequestFailures', async route => { await release; await route.fetch(); await route.abort(); });
   await page.screenshot({path: '.cache/pull-requests-inbox.png'});
   await pullRows.first().getByRole('button', {name: 'Send the failures to Claude'}).click();
+  try { await expect(siblingSend).toBeDisabled(); } finally { releaseSend(); }
   await expect.poll(() => sent('SendPullRequestFailures').length).toBe(2);
+  await expect(siblingSend).toBeEnabled();
+  await siblingSend.click();
+  await expect(siblingFailure).toContainText('Auto-dismiss in');
+  assert.equal(f.tracked.sent.filter(item => item.method === 'SendPullRequestFailures').length, 2, 'a lost acknowledgement recovers the original dispatch');
+  await expect(siblingSend).toHaveCount(0);
+  await sibling.close();
   await expect(pullRows.first().locator('.pr-inbox-note')).toContainText('Sent 2 failing checks');
-  await pullRows.nth(1).getByRole('button', {name: 'Address the review'}).click();
-  await expect.poll(() => sent('ImportPullRequestReview').length).toBe(1);
-  f.tracked.externalReviewOnly = true;
+  await expect(pullRows.first().getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
+  await expect(pullRows.first()).toContainText(/Auto-dismiss in \d+s/);
   const reviewRow = pullRows.nth(1);
+  f.tracked.refusal = 'Review unavailable';
+  await reviewRow.getByRole('button', {name: 'Address the review'}).click();
+  await expect(reviewRow.getByRole('alert')).toContainText('Review unavailable');
+  await expect(reviewRow.getByRole('button', {name: 'Address the review'})).toBeEnabled();
+  await page.reload();
+  await inboxButton.click();
+  await expect(reviewRow.getByRole('alert')).toContainText('Review unavailable');
+  await expect(pullRows.first()).toContainText('Auto-dismiss in');
+  await expect(pullRows.first().getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
+  f.tracked.refusal = '';
+  f.tracked.externalReviewOnly = true;
   await reviewRow.getByRole('button', {name: 'Address the review'}).click();
   await expect(reviewRow.getByRole('status')).toContainText('No new review feedback was sent.');
   await expect(reviewRow.getByRole('link', {name: 'Open review'})).toHaveAttribute('href', 'https://github.com/acme/api/pull/77/files');
   await reviewRow.screenshot({path: '.cache/pull-requests-external-review.png'});
-  assert.equal(f.tracked.sent.filter(item => item.method === 'ImportPullRequestReview').length, 1);
+  assert.equal(f.tracked.sent.filter(item => item.method === 'ImportPullRequestReview').length, 0);
   f.tracked.externalReviewOnly = false;
   await pullRows.nth(1).getByRole('button', {name: /Dismiss acme\/api#77/}).click();
   await expect(pullRows).toHaveCount(1);
+  await expect(pullRows).toHaveCount(0, {timeout: 12_000});
   await page.keyboard.press('Escape');
 
   // 6. The phone: the same rows, thumb-sized, with Undo before a send.
@@ -198,8 +234,13 @@ try {
   await phone.screenshot({path: '.cache/pull-requests-phone.png'});
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'no sideways scrolling on a phone');
   await phoneRows.first().getByRole('button', {name: 'Send the failures to Claude'}).click();
-  await expect.poll(() => sent('SendPullRequestFailures').length, {timeout: 15_000}).toBe(3);
+  await expect.poll(() => sent('SendPullRequestFailures').length, {timeout: 15_000}).toBe(4);
+  assert.equal(f.tracked.sent.filter(item => item.method === 'SendPullRequestFailures').length, 2, 'the phone recovers the desktop delivery receipt');
+  await expect(phoneRows.first().getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);
+  await expect(phoneRows.first()).toContainText('Auto-dismiss in');
 
+  await phoneRows.nth(1).getByRole('button', {name: 'Address the review'}).click();
+  await expect.poll(() => f.tracked.sent.filter(item => item.method === 'ImportPullRequestReview').length, {timeout: 15_000}).toBe(1);
   assert.deepEqual(errors, []);
   console.log('PASS: header pills, sidebar badge, Pull requests panel and keys with confirmations, the chip in the conversation, Inbox reactions, phone rows.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

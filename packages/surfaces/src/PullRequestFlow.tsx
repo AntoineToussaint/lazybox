@@ -32,7 +32,7 @@ const openWithFocus = (dialog: HTMLDialogElement | null) => {
  * workspace's most recent open coding conversation. */
 export function useWorkConversation(workspaceId: string, sessionId: string) {
   const { api } = useRunner();
-  const [conversation, setConversation] = useState<Session>();
+  const [loaded, setLoaded] = useState<{ api: typeof api; workspaceId: string; sessionId: string; conversation?: Session }>();
   useEffect(() => {
     const control = new AbortController();
     const load = async () => {
@@ -45,10 +45,10 @@ export function useWorkConversation(workspaceId: string, sessionId: string) {
       const coding = history.sessions.filter(session => !session.purpose || session.purpose === 'coding');
       return coding.find(session => !session.closed) || coding[0];
     };
-    void load().then(value => { if (!control.signal.aborted) setConversation(value); }, () => { if (!control.signal.aborted) setConversation(undefined); });
+    void load().then(value => { if (!control.signal.aborted) setLoaded({ api, workspaceId, sessionId, conversation: value }); }, () => { if (!control.signal.aborted) setLoaded(undefined); });
     return () => control.abort();
   }, [api, workspaceId, sessionId]);
-  return conversation;
+  return loaded?.api === api && loaded.workspaceId === workspaceId && loaded.sessionId === sessionId ? loaded.conversation : undefined;
 }
 
 const conversationName = (session?: Session) => session ? `“${nameOf(session, 'this conversation')}”` : '';

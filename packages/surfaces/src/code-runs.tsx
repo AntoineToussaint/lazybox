@@ -163,14 +163,14 @@ export class CodeRuns {
   // ---- What a block shows -----------------------------------------------------
 
   /** A block's view as a string that changes only when what it shows does, for `useSyncExternalStore`. */
-  signature(messageId: string, script: string): string {
-    const key = messageId + '\0' + script, cached = this.views.get(key);
+  signature(messageId: string, script: string, where?: string): string {
+    const key = JSON.stringify([messageId, script, where]), cached = this.views.get(key);
     if (cached?.revision === this.revision) return cached.signature;
-    const signature = JSON.stringify(this.view(messageId, script));
+    const signature = JSON.stringify(this.view(messageId, script, where));
     this.views.set(key, { revision: this.revision, signature });
     return signature;
   }
-  view(messageId: string, script: string): RunView {
+  view(messageId: string, script: string, where?: string): RunView {
     const confirming = this.confirm?.messageId === messageId && this.confirm.script === script;
     const local = this.memory.agent.filter(run => run.messageId === messageId && run.script === script).at(-1);
     const derived = agentRun(this.messages, messageId, script);
@@ -179,7 +179,7 @@ export class CodeRuns {
     if (local?.queued && !derived?.outcome) agent = { state: 'queued', start };
     else if (derived?.outcome) agent = { state: derived.outcome.state, exitCode: derived.outcome.exitCode, start, ...(derived.outcome.port ? { port: derived.outcome.port } : {}) };
     else if (derived || local) agent = { state: 'sent', start };
-    const terminal = this.terminalView(messageId, script);
+    const terminal = this.terminalView(messageId, script, where);
     return { agent, self: this.selfView(messageId, script), ...(terminal ? { terminal } : {}), confirming };
   }
   private selfView(messageId: string, script: string): SelfRunView | undefined {
@@ -268,9 +268,9 @@ export class CodeRuns {
     return placeFor(target, registeredHomes);
   }
 
-  runLastTerminal(messageId: string, script: string) {
+  runLastTerminal(messageId: string, script: string, offset: number) {
     const message = this.messages.find(value => value.id === messageId);
-    const target = explicitHomeTarget(message?.text || '', script);
+    const target = explicitHomeTarget(message?.text || '', script, offset);
     return this.runIn(messageId, script, this.runPlace(target), 'run', !!target);
   }
 
@@ -294,7 +294,7 @@ export class CodeRuns {
     const repositories = this.homeRepositories();
     return homeOffers(last.text).map(offer => ({
       offer, place: offer.explicit ? this.runPlace(offer.target) : placeFor(offer.target, repositories, offer.hint),
-    })).filter(entry => entry.place.kind !== 'unknown');
+    }));
   }
   homeSignature(messageId: string): string { return JSON.stringify(this.homeOffers(messageId)); }
   /** Where a block or command can run outside the workspace: each repository's home that exists, then the home folder. */
@@ -341,7 +341,7 @@ export class CodeRuns {
       typed = inHome(script).command;
     }
     const record: TerminalRecord = { messageId, script, typed, where: this.placeName(place), state: 'starting' };
-    this.memory.terminal = [...this.memory.terminal.filter(run => run.messageId !== messageId || run.script !== script), record];
+    this.memory.terminal = [...this.memory.terminal.filter(run => run.messageId !== messageId || run.script !== script || run.where !== record.where), record];
     this.emit();
     const opened = await openHomeShell(this.api, workspace, shell, typed, {
       mode: reviewTerminalCommand(typed) ? 'paste' : mode,
@@ -358,13 +358,13 @@ export class CodeRuns {
     });
     if (opened.error) { this.memory.terminal = this.memory.terminal.filter(run => run !== record); this.emit(); }
   }
-  private terminalView(messageId: string, script: string): TerminalRunView | undefined {
-    const run = this.memory.terminal.find(entry => entry.messageId === messageId && entry.script === script);
+  private terminalView(messageId: string, script: string, where?: string): TerminalRunView | undefined {
+    const run = this.memory.terminal.findLast(entry => entry.messageId === messageId && entry.script === script && (!where || where === entry.where));
     return run && { where: run.where, state: run.state, ...(run.exitCode !== undefined ? { exitCode: run.exitCode } : {}), ...(run.told ? { told: true } : {}), ...(run.reporting ? { reporting: true } : {}) };
   }
   /** "Tell Claude it's done": the command and how it ended, sent to the conversation (queued behind a turn), so the agent goes on. */
-  async tellDone(messageId: string, script: string) {
-    const run = this.memory.terminal.find(entry => entry.messageId === messageId && entry.script === script);
+  async tellDone(messageId: string, script: string, where?: string) {
+    const run = this.memory.terminal.findLast(entry => entry.messageId === messageId && entry.script === script && (!where || where === entry.where));
     if (run) await this.reportTerminalRun(run);
   }
   private async reportTerminalRun(run: TerminalRecord) {
@@ -410,9 +410,9 @@ export class CodeRuns {
       showMenuNotice(busy ? (server ? 'Queued — starts after the current turn' : 'Queued — runs after the current turn') : `Sent to ${this.agentName}`);
     } catch (error) { showMenuNotice(`Could not send: ${String(error instanceof Error ? error.message : error)}`); }
   }
-  openConfirm(messageId: string, script: string, inline = false) {
+  openConfirm(messageId: string, script: string, inline = false, offset?: number) {
     const message = this.messages.find(value => value.id === messageId);
-    if (needsTerminal(script) || explicitHomeTarget(message?.text || '', script)) {
+    if (needsTerminal(script) || explicitHomeTarget(message?.text || '', script, offset)) {
       showMenuNotice('Use the terminal button for this command');
       return;
     }
@@ -553,8 +553,8 @@ function runItems(host: CodeRuns, messageId: string, script: string, { inline, l
   ];
 }
 /** Items to run an inline command: in its right-click menu. */
-export function inlineRunItems(host: CodeRuns, messageId: string, command: string, text: string): MenuItem[] {
-  return runItems(host, messageId, command, { inline: true, target: explicitHomeTarget(text, command) });
+export function inlineRunItems(host: CodeRuns, messageId: string, command: string, text: string, offset?: number): MenuItem[] {
+  return runItems(host, messageId, command, { inline: true, target: explicitHomeTarget(text, command, offset) });
 }
 const clip = (text: string) => text.length > 48 ? text.slice(0, 47) + '…' : text;
 /** Types the command at the prompt without Return: to edit it before it runs. */
@@ -569,7 +569,7 @@ const NEEDS_TERMINAL = 'It signs in or asks for input: only a real terminal can 
  * A code block's run controls. Undefined unless the block is a shell block
  * in an agent's message of a conversation that can run things.
  */
-export function useRunnableBlock(text: string, language: string, runnable: boolean): undefined | {
+export function useRunnableBlock(text: string, language: string, runnable: boolean, offset?: number): undefined | {
   script: string;
   header: ReactNode;
   footer: ReactNode;
@@ -585,7 +585,7 @@ export function useRunnableBlock(text: string, language: string, runnable: boole
   const view = JSON.parse(signature) as RunView;
   const terminalOnly = needsTerminal(script);
   // Run is the person's: a shell of the Terminal panel runs it (or holds it at the prompt for review), never a message to the agent.
-  const target = explicitHomeTarget(scope?.text || '', script);
+  const target = explicitHomeTarget(scope?.text || '', script, offset);
   const place = host.runPlace(target);
   const typed = place.kind === 'repository' ? inHome(script).command : script;
   const review = reviewTerminalCommand(typed);
@@ -637,24 +637,26 @@ function HomeRuns({ host, messageId }: { host: CodeRuns; messageId: string }) {
   const offers = JSON.parse(signature) as { offer: HomeOffer; place: HomePlace }[];
   if (!offers.length) return null;
   return <div className="home-runs" role="group" aria-label="Commands for you to run">
-    {offers.map(({ offer, place }) => <HomeRun key={offer.command} host={host} messageId={messageId} offer={offer} place={place}/>)}
+    {offers.map(({ offer, place }) => <HomeRun key={JSON.stringify([offer.target, offer.command])} host={host} messageId={messageId} offer={offer} place={place}/>)}
   </div>;
 }
 function HomeRun({ host, messageId, offer, place }: { host: CodeRuns; messageId: string; offer: HomeOffer; place: HomePlace }) {
-  const view = JSON.parse(useSyncExternalStore(host.subscribe, () => host.signature(messageId, offer.command))) as RunView;
+  const view = JSON.parse(useSyncExternalStore(host.subscribe, () => host.signature(messageId, offer.command, host.placeName(place)))) as RunView;
   const setup = place.kind === 'repository' && !place.repository.home;
   const name = place.kind === 'repository' ? place.repository.name : '';
-  const label = setup ? `Create ${name} home and run` : placeLabel(place);
+  const unavailable = place.kind === 'unknown' ? `No checkout for ${place.name} is available on this Runner` : '';
+  const label = unavailable || (setup ? `Create ${name} home and run` : placeLabel(place));
   const others = (): MenuItem[] => [
-    { label: PASTE_LABEL, icon: 'paste', run: () => void host.runIn(messageId, offer.command, place, 'paste') },
+    { label: PASTE_LABEL, icon: 'paste', disabled: unavailable || undefined, run: () => void host.runIn(messageId, offer.command, place, 'paste') },
     ...host.homePlaces().filter(other => placeLabel(other) !== placeLabel(place)).map(other => ({ label: placeLabel(other), icon: 'home', run: () => void host.runIn(messageId, offer.command, other) })),
-    { label: 'Open in Terminal (your app)', icon: 'external', run: () => void host.openOwnTerminal(offer.command, place) },
+    { label: 'Open in Terminal (your app)', icon: 'external', disabled: unavailable || undefined, run: () => void host.openOwnTerminal(offer.command, place) },
     { label: 'Copy command', icon: 'copy', run: () => void copyText(place.kind === 'repository' ? inHome(offer.command).command : offer.command, 'Copied the command') },
   ];
   return <span className="home-run-row">
     <span className="home-run-split" role="group" aria-label={`${label}: ${offer.command}`}>
       <button type="button" className={'home-run' + (setup ? ' is-setup' : '')}
-        title={setup ? `Clone ${name}’s home checkout (your own copy, outside the workspace), then ${runsAtOnce(offer.command) ? 'run this in a shell there' : 'type this in a shell there for you to review'}` : terminalRunTitle(place.kind === 'repository' ? inHome(offer.command).command : offer.command, host.placeName(place))}
+        disabled={!!unavailable}
+        title={unavailable || (setup ? `Clone ${name}’s home checkout (your own copy, outside the workspace), then ${runsAtOnce(offer.command) ? 'run this in a shell there' : 'type this in a shell there for you to review'}` : terminalRunTitle(place.kind === 'repository' ? inHome(offer.command).command : offer.command, host.placeName(place)))}
         onClick={() => void host.runIn(messageId, offer.command, place, 'run', true)}>
         <Icon name="home" size={12}/><span>{label}</span><code>{offer.command.split('\n')[0]}{offer.command.includes('\n') ? ' …' : ''}</code>
       </button>
@@ -678,7 +680,7 @@ function TerminalStatus({ host, messageId, script, run }: { host: CodeRuns; mess
     <span className={`code-run-chip tone-${tone}`} role="status">{!finished ? <span className="code-run-dot" aria-hidden/> : <Icon name="terminal" size={10}/>}{terminalText[run.state](run)}</span>
     {run.told ? <span className="code-run-chip" role="status"><Icon name="send" size={10}/>Told {host.agentName}</span>
       : run.reporting ? <span className="code-run-chip" role="status">Reporting to {host.agentName}…</span>
-      : finished && <button type="button" className="code-run-link" title={`Sends “${doneMessage(script, run.exitCode).split('\n')[0]}” to ${host.agentName}`} onClick={() => void host.tellDone(messageId, script)}><Icon name="send" size={10}/>Tell {host.agentName} it’s done</button>}
+      : finished && <button type="button" className="code-run-link" title={`Sends “${doneMessage(script, run.exitCode).split('\n')[0]}” to ${host.agentName}`} onClick={() => void host.tellDone(messageId, script, run.where)}><Icon name="send" size={10}/>Tell {host.agentName} it’s done</button>}
   </span>;
 }
 function InlineRun({ host, messageId, script }: { host: CodeRuns; messageId: string; script: string }) {

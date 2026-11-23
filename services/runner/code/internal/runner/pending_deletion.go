@@ -20,7 +20,7 @@ const deletionGrace = 5 * time.Minute
 
 type PendingDeletion struct {
 	ID, WorkspaceID, SessionID, ConversationID, Title string
-	Discard, Stop                                     bool
+	Discard, Stop, KeepArtifacts                      bool
 	Expires                                           time.Time
 	Failure                                           string
 }
@@ -144,6 +144,9 @@ func (b *Bench) ScheduleDeletion(ctx context.Context, entry PendingDeletion) (Pe
 	defer s.mu.Unlock()
 	old, exists := s.entries[entry.ID]
 	if exists && old.Failure == "" {
+		if entry.SessionID == "" && old.KeepArtifacts != entry.KeepArtifacts {
+			return entry, errors.New("workspace deletion is already scheduled with a different artifact choice; undo it before changing the choice")
+		}
 		return old, nil
 	}
 	entry.Expires = time.Now().Add(deletionGrace)
@@ -212,7 +215,7 @@ func (b *Bench) finishPendingDeletions(ctx context.Context, now time.Time) {
 				b.ReviewerEndedByHand(reviewing, reviews.EndedDeleted)
 			}
 		} else {
-			_, err = b.DeleteWorkspace(ctx, entry.WorkspaceID, entry.Title, entry.Discard, entry.Stop)
+			_, err = b.DeleteWorkspace(ctx, entry.WorkspaceID, entry.Title, entry.Discard, entry.Stop, entry.KeepArtifacts)
 			if err == nil && b.Reviews != nil {
 				err = b.Reviews.Forget(entry.WorkspaceID)
 			}

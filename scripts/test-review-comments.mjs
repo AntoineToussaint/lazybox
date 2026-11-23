@@ -116,6 +116,9 @@ try{
  await expect(box).toHaveValue(/### 2\. api\/src\/handler\.go — removed line 3 \(in the version before the change\)/);
  await expect(changes).toContainText('Review it and send');
  assert.equal(fixture.mutations.filter(m=>m.method==='Apply').length,applies,'the review must not be sent on the person\'s behalf');
+ assert.ok(!reviewWrites().some(m=>m.method==='SetReviewDisposition'&&m.body.disposition==='sent'));
+ await box.press('Enter');
+ await expect.poll(()=>reviewWrites().some(m=>m.method==='SetReviewDisposition'&&m.body.disposition==='sent')).toBe(true);
  const sent=reviewWrites().find(m=>m.method==='SetReviewDisposition').body;assert.equal(sent.disposition,'sent');assert.equal(sent.sessionId,'alpha-session');assert.equal(sent.ids.length,2);
  await expect(tray).toContainText('2 sent');await expect(tray).toContainText('Nothing pending');
  await expect(thread).toContainText('Sent to “Harden the handler”');

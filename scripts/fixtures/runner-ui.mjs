@@ -42,6 +42,8 @@ export async function startRunnerFixture() {
   // A restarted Runner has a new bearer, and a launcher restart a new port: both change.
   let token = randomUUID(), url = '';
   const calls = [], mutations = [], pins = [];
+  const receipts = new Map(), runnerId = randomUUID();
+  const observation = pr => createHash('sha256').update(JSON.stringify(pr)).digest('hex');
   // Tracked pull requests (ListLinks): links the test sets, the reactions sent.
   const tracked = { links: [], events: [], trackingError: '', refusal: '', externalReviewOnly: false, requests: [], sent: [] };
   const workspaceFiles=new Map();
@@ -79,7 +81,7 @@ export async function startRunnerFixture() {
   const collections = ['alpha', 'beta'].map((id, index) => ({ id, name: index ? 'Beta release' : 'Alpha feature', workId: id, root: `/fixture/collections/${id}`, state: 'ready', ownerExecutionId: `${id}-session`, members: ['api', 'web'].map((name, i) => ({ spec: { name, repositoryId: i ? 'frontend' : 'backend', baseRef: 'main', branch: `lazybox/${id}/${name}` }, path: `/fixture/collections/${id}/${name}`, baseCommit: (index ? 'b' : 'a').repeat(40), ready: true })) }));
   const pendingDeletions = new Map();
   const visibleSessions = () => sessions.filter(s => !pendingDeletions.has(`conversation:${s.id}`));
-  const visibleCollections = () => arranged().filter(c => !pendingDeletions.has(`workspace:${c.id}`));
+  const visibleCollections = (includeRetained = false) => arranged().filter(c => (c.state !== 'deleted' || (includeRetained && c.keepArtifacts)) && !pendingDeletions.has(`workspace:${c.id}`));
   const arrangement = [];
   const arranged = () => { if (!arrangement.length) return collections; const at = new Map(arrangement.map((id, i) => [id, i])); return [...collections.filter(c => !at.has(c.id)).reverse(), ...collections.filter(c => at.has(c.id)).sort((a, b) => at.get(a.id) - at.get(b.id))]; };
   const sessions = collections.map(collection => ({ id: `${collection.id}-session`, collectionId: collection.id, workId: collection.id, profileId: 'claude-default', gatewayId: 'direct', workingDirectory: collection.root, capabilities: { files: true, images: true, resume: true, livePermission: true }, permission: 'ask', instructionsPending: collection.id === 'alpha', pending: [] }));
@@ -616,6 +618,8 @@ actions:
       }
       case 'StartReview': {
         mutations.push({method,body});
+        const request = body.requestKey && JSON.stringify([method,body.collectionId,body.sourceSessionId,body.requestKey]);
+        if (request && receipts.has(request)) return json(receipts.get(request));
         const collection=collections.find(c=>c.id===body.collectionId);if(!collection)return error('not_found','Workspace missing');
         const source=sessions.find(s=>s.id===body.sourceSessionId);if(!source||source.collectionId!==collection.id)return error('failed_precondition','that conversation works in another workspace');
         if(reviewOf(collection.id).runs.some(run=>run.reviewerSessionId===source.id))return error('failed_precondition','this conversation is itself a review; review the conversation it reviews instead');
@@ -646,7 +650,9 @@ actions:
         // The brief is the reviewer's first message, journaled as the Runner does.
         openEvents(reviewer.id).push({type:'operation_accepted',text:reviewBriefs.get(reviewer.id),operationId:'review-brief-'+run.id,providerDataJson:originData({kind:'review_brief',summary:`Asked ${label} to review ${run.sourceLabel}'s work`,detail:scopeLabel})});
         reviewEvent('review_started',collection.id,run);
-        return json({run:wireRun(collection.id,run),session:reviewer});
+        const receipt = {run:wireRun(collection.id,run),session:reviewer};
+        if (request) receipts.set(request, receipt);
+        return json(receipt);
       }
       case 'SaveRunnerSettings': {
         if(body.revision!==runnerSettings.revision)return error('aborted','Settings changed');
@@ -713,7 +719,7 @@ actions:
         if (body.refresh) availability.refreshes++;
         return json(availabilityReport(body.checkUpdates));
       }
-      case 'Info': return json({ restartAvailable: runner.restartAvailable, instanceId: runner.instanceId, profiles, pendingEnrollments: [...enrollments.values()].filter(flow => flow.state === 'awaiting_login').map(({ id, state, provider, label, profileId }) => ({ id, state, provider, label, profileId })), sessions: visibleSessions(), attachmentLimits: { maxFiles: 4, maxFileBytes: '20971520', maxMessageBytes: '20971520' } });
+      case 'Info': return json({ runnerId, restartAvailable: runner.restartAvailable, instanceId: runner.instanceId, profiles, pendingEnrollments: [...enrollments.values()].filter(flow => flow.state === 'awaiting_login').map(({ id, state, provider, label, profileId }) => ({ id, state, provider, label, profileId })), sessions: visibleSessions(), attachmentLimits: { maxFiles: 4, maxFileBytes: '20971520', maxMessageBytes: '20971520' } });
       case 'AddSubscription': {
         mutations.push({ method, body });
         const id = `enrollment-${body.requestKey}`;
@@ -740,7 +746,7 @@ actions:
         return json(profile);
       }
       case 'RefreshSubscription': { const profile = profiles.find(p => p.id === body.profileId); if (!profile) return error('not_found', 'Unknown profile'); if (profile.provider === 'claude') profile.availability = {state:'available',plan:'max',windows:[{name:'five_hour',usedPercent:37,durationMinutes:'300',resetAt:String(Math.floor(Date.now()/1000)+3600)}]}; profile.availability ??= { state: 'unknown', windows: [] }; profile.availability.observedAtUnixMillis = String(Date.now()); if (profile.availability.windows?.length) profile.availability.windows[0].usedPercent += 5; return json(profile); }
-      case 'ListCollections': { if (runner.listDelayMs) await new Promise(resolve => setTimeout(resolve, runner.listDelayMs)); return json({ collections: visibleCollections() }); }
+      case 'ListCollections': { if (runner.listDelayMs) await new Promise(resolve => setTimeout(resolve, runner.listDelayMs)); return json({ collections: visibleCollections(body.includeRetainedArtifactWorkspaces) }); }
       // The person's order, as the Runner keeps it (collections/arrangement.go): new ones first, then the kept order.
       case 'ArrangeWorkspaces': { if (runner.arrangeError) return error('unavailable', runner.arrangeError); mutations.push({method,body}); arrangement.splice(0, arrangement.length, ...new Set((body.collectionIds || []).filter(id => collections.some(c => c.id === id)))); return json({ collections: visibleCollections() }); }
       case 'GetCollection': { const collection = collections.find(c => c.id === body.collectionId); return collection ? json({ collection }) : error('not_found', 'Workspace missing'); }
@@ -877,7 +883,7 @@ actions:
       case 'GetSession': { const session = sessions.find(value => value.id === body.sessionId); if (session && frozenSessions.has(session.id)) return json({ session: frozenSessions.get(session.id) }); return session ? json({ session }) : error('not_found', 'Fixture session not found'); }
       case 'ListCommands': { const workspace = sessions.find(value => value.id === body.sessionId)?.collectionId; return json({ commands: commands.filter(value => value.sessionId === body.sessionId || (!value.sessionId && value.collectionId && value.collectionId === workspace)).map(listedCommand) }); }
       case 'ClaimCommandShare': { const command = commands.find(value => value.id === body.commandId); if (!command) return error('not_found', 'Command missing'); const claimed = !!command.shareWith && command.done && !claimedShares.has(command.id); if (claimed) claimedShares.add(command.id); return json({ claimed, status: wireCommand(command) }); }
-      case 'PreviewWorkspaceDeletion': if(collections.find(c=>c.id===body.collectionId)?.ownershipUncertain)return json({activeSessionIds:[],dirtyRepositories:[],filesOutsideRepositories:false,blocked:'Previous process ownership is unconfirmed; reconcile the workspace before deleting it.'});return json({activeSessionIds:sessions.filter(s=>s.collectionId===body.collectionId&&!s.closed).map(s=>s.id),dirtyRepositories:['api'],filesOutsideRepositories:false});
+      case 'PreviewWorkspaceDeletion': if(collections.find(c=>c.id===body.collectionId)?.ownershipUncertain)return json({activeSessionIds:[],dirtyRepositories:[],filesOutsideRepositories:false,blocked:'Previous process ownership is unconfirmed; reconcile the workspace before deleting it.'});return json({supportsKeepArtifacts:true,activeSessionIds:sessions.filter(s=>s.collectionId===body.collectionId&&!s.closed).map(s=>s.id),dirtyRepositories:['api'],filesOutsideRepositories:false});
       // Unconfirmed ownership (RESOURCE_OWNERSHIP.md): what a test recorded with
       // `ownership.set(id, {processes, provable})`, checked and settled as the Runner does.
       case 'GetOwnership': case 'ResolveOwnership': {
@@ -1070,12 +1076,15 @@ actions:
         // Like the Runner (runner/items.go): the store's links, never GitHub on the request path.
         tracked.requests.push(body);
         const links=tracked.links.filter(l=>body.all||l.collectionId===body.collectionId);
-        return json({links,events:tracked.events,trackingError:tracked.trackingError,pollSeconds:body.focused?60:300});
+        return json({links:links.map(l => l.item?.pullRequest ? {...l,item:{...l.item,pullRequest:{...l.item.pullRequest,observationId:observation(l.item.pullRequest)}}}:l),events:tracked.events,trackingError:tracked.trackingError,pollSeconds:body.focused?60:300});
       }
       case 'SendPullRequestFailures': case 'ImportPullRequestReview': {
         mutations.push({method,body});
         const l=tracked.links.find(x=>x.collectionId===body.collectionId&&x.item?.ref?.key===body.ref?.key&&x.role!=='mentions');
         if(!l)return error('not_found','this workspace does not deliver that pull request');
+        const request = body.expectedObservation && JSON.stringify([method, body.collectionId, body.sessionId, body.ref.key, body.expectedObservation]);
+        if (request && receipts.has(request)) return json(receipts.get(request));
+        if (request && (body.sessionId !== l.sessionId || body.expectedObservation !== observation(l.item.pullRequest))) return error('failed_precondition','The observation changed');
         if(tracked.refusal)return error('failed_precondition',tracked.refusal);
         if(method==='ImportPullRequestReview'&&tracked.externalReviewOnly)return json({summary:'No new review feedback was sent. Open review to read feedback on GitHub.'});
         const sessionId=body.sessionId||l.sessionId,key=l.item.ref.key,session=sessions.find(x=>x.id===sessionId),queued=!!session?.busy;
@@ -1084,7 +1093,9 @@ actions:
         const text=kind==='pr_checks'?`[Lazybox] Checks failed on ${key}: ${failing.join(', ')}.\n\n### ${failing[0]} — \`go test ./...\` → exit 1\n\n\`\`\`text\n--- FAIL: TestRefundRounding\n\`\`\`\n\nFull log (12 KB): /fixture/output/${sessionId}/pr-${failing[0]}.log`:`[Lazybox] The review of ${key} on GitHub asks for changes.`;
         tracked.sent.push({method,sessionId,text,kind});
         eventStreams.get(sessionId)?.push({type:'operation_accepted',operationId:`${kind}-${tracked.sent.length}`,text,providerDataJson:originData({kind,summary:kind==='pr_checks'?`Checks failed on ${key}`:`Review of ${key} on GitHub`,detail:kind==='pr_checks'?failing.join(', '):'1 comment',copy:l.item.url})});
-        return json({sessionId,queued,summary:kind==='pr_checks'?`Sent ${failing.length} failing ${failing.length===1?'check':'checks'} of #${key.split('#')[1]} to the agent`:`Sent 1 review comment of #${key.split('#')[1]} to the agent`,files:kind==='pr_checks'?[`/fixture/output/${sessionId}/pr-${failing[0]}.log`]:[],notes:[],comments:kind==='pr_review'?1:0});
+        const receipt = {sessionId,queued,summary:kind==='pr_checks'?`Sent ${failing.length} failing ${failing.length===1?'check':'checks'} of #${key.split('#')[1]} to the agent`:`Sent 1 review comment of #${key.split('#')[1]} to the agent`,files:kind==='pr_checks'?[`/fixture/output/${sessionId}/pr-${failing[0]}.log`]:[],notes:[],comments:kind==='pr_review'?1:0};
+        if (request) receipts.set(request, receipt);
+        return json(receipt);
       }
       case 'MergePullRequest': {
         if(body.item?.key){
@@ -1246,7 +1257,7 @@ actions:
             }
           }
           // Steered into the running turn: the receipt says so (engine.DeliverQueued).
-          else ch?.push({type:'receipt',status:'steered',receipt:{operationId,delivery:'acknowledged'}});
+          else ch?.push({type:'receipt',status:how==='delegate'?'delegation_requested':'steered',receipt:{operationId,delivery:'acknowledged'}});
           return json({operationId:body.operationId,delivery:'accepted'});
         }
         // A message sent during a turn waits in the queue, which a test opts into with session.queuedMessages.

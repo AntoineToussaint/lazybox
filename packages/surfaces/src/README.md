@@ -57,6 +57,8 @@ Settings search matches section names and common terms. Search for “less verbo
 
 How much of an agent's tool activity a conversation shows (`tool-lines.ts`, rendered by `ToolLine.tsx`). **Smart**, the default, folds the calls between two pieces of the agent's prose into one summary line named from the mix of calls ("Explored the codebase · 8 commands, 2 files read · 28s", "Ran tests and explored the codebase"), opened in place to one line per call: the agent's own words for a command when it gave them (Claude's Bash `description`), else its short form (`sed …/runtime_access.go`, `npm run test:client`, never the script), with no "exit 0", no duration under a second, and thinking only when it adds up to 10 s. Failures, edits (one compact line, no inline diff), the live plan, questions, approvals and sub-agent cards always stand on their own; while the agent works the step running now shows under its summary. **Quiet** keeps the agent's prose, decisions and edits, and folds a whole turn's calls into one line ("Worked for 2m 10s · 14 steps · 1 failed") on the turn's first run of calls, expandable; the step running now still shows. **Verbose** is every call on its own line, as before. Every mode keeps every call in the journal, the Activity dialog (searchable) and a line's details, and folding mounts fewer rows.
 
+The session header shows the current activity mode. Click it to cycle modes. Each prompt also has a response detail selector. Choose Quiet, Smart, Verbose, or Hide response, then choose Session to follow the conversation again. These turn choices last while the transcript is open. Hover over a prompt for its acceptance time and the last model and context usage reported before acceptance.
+
 The default is in Settings → Chat, with a live preview; a conversation can have its own from its ⋯ menu (and the header's context menu), the palette's "Activity detail: Quiet / Smart / Verbose / Use the default", or `] ] v` to cycle. Choosing the default again drops the conversation's own. Both are app preferences (`readPreference` under the Runner authority, `activity-detail.ts`), changed live in every chat of the window; a desktop window opened earlier reads a new default when it next opens. The palette and keys act on the chat last clicked or focused. `npm run test:activity-detail` drives all of it against the fake Runner.
 
 ## Colours, text sizes and themes
@@ -72,3 +74,17 @@ and the transcript shows the send time on each prompt.
 The **Recent** view in the Agents sidebar orders conversations by their
 latest observed activity with timestamps and the latest status or message.
 The **Priority** view groups conversations by what needs attention.
+
+On a subscription limit card, **Show all subscriptions** opens the latest reported account states grouped by provider, including the current account and reported reset times.
+
+In a running Codex turn, **Allow and enable Full access** accepts the pending command. Subsequent ordinary main-agent command requests use a one-time approval automatically. Codex applies the new sandbox policy when the next turn starts.
+
+Saved snippet text in drafts and sent prompts appears as a named chip. Hover, focus, or tap the chip to read the full text. **Edit prompt** opens the original draft, and **Collapse snippet text** restores the compact view. Matching uses the current snippet catalog; unmatched text stays visible.
+
+After a successful pull request Inbox action, its button gives way to a delivery receipt and a ten-second auto-dismiss countdown. Dismiss closes it immediately. Failed actions remain available to retry.
+
+Prompt Details shows the acceptance time, last provider-reported model and last reported context. Missing measurements are labeled unreported. An inserted review snippet retains its review action in the draft across reload. Pasting the same text creates an ordinary message. The Review tray records selected findings as sent when the Runner acknowledges the message.
+
+For Codex replies with a turn boundary, **Ask a side question…** opens a separate conversation through that turn. The question goes to the child. The dialog identifies whether its files come from a checkpoint or the current workspace.
+
+The Inbox sends a reaction for the displayed observation and destination. Updated Runners store the acknowledgement so another device or a retry can retrieve it. If the Runner stops between dispatch and saving its receipt, it reports the outcome as unknown and prevents an automatic second dispatch. Feedback requiring a person stays in the Inbox until dismissed. Dismissals from older clients without a Runner and observation identity may appear again.

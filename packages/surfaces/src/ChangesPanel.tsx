@@ -64,10 +64,10 @@ export function ChangesPanel({ workspaceId, viewState, sessionId = '', onShowSes
   // Failing checks and review comments go to the message box of a
   // conversation (the one that did the work, unless the person picks another),
   // opened beside this page, for the person to review and send.
-  const sendToAgent = (text: string, to: Session | undefined = conversation) => {
+  const sendToAgent = (text: string, to: Session | undefined = conversation, ids?: string[]) => {
     if (!to) { void navigator.clipboard?.writeText(text).catch(() => {}); setNotice('No conversation in this workspace yet. The failing checks were copied: start one and paste them.'); return; }
     const said = `Added to the message box of “${conversationName(to, 'the conversation')}”. Review it and send.`;
-    composeInConversation({ sessionId: to.id, text });
+    composeInConversation({ sessionId: to.id, text, api, reviews: ids && [{text, ids}] });
     // Opening the chat beside this panel remounts it; the notice survives that.
     notices.set(workspaceId, said); setNotice(said);
     onShowSession?.({ collectionId: workspaceId, sessionId: to.id, commandId: '' });
@@ -268,7 +268,7 @@ export function ChangesPanel({ workspaceId, viewState, sessionId = '', onShowSes
           : <div className="diff-empty"><h3>{loading ? 'Reading changes…' : error ? 'Changes unavailable' : listed.length ? 'Select a file to review' : 'No changes in this comparison'}</h3></div>}
       </div>
       {trayOpen && <Resizer split={SPLITS.changesReview} label="review tray"/>}
-      {trayOpen && <ReviewTray id={`${columnId}-review`} workspaceId={workspaceId} review={review} conversation={conversation} focusReview={focusReview} onJump={jump} onSend={(text, to) => sendToAgent(text, to)} onClose={() => showTray(false)}/>}
+      {trayOpen && <ReviewTray id={`${columnId}-review`} workspaceId={workspaceId} review={review} conversation={conversation} focusReview={focusReview} onJump={jump} onSend={sendToAgent} onClose={() => showTray(false)}/>}
     </div></>}
     {fileLinks.element}
   </section>;

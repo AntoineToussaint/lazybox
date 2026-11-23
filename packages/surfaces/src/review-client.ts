@@ -91,7 +91,7 @@ export function openReviewTab(request: ReviewTabRequest) {
  * in the panel group of the conversation it reviews: the person stays where
  * they are and can watch it.
  */
-export async function startReview(api: RunnerClient, request: Omit<StartReviewRequest, '$typeName' | '$unknown' | 'templateId'> & { templateId?: string }): Promise<{ run?: ReviewRun; session?: Session }> {
+export async function startReview(api: RunnerClient, request: Omit<StartReviewRequest, '$typeName' | '$unknown' | 'templateId' | 'requestKey'> & { templateId?: string; requestKey?: string }): Promise<{ run?: ReviewRun; session?: Session }> {
   const started = await api.startReview(request, { timeoutMs: 60000 });
   refreshWorkspaceReview(request.collectionId);
   if (started.session) openReviewTab({ collectionId: started.session.collectionId || request.collectionId, sessionId: started.session.id, beside: request.sourceSessionId });
@@ -119,7 +119,7 @@ export function useReviewLauncher(workspaceId: string, source?: Pick<Session, 'i
     [info?.profiles, authorProvider, review?.reviewerMode, review?.reviewer, review?.reviewerModel, missing]);
   const unavailable = !workspaceId ? 'Choose a workspace first' : !source ? 'No conversation in this workspace to review yet' : !choices.length ? 'No agent is available to review with' : '';
   /** `focus`: what the reviewer should look at in particular (`/review <focus>`). */
-  const start = async (scope: ReviewScope, choice: ReviewerChoice | undefined = choices[0], focus = '', templateId = '') => {
+  const start = async (scope: ReviewScope, choice: ReviewerChoice | undefined = choices[0], focus = '', templateId = '', requestKey = '') => {
     if (!source || !choice || busy || starting.current) return;
     starting.current = true; setBusy(choice.key); setError('');
     try {
@@ -127,7 +127,7 @@ export function useReviewLauncher(workspaceId: string, source?: Pick<Session, 'i
       // records why another agent stands in; one picked for this run is named.
       const named = !choice.isDefault;
       const started = await startReview(api, { collectionId: workspaceId, sourceSessionId: source.id, scope: scope.scope, compare: scope.scope === 'changes' ? scope.compare || '' : '', turn: scope.scope === 'turn' ? scope.turn : 0, member: scope.scope === 'pr' ? scope.member : '',
-        profileId: named ? choice.profileId : '', provider: named && !choice.profileId ? choice.provider : '', focus: focus.trim(), model: '', templateId });
+        profileId: named ? choice.profileId : '', provider: named && !choice.profileId ? choice.provider : '', focus: focus.trim(), model: '', templateId, requestKey });
       if (started.run?.state === 'failed') setError(started.run.detail);
       return started;
     } catch (e) { setError(errorText(e)); }

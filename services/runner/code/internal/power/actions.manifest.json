@@ -402,11 +402,20 @@
    "keys": ""
   },
   {
+   "id": "layout.arrange-windows",
+   "title": "Arrange desktop windows",
+   "group": "Layout",
+   "scope": "global",
+   "keys": "",
+   "argument": "columns, focus, grid, next-display, save, or restore"
+  },
+  {
    "id": "layout.import",
    "title": "Import a layout…",
    "group": "Layout",
    "scope": "global",
-   "keys": ""
+   "keys": "",
+   "argument": "layout YAML to review"
   },
   {
    "id": "layout.reset",
@@ -988,6 +997,7 @@
     "layout.presets": "",
     "layout.cycle": "Meta+Shift+l",
     "layout.copy": "",
+    "layout.arrange-windows": "",
     "layout.import": "",
     "layout.reset": "",
     "layout.focus-left": "Meta+Alt+ArrowLeft",
@@ -1113,6 +1123,7 @@
     "layout.presets": "",
     "layout.cycle": "Meta+Shift+l",
     "layout.copy": "",
+    "layout.arrange-windows": "",
     "layout.import": "",
     "layout.reset": "",
     "layout.focus-left": "Meta+Alt+ArrowLeft",
@@ -1238,6 +1249,7 @@
     "layout.presets": "",
     "layout.cycle": "Meta+Shift+l",
     "layout.copy": "",
+    "layout.arrange-windows": "",
     "layout.import": "",
     "layout.reset": "",
     "layout.focus-left": "Meta+Alt+ArrowLeft",
@@ -1365,6 +1377,7 @@
     "layout.presets": "",
     "layout.cycle": "Ctrl+Shift+l",
     "layout.copy": "",
+    "layout.arrange-windows": "",
     "layout.import": "",
     "layout.reset": "",
     "layout.focus-left": "Ctrl+Alt+ArrowLeft",
@@ -1490,6 +1503,7 @@
     "layout.presets": "",
     "layout.cycle": "Ctrl+Shift+l",
     "layout.copy": "",
+    "layout.arrange-windows": "",
     "layout.import": "",
     "layout.reset": "",
     "layout.focus-left": "Ctrl+Alt+ArrowLeft",
@@ -1615,6 +1629,7 @@
     "layout.presets": "",
     "layout.cycle": "Ctrl+Shift+l",
     "layout.copy": "",
+    "layout.arrange-windows": "",
     "layout.import": "",
     "layout.reset": "",
     "layout.focus-left": "Ctrl+Alt+ArrowLeft",

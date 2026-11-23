@@ -267,6 +267,18 @@ try {
  assert.ok(!addressedShell.input.join('').includes('\r'),'no Return was sent');
  assert.equal(applies().length,3,'the pasted login did not send a completion report');
 
+ const longCommand = `bash -o pipefail -c 'printf "%s" ${'x'.repeat(300)} | jq "length > 0"'`;
+ push({turnId:'t4',type:'operation_accepted',text:'Check the inventory'});
+ push({turnId:'t4',type:'message_delta',text:'Run in the home checkout of infra-base: `'+longCommand+'`'});
+ const longOffer=chat.locator('.home-run').filter({hasText:longCommand});
+ await expect(longOffer).toContainText('Run in infra-base home');
+ await longOffer.click();
+ await expect.poll(()=>[...fixture.terminals.values()].at(-1).input.join('')).toContain(longCommand+'\r');
+ assert.equal(calls('OpenTerminal').at(-1).body.repositoryHome,'infra');
+ push({turnId:'t5',type:'operation_accepted',text:'Check another repository'});
+ push({turnId:'t5',type:'message_delta',text:'Run in the home checkout of absent-repo: `make inspect`'});
+ await expect(chat.getByRole('button',{name:/No checkout for absent-repo/})).toBeDisabled();
+
  // ── Settings → Repositories lists every home with its state.
  await page.getByRole('button',{name:'Settings',exact:true}).click();
  await page.getByRole('tab',{name:'Repositories',exact:true}).click();

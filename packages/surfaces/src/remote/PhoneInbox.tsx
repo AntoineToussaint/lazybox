@@ -112,7 +112,7 @@ export function PhoneInbox({ device, collections, pins: pinStore, go, onRefresh 
     </header>
     <PullToRefresh onRefresh={onRefresh}>
       <PushNudge onOpenSettings={() => go({ screen: 'settings' })}/>
-      <PullRequestInboxSection collections={collections} phone canRespond={respond} defer={action => actions.schedule(action)} onOpen={target => go(target.sessionId ? { session: target.sessionId } : {})}/>
+      <PullRequestInboxSection collections={collections} phone canRespond={respond} deferredStates={actions.states} defer={action => actions.schedule(action)} onOpen={target => go(target.sessionId ? { session: target.sessionId } : {})}/>
       {!info ? <p className="remote-empty" role="status">Loading conversations…</p>
         : !inbox.rows.length ? <div className="remote-empty"><Icon name="inbox" size={28}/><strong>No conversations yet</strong><p>Agents that need you will show up here.</p></div>
         : <>

@@ -66,9 +66,10 @@ function textWidth(text: string, font: string): number {
  * when it is not the only one, then the numbers as compact chips. What does
  * not fit folds whole into "⋯" — nothing on the line is cut.
  */
-export function ChatHeader({ agentName, session, sessionID, title, status, statusText, statusBusy, modelLabel, realTitle, branch, modelRequested, shownAccount, onOpenChat, menu, onContextMenu, onPickModel, onSwitchSubscription, stats, origin, review }: Omit<HeaderProps, 'inspection'> & {
+export function ChatHeader({ agentName, session, sessionID, title, status, statusText, statusBusy, modelLabel, realTitle, branch, modelRequested, shownAccount, onOpenChat, menu, onContextMenu, onPickModel, onSwitchSubscription, stats, origin, review, detailButton }: Omit<HeaderProps, 'inspection'> & {
   /** Review this conversation's work (ReviewFromChat.tsx): first of the actions; folds into ⋯ in a slim panel. */
   review?: ReactNode;
+  detailButton?: ReactNode;
   /** Where the workspace's work started (an issue), as a chip beside the actions. */
   origin?: ReactNode;
   /** The conversation's actions on a right-click, the same as its ⋯ menu. */
@@ -188,7 +189,7 @@ export function ChatHeader({ agentName, session, sessionID, title, status, statu
       {onOpenChat && <button className="icon-button" aria-label="Open chat window ↗" title="Open in a separate window" onClick={onOpenChat}><Icon name="external"/></button>}
       {menu}
     </div>
-    <div ref={line} className="chat-heading-meta">
+    <div className="chat-heading-detail-row"><div ref={line} className="chat-heading-meta">
       <div className="chat-heading-about">
         <span className="chat-heading-status">{status}</span>
         {onLine(false)}
@@ -199,6 +200,7 @@ export function ChatHeader({ agentName, session, sessionID, title, status, statu
           aria-label={`More details: ${shownFolded.map(id => ITEM_LABEL[id]).join(', ')}`} title={`More: ${shownFolded.map(id => ITEM_LABEL[id].toLowerCase()).join(', ')}`} onClick={placeDetails}><Icon name="more" size={14}/></button>}
       </div>}
     </div>
+    {detailButton}</div>
     {createPortal(stats.artifacts, chips.artifacts)}{createPortal(stats.background, chips.background)}{createPortal(stats.usage, chips.usage)}{createPortal(stats.tools, chips.tools)}
     <div ref={details} id={detailsId} popover="auto" className="chat-details" role="group" aria-label="Conversation details">
       {plan.folded.map(id => <div key={id} className="chat-details-row" data-item={id} data-stat={isStat(id) || undefined}><span className="chat-details-label">{ITEM_LABEL[id]}</span><span className="chat-details-value">{item(id)}</span></div>)}

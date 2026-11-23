@@ -71,6 +71,7 @@ var builtinBriefings = []builtinBriefing{
 		{version: 3, since: "--supersedes", note: "Keep one artifact per topic: merge overlapping ones with `lazybox artifact put <file|-> --title \"…\" --supersedes ID,ID`, or retire one with `lazybox artifact retire ID`; do not leave pointer stubs."},
 		{version: 4, since: "Prefer Mermaid for workflows", note: "Prefer Mermaid for workflows, state transitions and service interactions. Show entry points, decisions and relevant failure paths. Use tables for comparisons and checklists for procedures; link to the source and document assumptions and unverified work."},
 		{version: 5, since: "lazybox artifact template KIND", note: "For structured artifacts start with lazybox artifact template KIND and publish with --kind KIND --format json. Each supported kind has a versioned schema."},
+		{version: 6, since: "Publish typed work records by default", note: "Publish typed work records by default. Start with lazybox artifact template KIND and publish with --kind KIND --format json. Use todo-list for actionable work and the native review workflow for selectable findings. Declare Markdown or HTML explicitly when importing a document."},
 	}},
 	{id: "conversations", text: conversationBriefing, changes: []briefingChange{
 		{version: 1, since: "lazybox conversation new", note: "To start another conversation when the person asks, run `lazybox conversation new --title \"…\" --brief \"…\"` (or `--brief-artifact ID`): the person approves it in one click."},

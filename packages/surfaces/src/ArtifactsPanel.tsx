@@ -70,9 +70,24 @@ export function ArtifactsPanel({ workspaceId, collections, viewState, target, on
   const [actionError, setActionError] = useState('');
   const [elsewhere, setElsewhere] = useState<{ collectionId: string; id: string }>();
   // Every workspace is read when it is asked for, and to say where artifacts are when this workspace has none.
-  const several = collections.filter(c => c.id).length > 1;
-  const wantAll = several && (scope === 'all' || (loaded && !artifacts.length));
-  const everywhere = useArtifactsOf(wantAll ? collections : []);
+  const [retained, setRetained] = useState<Collection[]>([]);
+  useEffect(() => {
+    const control = new AbortController();
+    const read = async () => {
+      try {
+        const result = await api.listCollections({ includeRetainedArtifactWorkspaces: true }, { signal: control.signal, timeoutMs: 10000 });
+        if (!control.signal.aborted) setRetained(result.collections.filter(c => c.state === 'deleted'));
+      } catch (error) { if (!control.signal.aborted) setActionError(errorText(error)); }
+    };
+    setRetained([]);
+    void read();
+    const timer = setInterval(read, 15000);
+    return () => { control.abort(); clearInterval(timer); };
+  }, [api]);
+  const catalog = [...collections, ...retained.filter(c => !collections.some(existing => existing.id === c.id)).map(c => ({ ...c, name: `${c.name} (deleted workspace)` }))];
+  const several = catalog.filter(c => c.id).length > 1 || retained.length > 0;
+  const wantAll = several && (!workspaceId || scope === 'all' || (loaded && !artifacts.length));
+  const everywhere = useArtifactsOf(wantAll ? catalog : []);
   const others = useMemo(() => everywhere.items.filter(item => item.collectionId !== workspaceId), [everywhere.items, workspaceId]);
   const [query, setQuery] = useState('');
   const [menu, setMenu] = useState<ContextMenuState>(), [deleting, setDeleting] = useState<Artifact>();
@@ -91,7 +106,7 @@ export function ArtifactsPanel({ workspaceId, collections, viewState, target, on
   const conversation = useWorkConversation(workspaceId, target.collectionId === workspaceId ? target.sessionId : '');
   const collection = collections.find(value => value.id === workspaceId);
   const q = query.trim().toLowerCase();
-  const all = scope === 'all' && several;
+  const all = (scope === 'all' || !workspaceId) && several;
   const here = useMemo(() => artifacts.filter(a => matches(a, q) && (!fromChat || fromConversation(a, fromChat))), [artifacts, q, fromChat]);
   const hereRetired = useMemo(() => showRetired ? retired.filter(a => matches(a, q) && (!fromChat || fromConversation(a, fromChat))) : [], [showRetired, retired, q, fromChat]);
   const groups = useMemo(() => all ? groupByWorkspace(everywhere.items.filter(item => matches(item.artifact, q))) : [], [all, everywhere.items, q]);
@@ -104,7 +119,7 @@ export function ArtifactsPanel({ workspaceId, collections, viewState, target, on
   // Opening an artifact, or reading it while a new version arrives, is looking at it.
   useEffect(() => { if (current && !other) markSeen(current); }, [current, other, markSeen]);
   useEffect(() => { onCurrentChange?.(currentCollectionId, current?.id || ''); }, [currentCollectionId, current?.id]);
-  if (!workspaceId) return <p className="module-empty">Choose a workspace to see its artifacts.</p>;
+  if (!workspaceId && !retained.length) return <p className="module-empty">Choose a workspace to see its artifacts.</p>;
   const focusRow = (id: string) => requestAnimationFrame(() => list.current?.querySelector<HTMLElement>(`[data-artifact-id="${CSS.escape(id)}"]`)?.focus());
   const navigate = (collectionId: string, id: string, version?: number) => {
     if (collectionId === workspaceId) setSelected(id);

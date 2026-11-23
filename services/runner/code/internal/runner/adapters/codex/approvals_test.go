@@ -180,3 +180,16 @@ func TestPermissionsAllowReachesTheAppServer(t *testing.T) {
 		t.Fatalf("app-server got %q", reply.Text)
 	}
 }
+
+func TestOffersCommandAccept(t *testing.T) {
+	for params, want := range map[string]bool{
+		`{}`: true,
+		`{"availableDecisions":["accept","decline"]}`:                             true,
+		`{"availableDecisions":[]}`:                                               false,
+		`{"availableDecisions":["decline",{"acceptWithExecpolicyAmendment":{}}]}`: false,
+	} {
+		if got := offersCommandAccept(json.RawMessage(params)); got != want {
+			t.Errorf("%s: got %v, want %v", params, got, want)
+		}
+	}
+}

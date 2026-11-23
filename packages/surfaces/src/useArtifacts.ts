@@ -114,13 +114,13 @@ export function useArtifacts(collectionId: string, interval = ARTIFACT_POLL_MS) 
  * The artifacts of several workspaces, newest first, each with its workspace:
  * the palette's "go to any artifact" and the panel's "All workspaces".
  */
-export function useArtifactsOf(collections: readonly { id: string; name: string }[], interval = OTHER_ARTIFACTS_POLL_MS): { items: FoundArtifact[]; loaded: boolean } {
+export function useArtifactsOf(collections: readonly { id: string; name: string; state?: string }[], interval = OTHER_ARTIFACTS_POLL_MS): { items: FoundArtifact[]; loaded: boolean } {
   const { api } = useRunner();
-  const ids = collections.filter(c => c.id).map(c => `${c.id}\u0000${c.name}`).join('\u0001');
-  const shown = useMemo(() => ids ? ids.split('\u0001').map(entry => { const [id, name] = entry.split('\u0000'); return { id, name }; }) : [], [ids]);
+  const ids = collections.filter(c => c.id).map(c => `${c.id}\u0000${c.name}\u0000${c.state || ''}`).join('\u0001');
+  const shown = useMemo(() => ids ? ids.split('\u0001').map(entry => { const [id, name, state] = entry.split('\u0000'); return { id, name, state }; }) : [], [ids]);
   const read = useCallback(() => {
     const snapshots = shown.map(c => ({ ...c, snapshot: entryFor(api, c.id).snapshot }));
-    const items = snapshots.flatMap(c => c.snapshot.artifacts.map(artifact => ({ artifact, collectionId: c.id, workspace: c.name || c.id })))
+    const items = snapshots.flatMap(c => (c.state === 'deleted' ? [...c.snapshot.artifacts, ...c.snapshot.retired] : c.snapshot.artifacts).map(artifact => ({ artifact, collectionId: c.id, workspace: c.name || c.id })))
       .sort((a, b) => Number(b.artifact.updatedAtUnixMillis || 0n) - Number(a.artifact.updatedAtUnixMillis || 0n));
     return { items, loaded: snapshots.every(c => c.snapshot.loaded) };
   }, [api, shown]);

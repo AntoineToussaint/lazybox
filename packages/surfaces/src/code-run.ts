@@ -50,8 +50,8 @@ export function placeholdersIn(script: string): string[] {
 }
 
 /** The fenced shell blocks of a Markdown message, in order: their language and script. */
-export function shellBlocksIn(markdown: string): { language: string; script: string }[] {
-  const out: { language: string; script: string }[] = [];
+export function shellBlocksIn(markdown: string): { language: string; script: string; offset: number }[] {
+  const out: { language: string; script: string; offset: number }[] = [];
   for (const match of markdown.matchAll(/^([ \t]*)(`{3,}|~{3,})[ \t]*([\w-]*)[^\n]*\n([\s\S]*?)\n[ \t]*\2[`~]*[ \t]*$/gm)) {
     const language = match[3].toLowerCase();
     if (!isShellLanguage(language)) continue;
@@ -59,7 +59,7 @@ export function shellBlocksIn(markdown: string): { language: string; script: str
     const indent = match[1].length;
     const body = indent ? match[4].split('\n').map(line => line.replace(new RegExp(`^[ \\t]{0,${indent}}`), '')).join('\n') : match[4];
     const script = shellScript(body, language);
-    if (script) out.push({ language, script });
+    if (script) out.push({ language, script, offset: match.index! });
   }
   return out;
 }

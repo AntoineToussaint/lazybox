@@ -181,9 +181,16 @@ func fixtureAppServer() {
 				decision := string(m.Result.Decision)
 				_ = json.Unmarshal(m.Result.Decision, &decision)
 				send(map[string]any{"method": "item/agentMessage/delta", "params": map[string]any{"threadId": "thread-1", "delta": "decision=" + decision}})
+				if os.Getenv("FIXTURE_SECOND_COMMAND") != "" {
+					send(map[string]any{"id": 44, "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": "thread-1", "turnId": "turn-1", "command": "ls staging-services"}})
+					continue
+				}
 				if os.Getenv("FIXTURE_KEEP_TURN") == "" {
 					send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread-1", "turn": map[string]string{"id": "turn-1", "status": "completed"}}})
 				}
+			}
+			if string(m.ID) == "44" && string(m.Result.Decision) == `"accept"` {
+				send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread-1", "turn": map[string]string{"id": "turn-1", "status": "completed"}}})
 			}
 			if string(m.ID) == "41" {
 				text := ""
@@ -740,5 +747,50 @@ func TestYOLOManagedCommandDoesNotAskForApproval(t *testing.T) {
 				t.Fatal("managed command did not run")
 			}
 		})
+	}
+}
+
+func TestFullAccessStopsNativeCommandPromptsInRunningTurn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := (Adapter{Binary: binary}).Open(ctx, agent.Open{
+		Cwd: t.TempDir(), Permission: "ask",
+		Env: append(os.Environ(), "FIXTURE_NATIVE_APPROVAL=1", "FIXTURE_SECOND_COMMAND=1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Apply(ctx, agent.Operation{ID: "first", Kind: agent.Message, Text: "Inspect staging"}); err != nil {
+		t.Fatal(err)
+	}
+	changed := false
+	for {
+		ev, err := s.Receive(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch ev.Type {
+		case "approval":
+			if changed {
+				t.Fatalf("second native command still asked after enabling Full access: %s", ev.RequestID)
+			}
+			if _, err := s.Apply(ctx, agent.Operation{ID: "permission", Kind: agent.Permission, Permission: "yolo"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Apply(ctx, agent.Operation{ID: "approve", Kind: agent.Approve, RequestID: ev.RequestID, Decision: "accept"}); err != nil {
+				t.Fatal(err)
+			}
+			changed = true
+		case "turn_ended":
+			if !changed {
+				t.Fatal("expected the first command to ask")
+			}
+			return
+		}
 	}
 }

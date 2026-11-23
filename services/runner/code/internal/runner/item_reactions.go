@@ -145,7 +145,20 @@ var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 // compacted by the filter `lazybox run` uses, with the full log saved to a
 // file the agent is pointed at. Checks from another CI are named with their
 // link and summary.
-func (b *Bench) SendPullRequestFailures(ctx context.Context, workspace string, ref workitems.Ref, session string) (Reaction, error) {
+func (b *Bench) SendPullRequestFailures(ctx context.Context, workspace string, ref workitems.Ref, session string, observation ...string) (Reaction, error) {
+	if len(observation) == 0 || observation[0] == "" {
+		return b.sendPullRequestFailures(ctx, workspace, ref, session, "", func() {})
+	}
+	key := observation[0]
+	if len(key) != 64 {
+		return Reaction{}, errors.New("invalid pull request observation")
+	}
+	return onceAction(ctx, b.History, []string{"sendPullRequestFailures", workspace, ref.ID(), session, key}, func(markStarted func()) (Reaction, error) {
+		return b.sendPullRequestFailures(ctx, workspace, ref, session, key, markStarted)
+	})
+}
+
+func (b *Bench) sendPullRequestFailures(ctx context.Context, workspace string, ref workitems.Ref, session, observation string, markStarted func()) (Reaction, error) {
 	link, err := b.DeliveredLink(workspace, ref)
 	if err != nil {
 		return Reaction{}, err
@@ -153,6 +166,9 @@ func (b *Bench) SendPullRequestFailures(ctx context.Context, workspace string, r
 	ctx, cancel := context.WithTimeout(ctx, reactionTimeout)
 	defer cancel()
 	item := b.refreshNow(ctx, ref)
+	if observation != "" && (item.ObservationID() != observation || link.Session != session) {
+		return Reaction{}, errors.New("the pull request or its conversation changed; refresh before sending")
+	}
 	failing := item.PR.Failing()
 	if item.PR == nil || item.RawState != "open" {
 		return Reaction{}, errors.New("this pull request is not open")
@@ -225,6 +241,7 @@ func (b *Bench) SendPullRequestFailures(ctx context.Context, workspace string, r
 	text := intro + "\n\n" + itemtext.QuoteExternal("GitHub pull request", key, pullURL(item.URL, item.Repository, item.Number), checksFraming, quoted) + "\n\nFix the failures, then commit and push: Lazybox watches the checks of the new head."
 	origin := &agent.Origin{Kind: originPRChecks, Summary: fmt.Sprintf("Checks failed on %s#%d", item.Repository, item.Number), Detail: strings.Join(names, ", "), Copy: item.URL}
 	operation := fmt.Sprintf("pr-checks-%s-%d-%s-%d", unsafeName.ReplaceAllString(item.Repository, "-"), item.Number, head, time.Now().UnixMilli())
+	markStarted()
 	if out.Queued, err = b.sendReaction(ctx, target, operation, text, PromptSourcePRChecks, origin); err != nil {
 		return Reaction{}, err
 	}
@@ -312,13 +329,29 @@ func noun(n int, one, many string) string {
 // (marked as GitHub's, imported once), and the review loop's message for
 // them — with the reviews' own summaries — goes to the conversation that
 // delivered the pull request. Replying on GitHub is left to the person.
-func (b *Bench) ImportPullRequestReview(ctx context.Context, workspace string, ref workitems.Ref, session string) (Reaction, error) {
+func (b *Bench) ImportPullRequestReview(ctx context.Context, workspace string, ref workitems.Ref, session string, observation ...string) (Reaction, error) {
+	if len(observation) == 0 || observation[0] == "" {
+		return b.importPullRequestReview(ctx, workspace, ref, session, "", func() {})
+	}
+	key := observation[0]
+	if len(key) != 64 {
+		return Reaction{}, errors.New("invalid pull request observation")
+	}
+	return onceAction(ctx, b.History, []string{"importPullRequestReview", workspace, ref.ID(), session, key}, func(markStarted func()) (Reaction, error) {
+		return b.importPullRequestReview(ctx, workspace, ref, session, key, markStarted)
+	})
+}
+
+func (b *Bench) importPullRequestReview(ctx context.Context, workspace string, ref workitems.Ref, session, observation string, markStarted func()) (Reaction, error) {
 	if b.Reviews == nil || b.Collections == nil {
 		return Reaction{}, errors.New("reviews are not available on this Runner")
 	}
 	link, err := b.DeliveredLink(workspace, ref)
 	if err != nil {
 		return Reaction{}, err
+	}
+	if observation != "" && (link.Session != session || b.refreshNow(ctx, ref).ObservationID() != observation) {
+		return Reaction{}, errors.New("the review or its conversation changed; refresh before sending")
 	}
 	repository, number, ok := workitems.ParseGitHubKey(ref.Key)
 	if !ok {
@@ -402,6 +435,16 @@ func (b *Bench) ImportPullRequestReview(ctx context.Context, workspace string, r
 		}
 		drafts = append(drafts, draft)
 	}
+	if observation != "" {
+		current, err := b.DeliveredLink(workspace, ref)
+		if err != nil {
+			return Reaction{}, err
+		}
+		if current.Session != session || b.refreshNow(ctx, ref).ObservationID() != observation {
+			return Reaction{}, errors.New("the review or its conversation changed while loading feedback; refresh before sending")
+		}
+	}
+	markStarted()
 	added, err := b.Reviews.Import(workspace, drafts)
 	if err != nil {
 		return Reaction{}, err

@@ -24,7 +24,9 @@ it did.
   next in one click (its tooltip names the step it stops), and, for
   Claude and Codex, **Steer**, which hands it to the running turn without
   stopping it: the agent reads it after the step it is on, as when you type
-  into its own terminal mid-turn. An agent that cannot take a message
+  into its own terminal mid-turn. **Send to sub-agent** asks the running agent to
+  delegate that queued message and continue its current task. It appears for
+  your messages when the agent supports both steering and sub-agents. An agent that cannot take a message
   mid-turn (an ACP agent, or a Claude agent an older Lazybox started) has no
   Steer, and the strip says so. After Send
   now the conversation shows one quiet line, *Stopped to send your message*,
@@ -154,7 +156,7 @@ runs and `Esc` closes it and leaves your text. It works in Vim insert mode too.
   command block), `/stop`, `/detail quiet|smart|verbose`, `/rename <title>` and
   `/help`. A command that takes a choice lists it (models, modes) with the
   current one marked. The unfiltered `/model` list puts the current model first
-  and sorts the rest by name. An unavailable suggestion says why and lets Tab move
+  and the provider default next when available, then sorts the rest by name and version number. Each model appears once. Use `/effort` to choose a supported reasoning level for the current model, or type both in one command, such as `/model luna high`. An unavailable suggestion says why and lets Tab move
   focus away. Enter returns to the normal send flow, which asks before sending
   an unsupported command as text. They are in the command
   palette (`⌘K`) as well, where they leave your draft alone; there `/review`
@@ -405,6 +407,8 @@ yet (add one in Settings → Pricing), a provider that reports only a running
 total for the session (Codex without the metered gateway), a fee Lazybox does
 not price — and how many tokens that leaves out.
 
+Select text in a workspace shell beside your chat and click **Send to agent** to append the selection to the conversation draft. You can add a question before sending it.
+
 ## Reuse your prompts and snippets
 
 - **Recall:** `↑` in an empty message box brings back what you sent, newest
@@ -414,7 +418,11 @@ not price — and how many tokens that leaves out.
 - **Snippets** (`]] s`, or the snippet icon in the message box): a searchable
   picker over Lazybox's snippet catalog with a preview of the exact text.
   `Enter` sends it, `Shift+Enter` inserts it into your draft. Recent and
-  favourite snippets come first.
+  favourite snippets come first. Sending the **review** or **deepreview** snippet on
+  its own starts a structured code review with its instructions. Open **Review**
+  on the resulting chat card, select the findings you want, and choose the
+  current conversation or **Fix in new conversation**. Both prepare a draft
+  containing the selected findings for you to send.
 - **Your own leader keys:** Settings → Shortcuts can add `]]` menu entries that
   send or insert a snippet with one key.
 

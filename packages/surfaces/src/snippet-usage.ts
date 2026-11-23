@@ -86,3 +86,8 @@ export function searchSnippets<T extends SearchableSnippet>(rows: readonly T[], 
     return [];
   }).sort((a, b) => a.rank - b.rank).map(match => match.row);
 }
+
+/** Catalog actions whose instructions belong in the structured code-review brief. */
+export function isReviewSnippet(key: string) {
+  return key === 'review' || key === 'deepreview';
+}

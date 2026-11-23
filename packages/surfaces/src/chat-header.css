@@ -41,7 +41,9 @@
 
 /* The second line: how the conversation is going (left), its numbers (right). Fixed height: a chip
    that appears or a count that ticks never moves the transcript. */
-.chat-heading-meta{grid-area:meta;display:flex;align-items:center;gap:12px;min-width:0;height:22px;font-size:calc(11px * var(--text-scale));line-height:calc(16px * var(--text-scale));color:var(--text-muted);white-space:nowrap}
+.chat-heading-detail-row{grid-area:meta;display:flex;align-items:center;gap:4px;min-width:0}
+.chat-heading-detail-row .session-detail-button{flex:none;min-height:20px;padding:0 5px}
+.chat-heading-meta{flex:1;display:flex;align-items:center;gap:12px;min-width:0;height:22px;font-size:calc(11px * var(--text-scale));line-height:calc(16px * var(--text-scale));color:var(--text-muted);white-space:nowrap}
 .chat-heading-about{display:flex;align-items:center;min-width:0;flex:0 1 auto;overflow:hidden}
 .chat-heading-about>*{flex:none;min-width:0}
 .chat-heading-about>*+*::before{content:'·';margin:0 6px;color:var(--text-disabled)}

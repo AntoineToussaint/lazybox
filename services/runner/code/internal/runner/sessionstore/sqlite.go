@@ -60,7 +60,7 @@ func OpenSQLite(path string) (*SQLite, error) {
 		db.Close()
 		return fail(err)
 	}
-	if version > 5 {
+	if version > 6 {
 		db.Close()
 		return fail(errors.New("session database requires a newer Runner"))
 	}
@@ -97,6 +97,13 @@ func OpenSQLite(path string) (*SQLite, error) {
 		// Pins and archive marks belong to the conversation, like its title,
 		// so every window and a paired phone see the same ones.
 		_, err = db.Exec(`BEGIN; ALTER TABLE conversation_metadata ADD COLUMN pinned_at INTEGER NOT NULL DEFAULT 0; ALTER TABLE conversation_metadata ADD COLUMN archived_at INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=5; COMMIT;`)
+		if err != nil {
+			db.Close()
+			return fail(err)
+		}
+	}
+	if version < 6 {
+		_, err = db.Exec(`BEGIN; CREATE TABLE action_receipts (id TEXT PRIMARY KEY, receipt BLOB); PRAGMA user_version=6; COMMIT;`)
 		if err != nil {
 			db.Close()
 			return fail(err)
@@ -346,3 +353,29 @@ func (s *SQLite) Query(ctx context.Context, q Query) ([]Record, error) {
 	return result, rows.Err()
 }
 func (s *SQLite) Close() error { return errors.Join(s.db.Close(), s.lock.Close()) }
+
+// ClaimAction's unique insert fences concurrent calls and survives a Runner restart.
+func (s *SQLite) ClaimAction(ctx context.Context, id string) (bool, []byte, error) {
+	result, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO action_receipts(id) VALUES (?)", id)
+	if err != nil {
+		return false, nil, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows == 1 {
+		return rows == 1, nil, err
+	}
+	var receipt []byte
+	err = s.db.QueryRowContext(ctx, "SELECT receipt FROM action_receipts WHERE id=?", id).Scan(&receipt)
+	return false, receipt, err
+}
+
+func (s *SQLite) FinishAction(ctx context.Context, id string, receipt []byte) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE action_receipts SET receipt=? WHERE id=?", receipt, id)
+	return err
+}
+
+// ReleaseAction permits a retry when validation or preparation failed before dispatch.
+func (s *SQLite) ReleaseAction(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM action_receipts WHERE id=? AND receipt IS NULL", id)
+	return err
+}

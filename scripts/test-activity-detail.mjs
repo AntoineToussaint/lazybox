@@ -17,6 +17,9 @@ const push=(event,seconds=0)=>channel.push({turnId:'t1',...event},at(seconds));
 const tool=(id,fields,seconds=0)=>push({type:'tool_activity',providerDataJson:b64({type:'tool_call',id,...fields})},seconds);
 const said=text=>push({type:'message_delta',text},1);
 
+push({type:'operation_accepted',text:'Earlier question',turnId:'previous'});
+push({type:'message_delta',text:'Earlier answer',turnId:'previous'});
+push({type:'context',providerDataJson:b64({model:'fixture-model',used:250,capacity:1000})});
 push({type:'operation_accepted',text:'Why can’t the owner read their own runtime?'});
 said('I’ll trace how the runtime resolves access.');
 // The run a person saw: thinking, a multi-line shell script, exit 0, 0.1s — eight times.
@@ -44,6 +47,22 @@ try{
  await page.goto(url);
  await mkdir('.cache',{recursive:true});
  const messages=page.locator('.messages:visible').first();
+ await expect(messages.locator('.prompt-sent-time').last()).toHaveAttribute('title',/fixture-model.*250 \/ 1,000 tokens/);
+ const details=messages.locator('.prompt-metadata').last();
+ await details.getByLabel('Prompt details').click();
+ await expect(details.locator('p')).toContainText(/fixture-model.*250 \/ 1,000 tokens/);
+ await details.getByLabel('Prompt details').press('Escape');
+ await expect(details.locator('p')).toBeHidden();
+ const override=messages.getByLabel('Response detail for this prompt').last();
+ await override.selectOption('hidden');
+ await expect(messages.getByText('Earlier answer',{exact:true})).toBeVisible();
+ await expect(messages.getByText('I’ll trace how the runtime resolves access.')).toHaveCount(0);
+ await override.selectOption('verbose');
+ await expect(messages.locator('.tool-lines').first()).toHaveAttribute('data-detail','verbose');
+ await override.selectOption('');
+ const cycle=page.getByTitle('Cycle conversation activity detail').first();
+ await cycle.click(); await expect(cycle).toHaveText('Verbose');
+ await cycle.click(); await cycle.click();
  const runs=messages.locator('.tool-lines');
 
  // ── Smart, the default: the long run is one line; the failure and the edit stay.

@@ -2695,7 +2695,9 @@ type InfoResponse struct {
 	// A supervising launcher will start this Runner again after RestartRunner.
 	RestartAvailable bool `protobuf:"varint,9,opt,name=restart_available,json=restartAvailable,proto3" json:"restart_available,omitempty"`
 	// Random per Runner process: a new value means a new process is serving.
-	InstanceId    string `protobuf:"bytes,10,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	InstanceId string `protobuf:"bytes,10,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	// Stable across restarts of the same Runner database.
+	RunnerId      string `protobuf:"bytes,11,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2796,6 +2798,13 @@ func (x *InfoResponse) GetRestartAvailable() bool {
 func (x *InfoResponse) GetInstanceId() string {
 	if x != nil {
 		return x.InstanceId
+	}
+	return ""
+}
+
+func (x *InfoResponse) GetRunnerId() string {
+	if x != nil {
+		return x.RunnerId
 	}
 	return ""
 }
@@ -5968,8 +5977,10 @@ type ItemPullRequest struct {
 	ChecksTotal uint32 `protobuf:"varint,10,opt,name=checks_total,json=checksTotal,proto3" json:"checks_total,omitempty"`
 	// When it was merged or closed; zero while open.
 	ClosedAtUnixMillis int64 `protobuf:"varint,11,opt,name=closed_at_unix_millis,json=closedAtUnixMillis,proto3" json:"closed_at_unix_millis,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Opaque identity of the displayed head and review or failing jobs.
+	ObservationId string `protobuf:"bytes,12,opt,name=observation_id,json=observationId,proto3" json:"observation_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ItemPullRequest) Reset() {
@@ -6077,6 +6088,13 @@ func (x *ItemPullRequest) GetClosedAtUnixMillis() int64 {
 		return x.ClosedAtUnixMillis
 	}
 	return 0
+}
+
+func (x *ItemPullRequest) GetObservationId() string {
+	if x != nil {
+		return x.ObservationId
+	}
+	return ""
 }
 
 type Item struct {
@@ -7619,9 +7637,10 @@ type PullRequestReactionRequest struct {
 	CollectionId string                 `protobuf:"bytes,1,opt,name=collection_id,json=collectionId,proto3" json:"collection_id,omitempty"`
 	Ref          *ItemRef               `protobuf:"bytes,2,opt,name=ref,proto3" json:"ref,omitempty"`
 	// The conversation to send to; empty is the one that delivered the pull request.
-	SessionId     string `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SessionId           string `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	ExpectedObservation string `protobuf:"bytes,4,opt,name=expected_observation,json=expectedObservation,proto3" json:"expected_observation,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *PullRequestReactionRequest) Reset() {
@@ -7671,6 +7690,13 @@ func (x *PullRequestReactionRequest) GetRef() *ItemRef {
 func (x *PullRequestReactionRequest) GetSessionId() string {
 	if x != nil {
 		return x.SessionId
+	}
+	return ""
+}
+
+func (x *PullRequestReactionRequest) GetExpectedObservation() string {
+	if x != nil {
+		return x.ExpectedObservation
 	}
 	return ""
 }
@@ -10786,9 +10812,10 @@ func (x *CollectionResponse) GetCollection() *Collection {
 }
 
 type ListCollectionsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                             protoimpl.MessageState `protogen:"open.v1"`
+	IncludeRetainedArtifactWorkspaces bool                   `protobuf:"varint,1,opt,name=include_retained_artifact_workspaces,json=includeRetainedArtifactWorkspaces,proto3" json:"include_retained_artifact_workspaces,omitempty"`
+	unknownFields                     protoimpl.UnknownFields
+	sizeCache                         protoimpl.SizeCache
 }
 
 func (x *ListCollectionsRequest) Reset() {
@@ -10819,6 +10846,13 @@ func (x *ListCollectionsRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ListCollectionsRequest.ProtoReflect.Descriptor instead.
 func (*ListCollectionsRequest) Descriptor() ([]byte, []int) {
 	return file_api_proto_rawDescGZIP(), []int{136}
+}
+
+func (x *ListCollectionsRequest) GetIncludeRetainedArtifactWorkspaces() bool {
+	if x != nil {
+		return x.IncludeRetainedArtifactWorkspaces
+	}
+	return false
 }
 
 // The person's order (ArrangeWorkspaces): a workspace they never placed
@@ -16526,6 +16560,7 @@ type WorkspaceDeletionPreview struct {
 	DirtyRepositories        []string               `protobuf:"bytes,2,rep,name=dirty_repositories,json=dirtyRepositories,proto3" json:"dirty_repositories,omitempty"`
 	FilesOutsideRepositories bool                   `protobuf:"varint,3,opt,name=files_outside_repositories,json=filesOutsideRepositories,proto3" json:"files_outside_repositories,omitempty"`
 	Blocked                  string                 `protobuf:"bytes,4,opt,name=blocked,proto3" json:"blocked,omitempty"`
+	SupportsKeepArtifacts    bool                   `protobuf:"varint,5,opt,name=supports_keep_artifacts,json=supportsKeepArtifacts,proto3" json:"supports_keep_artifacts,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -16588,12 +16623,20 @@ func (x *WorkspaceDeletionPreview) GetBlocked() string {
 	return ""
 }
 
+func (x *WorkspaceDeletionPreview) GetSupportsKeepArtifacts() bool {
+	if x != nil {
+		return x.SupportsKeepArtifacts
+	}
+	return false
+}
+
 type DeleteWorkspaceRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	CollectionId   string                 `protobuf:"bytes,1,opt,name=collection_id,json=collectionId,proto3" json:"collection_id,omitempty"`
 	ConfirmName    string                 `protobuf:"bytes,2,opt,name=confirm_name,json=confirmName,proto3" json:"confirm_name,omitempty"`
 	DiscardChanges bool                   `protobuf:"varint,3,opt,name=discard_changes,json=discardChanges,proto3" json:"discard_changes,omitempty"`
 	StopSessions   bool                   `protobuf:"varint,4,opt,name=stop_sessions,json=stopSessions,proto3" json:"stop_sessions,omitempty"`
+	KeepArtifacts  bool                   `protobuf:"varint,5,opt,name=keep_artifacts,json=keepArtifacts,proto3" json:"keep_artifacts,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -16652,6 +16695,13 @@ func (x *DeleteWorkspaceRequest) GetDiscardChanges() bool {
 func (x *DeleteWorkspaceRequest) GetStopSessions() bool {
 	if x != nil {
 		return x.StopSessions
+	}
+	return false
+}
+
+func (x *DeleteWorkspaceRequest) GetKeepArtifacts() bool {
+	if x != nil {
+		return x.KeepArtifacts
 	}
 	return false
 }
@@ -20692,6 +20742,7 @@ type StartReviewRequest struct {
 	Model string `protobuf:"bytes,10,opt,name=model,proto3" json:"model,omitempty"`
 	// A built-in review template. Empty preserves the legacy review entry points.
 	TemplateId    string `protobuf:"bytes,11,opt,name=template_id,json=templateId,proto3" json:"template_id,omitempty"`
+	RequestKey    string `protobuf:"bytes,12,opt,name=request_key,json=requestKey,proto3" json:"request_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -20799,6 +20850,13 @@ func (x *StartReviewRequest) GetModel() string {
 func (x *StartReviewRequest) GetTemplateId() string {
 	if x != nil {
 		return x.TemplateId
+	}
+	return ""
+}
+
+func (x *StartReviewRequest) GetRequestKey() string {
+	if x != nil {
+		return x.RequestKey
 	}
 	return ""
 }
@@ -38193,7 +38251,7 @@ const file_api_proto_rawDesc = "" +
 	"profile_id\x18\x01 \x01(\tR\tprofileId\"5\n" +
 	"\aGateway\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
-	"\bprovider\x18\x02 \x01(\tR\bprovider\"\xb4\x04\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\"\xd1\x04\n" +
 	"\fInfoResponse\x125\n" +
 	"\bprofiles\x18\x01 \x03(\v2\x19.lazybox.bench.v1.ProfileR\bprofiles\x125\n" +
 	"\bgateways\x18\x02 \x03(\v2\x19.lazybox.bench.v1.GatewayR\bgateways\x125\n" +
@@ -38206,7 +38264,8 @@ const file_api_proto_rawDesc = "" +
 	"\x11restart_available\x18\t \x01(\bR\x10restartAvailable\x12\x1f\n" +
 	"\vinstance_id\x18\n" +
 	" \x01(\tR\n" +
-	"instanceId\"\\\n" +
+	"instanceId\x12\x1b\n" +
+	"\trunner_id\x18\v \x01(\tR\brunnerId\"\\\n" +
 	"\x1bProviderAvailabilityRequest\x12\x18\n" +
 	"\arefresh\x18\x01 \x01(\bR\arefresh\x12#\n" +
 	"\rcheck_updates\x18\x02 \x01(\bR\fcheckUpdates\"\x8b\x01\n" +
@@ -38462,7 +38521,7 @@ const file_api_proto_rawDesc = "" +
 	"\x05label\x18\x02 \x01(\tR\x05label\"1\n" +
 	"\tItemCheck\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
-	"\x03url\x18\x02 \x01(\tR\x03url\"\xfb\x02\n" +
+	"\x03url\x18\x02 \x01(\tR\x03url\"\xa2\x03\n" +
 	"\x0fItemPullRequest\x12\x12\n" +
 	"\x04head\x18\x01 \x01(\tR\x04head\x12\x12\n" +
 	"\x04base\x18\x02 \x01(\tR\x04base\x12\x14\n" +
@@ -38475,7 +38534,8 @@ const file_api_proto_rawDesc = "" +
 	"\x0fmergeable_state\x18\t \x01(\tR\x0emergeableState\x12!\n" +
 	"\fchecks_total\x18\n" +
 	" \x01(\rR\vchecksTotal\x121\n" +
-	"\x15closed_at_unix_millis\x18\v \x01(\x03R\x12closedAtUnixMillis\"\x90\x04\n" +
+	"\x15closed_at_unix_millis\x18\v \x01(\x03R\x12closedAtUnixMillis\x12%\n" +
+	"\x0eobservation_id\x18\f \x01(\tR\robservationId\"\x90\x04\n" +
 	"\x04Item\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.lazybox.bench.v1.ItemRefR\x03ref\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x14\n" +
@@ -38609,12 +38669,13 @@ const file_api_proto_rawDesc = "" +
 	"\x04role\x18\x04 \x01(\tR\x04role\"e\n" +
 	"\x11UnlinkItemRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12+\n" +
-	"\x03ref\x18\x02 \x01(\v2\x19.lazybox.bench.v1.ItemRefR\x03ref\"\x8d\x01\n" +
+	"\x03ref\x18\x02 \x01(\v2\x19.lazybox.bench.v1.ItemRefR\x03ref\"\xc0\x01\n" +
 	"\x1aPullRequestReactionRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12+\n" +
 	"\x03ref\x18\x02 \x01(\v2\x19.lazybox.bench.v1.ItemRefR\x03ref\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\tR\tsessionId\"\xae\x01\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\x121\n" +
+	"\x14expected_observation\x18\x04 \x01(\tR\x13expectedObservation\"\xae\x01\n" +
 	"\x13PullRequestReaction\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x16\n" +
@@ -38888,8 +38949,9 @@ const file_api_proto_rawDesc = "" +
 	"\x12CollectionResponse\x12<\n" +
 	"\n" +
 	"collection\x18\x01 \x01(\v2\x1c.lazybox.bench.v1.CollectionR\n" +
-	"collection\"\x18\n" +
-	"\x16ListCollectionsRequest\"Y\n" +
+	"collection\"i\n" +
+	"\x16ListCollectionsRequest\x12O\n" +
+	"$include_retained_artifact_workspaces\x18\x01 \x01(\bR!includeRetainedArtifactWorkspaces\"Y\n" +
 	"\x17ListCollectionsResponse\x12>\n" +
 	"\vcollections\x18\x01 \x03(\v2\x1c.lazybox.bench.v1.CollectionR\vcollections\"A\n" +
 	"\x18ArrangeWorkspacesRequest\x12%\n" +
@@ -39349,17 +39411,19 @@ const file_api_proto_rawDesc = "" +
 	"updated_at\x18\b \x01(\tR\tupdatedAt\"h\n" +
 	"\x17ListGitHubItemsResponse\x122\n" +
 	"\x05items\x18\x01 \x03(\v2\x1c.lazybox.bench.v1.GitHubItemR\x05items\x12\x19\n" +
-	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\xcf\x01\n" +
+	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\x87\x02\n" +
 	"\x18WorkspaceDeletionPreview\x12,\n" +
 	"\x12active_session_ids\x18\x01 \x03(\tR\x10activeSessionIds\x12-\n" +
 	"\x12dirty_repositories\x18\x02 \x03(\tR\x11dirtyRepositories\x12<\n" +
 	"\x1afiles_outside_repositories\x18\x03 \x01(\bR\x18filesOutsideRepositories\x12\x18\n" +
-	"\ablocked\x18\x04 \x01(\tR\ablocked\"\xae\x01\n" +
+	"\ablocked\x18\x04 \x01(\tR\ablocked\x126\n" +
+	"\x17supports_keep_artifacts\x18\x05 \x01(\bR\x15supportsKeepArtifacts\"\xd5\x01\n" +
 	"\x16DeleteWorkspaceRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12!\n" +
 	"\fconfirm_name\x18\x02 \x01(\tR\vconfirmName\x12'\n" +
 	"\x0fdiscard_changes\x18\x03 \x01(\bR\x0ediscardChanges\x12#\n" +
-	"\rstop_sessions\x18\x04 \x01(\bR\fstopSessions\"O\n" +
+	"\rstop_sessions\x18\x04 \x01(\bR\fstopSessions\x12%\n" +
+	"\x0ekeep_artifacts\x18\x05 \x01(\bR\rkeepArtifacts\"O\n" +
 	"\x14WorkspaceFileRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\"_\n" +
@@ -39718,7 +39782,7 @@ const file_api_proto_rawDesc = "" +
 	"\bcomments\x18\x01 \x03(\v2\x1f.lazybox.bench.v1.ReviewCommentR\bcomments\x12!\n" +
 	"\fauto_resolve\x18\x02 \x01(\bR\vautoResolve\x12\x19\n" +
 	"\badded_id\x18\x03 \x01(\tR\aaddedId\x12/\n" +
-	"\x04runs\x18\x04 \x03(\v2\x1b.lazybox.bench.v1.ReviewRunR\x04runs\"\xc9\x02\n" +
+	"\x04runs\x18\x04 \x03(\v2\x1b.lazybox.bench.v1.ReviewRunR\x04runs\"\xea\x02\n" +
 	"\x12StartReviewRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12*\n" +
 	"\x11source_session_id\x18\x02 \x01(\tR\x0fsourceSessionId\x12\x14\n" +
@@ -39733,7 +39797,9 @@ const file_api_proto_rawDesc = "" +
 	"\x05model\x18\n" +
 	" \x01(\tR\x05model\x12\x1f\n" +
 	"\vtemplate_id\x18\v \x01(\tR\n" +
-	"templateId\"y\n" +
+	"templateId\x12\x1f\n" +
+	"\vrequest_key\x18\f \x01(\tR\n" +
+	"requestKey\"y\n" +
 	"\x13StartReviewResponse\x12-\n" +
 	"\x03run\x18\x01 \x01(\v2\x1b.lazybox.bench.v1.ReviewRunR\x03run\x123\n" +
 	"\asession\x18\x02 \x01(\v2\x19.lazybox.bench.v1.SessionR\asession\"\xde\x01\n" +

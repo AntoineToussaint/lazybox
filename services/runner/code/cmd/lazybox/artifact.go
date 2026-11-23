@@ -35,7 +35,10 @@ const artifactUsage = `Usage:
   lazybox artifact put <file|-> --title T [--id ID] [--kind plan|report|spec|notes|todo-list|other] [--format markdown|html|json] [--design ID@VERSION] [--review ID@VERSION] [--supersedes ID[,ID…]]
   lazybox artifact retire ID [--superseded-by ID] [--reason "…"]
   lazybox artifact get ID [--version N]
-  lazybox artifact list [--all]`
+  lazybox artifact list [--all]
+
+New artifacts with --kind use its JSON schema by default. Use artifact template KIND to get started.
+For a source document, pass --format markdown or --format html. Updates retain the existing format.`
 
 // restorable ends what retire and put --supersedes print: nothing was deleted.
 const restorable = "Retired artifacts keep every version; the person can restore them in Lazybox → Artifacts."
@@ -163,6 +166,9 @@ func artifactCommand(ctx context.Context, client artifactAPI, workspace string, 
 			replaced = append(replaced, current.Msg)
 		}
 		request := &pb.PutArtifactRequest{CollectionId: *collection, ArtifactId: *id, Title: *title, Kind: *kind, Format: *format, Content: string(data)}
+		if request.ArtifactId == "" && request.Kind != "" && request.Format == "" {
+			request.Format = "json"
+		}
 		for _, input := range []struct{ role, ref string }{{"design", *design}, {"review", *review}} {
 			if input.ref == "" {
 				continue

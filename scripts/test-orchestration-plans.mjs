@@ -22,11 +22,11 @@ mkdirSync(shots, { recursive: true });
 let browser, server, fixture;
 try {
   browser = await (process.env.TEST_CHROMIUM ? chromium : webkit).launch();
-  for (const scheme of ['dark', 'light']) {
+  for (const [scheme, capped] of [['dark', true], ['light', true], ['light', false]]) {
     fixture = await startRunnerFixture();
     server = await createServer({ ...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
     await server.listen();
-    await run(scheme);
+    await run(scheme, capped);
     await server.close(); server = undefined;
     await fixture.close(); fixture = undefined;
   }
@@ -37,13 +37,13 @@ try {
   await fixture?.close();
 }
 
-async function run(scheme) {
+async function run(scheme, capped) {
   const updates = () => fixture.calls.filter(c => c.method === 'UpdateMission').map(c => c.body);
   fixture.sessions.find(s => s.id === 'alpha-session').title = 'Search lead';
   fixture.openEvents('alpha-session').push({ type: 'message_delta', text: 'Here is how I would split it.' });
   // The person granted it earlier, asking for a plan first.
   const m = fixture.missions.create('Ship search');
-  const grant = fixture.missions.handle('UpdateMission', { missionId: m.id, grant: { sessionId: 'alpha-session', ceiling: { maxChildren: 3, planRequired: true } } });
+  const grant = fixture.missions.handle('UpdateMission', { missionId: m.id, grant: { sessionId: 'alpha-session', ceiling: { maxChildren: 3, planRequired: true, budgetUsd:capped ? 0 : 20 } } });
   assert.ok(!grant.error, JSON.stringify(grant.error));
   const plan = fixture.missions.proposePlan('alpha-session', { summary: 'index first, then rank; docs alongside', tasks: [
     { key: 'index', title: 'Index the corpus', brief: 'Objective: a token index\nDone when: go test ./search passes', role: 'worker', workspace: 'pinned', paths: ['search/'], estimateUsd: 4 },
@@ -97,7 +97,27 @@ async function run(scheme) {
   await expect(sheet.locator('.plan-paths li.overlap')).toHaveCount(2);
   await expect(sheet.locator('.plan-overlaps')).toContainText('search/rank.go (index, rank)');
   await expect(sheet.locator('.plan-totals')).toContainText('Estimate $8.50');
+  await expect(sheet.getByLabel('Budget cap in dollars')).toHaveCount(0);
+  const toggle = sheet.getByRole('checkbox', { name: 'Set a budget cap' });
+  await expect(toggle).not.toBeChecked();
+  await expect(sheet.getByRole('button', { name: capped ? 'Approve without cap' : 'Approve and remove $20 grant cap' })).toBeEnabled();
+  await toggle.check();
+  if (!capped) {
+    await toggle.uncheck();
+    await sheet.getByRole('button', { name: capped ? 'Approve without cap' : 'Approve and remove $20 grant cap' }).click();
+    await expect(sheet).toHaveCount(0);
+    await expect(panel.locator('.mission-card')).toHaveCount(3);
+    await expect(panel.locator('.mission-orchestrator-budget')).toContainText('no cap');
+    assert.equal(updates().find(u => u.approvePlan).approvePlan.capUsd ?? 0, 0);
+    assert.deepEqual(errors, []);
+    await context.close();
+    return;
+  }
   await expect(sheet.getByLabel('Budget cap in dollars')).toHaveValue('11');
+  await sheet.getByLabel('Budget cap in dollars').fill('');
+  await page.keyboard.press('Meta+Enter');
+  await expect(sheet).toBeVisible();
+  assert.ok(!updates().some(u => u.approvePlan));
   await sheet.getByLabel('Budget cap in dollars').fill('12');
   await sheet.getByLabel('Agents at once').fill('2');
   await expect(sheet.getByRole('button', { name: 'Approve with $12 cap' })).toBeEnabled();

@@ -54,6 +54,21 @@ try {
  await expect(screen).toContainText('ran: ls -la');
  assert.equal(first.input.join(''),'ls -la\r','keystrokes reach the shell in order');
 
+ // Select a single word in xterm beside an existing conversation draft.
+ const composer=page.locator('.panel-chat').getByRole('textbox',{name:'Message',exact:true});
+ await composer.fill('Please explain');
+ const banner=screen.locator('.xterm-rows > div').filter({hasText:'fixture shell in Alpha feature'}).first();
+ const bannerBox=await banner.boundingBox();
+ await page.mouse.dblclick(bannerBox.x+12,bannerBox.y+bannerBox.height/2);
+ const share=panel.getByRole('button',{name:'Add selection to draft',exact:true});
+ await expect(share).toBeVisible();
+ const applied=calls('Apply').length;
+ await share.click();
+ await expect(composer).toHaveValue(/^Please explain\s+`{3}[^\n]*\nfixture\n`{3}$/);
+ await expect(share).toHaveCount(0);
+ assert.equal(calls('Apply').length,applied,'sharing prepares a draft');
+ await composer.fill('');
+
  // ── Links: a sign-in URL that wraps across rows is one link, underlined with a pointer on hover; a click on any
  // part of it opens the whole address; a drag selects text and opens nothing; the right-click menu offers it.
  const signIn='https://accounts.example.com/o/oauth2/auth?response_type=code&client_id=32555940559.apps.example.com&redirect_uri=https%3A%2F%2Fsdk.example.com%2Fauthcode.html&scope=openid+https%3A%2F%2Fwww.example.com%2Fauth%2Fuserinfo.email+https%3A%2F%2Fwww.example.com%2Fauth%2Fcloud-platform+https%3A%2F%2Fwww.example.com%2Fauth%2Fappengine.admin+https%3A%2F%2Fwww.example.com%2Fauth%2Fsqlservice.login+https%3A%2F%2Fwww.example.com%2Fauth%2Fcompute+https%3A%2F%2Fwww.example.com%2Fauth%2Faccounts.reauth&state=Qx7fZk2bH0wLm4&prompt=consent&token_usage=remote&access_type=offline&code_challenge=AbCdEf0123456789_-AbCdEf0123456789_-AbCdEf0&code_challenge_method=S256';
@@ -85,7 +100,7 @@ try {
  const linkMenu=page.locator('.context-menu[data-depth="0"]');
  const linkItems=await linkMenu.locator('.context-menu-label').allTextContents();
  assert.deepEqual(linkItems.slice(0,4),['Open in your browser','Open in Lazybox','Open in a new Lazybox panel','Copy link'],`link menu: ${linkItems}`);
- assert.ok(linkItems.includes('Copy')&&linkItems.includes('Send selection to agent'),'the terminal items follow');
+ assert.ok(linkItems.includes('Copy')&&linkItems.includes('Add selection to draft'),'the terminal items follow');
  await linkMenu.getByRole('menuitem',{name:'Open in your browser'}).click();
  await expect.poll(linksOpened).toEqual([signIn,signIn]);
  await page.screenshot({path:'/tmp/lazybox-terminal-link.png'});

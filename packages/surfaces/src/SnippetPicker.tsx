@@ -1,3 +1,4 @@
+import { isReviewSnippet } from './snippet-usage';
 import { readPreference, writePreference } from "./view-state";
 import { readSnippetUsage, saveSnippetUse, searchSnippets, sortSnippets, type SnippetUsage } from "./snippet-usage";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -14,6 +15,7 @@ export function SnippetPicker({
   store,
   canSend,
   onClose,
+  onCatalog,
   onInsert,
   onSend,
 }: {
@@ -21,8 +23,9 @@ export function SnippetPicker({
   store?: ViewStateStore;
   canSend: boolean;
   onClose(): void;
-  onInsert(text: string): void;
-  onSend(text: string): Promise<boolean>;
+  onCatalog(rows: Snippet[]): void;
+  onInsert(text: string, key: string): void;
+  onSend(text: string, key: string): Promise<boolean>;
 }) {
   const { api } = useRunner(),
     dialog = useRef<HTMLDialogElement>(null);
@@ -50,7 +53,7 @@ export function SnippetPicker({
       .listSnippets({}, { signal: controller.signal })
       .then(
         (v) => {
-          if (!controller.signal.aborted) setRows(v.snippets);
+          if (!controller.signal.aborted) { setRows(v.snippets); onCatalog(v.snippets); }
         },
         (e) => {
           if (!controller.signal.aborted) setError(String(e));
@@ -60,7 +63,7 @@ export function SnippetPicker({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [api]);
+  }, [api, onCatalog]);
   const matching = rows.filter(row =>
     view === 'all' || (view === 'favorites' ? favorites.includes(row.key) : (usage[row.key]?.count || 0) > 0),
   );
@@ -86,7 +89,7 @@ export function SnippetPicker({
   const insert = () => {
     if (selected && !busy) {
       used(selected.key);
-      onInsert(selected.body);
+      onInsert(selected.body, selected.key);
       onClose();
     }
   };
@@ -94,12 +97,12 @@ export function SnippetPicker({
     if (!selected || !canSend || busy) return;
     setBusy(true);
     try {
-      if (await onSend(selected.body)) {
+      if (await onSend(selected.body, selected.key)) {
         used(selected.key);
         onClose();
       } else
         setError(
-          "The send was not confirmed. Close this picker to retry the retained draft.",
+          isReviewSnippet(selected.key) ? "Review start was not confirmed. Close the picker and retry the retained draft." : "The send was not confirmed. Close this picker to retry the retained draft.",
         );
     } catch (e) {
       setError(String(e));
@@ -209,7 +212,7 @@ export function SnippetPicker({
           disabled={!selected || !canSend || busy}
           onClick={() => void send()}
         >
-          {busy ? "Sending…" : "Send snippet"}
+          {busy ? "Starting…" : selected && isReviewSnippet(selected.key) ? "Start review" : "Send snippet"}
         </button>
       </footer>
     </DraggableDialog>

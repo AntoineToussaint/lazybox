@@ -142,9 +142,9 @@ export type SlashMenuState =
 const modelOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
 
 /** Keep the current model visible and sort the other names independently of catalog order. */
-function orderedModelChoices(choices: readonly SlashChoice[]): SlashChoice[] {
+export function orderedModelChoices(choices: readonly SlashChoice[]): SlashChoice[] {
   return [...choices].sort((a, b) =>
-    Number(!!b.current) - Number(!!a.current) || Number(!!a.effort) - Number(!!b.effort) || modelOrder.compare(a.label, b.label) ||
+    Number(!!b.current) - Number(!!a.current) || Number(b.value === DEFAULT_MODEL) - Number(a.value === DEFAULT_MODEL) || modelOrder.compare(a.label, b.label) ||
     modelOrder.compare(a.value, b.value) || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0),
   );
 }
@@ -293,7 +293,14 @@ export function lazyboxCommands(ctx: SlashContext): SlashCommand[] {
   const notLive = !ctx.live && 'The conversation is not running';
   const agentName = ctx.agentName || agentTitle(ctx.provider);
   const restart = (live: boolean) => live ? '' : ctx.resumable ? ' (restarts the agent; the conversation continues)' : '';
-  const models = modelChoices(mergeModels(ctx.providerModels || [], ctx.models), ctx.model, ctx.effort);
+  const catalog = mergeModels(ctx.providerModels || [], ctx.models);
+  const models = modelChoices(catalog, ctx.model);
+  const current = models.find(choice => choice.current);
+  const levels = catalog.find(model => model.value === current?.value)?.effortLevels || [];
+  const order = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+  const priority = (level: string) => order.includes(level) ? order.indexOf(level) : order.length;
+  const efforts = [...new Set(levels)].sort((a, b) => priority(a) - priority(b) || modelOrder.compare(a, b))
+    .map(level => ({ value: level, label: level, effort: level, current: level === ctx.effort, detail: current?.label }));
   const permissions: SlashChoice[] = (['ask', 'read-only', 'yolo'] as PermissionMode[]).map(mode => ({ value: mode, label: PERMISSION_LABELS[mode], detail: PERMISSION_DETAILS[mode] + restart(ctx.livePermission), current: ctx.permission === mode, disabled: permissionBlocked(ctx.planWorkflow ? 'plan' : '', mode) || undefined, keywords: mode === 'yolo' ? 'yolo bypass dangerous skip' : mode === 'ask' ? 'approve default' : 'plan readonly' }));
   return [
     { key: 'lazybox:model', name: 'model', group: 'lazybox', icon: 'sparkle', argumentHint: '<name> [effort]', description: ctx.liveModel ? `Switch ${agentName}'s model` : `Switch ${agentName}'s model${restart(false)}`, choices: models, freeArgument: true, disabled: unless(notLive), keywords: 'opus sonnet haiku gpt' },
@@ -312,8 +319,8 @@ export function lazyboxCommands(ctx: SlashContext): SlashCommand[] {
     { key: 'lazybox:diff', name: 'diff', group: 'lazybox', icon: 'branch', description: 'Open this workspace’s changes', disabled: unless(!ctx.workspace && 'Only in a workspace') },
     { key: 'lazybox:status', name: 'status', group: 'lazybox', icon: 'activity', description: 'Show conversation status and context usage' },
     { key: 'lazybox:copy', name: 'copy', group: 'lazybox', icon: 'copy', description: 'Copy the latest agent reply', freeArgument: true, disabled: unless(!ctx.agentMessage && 'No reply to copy yet') },
-    ...(ctx.provider === 'claude' || ctx.provider === 'codex' ? [
-      { key: 'lazybox:effort', name: 'effort', group: 'lazybox' as const, icon: 'sliders', description: 'Show or change the current model’s reasoning effort', freeArgument: true, disabled: unless(notLive) },
+    ...(efforts.length || ctx.provider === 'claude' || ctx.provider === 'codex' ? [
+      { key: 'lazybox:effort', name: 'effort', group: 'lazybox' as const, icon: 'sliders', description: 'Show or change the current model’s reasoning effort', choices: efforts, freeArgument: true, disabled: unless(notLive) },
     ] : []),
     { key: 'lazybox:context', name: 'context', group: 'lazybox', icon: 'activity', description: 'How full the context window is', keywords: 'tokens window memory' },
     // `/review` has the default reviewer review this conversation's changes; `/review claude` names one; `/review <focus>`
@@ -402,19 +409,7 @@ const DEFAULT_MODEL_CHOICE: SlashChoice = { value: DEFAULT_MODEL, label: 'Defaul
  * id) is listed first, so the list always says what runs now — but choosing
  * the current model changes nothing (useSlashCommands' switchModel).
  */
-export function modelChoices(models: readonly ProviderModel[], current: string, effort = ''): SlashChoice[] {
-  const withEffort = (choices: SlashChoice[]) => {
-    const plain: SlashChoice[] = [], variants: SlashChoice[] = [];
-    for (const choice of choices) {
-      const levels = models.find(model => model.value === choice.value)?.effortLevels || [];
-      plain.push({ ...choice, current: choice.current && !levels.includes(effort) });
-      variants.push(...levels.map(level => ({
-        ...choice, effort: level, value: `${choice.value} ${level}`, label: `${choice.label} · ${level}`,
-        current: choice.current && effort === level, keywords: `${choice.value} ${level} effort`,
-      })));
-    }
-    return [...plain, ...variants];
-  };
+export function modelChoices(models: readonly ProviderModel[], current: string): SlashChoice[] {
   // No model named yet: the conversation runs on the provider's own default
   // (no id was asked for, and the agent has not said which). That is the
   // current choice, so the list never reads as "none of these": the agent's
@@ -422,7 +417,7 @@ export function modelChoices(models: readonly ProviderModel[], current: string, 
   if (!current.trim()) {
     const listed = models.findIndex(model => model.value.toLowerCase() === DEFAULT_MODEL);
     const choices = models.map((model, i): SlashChoice => ({ value: model.value, label: model.displayName, detail: [model.value !== model.displayName ? model.value : '', model.description].filter(Boolean).join(' · '), current: i === listed, keywords: model.value }));
-    return withEffort(listed < 0 ? [DEFAULT_MODEL_CHOICE, ...choices] : choices);
+    return listed < 0 ? [DEFAULT_MODEL_CHOICE, ...choices] : choices;
   }
   // Every entry that is the current model is marked (an id and its alias), so
   // none of them is offered first as a switch (rankChoices skips the current).
@@ -440,7 +435,7 @@ export function modelChoices(models: readonly ProviderModel[], current: string, 
     const label = modelName(current);
     choices.unshift({ value: current, label, detail: label === current ? 'Current model' : `${current} · Current model`, current: true, keywords: current });
   }
-  return withEffort(choices);
+  return choices;
 }
 /**
  * What the card asks before a model switch that restarts the agent, in one
@@ -461,7 +456,8 @@ export function resolveModel(args: string, models: readonly ProviderModel[]): st
   const q = args.trim();
   if (!q) return '';
   const lower = q.toLowerCase();
-  return (models.find(m => m.value.toLowerCase() === lower || m.displayName.toLowerCase() === lower) || models.find(m => m.displayName.toLowerCase().startsWith(lower) || m.value.toLowerCase().startsWith(lower)))?.value || q;
+  const byWord = models.filter(model => model.value.toLowerCase().split(/[-_.]/).includes(lower));
+  return (models.find(m => m.value.toLowerCase() === lower || m.displayName.toLowerCase() === lower) || models.find(m => m.displayName.toLowerCase().startsWith(lower) || m.value.toLowerCase().startsWith(lower)) || (byWord.length === 1 ? byWord[0] : undefined))?.value || q;
 }
 
 /**

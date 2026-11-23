@@ -68,6 +68,11 @@ export function PowerLayer(props: PowerLayerProps) {
       // Let the new workspace mount, so its handlers are the ones that run.
       await new Promise(resolve => setTimeout(resolve, 150));
     }
+    if (id === 'layout.arrange-windows') {
+      if (!p.host?.arrangeWindows) throw new Error('Window arrangements require the Lazybox desktop app');
+      await p.host.arrangeWindows(argument);
+      return `Applied desktop window arrangement: ${argument}`;
+    }
     if (!actionEnabled(id) && !id.startsWith('navigation.')) throw new Error(`“${definition.title}” is not available in the window right now`);
     runAction(id, argument || undefined, 'other');
     await p.host?.focusWindow?.().catch(() => undefined);

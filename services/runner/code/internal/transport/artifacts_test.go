@@ -319,3 +319,40 @@ func TestAgentRetiresAndSupersedesOnlyAgentPublishedArtifacts(t *testing.T) {
 }
 
 var _ github.Issues = (*github.Client)(nil)
+
+func TestKeptArtifactsRemainDiscoverableAfterWorkspaceDeletion(t *testing.T) {
+	f := newTerminalFixture(t)
+	ctx := bearer(timeout(t), ownerToken)
+	ws := f.theirs.Id
+	a, err := f.client.PutArtifact(ctx, &pb.PutArtifactRequest{CollectionId: ws, Title: "Inventory", Content: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.client.PutArtifact(ctx, &pb.PutArtifactRequest{CollectionId: ws, ArtifactId: a.Id, Content: "revised"}); err != nil {
+		t.Fatal(err)
+	}
+	req := &pb.DeleteWorkspaceRequest{CollectionId: ws, ConfirmName: f.theirs.Name, DiscardChanges: true, StopSessions: true, KeepArtifacts: true}
+	if _, err = f.service.DeleteWorkspace(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	req.KeepArtifacts = false // A late retry from an old client must respect the tombstone.
+	if _, err = f.service.DeleteWorkspace(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	for i, content := range []string{"original", "revised"} {
+		doc, err := f.client.GetArtifact(ctx, &pb.GetArtifactRequest{CollectionId: ws, ArtifactId: a.Id, Version: uint32(i + 1)})
+		if err != nil || doc.Content != content {
+			t.Fatal(doc, err)
+		}
+	}
+	for _, include := range []bool{false, true} {
+		list, err := f.client.ListCollections(ctx, &pb.ListCollectionsRequest{IncludeRetainedArtifactWorkspaces: include})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := slices.ContainsFunc(list.Collections, func(c *pb.Collection) bool { return c.Id == ws && c.State == "deleted" })
+		if found != include {
+			t.Fatalf("include retained=%t, found=%t", include, found)
+		}
+	}
+}

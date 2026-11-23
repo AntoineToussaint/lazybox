@@ -1,9 +1,11 @@
+import { Icon } from './Icons';
 import { useDisplayDetail } from './display-detail';
 import { ArtifactsChip } from './ArtifactCard';
 import { DetachedArtifacts } from './DetachedArtifacts';
 import { AppearanceSync } from './appearance/AppearanceSync';
 import { LeaderMenu } from './LeaderMenu';
 import { DetachedCommands } from './DetachedCommands';
+import { PromptSnippets } from './SnippetPrompt';
 import { SnippetPicker } from './SnippetPicker';
 import { useKeyboardNavigation, useKeyboardAction, useKeymap, useMenuSnippet, type KeyHint } from './keyboard';
 import { continueConversation } from './transcript-cache';
@@ -16,7 +18,7 @@ import { useTranscript } from './useTranscript';
 import { useLiveStatus } from './LiveIndicator';
 import { PromptHistoryDialog } from './PromptHistoryDialog';
 import { savePrompt } from './prompt-history';
-import { saveSnippetUse } from './snippet-usage';
+import { isReviewSnippet, saveSnippetUse } from './snippet-usage';
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { type CommandStatus, type Session } from '@lazybox/protocol';
@@ -24,6 +26,7 @@ import type { SurfaceTarget, ViewStateStore } from '@lazybox/platform';
 import { readDraft, writeDraft } from './view-state';
 import { RunnerProvider, useRunner, type RunnerConnection } from './RunnerContext';
 import { AttentionScope, PanelShownContext, useMarkViewed } from './useAttention';
+import { conversationName } from './conversation-model';
 import { useComposeRequests } from './compose';
 import { queuedMessages } from './transcript-model';
 export type { RunnerConnection } from './RunnerContext';
@@ -69,7 +72,7 @@ import { Composer } from './Composer';
 import { ComposerInfo } from './ComposerInfo';
 import { ConsoleWindow, EventLog, SessionCommands } from './SessionCommands';
 import { faultSentence, sessionLimit, subscriptionName, turnFault } from './subscription-model';
-import { CurrentChatContext, useConversationActivity } from './activity-detail';
+import { ACTIVITY_LABELS, CurrentChatContext, useConversationActivity } from './activity-detail';
 import { bindings, displayBinding, useActions } from './actions';
 import { CodeRunContext, CodeRuns, type RunActions } from './code-runs';
 import { shellBlocksIn } from './code-run';
@@ -156,11 +159,12 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   useMenuSnippet(entry => {
     if (!canCompose || !composerFocused()) return;
     void api.listSnippets({}).then(result => {
+      slash.updateSnippetCatalog(result.snippets);
       const snippet = result.snippets.find(row => row.key === entry.snippet);
       if (!snippet) { setError(`Snippet "${entry.snippet}" no longer exists. Update the ]] menu in Settings → Keyboard.`); return; }
       saveSnippetUse(viewState, snippet.key);
-      if (entry.mode === 'send' && !message.trim() && !files.length && !missingFiles.length && !sending) void send(undefined, snippet.body);
-      else { const next = message + (message && !message.endsWith('\n') ? '\n' : '') + snippet.body; setMessage(next); persistDraft(next, files, missingFiles); requestAnimationFrame(() => composer.current?.focus()); }
+      if (entry.mode === 'send' && !message.trim() && !files.length && !missingFiles.length && !sending) void send(undefined, snippet.body, snippet.key);
+      else { const next = message + (message && !message.endsWith('\n') ? '\n' : '') + snippet.body; draftSnippet.current = next === snippet.body ? {key:snippet.key, text:next} : undefined; setMessage(next); persistDraft(next, files, missingFiles); requestAnimationFrame(() => composer.current?.focus()); }
     }, error => setError(humanError(error)));
   });
   // Enter while a send is in flight (the box is read-only meanwhile) does nothing: the send under way says how it went.
@@ -174,7 +178,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // other read of the window (its review, its sessions) then waited forever.
   const shown = useContext(PanelShownContext);
   const transcript = useTranscript(api, sessionID, !!info && shown);
-  const [branchSelection, setBranchSelection] = useState<{ message: TranscriptMessage; source: string; requestKey: string }>();
+  const [branchSelection, setBranchSelection] = useState<{ message: TranscriptMessage; source: string; requestKey: string; sideQuestion?: boolean }>();
   const branchMessage = branchSelection?.source === sessionID ? branchSelection.message : undefined;
   const [retryDraft, setRetryDraft] = useState('');
   const [branchFromCheckpoint, setBranchFromCheckpoint] = useState(false);
@@ -186,7 +190,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const scroll = useChatScroll(transcript.reader, conversation, session?.pending.length);
   const { jumpToLatest } = scroll;
   const [error, setError] = useState('');
-  const { restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
+  const { snippet: draftSnippet, reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
   const [commandsOpen, setCommandsOpen] = useState(initialCommandsOpen ?? !!initialCommandId);
   const [sending, setSending] = useState(false);
   const [commands, setCommands] = useState<CommandStatus[]>([]);
@@ -241,7 +245,8 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // this render has not seen it yet, and saving now survives this view
   // remounting. While a send is in flight the text waits: the send empties the
   // box when it is confirmed, and would erase it (and the draft it retries).
-  const appendPanelDraft = (text: string) => {
+  const appendPanelDraft = (text: string, reviews?: typeof reviewDrafts.current) => {
+    if (reviews) reviewDrafts.current.push(...reviews);
     const current = viewState ? readDraft(viewState, sessionID).text : message;
     const next = current + (current.trim() ? '\n\n' : '') + text;
     setMessage(next); persistDraft(next, files, missingFiles); setUncertainSend(''); sendAttempt.current = null;
@@ -272,7 +277,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     onStarted: (id, workspace) => { setSessionID(id); setCommand(''); onSessionChange?.(id, workspace); },
   });
 
-  const send = async (event?: FormEvent, snippetText?: string) => {
+  const send = async (event?: FormEvent, snippetText?: string, snippetKey?: string) => {
     event?.preventDefault();
     // ⌘↵ (chat.send-now) submits this same form, after dictation's last words
     // settle when it was listening: the message it sends goes now.
@@ -296,6 +301,24 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     sendingRef.current = true; setSending(true); setError(''); jumpToLatest();
     const signal = lifetime.current!.signal;
     try {
+      const reviewKey = snippetKey ?? (draftSnippet.current?.text === text ? draftSnippet.current.key : undefined);
+      if ((uncertainSend.startsWith('review-') || (reviewKey && isReviewSnippet(reviewKey))) && !files.length) {
+        const launcher = chatReview.launcher;
+        if (launcher.unavailable) { setError(launcher.unavailable); return false; }
+        const requestKey = uncertainSend || 'review-' + crypto.randomUUID();
+        draftSnippet.current = {key: reviewKey || "review", text};
+        setUncertainSend(requestKey);
+        setMessage(text);
+        persistDraft(text, [], [], requestKey);
+        const started = await launcher.start({ scope: 'changes' }, undefined, text, 'code-review-v1', requestKey);
+        if (!started?.run) return false;
+        if (started.run.state === 'failed') {
+          if (!signal.aborted) { setUncertainSend(''); persistDraft(text, [], []); }
+          return false;
+        }
+        if (!signal.aborted) { setUncertainSend(''); setMessage(''); persistDraft('', [], []); }
+        return true;
+      }
       const previous = sendAttempt.current;
       const attempt = previous?.text === text && previous.files.length === files.length && files.every((file, i) => file === previous.files[i]) ? previous : { id: uncertainSend || crypto.randomUUID(), text, files };
       sendAttempt.current = attempt;
@@ -315,8 +338,15 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       // block sending forever. The operation id is kept, so sending again cannot
       // deliver the message twice.
       const deadline = AbortSignal.timeout(30_000);
-      try { await api.apply({ sessionId: destination, operationId: attempt.id, operation: { case: 'message', value: { text, attachments } } }, { signal: AbortSignal.any([signal, deadline]) }); }
+      try { const receipt = await api.apply({ sessionId: destination, operationId: attempt.id, operation: { case: 'message', value: { text, attachments } } }, { signal: AbortSignal.any([signal, deadline]) });
+        if (receipt.error || receipt.delivery === 'failed') throw new Error(receipt.error || 'The message failed to send.');
+      }
       catch (e) { if (deadline.aborted && !signal.aborted) throw new Error('The Runner did not confirm this message within 30 seconds. Press Enter to send it again: it will not be delivered twice.'); throw e; }
+      const ids = [...new Set(reviewDrafts.current.filter(review => text.includes(review.text)).flatMap(review => review.ids))];
+      if (ids.length && session?.collectionId) {
+        await api.setReviewDisposition({ collectionId: session.collectionId, ids, disposition: 'sent', sessionId: destination, sessionTitle: conversationName(session, '') });
+        refreshWorkspaceReview(session.collectionId);
+      }
       savePrompt(viewState, text, session?.conversationId || sessionID); recall.reset();
       // Queued behind a busy turn, it shows above the box now, not at the next poll.
       refreshSession();
@@ -471,13 +501,14 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     return true;
   };
   const drop = useFileDrop({ canAttach, onFiles: selectFiles, onError: setError });
-  const insertSnippet = (body: string) => {
+  const insertSnippet = (body: string, key: string) => {
     const node = composer.current, start = node?.selectionStart ?? message.length, end = node?.selectionEnd ?? message.length;
     const next = message.slice(0, start) + body + message.slice(end);
     // The text and the caret after it are placed now, not on a later frame: a
     // frame that came late used to move the caret over whatever the person did
     // next (select all, then Delete, deleted nothing).
     flushSync(() => { setMessage(next); setUncertainSend(''); });
+    draftSnippet.current = next === body ? {key, text:body} : undefined;
     persistDraft(next, files, missingFiles); sendAttempt.current = null;
     node?.setSelectionRange(start + body.length, start + body.length);
     // Only the focus waits, for the picker to go (it makes the composer inert);
@@ -526,7 +557,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     if (why) { showMenuNotice(why); return; }
     scroll.revealMessage(block.messageId);
     // Run opens the Terminal panel with the command at the prompt, as the block's own Run does; never a message to the agent.
-    if (myself) codeRuns.openConfirm(block.messageId, block.script); else void codeRuns.runLastTerminal(block.messageId, block.script);
+    if (myself) codeRuns.openConfirm(block.messageId, block.script, false, block.offset); else void codeRuns.runLastTerminal(block.messageId, block.script, block.offset);
   };
   const canRunLast = () => !!codeRuns && activity.current() && !!lastBlock.current;
   useActions({
@@ -574,8 +605,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       if (!stopped.session?.closed || stopped.session.recoveryRequired) {
         throw new Error('Lazybox could not confirm that the previous continuation stopped.');
       }
-      await api.apply({ sessionId: child.id, operationId: branchSelection.requestKey,
+    }
+    if (retry || branchSelection.sideQuestion) {
+      const receipt = await api.apply({ sessionId: child.id, operationId: branchSelection.requestKey,
         operation: { case: 'message', value: { text: retryDraft, attachments: [] } } });
+      if (receipt.error || receipt.delivery === "failed") throw new Error(receipt.error || "The Runner could not deliver this message.");
       savePrompt(viewState, retryDraft, child.conversationId || child.id);
     }
     setBranchSelection(undefined);
@@ -613,7 +647,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     api, viewState, enabled: mode === 'agent' && !!sessionID, session, sessionID, agentName, provider, catalog: transcript.catalog,
     model: transcript.reportedModel || session?.model || '', conversation, shellBlock: !!codeRuns && !!lastShellBlock, detail: activity.detail,
     subscriptions: (profileList || []).filter(p => p.provider === provider).length, canCompose, message,
-    setText: text => { setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); },
+    setText: (text, key) => { draftSnippet.current = key ? {key, text} : undefined; setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); },
     textarea: composer, front: activity.current, onError: setError, reviewLauncher: chatReview.launcher,
     actions: {
       sendText: async text => {
@@ -647,14 +681,17 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const inspection = <><BackgroundWorkButton/><SessionInspection sessionID={sessionID} session={session} activity={transcript.activity} activityTruncated={transcript.activityTruncated}/></>;
   const stats: HeaderStats = { background: <BackgroundWorkButton/>, usage: <TelemetryPanel executionId={sessionID} conversationId={session?.conversationId} compact/>, tools: <ToolActivity sessionId={sessionID} events={transcript.activity} truncated={transcript.activityTruncated}/>,
     artifacts: session?.collectionId ? <ArtifactsChip collectionId={session.collectionId} sessionId={sessionID} conversationId={session.conversationId} title={realTitle}/> : undefined };
+  const detailButton = sessionID && <button type="button" className="session-detail-button" title="Cycle conversation activity detail" onClick={() => activity.cycle()}>
+    <Icon name="activity" size={13}/> {ACTIVITY_LABELS[activity.detail].label}
+  </button>;
   const lifecycle = <SessionLifecycleButton session={session} allowStart={allowStart} onNewSession={newSession} onClose={() => void close()}/>;
 
   return <main className={'agent-window' + (embedded ? ' embedded-chat' : '') + (drop.dragging ? ' file-drag-active' : '')} {...drop.handlers} onFocusCapture={activity.mark} onPointerDownCapture={activity.mark}>
     {!embedded && <LeaderMenu hint={keyboardHint}/>}
     {snippetsOpen && <SnippetPicker workspace={session?.collectionId || collectionId} store={viewState} canSend={canCompose && !sending && !message.trim() && !files.length && !missingFiles.length}
       onClose={() => { setSnippetsOpen(false); composer.current?.focus(); }}
-      onInsert={insertSnippet}
-      onSend={text => send(undefined, text)}/>}
+      onCatalog={slash.updateSnippetCatalog} onInsert={insertSnippet}
+      onSend={(text, key) => send(undefined, text, key)}/>}
     {!embedded && <WindowTopbar connecting={connecting} info={info} sessionID={sessionID} session={session}/>}
     {(error || connectionError || refreshError) && !(embedded && connectionError) && <div className={sessionID ? "error" : "error session-launch-error"} role="alert"><span>{error || connectionError || refreshError}</span><button onClick={() => { setError(''); setRefreshError(''); }}>Dismiss</button></div>}
     {!info && !connecting && <div className="connection-retry"><button onClick={refresh}>Retry connection</button></div>}
@@ -662,12 +699,12 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       ? <div className="empty">Select an existing session to view its chat.</div>
       : !sessionID
         ? <NewSessionForm launcher={launcher} info={info} purpose={purpose} emptyWorkspace={emptyWorkspace} collectionId={collectionId} agentName={agentName}/>
-        : <SubagentContext.Provider value={subagents}><CurrentChatContext.Provider value={activity.current}><section className="single-session">
+        : <SubagentContext.Provider value={subagents}><CurrentChatContext.Provider value={activity.current}><PromptSnippets.Provider value={slash.snippetRows}><section className="single-session">
           {embedded
             ? <ChatHeader agentName={agentName} session={session} sessionID={sessionID} title={title} status={status} statusText={live.text + (session?.queued ? ` · ${session.queued} queued` : '')} statusBusy={live.tone === 'busy' || live.tone === 'waiting'}
               modelLabel={modelLabel} stats={stats} realTitle={realTitle} branch={branch} shownAccount={headerAccount} onOpenChat={onOpenChat} origin={assistant ? undefined : <ItemOriginChip workspace={workspace}/>}
               modelRequested={!!session?.model && !session.modelReported && !transcript.reportedModel}
-              review={!assistant && <ReviewChatButton review={chatReview} keys={keymap['review.start']}/>}
+              detailButton={detailButton} review={!assistant && <ReviewChatButton review={chatReview} keys={keymap['review.start']}/>}
               onContextMenu={contextMenu('session', () => [...chatReview.menuItems, onOpenChat && { label: 'Open in its own window', icon: 'external', run: onOpenChat }, 'separator', ...withHandoff(sessionMenuItems({ session, allowStart,
                 onChangePermission: mode => void changePermission(mode), onRestartWithPermission: setRestartTo, onSwitchSubscription: () => setSwitchingSubscription(true), onGiveBrowser: () => void giveBrowser(),
                 onNewSession: newSession, onClose: () => void close(), onDelete: () => setDeleting(true), activity, models: slash.models, sessionID }), conversationHandoffItems(api, session, info))], { sessionId: sessionID })}
@@ -678,7 +715,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
                 onSwitchSubscription={() => setSwitchingSubscription(true)} onGiveBrowser={() => void giveBrowser()}
                 onNewSession={newSession} onClose={() => void close()} onDelete={() => setDeleting(true)} activity={activity} models={slash.models} extra={chatReview.menuItems}/>}/>
             : <SessionHeader agentName={agentName} session={session} sessionID={sessionID} title={title} status={status} modelLabel={modelLabel} inspection={inspection}
-              accountName={shownAccount} lifecycle={lifecycle}/>}
+              accountName={shownAccount} lifecycle={<>{detailButton}{lifecycle}</>}/>}
           {drop.dragging && <div className="file-drop-hint" role="status">Drop files to attach</div>}
           {session?.closed && <ResumeBar session={session} canResumeOnSend={canResumeOnSend} onResume={resumeSession} onError={setError}/>}
           {deleting && session && <DeleteConversationDialog session={session} onClose={() => setDeleting(false)} onDeleted={() => { setDeleting(false); newSession(); }}/>}
@@ -693,18 +730,18 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {transcript.error && <TranscriptNotice error={transcript.error} onRetry={transcript.retry}/>}
           {handoffMessage && session?.collectionId && onOpenHandoff && <ConversationHandoff source={session} message={handoffMessage}
             open={onOpenHandoff} onClose={() => setHandoffMessage(undefined)}/>}
-          {branchMessage && <ConfirmDialog title={branchMessage.type === 'operation_accepted' ? 'Edit and restart here' : 'Fork after this turn'}
-            confirm={branchMessage.type === 'operation_accepted' ? 'Restart with revised prompt' : 'Fork conversation'} working="Opening conversation…" tone="primary"
-            closeLabel="Close conversation branch" canConfirm={branchMessage.type !== 'operation_accepted' || !!retryDraft.trim()}
+          {branchMessage && <ConfirmDialog title={branchSelection?.sideQuestion ? 'Ask a side question' : branchMessage.type === 'operation_accepted' ? 'Edit and restart here' : 'Fork after this turn'}
+            confirm={branchSelection?.sideQuestion ? 'Ask in new conversation' : branchMessage.type === 'operation_accepted' ? 'Restart with revised prompt' : 'Fork conversation'} working="Opening conversation…" tone="primary"
+            closeLabel="Close conversation branch" canConfirm={(!branchSelection?.sideQuestion && branchMessage.type !== 'operation_accepted') || !!retryDraft.trim()}
             onClose={() => setBranchSelection(undefined)} onConfirm={openBranch}
             details={busy => <>
               {session?.collectionId && onOpenHandoff && <label>Workspace files<select disabled={busy} value={branchFromCheckpoint ? 'checkpoint' : 'current'} onChange={event => setBranchFromCheckpoint(event.target.value === 'checkpoint')}>
                 <option value="checkpoint">New workspace from this turn</option>
                 <option value="current">Use current workspace files</option>
               </select></label>}
-              {branchMessage.type === 'operation_accepted' && <label>Revised prompt<textarea disabled={busy} value={retryDraft} onChange={event => setRetryDraft(event.target.value)}/></label>}
+              {(branchSelection?.sideQuestion || branchMessage.type === 'operation_accepted') && <label>{branchSelection?.sideQuestion ? 'Side question' : 'Revised prompt'}<textarea disabled={busy} value={retryDraft} onChange={event => setRetryDraft(event.target.value)}/></label>}
             </>}>
-            {branchMessage.type === 'operation_accepted'
+            {branchSelection?.sideQuestion ? 'Only the new conversation receives your question. Its history ends at this turn.' : branchMessage.type === 'operation_accepted'
               ? 'Restarting stops the previous continuation and sends your revised prompt. The previous continuation remains available in History.'
               : 'The source conversation can keep working while the fork runs.'}
             {' '}
@@ -716,7 +753,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             Open previous conversation
           </button>}
           <CodeRunContext.Provider value={codeRuns}><MessageArea onBranch={allowStart && !assistant && session?.provider === 'codex'
-            ? entry => { setBranchSelection({ message: entry, source: sessionID, requestKey: crypto.randomUUID() }); setRetryDraft(entry.text); setBranchFromCheckpoint(entry.type !== 'operation_accepted' && !!session.collectionId && !!onOpenHandoff); } : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
+            ? (entry, sideQuestion) => { setBranchSelection({ message: entry, source: sessionID, requestKey: crypto.randomUUID(), sideQuestion }); setRetryDraft(sideQuestion ? "" : entry.text); setBranchFromCheckpoint(entry.type !== 'operation_accepted' && !!session.collectionId && !!onOpenHandoff); } : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             enableFullAccess={session?.provider === 'codex' && !session.closed && session.capabilities?.livePermission && session.permission !== 'yolo' && session.workflow !== 'plan' && !assistant ? () => changePermission('yolo') : undefined}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
             subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
@@ -752,6 +789,6 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             onSendToAgent={canCompose && !sending ? text => { addToDraft(text, HANDOVER_NOTICE); return ''; } : undefined}/>}
           {!embedded && <EventLog events={events}/>}
           <SubagentPanel/>
-        </section></CurrentChatContext.Provider></SubagentContext.Provider>}
+        </section></PromptSnippets.Provider></CurrentChatContext.Provider></SubagentContext.Provider>}
   </main>;
 }

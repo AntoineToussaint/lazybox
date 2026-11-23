@@ -35,3 +35,8 @@
 .switch-subscription-dialog>p{margin:0 0 12px;font-size:calc(12.5px * var(--text-scale));line-height:1.55;color:var(--text-tertiary)}
 .switch-subscription-dialog footer{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 .switch-subscription-dialog footer button{padding:8px 12px;font-size:calc(12.5px * var(--text-scale));border-radius:6px;line-height:calc(18px * var(--text-scale))}
+
+.subscription-status-list{margin:0 0 12px}
+.subscription-status-list>div{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 12px;padding:8px 0;border-bottom:1px solid var(--line)}
+.subscription-status-list dt{font-weight:500;overflow-wrap:anywhere}
+.subscription-status-list dd,.subscription-status-list small{margin:0;color:var(--text-muted)}

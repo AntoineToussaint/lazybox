@@ -7,3 +7,6 @@
 .message-day{display:flex;align-items:center;gap:10px;margin:12px 0 4px;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
 .message-day::before,.message-day::after{content:"";height:1px;background:var(--line-subtle);flex:1}
 .command-history-time{flex:none}
+.prompt-metadata{min-width:0;font-size:calc(12px * var(--text-scale));color:var(--text-muted)}
+.prompt-metadata summary{cursor:pointer;padding:4px}
+.prompt-metadata p{margin:0;padding:4px;overflow-wrap:anywhere}

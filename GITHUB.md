@@ -459,7 +459,7 @@ or the same one. The run's `fallback` says so in one sentence (*Codex is not
 available, so a fresh Claude conversation reviews.*), shown quietly on the
 review's card and in the button's tooltip, and appended to its `detail`.
 
-**The focus** (`StartReviewRequest.focus`, at most 2 KiB; `/review <focus>`)
+**The focus** (`StartReviewRequest.focus`, at most 32 KiB; `/review <focus>`)
 is a section of the brief (`{{focus}}`, or before `{{report}}` when the
 template has no `{{focus}}`) and is kept on the run.
 

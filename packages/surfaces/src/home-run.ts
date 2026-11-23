@@ -126,12 +126,14 @@ const FENCE = /^([ \t]*)(`{3,}|~{3,})[ \t]*([\w-]*)[^\n]*\n([\s\S]*?)\n[ \t]*\2[
  * inline command with the phrase before it in its line or sentence, and a
  * fenced shell block with the paragraph before it.
  */
-export function homeOffers(markdown: string, limit = 3, standaloneInline = false): HomeOffer[] {
+export function homeOffers(markdown: string, limit = 3, standaloneInline = false, offset?: number): HomeOffer[] {
   const out: HomeOffer[] = [];
   const seen = new Set<string>();
   const add = (command: string, found: { target: HomeTarget; explicit: boolean } | undefined) => {
-    if (!command || !found || seen.has(command) || out.length >= limit) return;
-    seen.add(command);
+    if (!command || !found || out.length >= limit) return;
+    const key = JSON.stringify([command, found.target]);
+    if (seen.has(key)) return;
+    seen.add(key);
     const hint = cdHint(command);
     out.push({ command, ...found, ...(hint ? { hint } : {}) });
   };
@@ -151,23 +153,28 @@ export function homeOffers(markdown: string, limit = 3, standaloneInline = false
   for (const match of markdown.matchAll(/(?<!`)`([^`\n]+)`(?!`)/g)) {
     const at = match.index!;
     if (fences.some(([from, to]) => at >= from && at < to)) continue;
-    const command = inlineCommandText(match[1]);
-    if (!command || LATER.test(markdown.slice(at + match[0].length, at + match[0].length + 40))) continue;
+    if (LATER.test(markdown.slice(at + match[0].length, at + match[0].length + 40))) continue;
     // The text before it on its line, from the sentence it is in.
     const line = markdown.slice(markdown.lastIndexOf('\n', at - 1) + 1, at);
     const sentence = line.split(/(?<=[.!?])\s+(?=[A-Z])/).pop() || line;
     const previous = standaloneInline && !line.trim() && /^\s*$/.test(markdown.slice(at + match[0].length).split('\n')[0])
       ? markdown.slice(0, at).trimEnd().split('\n').at(-1) || '' : '';
-    items.push({ at, run: () => add(command, targetOf(sentence || previous, command)) });
+    const raw = match[1];
+    if (Array.from(raw).some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)) continue;
+    const found = targetOf(sentence || previous, raw);
+    // A named handoff identifies the command. Heuristics only distinguish commands from prose elsewhere.
+    const command = found?.explicit ? raw : inlineCommandText(raw);
+    items.push({ at, run: () => add(command, found) });
   }
-  for (const item of items.sort((a, b) => a.at - b.at)) item.run();
+  for (const item of items.sort((a, b) => a.at - b.at)) if (offset === undefined || item.at === offset) item.run();
   return out;
 }
 
 /** An explicit destination also applies to the command's own Run button. */
-export function explicitHomeTarget(markdown: string, command: string): HomeTarget | undefined {
+export function explicitHomeTarget(markdown: string, command: string, offset?: number): HomeTarget | undefined {
   if (!/\bhome\b/i.test(markdown)) return undefined;
-  return homeOffers(markdown, Infinity).find(offer => offer.explicit && offer.command === command)?.target;
+  const matches = homeOffers(markdown, Infinity, true, offset).filter(offer => offer.explicit && offer.command === command);
+  return matches.length === 1 ? matches[0].target : undefined;
 }
 
 /** Paste compound sign-in commands for review before any step can run. */

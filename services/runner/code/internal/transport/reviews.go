@@ -282,7 +282,7 @@ func (s *Service) StartReview(ctx context.Context, r *pb.StartReviewRequest) (*p
 	if _, err := s.reviewStore(r.CollectionId); err != nil {
 		return nil, err
 	}
-	req := runner.ReviewRequest{TemplateID: r.TemplateId, Workspace: r.CollectionId, Source: r.SourceSessionId, Scope: r.Scope, Compare: r.Compare, Turn: int(r.Turn), Member: r.Member, Profile: r.ProfileId, Provider: r.Provider, Focus: r.Focus, Model: r.Model}
+	req := runner.ReviewRequest{RequestKey: r.RequestKey, TemplateID: r.TemplateId, Workspace: r.CollectionId, Source: r.SourceSessionId, Scope: r.Scope, Compare: r.Compare, Turn: int(r.Turn), Member: r.Member, Profile: r.ProfileId, Provider: r.Provider, Focus: r.Focus, Model: r.Model}
 	if r.Scope == reviews.ScopePR {
 		pr, err := s.GetPullRequest(ctx, &pb.GetPullRequestRequest{CollectionId: r.CollectionId, Member: r.Member})
 		if err != nil {

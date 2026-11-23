@@ -19,10 +19,10 @@ func (s *Service) PreviewWorkspaceDeletion(ctx context.Context, r *pb.Collection
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &pb.WorkspaceDeletionPreview{ActiveSessionIds: p.Active, DirtyRepositories: p.Dirty, FilesOutsideRepositories: p.FilesOutsideRepositories, Blocked: p.Blocked}, nil
+	return &pb.WorkspaceDeletionPreview{ActiveSessionIds: p.Active, DirtyRepositories: p.Dirty, FilesOutsideRepositories: p.FilesOutsideRepositories, Blocked: p.Blocked, SupportsKeepArtifacts: true}, nil
 }
 func (s *Service) DeleteWorkspace(ctx context.Context, r *pb.DeleteWorkspaceRequest) (*pb.CollectionResponse, error) {
-	c, err := s.Bench.DeleteWorkspace(ctx, r.CollectionId, r.ConfirmName, r.DiscardChanges, r.StopSessions)
+	c, err := s.Bench.DeleteWorkspace(ctx, r.CollectionId, r.ConfirmName, r.DiscardChanges, r.StopSessions, r.KeepArtifacts)
 	if err != nil {
 		return nil, rpcError(err)
 	}
@@ -60,7 +60,7 @@ func (s *Service) ScheduleDeletion(ctx context.Context, r *pb.ScheduleDeletionRe
 	switch {
 	case r.GetWorkspace() != nil && r.GetWorkspace().CollectionId != "":
 		w := r.GetWorkspace()
-		entry = runner.PendingDeletion{WorkspaceID: w.CollectionId, Title: w.ConfirmName, Stop: w.StopSessions, Discard: w.DiscardChanges}
+		entry = runner.PendingDeletion{WorkspaceID: w.CollectionId, Title: w.ConfirmName, Stop: w.StopSessions, Discard: w.DiscardChanges, KeepArtifacts: w.KeepArtifacts}
 	case r.GetConversation() != nil && r.GetConversation().SessionId != "":
 		c := r.GetConversation()
 		entry = runner.PendingDeletion{SessionID: c.SessionId, Stop: c.StopSessions}

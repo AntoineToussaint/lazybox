@@ -11,7 +11,7 @@ const server=await createServer({...testViteCache(import.meta.url),configFile:fa
 let browser;
 try{
  await server.listen();browser=await(process.env.TEST_WEBKIT?webkit:chromium).launch({headless:true});const page=await browser.newPage({viewport:{width:1250,height:900}});page.setDefaultTimeout(8000);
- await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
+ await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`,{waitUntil:'domcontentloaded',timeout:30000});
  const rows=page.locator('.workspace-row');await expect(rows).toHaveCount(2);
  for(const row of await rows.all()){const name=await row.locator('.workspace-label strong').boundingBox(),bounds=await row.boundingBox(),action=await row.locator('summary').boundingBox();assert.ok(Math.abs((name.y+name.height/2)-(action.y+action.height/2))<2,'actions must align with workspace name');assert.ok(action.x+action.width<=bounds.x+bounds.width,'actions remain inside the row at its right edge');}
  await expect(page.locator('.workspace-conversations')).toHaveCount(0);await expect(rows.first().getByRole('button',{name:'New conversation in Alpha feature'})).toHaveCount(1);
@@ -25,16 +25,25 @@ try{
  await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();
  const dialog=page.getByRole('dialog',{name:'Delete workspace',exact:true});await expect(dialog).toBeVisible();await expect(dialog).toContainText('Beta release');await expect(dialog.getByRole('heading')).toHaveText('Delete workspace?');await expect(dialog.getByRole('button',{name:'Cancel',exact:true})).toBeFocused();await page.screenshot({path:'/tmp/lazybox-workspace-delete-dirty.png'});await page.getByRole('button',{name:'Cancel workspace deletion'}).click();await expect(dialog).toHaveCount(0);assert.equal(fixture.mutations.length,0);
  await actions.click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();await expect(dialog).toBeVisible();await expect(dialog.getByRole('button',{name:'Delete workspace',exact:true})).toBeDisabled();
+ const removeArtifacts=dialog.getByRole('checkbox',{name:'Permanently delete workspace artifacts and all their versions'});
+ await expect(removeArtifacts).not.toBeChecked();
+ await removeArtifacts.check();
+ await expect(dialog).toContainText('Artifacts will be removed');
  await expect(dialog).toContainText('running session');await expect(dialog).toContainText('Uncommitted or untracked files');await expect(dialog.getByRole('textbox')).toHaveCount(0);await dialog.getByLabel(/Stop .* active session/).check();await dialog.getByLabel('Discard these workspace files permanently').check();
- await page.route('**/ScheduleDeletion',route=>route.fulfill({status:400,json:{code:'failed_precondition',message:'Member is not the expected worktree root'}}),{times:1});
+ await page.route('**/ScheduleDeletion',route=>{
+   assert.equal(!!route.request().postDataJSON().workspace.keepArtifacts,false);
+   return route.fulfill({status:400,json:{code:'failed_precondition',message:'Member is not the expected worktree root'}});
+ },{times:1});
  const confirmDelete=dialog.getByRole('button',{name:'Delete workspace',exact:true});
  await confirmDelete.click();
  await expect(dialog.getByRole('alert')).toContainText('Member is not the expected worktree root');
  await expect(confirmDelete).toBeEnabled();
  assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,0);
+ await removeArtifacts.uncheck();
  await page.clock.install();
  await dialog.getByRole('button',{name:'Delete workspace',exact:true}).click();await expect(dialog).toHaveCount(0);await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).not.toContainText('Beta release');await expect(page.locator('.workspace-row button[aria-current=page]')).toContainText('Alpha feature');
  assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,1);
+ assert.equal(fixture.mutations.find(m=>m.method==='ScheduleDeletion').body.workspace.keepArtifacts,true);
  const undoNotice=page.getByText('Workspace moved to Recently deleted',{exact:true});
  await expect(undoNotice).toBeVisible();
  await page.clock.fastForward(30_000);

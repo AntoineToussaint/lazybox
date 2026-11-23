@@ -15,7 +15,7 @@ import { SlashMenu, SLASH_MENU_ID, slashOptionId } from './SlashMenu';
 import { useDismiss } from './dismiss';
 import { useConfirmCard } from './confirm-card';
 import {
-  boxAfterCommand, decideSend, findCommand, lazyboxCommands, mergeModels, modelRestartText, paletteCommand, reviewRequest, providerCommands, resolveModel, sameModel, slashCommandList, slashMenu, snippetCommands,
+  boxAfterCommand, decideSend, findCommand, lazyboxCommands, mergeModels, orderedModelChoices, modelRestartText, paletteCommand, reviewRequest, providerCommands, resolveModel, sameModel, slashCommandList, slashMenu, snippetCommands,
   type CommandCatalog, type ProviderModel, type SlashChoice, type SlashCommand, type SlashContext, type SlashMenuState,
 } from './slash-commands';
 import { useProviderAvailability } from './useProviderAvailability';
@@ -60,7 +60,7 @@ type Options = {
   subscriptions: number;
   canCompose: boolean;
   message: string;
-  setText(text: string): void;
+  setText(text: string, snippetKey?: string): void;
   textarea: RefObject<HTMLTextAreaElement | null>;
   /** This is the chat in front: the palette's commands mean it. */
   front(): boolean;
@@ -91,20 +91,26 @@ export function useSlashCommands(o: Options) {
   const { api, session, sessionID, catalog, provider } = o;
   const workspaceId = session?.collectionId || '';
 
-  // Snippets join the menu once a command is typed; the chain the last one offers comes first.
-  const [snippets, setSnippets] = useState<{ rows: Snippet[]; next: string[] }>({ rows: [], next: [] });
-  const typingCommand = o.message.startsWith('/');
-  const loadedFor = useRef('');
+  // The transcript also uses the catalog to fold saved snippet bodies on replay.
+  const [snippetRows, setSnippetRows] = useState<Snippet[]>([]);
   useEffect(() => {
-    if (!typingCommand || !o.enabled || loadedFor.current === sessionID) return;
-    loadedFor.current = sessionID;
+    if (!o.enabled) return;
     const controller = new AbortController();
-    void Promise.all([
-      api.listSnippets({}, { signal: controller.signal }).catch(() => ({ snippets: [] as Snippet[] })),
-      session?.conversationId ? api.listPromptHistory({ conversationId: session.conversationId, limit: 1 }, { signal: controller.signal }).catch(() => undefined) : Promise.resolve(undefined),
-    ]).then(([list, history]) => { if (!controller.signal.aborted) setSnippets({ rows: list.snippets, next: history?.nextSnippets || [] }); });
-    return () => { controller.abort(); if (loadedFor.current === sessionID) loadedFor.current = ''; };
-  }, [typingCommand, o.enabled, sessionID, api, session?.conversationId]);
+    void api.listSnippets({}, { signal: controller.signal }).then(list => {
+      if (!controller.signal.aborted) setSnippetRows(list.snippets);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [api, o.enabled, sessionID]);
+  const [nextSnippets, setNextSnippets] = useState<string[]>([]);
+  const typingCommand = o.message.startsWith('/');
+  useEffect(() => {
+    if (!typingCommand || !o.enabled || !session?.conversationId) return;
+    const controller = new AbortController();
+    void api.listPromptHistory({ conversationId: session.conversationId, limit: 1 }, { signal: controller.signal }).then(history => {
+      if (!controller.signal.aborted) setNextSnippets(history.nextSnippets);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [api, typingCommand, o.enabled, session?.conversationId]);
 
   // `/review`: another agent reviews this conversation's work (or, from a
   // review conversation, the work it reviews: a review is never reviewed).
@@ -128,7 +134,7 @@ export function useSlashCommands(o: Options) {
   };
   const lazybox = lazyboxCommands(context);
   const modelsRef = useRef(models); modelsRef.current = models;
-  const commands: SlashCommand[] = slashCommandList(lazybox, providerCommands(catalog, lazybox, o.canCompose ? undefined : 'The conversation cannot take a message now'), snippetCommands(snippets.rows, snippets.next));
+  const commands: SlashCommand[] = slashCommandList(lazybox, providerCommands(catalog, lazybox, o.canCompose ? undefined : 'The conversation cannot take a message now'), snippetCommands(snippetRows, nextSnippets));
   const byName = (name: string) => lazybox.find(command => command.name === name)!;
 
   // ---- The menu --------------------------------------------------------
@@ -150,8 +156,8 @@ export function useSlashCommands(o: Options) {
 
   // A draft set aside while a command from the palette or a menu borrows the box.
   const stash = useRef<string | null>(null);
-  const setText = (text: string) => {
-    latest.current.setText(text);
+  const setText = (text: string, snippetKey?: string) => {
+    latest.current.setText(text, snippetKey);
     // The caret goes to the end a frame later, once the box holds the text — unless
     // the person typed on meanwhile: what they typed keeps its caret.
     const box = latest.current.textarea.current;
@@ -177,10 +183,10 @@ export function useSlashCommands(o: Options) {
     const model = resolveModel(name || '', modelsRef.current);
     const { session: current, sessionID: id, onError } = latest.current;
     if (!model || !current) return;
-    const choice = byNameLatest('model')?.choices?.find(c => c.value.toLowerCase() === [model, effort].filter(Boolean).join(' ').toLowerCase());
-    const label = choice?.label || [modelName(model), effort].filter(Boolean).join(' · ');
+    const choice = byNameLatest('model')?.choices?.find(c => c.value.toLowerCase() === model.toLowerCase());
+    const label = [choice?.label || modelName(model), effort].filter(Boolean).join(' · ');
     // The model it runs on already: nothing to switch, nothing to confirm.
-    if (choice?.current || ((!effort || current.effort === effort) && sameModel({ value: model, displayName: modelName(model), description: '' }, latest.current.model))) { setRestart(undefined); notice(`Already on ${label}`); return; }
+    if ((!effort || current.effort === effort) && (choice?.current || sameModel({ value: model, displayName: modelName(model), description: '' }, latest.current.model))) { setRestart(undefined); notice(`Already on ${label}`); return; }
     if (current.capabilities?.liveModel) {
       try {
         await api.apply({ sessionId: id, operationId: crypto.randomUUID(), operation: { case: 'model', value: { model, effort } } });
@@ -230,9 +236,10 @@ export function useSlashCommands(o: Options) {
       case 'effort': {
         const { model, session: current } = latest.current;
         if (!args || args === 'status') { notice(`Reasoning effort: ${current?.effort || 'Provider default'}`); break; }
-        if (!model) { notice('Choose a model and effort with /model'); break; }
-        if (!/^(none|minimal|low|medium|high|xhigh|max|ultra)$/.test(args)) { notice('Choose a supported effort with /model'); break; }
-        void switchModel(`${model} ${args}`);
+        const target = byNameLatest('model')?.choices?.find(choice => choice.current)?.value || model;
+        if (!target) { notice('Choose a model with /model'); break; }
+        if (!/^(none|minimal|low|medium|high|xhigh|max|ultra)$/.test(args)) { notice('Choose a supported level with /effort'); break; }
+        void switchModel(`${target} ${args}`);
         break;
       }
       case 'diff': if (!runAction('changes.show')) notice('Open Changes in the workspace window'); break;
@@ -321,7 +328,7 @@ export function useSlashCommands(o: Options) {
     }
     const command = menu.items[index]?.command;
     if (!command) return;
-    if (command.group === 'snippet') { saveSnippetUse(latest.current.viewState, command.name); stash.current = null; setText(command.body || ''); return; }
+    if (command.group === 'snippet') { saveSnippetUse(latest.current.viewState, command.name); stash.current = null; setText(command.body || '', command.name); return; }
     if (command.disabled) { notice(command.disabled); return; }
     if (complete || command.argumentHint || command.choices?.length || command.needsArgument) { setText(`/${command.name} `); return; }
     if (command.group === 'provider') {
@@ -383,7 +390,7 @@ export function useSlashCommands(o: Options) {
       case 'text': return false;
       case 'lazybox': run(decision.command, decision.args); return true;
       case 'provider': if (decision.command.disabled) { notice(decision.command.disabled); return true; } return false;
-      case 'snippet': setText(decision.command.body || ''); return true;
+      case 'snippet': setText(decision.command.body || '', decision.command.name); return true;
     }
   };
 
@@ -434,13 +441,12 @@ export function useSlashCommands(o: Options) {
   };
   const modelCommand = byName('model');
   const choices = modelCommand.choices || [];
-  const currentModel = choices.find(choice => choice.current)?.value.split(' ')[0];
-  const modelMenuChoices = choices.filter(choice => !choice.effort).map(choice =>
-    choice.value === currentModel && !choice.current ? { ...choice, current: true } : choice);
-  const effortChoices = choices.filter(choice => choice.effort && choice.value.split(' ')[0] === currentModel);
+  const currentModel = choices.find(choice => choice.current)?.value;
+  const modelMenuChoices = orderedModelChoices(choices);
+  const effortChoices = (lazybox.find(command => command.name === 'effort')?.choices || []).map(choice => ({ ...choice, value: `${currentModel} ${choice.value}` }));
 
   return {
-    menu: menu as SlashMenuState | null, onKeyDown, intercept, above, prompt, dialogs, textareaProps,
+    snippetRows, updateSnippetCatalog: setSnippetRows, menu: menu as SlashMenuState | null, onKeyDown, intercept, above, prompt, dialogs, textareaProps,
     /** The model picker of the ⋯ menu and the header: the same choices and switch as `/model`. */
     models: { choices: modelMenuChoices, efforts: effortChoices, live: context.liveModel, disabled: modelCommand.disabled, choose: (value: string) => { void switchModel(value); }, pick: () => fromPalette('model') },
     pickPermissions: byName('permissions').disabled ? undefined : () => fromPalette('permissions'),

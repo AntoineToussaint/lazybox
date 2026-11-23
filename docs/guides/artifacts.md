@@ -3,6 +3,7 @@
 Agents write plans, reviews and specs — in a chat message, or in a file such as
 `docs/PLAN.md`. Track one as an **artifact** and it becomes a versioned page of
 the workspace: compare versions, export it, and hand it back to an agent.
+The Runner verifies each revision against its saved SHA-256 digest when you open it. If a file is damaged, that revision reports an error. Other intact revisions remain readable.
 
 ![The Artifacts panel with an artifact page open](../images/artifacts.webp)
 
@@ -12,7 +13,7 @@ the workspace: compare versions, export it, and hand it back to an agent.
 | --- | --- |
 | **An agent's message** | Hover the message and click **Track**, or right-click → **Track as artifact…**. The title and kind (plan, report, spec, notes) are suggested, with a preview. When the message links a Markdown file, the dialog offers **Track `docs/PLAN.md`** (stays in sync with the file) first, chosen already for a short message that mostly names it. Later messages of the same conversation offer **Update "Title" from this message…**, which shows the diff before saving. |
 | **A Markdown file** | In Files, right-click the file (or the editor tab, or the file's link in a message) → **Track as artifact**. Lazybox follows the file: each settled change becomes a new version, and the page says *Synced with `api/docs/PLAN.md`*. **Stop syncing with file** keeps every version. |
-| **The agent itself** | Agents publish with `lazybox artifact put PLAN.md --title "Migration plan" --kind plan`; their briefing tells them to. |
+| **The agent itself** | Agents publish with `lazybox artifact put plan.json --title "Migration plan" --kind plan`; their briefing tells them to. |
 
 ## One artifact per topic
 
@@ -81,7 +82,7 @@ The page follows new versions by itself. Rename by double-clicking the title.
   **Create GitHub issue…** in a workspace repository. The desktop app opens
   the system Save dialog for Markdown, HTML, and JSON exports.
 
-Deleting a workspace deletes its artifacts; deleting a conversation does not.
+Workspace deletion keeps artifacts and their version history by default. Find them under **Artifacts → All workspaces**. Select **Permanently delete workspace artifacts and all their versions** to remove them when the undo period ends. Deleting a conversation keeps its artifacts.
 
 ## Preview an HTML artifact
 
@@ -104,6 +105,10 @@ agent**. The draft includes the excerpt and a command to read the exact
 revision you had open. In a standalone window, Lazybox copies that draft.
 
 ## Publish a TODO list
+
+New CLI records created with an explicit kind default to its validated JSON schema. To import an existing document, specify `--format markdown` or `--format html`. Updates preserve the original format.
+
+The task list shows how many items are complete. On the current version, use the remaining-tasks action to prepare a chat draft or copy a brief referencing that revision. You can review the draft before sending.
 
 Publish a JSON file with `lazybox artifact put tasks.json --title "Release tasks" --kind todo-list`.
 Each entry has a unique stable ID, text, and a status of `todo` or `done`. Array order is display order.

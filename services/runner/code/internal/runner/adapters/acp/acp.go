@@ -343,20 +343,10 @@ type authMethod struct {
 	Args        []string `json:"args"`
 }
 
-// rpcError is a JSON-RPC error an agent answered with.
-type rpcError struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data"`
-}
-
 // errorOf reads the JSON-RPC error out of a failed call.
-func errorOf(err error) (rpcError, bool) {
+func errorOf(err error) (*jsonl.CallError, bool) {
 	var call *jsonl.CallError
-	if errors.As(err, &call) && (call.Code != 0 || call.Message != "") {
-		return rpcError{Code: call.Code, Message: call.Message, Data: call.Data}, true
-	}
-	return rpcError{}, false
+	return call, errors.As(err, &call)
 }
 
 // authRequired is ACP's "Authentication required" error code.
@@ -382,10 +372,7 @@ func startupError(title, method string, err error, methods ...authMethod) error 
 		}
 		return fmt.Errorf("%s needs you to sign in. %s", title, hint)
 	}
-	if e.Message == "" {
-		e.Message = fmt.Sprintf("error %d", e.Code)
-	}
-	return fmt.Errorf("%s did not start (%s): %s", title, method, e.Message)
+	return fmt.Errorf("%s did not start (%s): %w", title, method, e)
 }
 
 func (s *session) DurableState() json.RawMessage {

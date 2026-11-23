@@ -121,7 +121,16 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 		cancel()
 		return nil, err
 	}
-	fail := func(err error) (agent.Session, error) { cancel(); p.Close(); return nil, err }
+	fail := func(err error) (agent.Session, error) {
+		cancel()
+		p.Close()
+		// Codex's own answer, with the step that refused it.
+		var call *jsonl.CallError
+		if errors.As(err, &call) {
+			err = fmt.Errorf("Codex did not start (%s): %w", call.Method, err)
+		}
+		return nil, err
+	}
 	setup, done := context.WithTimeout(life, 30*time.Second)
 	defer done()
 	initialized, err := p.Call(setup, "initialize", map[string]any{"clientInfo": map[string]string{"name": "lazybox_v2_testbench", "title": "Lazybox V2 test bench", "version": "0.1.0"}, "capabilities": map[string]any{"experimentalApi": true}})

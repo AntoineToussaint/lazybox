@@ -101,18 +101,19 @@ func (s *session) answered(m jsonl.Message, emit func(agent.Event)) bool {
 func turnEnd(turn string, result, failure json.RawMessage, title string) []agent.Event {
 	end := agent.Event{Type: "turn_ended", TurnID: turn, Status: "completed"}
 	if present(failure) {
-		var e rpcError
-		_ = json.Unmarshal(failure, &e)
-		fault := agent.Event{Type: "failure", TurnID: turn, Status: "provider_error", Text: e.Message}
+		// The agent's own words, read the way every adapter call's error is (jsonl.CallError).
+		e := jsonl.NewCallError("session/prompt", failure)
+		said := e.Message != "" || len(e.Data) > 0
+		fault := agent.Event{Type: "failure", TurnID: turn, Status: "provider_error", Text: title + " ended the turn with an error."}
+		if said {
+			fault.Text = e.Error()
+		}
 		if e.Code == authRequired {
 			fault.Status = "auth_required"
 			fault.Account = &agent.AccountObservation{State: "auth_required", Reason: "acp_auth_required"}
-			if fault.Text == "" {
+			if !said {
 				fault.Text = title + " needs you to sign in again."
 			}
-		}
-		if fault.Text == "" {
-			fault.Text = title + " ended the turn with an error."
 		}
 		end.Status = "failed"
 		end.Data = failure

@@ -17,7 +17,8 @@ test('a stream that ends is reported as the provider process ending, after every
 test('a stream that fails is reported as an SDK error', async () => {
   const end = await readStream(messages(['a'], new Error('control channel closed')), () => {});
   assert.equal(end.status, 'sdk_error');
-  assert.match(end.text, /control channel closed/);
+  // The error's message, as the person reads it: not JavaScript's "Error: control channel closed".
+  assert.equal(end.text, 'control channel closed');
 });
 
 test('the worker exits once it has said why the stream ended, never before', () => {

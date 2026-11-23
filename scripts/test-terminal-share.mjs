@@ -42,7 +42,8 @@ try {
   // Two listings after the run started: the page has seen it.
   const seen = lists();
   await expect.poll(lists, { timeout: 5000 }).toBeGreaterThan(seen + 1);
-  assert.equal(await minimized(), true, 'a run never unfolds the console by itself');
+  // Folded throughout, not just at one moment: a late unfold would show within this second.
+  for (const end = Date.now() + 1000; Date.now() < end; await page.waitForTimeout(100)) assert.equal(await minimized(), true, 'a run never unfolds the console by itself');
   await expect(composer).toBeFocused();
   await page.getByRole('tab', { name: 'Command output', exact: true }).click();
   await expect.poll(minimized, { timeout: 5000 }).toBe(false);

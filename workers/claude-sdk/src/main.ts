@@ -16,6 +16,7 @@ import { generateTitle } from './title.js';
 import { ModelSwitch } from './model.js';
 import { messageContent } from './content.js';
 import { steerPriority, userMessage } from './steer.js';
+import { errorText } from './error-text.js';
 
 type Request = { id?: string; method?: string; params?: any; result?: any; error?: any };
 let session: Query | undefined;
@@ -36,7 +37,7 @@ const settingsApprovals = new SettingsApprovals();
 // The agent's own slash commands and models, said once per change.
 const catalog = new CommandCatalog();
 // The model of the following turns: a change during a turn waits for it to end.
-const models = new ModelSwitch((model, effort) => effort ? session!.applyFlagSettings({ model, effortLevel: effort }) : session!.setModel(model), (model, error) => process.stderr.write(`model ${model} not applied: ${String(error)}\n`));
+const models = new ModelSwitch((model, effort) => effort ? session!.applyFlagSettings({ model, effortLevel: effort }) : session!.setModel(model), (model, error) => process.stderr.write(`model ${model} not applied: ${errorText(error)}\n`));
 const sayCatalog = (value: ReturnType<CommandCatalog['fromChanged']>) => { if (value) event({ ...value, sessionId: reference }); };
 const send = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
 const event = (value: unknown) => send({ method: 'event', params: value });
@@ -241,7 +242,7 @@ async function handle(request: Request) {
       }
       default: throw new Error('Unsupported worker operation');
     }
-  } catch (error) { send({ id: request.id, error: { message: String(error) } }); }
+  } catch (error) { send({ id: request.id, error: { message: errorText(error) } }); }
 }
 
 const reader = createInterface({ input: process.stdin, crlfDelay: Infinity });

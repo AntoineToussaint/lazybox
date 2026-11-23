@@ -339,43 +339,68 @@ func (p *Process) Close() error {
 }
 
 // CallError is the error an adapter answered a call with (a JSON-RPC error
-// object). It reads as the agent's own message ("API error: 429 This request
-// would exceed your account's rate limit…"), never as the raw object: that
-// text reaches the person. Method, Code and Data stay for code that decides
-// what to do with it.
+// object). It reads as the adapter's own words: its message, and the reason
+// in its data when the message alone is generic ("Internal error: model
+// claude-x not available"), never the raw object, which reaches the person.
+// Method, Code, Data and Raw stay for code that decides what to do with it;
+// a caller says which step failed (Codex and ACP name it when they did not
+// start).
 type CallError struct {
 	Method  string
 	Code    int
 	Message string
 	Data    json.RawMessage
-	// Raw is the error as the adapter sent it, for an answer that is not an object.
+	// Raw is the error as the adapter sent it.
 	Raw json.RawMessage
 }
 
-// NewCallError reads an adapter's error answer to method.
+// NewCallError reads an adapter's error answer to method. Each field is
+// read on its own, so one of an unexpected type keeps the others.
 func NewCallError(method string, raw json.RawMessage) *CallError {
 	e := &CallError{Method: method, Raw: append(json.RawMessage(nil), raw...)}
-	var object struct {
-		Code    int             `json:"code"`
-		Message string          `json:"message"`
-		Data    json.RawMessage `json:"data"`
-	}
-	if json.Unmarshal(raw, &object) == nil {
-		e.Code, e.Message, e.Data = object.Code, object.Message, object.Data
-	} else {
-		var text string
-		if json.Unmarshal(raw, &text) == nil {
-			e.Message = text
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) == nil {
+		_ = json.Unmarshal(fields["message"], &e.Message)
+		var code float64
+		if json.Unmarshal(fields["code"], &code) == nil {
+			e.Code = int(code)
 		}
+		e.Data = fields["data"]
+	} else {
+		_ = json.Unmarshal(raw, &e.Message)
 	}
-	// A JavaScript error's own "Error: " prefix says nothing to the person.
-	e.Message = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(e.Message), "Error: "))
+	e.Message = strings.TrimSpace(e.Message)
 	return e
 }
 
 func (e *CallError) Error() string {
-	if e.Message != "" {
-		return e.Message
+	message, detail := e.Message, dataDetail(e.Data)
+	switch {
+	case message == "" && detail == "":
+		return e.Method + " failed"
+	case message == "":
+		return detail
+	case detail == "" || strings.Contains(message, detail):
+		return message
 	}
-	return fmt.Sprintf("the agent refused %s: %s", e.Method, e.Raw)
+	return message + ": " + detail
+}
+
+// dataDetail is the reason an error's data gives in words, when it gives
+// one: a string, or the string field ACP and JSON-RPC servers use.
+func dataDetail(data json.RawMessage) string {
+	var text string
+	if json.Unmarshal(data, &text) == nil {
+		return strings.TrimSpace(text)
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return ""
+	}
+	for _, key := range []string{"details", "message", "reason", "error"} {
+		if json.Unmarshal(fields[key], &text) == nil && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
 }

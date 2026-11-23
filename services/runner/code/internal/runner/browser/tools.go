@@ -326,9 +326,9 @@ func (m *Manager) ensureOpen(ctx context.Context, b *conv) error {
 	workspace := b.workspace
 	m.mu.Unlock()
 	fail := func(err error) error {
-		if service := serviceError(err); service != err {
-			err = service
-		} else {
+		// The service answered with an error: its own words (jsonl.CallError reads as them).
+		var call *jsonl.CallError
+		if !errors.As(err, &call) {
 			// The process itself failed: one line for the person, the rest is in its stderr tail.
 			first, _, _ := strings.Cut(err.Error(), "\n")
 			err = fmt.Errorf("the browser service did not start: %s", first)
@@ -384,7 +384,7 @@ func (m *Manager) act(ctx context.Context, b *conv, params map[string]any) (actR
 	defer cancel()
 	raw, err := p.Call(call, "act", params)
 	if err != nil {
-		return actResult{}, serviceError(err)
+		return actResult{}, err
 	}
 	var r actResult
 	if err = json.Unmarshal(raw, &r); err != nil {
@@ -395,15 +395,6 @@ func (m *Manager) act(ctx context.Context, b *conv, params map[string]any) (actR
 	m.changedLocked(b)
 	m.mu.Unlock()
 	return r, nil
-}
-
-// serviceError keeps the service's own words: a call it refused reads as its message.
-func serviceError(err error) error {
-	var call *jsonl.CallError
-	if errors.As(err, &call) && call.Message != "" {
-		return errors.New(call.Message)
-	}
-	return err
 }
 
 // closeBrowser closes b's page; who is agent or person.
@@ -545,7 +536,7 @@ func (m *Manager) Input(ctx context.Context, conversation string, input map[stri
 	defer cancel()
 	raw, err := p.Call(call, "input", input)
 	if err != nil {
-		return State{}, serviceError(err)
+		return State{}, err
 	}
 	var page PageState
 	m.mu.Lock()

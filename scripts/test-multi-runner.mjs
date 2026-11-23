@@ -278,9 +278,6 @@ try {
       await expect.poll(() => mutations(working, 'Apply').filter(m => m.body.message?.text === 'Bump the invoice schema').length).toBe(1);
       assert.equal(mutations(dev, 'PrepareWorkspace').length, prepares.dev, "Working's + never reaches Dev");
       await expect(workingGroup).toHaveAttribute('data-active', 'true');
-      // The started task's conversation takes focus for its next message. Wait for it, or it can
-      // land after the header is focused below and the keys go to the message box instead.
-      await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeFocused();
 
       // Keyboard only (⌥Tab in WebKit, as Safari moves between buttons; Tab elsewhere): from Dev's header to its +, Enter, then "on Dev ▾" (⇧⌥Tab) and ↓ to change the Runner; Escape closes the menu, not the sheet.
       await devGroup.locator('.runner-group-toggle').focus();

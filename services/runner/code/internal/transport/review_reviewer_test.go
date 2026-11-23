@@ -73,9 +73,14 @@ func TestReviewerSettingIsKept(t *testing.T) {
 // the fixed subscription on its model; the person's focus reaches the brief.
 func TestStartReviewUsesTheConfiguredReviewer(t *testing.T) {
 	f := newReviewFixture(t)
-	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Focus: "the error path of Handle"})
+	request := &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Focus: "the error path of Handle", RequestKey: "review-request"}
+	started, err := f.client.StartReview(f.owner, request)
 	if err != nil {
 		t.Fatal(err)
+	}
+	replay, err := f.client.StartReview(f.owner, request)
+	if err != nil || replay.GetRun().GetId() != started.Run.Id || replay.GetSession().GetId() != started.Session.Id {
+		t.Fatalf("replaying a review start created different work: %v %v", replay, err)
 	}
 	if started.Run.ReviewerProvider != "codex" || started.Run.Fallback != "" || started.Run.Focus != "the error path of Handle" || started.Session.Title != "Review · Changes · Codex" {
 		t.Fatalf("the other agent reviews: %+v", started.Run)

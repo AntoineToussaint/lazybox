@@ -1,8 +1,6 @@
-import { parseDismissed } from './pull-requests-model';
 
-type Reaction = { phase: 'sending' | 'sent' | 'error' | 'dismissed'; text: string; at: number; hidden?: boolean };
+type Reaction = { phase: 'sending' | 'sent' | 'error' | 'manual' | 'dismissed'; text: string; at: number; hidden?: boolean };
 const prefix = 'lazybox:pull-reaction:';
-const legacy = 'lazybox:pull-inbox-dismissed';
 const receiptDuration = 10_000;
 // The longest reaction RPC times out after 120 seconds.
 const pendingDuration = 125_000;
@@ -12,12 +10,11 @@ let timer: ReturnType<typeof setTimeout>;
 function decode(raw: string | null): Reaction | undefined {
   try {
     const v = JSON.parse(raw || 'null');
-    if (v && ['sending','sent','error','dismissed'].includes(v.phase) && Number.isFinite(v.at) && typeof v.text === 'string') return v;
+    if (v && ['sending','sent','error','manual','dismissed'].includes(v.phase) && Number.isFinite(v.at) && typeof v.text === 'string') return v;
   } catch { /* Ignore invalid saved state. */ }
 }
 function restore() {
   try {
-    for (const key of parseDismissed(localStorage.getItem(legacy))) records.set(key, { phase: 'dismissed', text: '', at: 0 });
     for (const key of Object.keys(localStorage)) {
       if (!key.startsWith(prefix)) continue;
       const record = decode(localStorage.getItem(key));
@@ -57,7 +54,7 @@ function write(key: string, value: Reaction) {
   publish();
 }
 if (typeof window !== 'undefined') window.addEventListener('storage', event => {
-  if (event.key === null || event.key === legacy) { records.clear(); restore(); publish(); return; }
+  if (event.key === null) { records.clear(); restore(); publish(); return; }
   if (!event.key.startsWith(prefix)) return;
   const key = event.key.slice(prefix.length);
   const record = decode(localStorage.getItem(event.key));
@@ -71,7 +68,7 @@ export const pullReactions = {
     const record = records.get(key);
     write(key, record ? { ...record, hidden: true } : { phase: 'dismissed', text: '', at: Date.now(), hidden: true });
   },
-  async run(key: string, work: () => Promise<{ok: boolean; text: string}>) {
+  async run(key: string, work: () => Promise<{ok: boolean; text: string; manual?: boolean}>) {
     const execute = async () => {
       // Read under the lock; another window's storage event can arrive later.
       try { const saved = decode(localStorage.getItem(prefix + key)); if (saved) records.set(key, saved); } catch { /* in memory */ }
@@ -82,7 +79,7 @@ export const pullReactions = {
       const result = await work();
       let latest = records.get(key);
       try { latest = decode(localStorage.getItem(prefix + key)) ?? latest; } catch { /* In-memory state. */ }
-      write(key, {phase: result.ok ? 'sent' : 'error', text: result.text, at: Date.now(), hidden: latest?.hidden});
+      write(key, {phase: result.manual ? 'manual' : result.ok ? 'sent' : 'error', text: result.text, at: Date.now(), hidden: latest?.hidden});
       return result;
     };
     if (!navigator.locks) return execute();

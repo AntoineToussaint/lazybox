@@ -308,10 +308,33 @@ func TestPullRequestReactions(t *testing.T) {
 	f.agent.Events <- agent.Event{Type: "turn_started"}
 	until(t, "the turn never started", func() bool { return f.session.Engine.Snapshot().Busy })
 	ref := &pb.ItemRef{Provider: "github", Key: "team/api#3"}
-	sent, err := f.client.SendPullRequestFailures(owner, &pb.PullRequestReactionRequest{CollectionId: f.mine.Id, Ref: ref})
+	observed, err := f.client.ListLinks(owner, &pb.ListLinksRequest{CollectionId: f.mine.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observation string
+	for _, link := range observed.Links {
+		if link.Item.GetRef().GetKey() == ref.Key {
+			observation = link.Item.GetPullRequest().GetObservationId()
+		}
+	}
+	if observation == "" {
+		t.Fatal("expected observation identity")
+	}
+	request := &pb.PullRequestReactionRequest{CollectionId: f.mine.Id, Ref: ref, SessionId: f.session.ID, ExpectedObservation: observation}
+	sent, err := f.client.SendPullRequestFailures(owner, request)
 	if err != nil || sent.SessionId != f.session.ID || !sent.Queued || len(sent.Files) != 1 {
 		t.Fatalf("send failures: %+v %v", sent, err)
 	}
+	replay, err := f.client.SendPullRequestFailures(owner, request)
+	if err != nil || replay.GetSummary() != sent.Summary || f.session.Engine.Snapshot().Queued != 1 {
+		t.Fatalf("duplicate reaction: %v %v", replay, err)
+	}
+	request.ExpectedObservation = strings.Repeat("0", 64)
+	if _, err = f.client.SendPullRequestFailures(owner, request); err == nil {
+		t.Fatal("accepted a stale observation")
+	}
+
 	if full, err := os.ReadFile(sent.Files[0]); err != nil || string(full) != failingJob {
 		t.Fatalf("the full log is saved for the agent: %v", err)
 	}

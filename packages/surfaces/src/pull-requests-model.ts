@@ -151,6 +151,7 @@ export type PullInboxRow = TrackedPull & {
 export function pullReactionKey(pull: TrackedPull): string {
   const pr = pull.link.item?.pullRequest;
   const base = `${pull.key}:${pull.status}:${pr?.headSha || ''}`;
+  if (pr?.observationId) return JSON.stringify([base, pull.link.sessionId, pr.observationId]);
   if (pull.status === 'checks-failed' && pr?.failingChecks?.length) {
     return base + ':' + JSON.stringify(pr.failingChecks.map(check => JSON.stringify([check.name, check.url])).sort());
   }
@@ -162,7 +163,7 @@ export function pullInboxRows(links: readonly ItemLink[], dismissed: ReadonlySet
   for (const pull of deliveredPulls(links)) {
     if (!needsYou.has(pull.status) || pull.link.collectionDeleted) continue;
     const dismissKey = pullReactionKey(pull);
-    if (dismissed.has(dismissKey) || dismissed.has(`${pull.key}:${pull.status}:${pull.link.item?.pullRequest?.headSha || ''}`)) continue;
+    if (dismissed.has(dismissKey)) continue;
     const action = pull.status === 'checks-failed' ? 'send' : pull.status === 'changes-requested' ? 'review' : pull.status === 'ready' ? 'merge' : 'open';
     const what = pull.status === 'checks-failed' ? `checks failed · ${pull.detail}` : pull.status === 'ready' ? 'approved · checks green' : statusLabel[pull.status].toLowerCase();
     rows.push({ ...pull, dismissKey, action, line: `${pull.repository}#${pull.number} ${what}` });

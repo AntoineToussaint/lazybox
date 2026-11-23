@@ -120,7 +120,7 @@ function PullRow({ pull, now, workspace, agent, state, confirming, onOpen, onAsk
   const confirmButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (confirming) confirmButton.current?.focus(); }, [confirming]);
   const busy = state?.phase === 'sending';
-  const note = state && ['sent','error'].includes(state.phase) ? {ok: state.phase === 'sent', text: state.text} : undefined;
+  const note = state && ['manual','sent','error'].includes(state.phase) ? {ok: state.phase !== 'error', text: state.text} : undefined;
   const reaction = pull.link.collectionDeleted || state?.phase === 'sent' ? undefined : reactionFor(pull);
   return <li className="pr-item" data-pull={pull.key} data-status={pull.status}>
     <button className="pr-row" onClick={onOpen} title={`Open ${workspace}${pull.link.sessionId ? ' at the conversation that delivered it' : ''}`}>

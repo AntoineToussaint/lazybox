@@ -12,6 +12,9 @@
 package items
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -148,6 +151,25 @@ type Item struct {
 	ClosedAt   time.Time    `json:"closedAt,omitzero"`
 	ObservedAt time.Time    `json:"observedAt,omitzero"`
 	PR         *PullRequest `json:"pullRequest,omitempty"`
+}
+
+// ObservationID identifies the provider state a person can act on. Job order
+// is immaterial, while reruns with the same names have distinct provider IDs.
+func (item Item) ObservationID() string {
+	pr := item.PR
+	if pr == nil {
+		return ""
+	}
+	var jobs []string
+	for _, check := range pr.Failing() {
+		jobs = append(jobs, fmt.Sprintf("%d:%q:%q", check.ID, check.Name, check.URL))
+	}
+	slices.Sort(jobs)
+	reviewTime := int64(0)
+	if pr.Review == "changes_requested" {
+		reviewTime = item.UpdatedAt.UnixMilli()
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%q:%q:%q:%q:%q:%d:%q", item.Ref.ID(), item.RawState, pr.HeadSHA, pr.Checks, pr.Review, reviewTime, jobs))))
 }
 
 // Link ties an item to a workspace.

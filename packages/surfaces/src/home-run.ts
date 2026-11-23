@@ -126,12 +126,14 @@ const FENCE = /^([ \t]*)(`{3,}|~{3,})[ \t]*([\w-]*)[^\n]*\n([\s\S]*?)\n[ \t]*\2[
  * inline command with the phrase before it in its line or sentence, and a
  * fenced shell block with the paragraph before it.
  */
-export function homeOffers(markdown: string, limit = 3, standaloneInline = false): HomeOffer[] {
+export function homeOffers(markdown: string, limit = 3, standaloneInline = false, offset?: number): HomeOffer[] {
   const out: HomeOffer[] = [];
   const seen = new Set<string>();
   const add = (command: string, found: { target: HomeTarget; explicit: boolean } | undefined) => {
-    if (!command || !found || seen.has(command) || out.length >= limit) return;
-    seen.add(command);
+    if (!command || !found || out.length >= limit) return;
+    const key = JSON.stringify([command, found.target]);
+    if (seen.has(key)) return;
+    seen.add(key);
     const hint = cdHint(command);
     out.push({ command, ...found, ...(hint ? { hint } : {}) });
   };
@@ -164,14 +166,15 @@ export function homeOffers(markdown: string, limit = 3, standaloneInline = false
     const command = found?.explicit ? raw : inlineCommandText(raw);
     items.push({ at, run: () => add(command, found) });
   }
-  for (const item of items.sort((a, b) => a.at - b.at)) item.run();
+  for (const item of items.sort((a, b) => a.at - b.at)) if (offset === undefined || item.at === offset) item.run();
   return out;
 }
 
 /** An explicit destination also applies to the command's own Run button. */
-export function explicitHomeTarget(markdown: string, command: string): HomeTarget | undefined {
+export function explicitHomeTarget(markdown: string, command: string, offset?: number): HomeTarget | undefined {
   if (!/\bhome\b/i.test(markdown)) return undefined;
-  return homeOffers(markdown, Infinity).find(offer => offer.explicit && offer.command === command)?.target;
+  const matches = homeOffers(markdown, Infinity, true, offset).filter(offer => offer.explicit && offer.command === command);
+  return matches.length === 1 ? matches[0].target : undefined;
 }
 
 /** Paste compound sign-in commands for review before any step can run. */

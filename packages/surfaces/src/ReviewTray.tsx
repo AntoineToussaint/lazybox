@@ -136,7 +136,7 @@ function ReviewRuns({ runs, workspaceId, review, focus, onFocus }: { runs: reado
  * in the author's message box as a single message, for the person to send. */
 export function ReviewTray({ id, workspaceId, review, conversation, focusReview = '', onJump, onSend, onClose }: {
   id?: string; workspaceId: string; review: WorkspaceReviewState; conversation?: Session; focusReview?: string;
-  onJump(comment: ReviewComment): void; onSend(text: string, to: Session): void; onClose(): void;
+  onJump(comment: ReviewComment): void; onSend(text: string, to: Session, ids: string[]): void; onClose(): void;
 }) {
   const runs = review.review?.runs || [];
   const reviewers = useMemo(() => new Set(runs.map(run => run.reviewerSessionId)), [runs]);
@@ -173,8 +173,7 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
     if (!to || !chosen.length || busy) return;
     setBusy(true); setError('');
     try {
-      onSend(reviewMessage(chosen), to);
-      await review.setDisposition(chosen.map(c => c.id), 'sent', { sessionId: to.id, sessionTitle: conversationName(to, '') });
+      onSend(reviewMessage(chosen), to, chosen.map(c => c.id));
     } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
   };
   const authorSession = to;
@@ -193,7 +192,7 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
         `Finding IDs: ${chosen.map(finding => finding.id).join(', ')}.`,
         reviewMessage(chosen),
       ].join('\n\n');
-      composeInConversation({ sessionId, text: draft, api });
+      composeInConversation({ sessionId, text: draft, api, reviews: [{text: reviewMessage(chosen), ids: chosen.map(c => c.id)}] });
       const openedBeside = openRelatedConversation({ collectionId: workspaceId, sessionId: authorSession.id, commandId: '' },
         { collectionId: workspaceId, sessionId, commandId: '' }, { background: false });
       if (!openedBeside) showConversation({ collectionId: workspaceId, sessionId });

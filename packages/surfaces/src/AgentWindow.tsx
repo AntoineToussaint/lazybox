@@ -26,6 +26,7 @@ import type { SurfaceTarget, ViewStateStore } from '@lazybox/platform';
 import { readDraft, writeDraft } from './view-state';
 import { RunnerProvider, useRunner, type RunnerConnection } from './RunnerContext';
 import { AttentionScope, PanelShownContext, useMarkViewed } from './useAttention';
+import { conversationName } from './conversation-model';
 import { useComposeRequests } from './compose';
 import { queuedMessages } from './transcript-model';
 export type { RunnerConnection } from './RunnerContext';
@@ -189,7 +190,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const scroll = useChatScroll(transcript.reader, conversation, session?.pending.length);
   const { jumpToLatest } = scroll;
   const [error, setError] = useState('');
-  const { restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
+  const { reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
   const [commandsOpen, setCommandsOpen] = useState(initialCommandsOpen ?? !!initialCommandId);
   const [sending, setSending] = useState(false);
   const [commands, setCommands] = useState<CommandStatus[]>([]);
@@ -244,7 +245,8 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // this render has not seen it yet, and saving now survives this view
   // remounting. While a send is in flight the text waits: the send empties the
   // box when it is confirmed, and would erase it (and the draft it retries).
-  const appendPanelDraft = (text: string) => {
+  const appendPanelDraft = (text: string, reviews?: typeof reviewDrafts.current) => {
+    if (reviews) reviewDrafts.current.push(...reviews);
     const current = viewState ? readDraft(viewState, sessionID).text : message;
     const next = current + (current.trim() ? '\n\n' : '') + text;
     setMessage(next); persistDraft(next, files, missingFiles); setUncertainSend(''); sendAttempt.current = null;
@@ -303,9 +305,13 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       if (reviewKey && isReviewSnippet(reviewKey) && !files.length) {
         const launcher = chatReview.launcher;
         if (launcher.unavailable) { setError(launcher.unavailable); return false; }
-        const started = await launcher.start({ scope: 'changes' }, undefined, text, 'code-review-v1');
+        const requestKey = uncertainSend || crypto.randomUUID();
+        setUncertainSend(requestKey);
+        setMessage(text);
+        persistDraft(text, [], [], requestKey);
+        const started = await launcher.start({ scope: 'changes' }, undefined, text, 'code-review-v1', requestKey);
         if (!started?.run || started.run.state === 'failed') return false;
-        if (!signal.aborted && !snippetText) { setMessage(''); persistDraft('', [], []); }
+        if (!signal.aborted) { setUncertainSend(''); setMessage(''); persistDraft('', [], []); }
         return true;
       }
       const previous = sendAttempt.current;
@@ -327,8 +333,15 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       // block sending forever. The operation id is kept, so sending again cannot
       // deliver the message twice.
       const deadline = AbortSignal.timeout(30_000);
-      try { await api.apply({ sessionId: destination, operationId: attempt.id, operation: { case: 'message', value: { text, attachments } } }, { signal: AbortSignal.any([signal, deadline]) }); }
+      try { const receipt = await api.apply({ sessionId: destination, operationId: attempt.id, operation: { case: 'message', value: { text, attachments } } }, { signal: AbortSignal.any([signal, deadline]) });
+        if (receipt.error || receipt.delivery === 'failed') throw new Error(receipt.error || 'The message failed to send.');
+      }
       catch (e) { if (deadline.aborted && !signal.aborted) throw new Error('The Runner did not confirm this message within 30 seconds. Press Enter to send it again: it will not be delivered twice.'); throw e; }
+      const ids = [...new Set(reviewDrafts.current.filter(review => text.includes(review.text)).flatMap(review => review.ids))];
+      if (ids.length && session?.collectionId) {
+        await api.setReviewDisposition({ collectionId: session.collectionId, ids, disposition: 'sent', sessionId: destination, sessionTitle: conversationName(session, '') });
+        refreshWorkspaceReview(session.collectionId);
+      }
       savePrompt(viewState, text, session?.conversationId || sessionID); recall.reset();
       // Queued behind a busy turn, it shows above the box now, not at the next poll.
       refreshSession();

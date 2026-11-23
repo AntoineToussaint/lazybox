@@ -768,6 +768,8 @@ message InfoResponse {
   bool restart_available = 9;
   // Random per Runner process: a new value means a new process is serving.
   string instance_id = 10;
+  // Stable across restarts of the same Runner database.
+  string runner_id = 11;
 }
 message ProviderAvailabilityRequest {
   // Probe the provider programs again (path and version) instead of answering
@@ -1073,6 +1075,8 @@ message ItemPullRequest {
   uint32 checks_total = 10;
   // When it was merged or closed; zero while open.
   int64 closed_at_unix_millis = 11;
+  // Opaque identity of the displayed head and review or failing jobs.
+  string observation_id = 12;
 }
 message Item {
   ItemRef ref = 1;
@@ -1256,6 +1260,7 @@ message PullRequestReactionRequest {
   ItemRef ref = 2;
   // The conversation to send to; empty is the one that delivered the pull request.
   string session_id = 3;
+  string expected_observation = 4;
 }
 message PullRequestReaction {
   // The execution the message went to.
@@ -2631,6 +2636,7 @@ message StartReviewRequest {
   string model = 10;
   // A built-in review template. Empty preserves the legacy review entry points.
   string template_id = 11;
+  string request_key = 12;
 }
 message StartReviewResponse {
   ReviewRun run = 1;

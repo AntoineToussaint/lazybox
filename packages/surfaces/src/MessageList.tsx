@@ -77,14 +77,20 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
   const reply = m.type === 'message_delta';
   const at = validActivityTime(m.at) ? m.at : undefined;
   const context = m.promptContext;
-  const info = own ? [agentName, at && exactTime(at), 'Model: ' + (m.promptModel || 'Unreported'),
+  const info = own ? [agentName, at ? exactTime(at) : 'Acceptance time unreported', 'Model: ' + (m.promptModel || 'Unreported'),
     'Last reported context: ' + (context ? context.used.toLocaleString() + (context.capacity ? ' / ' + context.capacity.toLocaleString() : '') + ' tokens' : 'Unreported')].filter(Boolean).join(' · ') : undefined;
   return <article title={info} className={'message ' + m.type} data-message-id={m.id} data-time-visible={alwaysShowTime || undefined} aria-label={own ? `You${m.delegationRequested ? ', sub-agent requested' : m.steered ? ', steered' : ''}: ${ownSummary(m.text)}` : undefined}
     onContextMenu={menu && contextMenu<MessageMenuDetail>('message', menu, { message: m, role: messageRole(m), sessionId }, 'Message actions')}>
     {/* A message steered into a running turn says so, where it reached the agent. */}
     {own
       ? <>{m.steered && <span className="message-tag" title={`Given to ${agentName} inside its running turn`}>{m.delegationRequested ? 'sub-agent requested' : 'steered'}</span>}
-          <div className="message-byline">{at !== undefined && <ActivityTime at={at} className="prompt-sent-time" description={info}/>} {turnControl}</div></>
+          <div className="message-byline">{at !== undefined && <ActivityTime at={at} className="prompt-sent-time" description={info}/>} <details className="prompt-metadata" onKeyDown={event => {
+            if (event.key === 'Escape' && event.currentTarget.open) {
+              event.currentTarget.open = false;
+              event.currentTarget.querySelector('summary')?.focus();
+              event.stopPropagation();
+            }
+          }}><summary aria-label="Prompt details">Details</summary><p>{info}</p></details> {turnControl}</div></>
       : (!reply || at !== undefined) && <div className="message-byline">
         {!reply && <span className="eyebrow">{m.type === 'failure' ? 'Stopped' : agentName}</span>}
         {reply && at !== undefined && <ActivityTime at={at} className="message-time"/>}

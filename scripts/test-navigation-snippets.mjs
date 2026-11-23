@@ -160,12 +160,13 @@ try {
   ).toBeVisible();
   await page
     .getByRole("navigation", { name: "Pages" })
-    .getByRole("button")
-    .first()
+    .getByRole("button", { name: "Work", exact: true })
     .click();
   await message.focus();
   await message.press("Control+b");
   await expect(alpha.locator(".workspace-link")).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(alpha.locator(".conversation-link:focus")).toContainText("Review");
   await page.keyboard.press("ArrowDown");
   await expect(rows.nth(1).locator(".workspace-link")).toBeFocused();
   // The leader menu is configurable: add an entry, see it in the which-key card, use it.

@@ -125,7 +125,8 @@ try{
  await expect(box).toHaveValue(new RegExp(`### 1\\. api/src/handler\\.go:3–4\\n\\n\\*\\*Blocker: The error is logged, not returned\\*\\* \\(finding ${blocker.id}, from Codex\\)`));
  await expect(box).toHaveValue(/Return it so callers can retry\./);
  assert.equal(fixture.mutations.filter(m=>m.method==='Apply').length,applies,'the review must not be sent on the person\'s behalf');
- assert.equal(fixture.mutations.filter(m=>m.method==='SetReviewDisposition').at(-1).body.sessionId,author.id);
+ await box.press('Enter');
+ await expect.poll(()=>fixture.mutations.filter(m=>m.method==='SetReviewDisposition').at(-1)?.body.sessionId).toBe(author.id);
 
  // 6. The reviewer ends its turn: the author's conversation shows the outcome.
  fixture.finishReview(run.id);
@@ -191,8 +192,9 @@ try{
  const authorBox=page.locator('section.panel-chat:visible').getByRole('textbox',{name:'Message',exact:true});
  await expect(authorBox).toHaveValue(/^Please address these 2 review comments/);
  await expect(authorBox).toHaveValue(/\*\*Major: Wrap the error\*\*/);
- await expect.poll(()=>fixture.mutations.filter(m=>m.method==='SetReviewDisposition').at(-1)?.body).toMatchObject({disposition:'sent',sessionId:author.id});
  assert.equal(fixture.mutations.filter(m=>m.method==='Apply').length,sentBefore,'the findings are never sent for the person');
+ await authorBox.press('Enter');
+ await expect.poll(()=>fixture.mutations.filter(m=>m.method==='SetReviewDisposition').at(-1)?.body).toMatchObject({disposition:'sent',sessionId:author.id});
  await expect(turnCard.getByRole('button',{name:/^Send \d+ finding/})).toHaveCount(0);
  await authorBox.fill('');
 
@@ -243,6 +245,7 @@ try{
 
  assert.deepEqual(errors,[]);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}#token=${fixture.token}`);
+ await page.getByRole('navigation',{name:'Pages'}).getByRole('button',{name:'Work',exact:true}).click();
  await page.getByRole('button',{name:'Snippets',exact:true}).click();
  const picker=page.getByRole('dialog',{name:'Snippets',exact:true});
  await picker.getByRole('searchbox').fill('review');

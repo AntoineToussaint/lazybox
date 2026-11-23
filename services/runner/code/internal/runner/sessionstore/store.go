@@ -63,6 +63,11 @@ type Query struct {
 
 type Store interface {
 	Identity(context.Context) (string, error)
+	// ClaimAction reserves an operation before an external side effect. A replay
+	// returns its receipt, or an empty receipt if completion is uncertain.
+	ClaimAction(context.Context, string) (claimed bool, receipt []byte, err error)
+	FinishAction(context.Context, string, []byte) error
+	ReleaseAction(context.Context, string) error
 	Query(context.Context, Query) ([]Record, error)
 	Rename(context.Context, string, string) error
 	// SetGeneratedTitle records a generated title; a rename still wins.

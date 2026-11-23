@@ -59,10 +59,11 @@ test('prompt metadata retains the last root observation at acceptance across jou
  add('operation_accepted', 'Before telemetry');
  add('usage', '', {model: 'first', tokenUsage: {last: {totalTokens: 20}, modelContextWindow: 100}});
  add('context', '', {model: 'child', used: 90, capacity: 200}, 'reviewer');
+ add('model_changed', 'requested-for-next-turn');
  add('operation_accepted', 'First observation');
  add('context', '', {model: 'second', used: 0, capacity: 300});
  add('operation_accepted', 'Second observation');
- assert.deepEqual(state.messages.map(m => [m.promptModel, m.promptContext]), [
+ assert.deepEqual(state.messages.filter(m => m.type === 'operation_accepted').map(m => [m.promptModel, m.promptContext]), [
   [undefined, undefined],
   ['first', {used: 20, capacity: 100}],
   ['second', {used: 0, capacity: 300}],

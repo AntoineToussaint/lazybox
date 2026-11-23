@@ -10,7 +10,7 @@ import { countsSummary, endedByHand, isPending, isProposed, loopLine, loopNeedsY
 import { openArtifact } from './artifact-events';
 import { useCancelReview } from './ReviewCancel';
 import { composeInConversation } from './compose';
-import { errorText } from './PullRequestFlow';
+import { useRunner } from './RunnerContext';
 import { showMenuNotice } from './ContextMenu';
 import { useWorkspaceReview } from './useWorkspaceReview';
 import type { ReviewNote } from './transcript-model';
@@ -79,6 +79,7 @@ export function ReviewAlert({ text, id, note }: { text: string; id: string; note
  * click away.
  */
 export function ReviewCard({ data }: { data: ReviewCardData }) {
+  const { api } = useRunner();
   const review = useWorkspaceReview(data.workspace);
   const live = useMemo(() => review.review?.runs.find(run => run.id === data.review), [review.review, data.review]);
   const run = live || { state: data.state || (data.finished ? 'done' : 'running'), reviewerLabel: data.reviewerLabel, scopeLabel: data.scopeLabel, blockers: data.blockers || 0, majors: data.majors || 0, minors: data.minors || 0, nits: data.nits || 0, detail: '', loop: '', phase: '', round: 1, maxRounds: 1, paused: false, stopReason: '', sourceLabel: '', sourceSessionId: '', fallback: '', focus: '' };
@@ -103,9 +104,8 @@ export function ReviewCard({ data }: { data: ReviewCardData }) {
   const author = run.sourceLabel || 'the author';
   const send = async () => {
     if (!run.sourceSessionId || !unsent.length) return;
-    composeInConversation({ sessionId: run.sourceSessionId, text: reviewMessage(unsent) });
-    try { await review.setDisposition(unsent.map(c => c.id), 'sent', { sessionId: run.sourceSessionId, sessionTitle: '' }); }
-    catch (e) { showMenuNotice(`Could not mark the findings sent: ${errorText(e)}`); }
+    const text = reviewMessage(unsent);
+    composeInConversation({ sessionId: run.sourceSessionId, api, text, reviews: [{text, ids: unsent.map(c => c.id)}] });
   };
   const canSend = !running && !failed && unsent.length > 0 && !!run.sourceSessionId;
   const stoppedAt = live?.stoppedAtUnix ? new Date(Number(live.stoppedAtUnix) * 1000).toLocaleString([], { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' }) : '';

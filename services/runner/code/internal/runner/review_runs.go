@@ -39,6 +39,7 @@ const PromptSourceReview = "review"
 
 // ReviewRequest is what the person asked to review, and by whom.
 type ReviewRequest struct {
+	RequestKey string
 	TemplateID string
 	// Workspace may be empty: the source conversation's.
 	Workspace string
@@ -510,6 +511,44 @@ func (b *Bench) reviewEvidence(source *Execution) []string {
 // review is recorded before the brief is sent, so the reviewer's first
 // finding finds it; a brief that cannot be delivered fails the review.
 func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution, reviews.Run, error) {
+	if req.RequestKey == "" {
+		return b.startReview(ctx, req, func() {})
+	}
+	if len(req.RequestKey) > 128 {
+		return nil, reviews.Run{}, errors.New("review request key too long")
+	}
+	type reviewReceipt struct{ Session, Run string }
+	request, err := json.Marshal(req)
+	if err != nil {
+		return nil, reviews.Run{}, err
+	}
+	receipt, err := onceAction(ctx, b.History, []string{"review", string(request)}, func(markStarted func()) (reviewReceipt, error) {
+		e, run, startErr := b.startReview(ctx, req, markStarted)
+		if e == nil || run.ID == "" {
+			return reviewReceipt{}, startErr
+		}
+		return reviewReceipt{Session: e.ID, Run: run.ID}, nil
+	})
+	if err != nil {
+		return nil, reviews.Run{}, err
+	}
+	e, err := b.Get(receipt.Session)
+	if err != nil {
+		return nil, reviews.Run{}, err
+	}
+	review, err := b.Reviews.Load(e.CollectionID)
+	if err != nil {
+		return nil, reviews.Run{}, err
+	}
+	for _, run := range review.Runs {
+		if run.ID == receipt.Run {
+			return e, run, nil
+		}
+	}
+	return nil, reviews.Run{}, errors.New("the review already started and its record is no longer retained")
+}
+
+func (b *Bench) startReview(ctx context.Context, req ReviewRequest, markStarted func()) (*Execution, reviews.Run, error) {
 	if b.Reviews == nil || b.Collections == nil {
 		return nil, reviews.Run{}, errors.New("reviews are not available on this Runner")
 	}
@@ -611,6 +650,7 @@ func (b *Bench) StartReview(ctx context.Context, req ReviewRequest) (*Execution,
 			return nil, reviews.Run{}, err
 		}
 	}
+	markStarted()
 	e, err := b.OpenCollection(profile.ID, workspace.ID, "", accounts.Options{Permission: "read-only", Model: chosen.model}, "", "")
 	if err != nil {
 		return nil, reviews.Run{}, err

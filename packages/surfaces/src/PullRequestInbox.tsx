@@ -100,6 +100,7 @@ function PullInboxItem({ row, workspace, phone, canRespond, defer, onOpen, onDis
     </div>
     {!receipt && (busy || pending) && <p className="pr-inbox-note" role="status">{pending?.text || 'Working…'}</p>}
     {receipt && <p className="pr-inbox-note"><span role="status">{receipt.text}</span> · Auto-dismiss in {Math.max(0, Math.min(10, Math.ceil((receipt.until - now) / 1000)))}s</p>}
+    {state?.phase === 'manual' && <p className="pr-inbox-note" role="status">{state.text}</p>}
     {!receipt && !busy && error && <p className="pr-inbox-note is-error" role="alert">{error}</p>}
   </li>;
 }

@@ -212,6 +212,13 @@ func (s *Service) Info(ctx context.Context, r *pb.InfoRequest) (*pb.InfoResponse
 		return nil, rpcError(err)
 	}
 	w := &pb.InfoResponse{InstanceId: instance, RestartAvailable: s.Restart != nil, SharedSubscriptions: s.Bench.Config.SubscriptionState != s.Bench.Config.State, DefaultModel: s.Bench.Config.Defaults.Model, DefaultPermission: s.Bench.Config.Defaults.Permission, AttachmentLimits: &pb.AttachmentLimits{MaxFiles: attachments.MaxFiles, MaxFileBytes: attachments.MaxFileBytes, MaxMessageBytes: attachments.MaxMessageBytes}}
+	if s.Bench.History != nil {
+		id, err := s.Bench.History.Identity(ctx)
+		if err != nil {
+			return nil, rpcError(err)
+		}
+		w.RunnerId = id
+	}
 	for _, p := range s.Bench.Profiles() {
 		w.Profiles = append(w.Profiles, s.wireProfile(p))
 	}

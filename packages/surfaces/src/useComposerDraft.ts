@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ViewStateStore } from '@lazybox/platform';
-import { readDraft, writeDraft, type FileReference } from './view-state';
+import { readDraft, writeDraft, type ReviewDraft, type FileReference } from './view-state';
 import { draftFileId, loadDraftFiles, saveDraftFiles } from './draft-files';
 import { DRAFT_TEXT_BYTES, pastedTextOf, restorePastedText } from './attachment-boxes';
 
@@ -40,6 +40,7 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
   const [uncertainSend, setUncertainSend] = useState('');
   const sendAttempt = useRef<SendAttempt | null>(null);
 
+  const reviewDrafts = useRef<ReviewDraft[]>([]);
   const [restoring, setRestoring] = useState(false);
   const saved = useRef<{ destination: string; files: File[] } | undefined>(undefined);
   useEffect(() => {
@@ -48,6 +49,7 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
     async function restore() {
       const draft = readDraft(viewState, sessionID);
       setFiles([]); setMissingFiles([]);
+      reviewDrafts.current = draft.reviews || [];
       setMessage(draft.text);
       setUncertainSend(draft.operationId);
       sendAttempt.current = null;
@@ -79,7 +81,8 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
   const persistDraft = (text: string, selected: File[], missing: FileReference[], operationId = '', destination = sessionID) => {
     try {
       const refs = fileReferences(selected, text, missing, operationId);
-      writeDraft(viewState, destination, { text, files: [...refs, ...missing], operationId });
+      reviewDrafts.current = reviewDrafts.current.filter(r => text.includes(r.text));
+      writeDraft(viewState, destination, { text, files: [...refs, ...missing], operationId, reviews: reviewDrafts.current });
       if (!viewState) return;
       const binary = selected.filter((_, i) => refs[i].blobId);
       const previous = saved.current;
@@ -94,5 +97,5 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
     } catch (e) { onError(`Could not save this window's draft: ${String(e)}`); }
   };
 
-  return { restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft };
+  return { reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft };
 }

@@ -138,7 +138,7 @@ func (s *Service) SendPullRequestFailures(ctx context.Context, r *pb.PullRequest
 	if r.CollectionId == "" || r.Ref == nil {
 		return nil, grpcError(codes.InvalidArgument, errors.New("a workspace and a pull request are required"))
 	}
-	out, err := s.Bench.SendPullRequestFailures(ctx, r.CollectionId, refOf(r.Ref), r.SessionId)
+	out, err := s.Bench.SendPullRequestFailures(ctx, r.CollectionId, refOf(r.Ref), r.SessionId, r.ExpectedObservation)
 	if err != nil {
 		return nil, reactionError(err)
 	}
@@ -149,7 +149,7 @@ func (s *Service) ImportPullRequestReview(ctx context.Context, r *pb.PullRequest
 	if r.CollectionId == "" || r.Ref == nil {
 		return nil, grpcError(codes.InvalidArgument, errors.New("a workspace and a pull request are required"))
 	}
-	out, err := s.Bench.ImportPullRequestReview(ctx, r.CollectionId, refOf(r.Ref), r.SessionId)
+	out, err := s.Bench.ImportPullRequestReview(ctx, r.CollectionId, refOf(r.Ref), r.SessionId, r.ExpectedObservation)
 	if err != nil {
 		return nil, reactionError(err)
 	}
@@ -187,7 +187,7 @@ func wireItem(item workitems.Item) *pb.Item {
 		}
 	}
 	if pr := item.PR; pr != nil {
-		w := &pb.ItemPullRequest{Head: pr.Head, Base: pr.Base, Draft: pr.Draft, Checks: pr.Checks, Review: pr.Review, Mergeable: pr.Mergeable, HeadSha: pr.HeadSHA,
+		w := &pb.ItemPullRequest{ObservationId: item.ObservationID(), Head: pr.Head, Base: pr.Base, Draft: pr.Draft, Checks: pr.Checks, Review: pr.Review, Mergeable: pr.Mergeable, HeadSha: pr.HeadSHA,
 			MergeableState: pr.MergeableState, ChecksTotal: uint32(len(pr.CheckRuns)), ClosedAtUnixMillis: millis(item.ClosedAt)}
 		for _, c := range pr.Failing() {
 			w.FailingChecks = append(w.FailingChecks, &pb.ItemCheck{Name: c.Name, Url: c.URL})

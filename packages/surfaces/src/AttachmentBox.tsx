@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useId, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { placePreview, type PreviewPlacement } from './attachment-images';
 import { PREVIEW_CHARS, languageLabel } from './attachment-boxes';
@@ -70,7 +70,7 @@ export function boxKeys({ onRemove, onMove, preview, hide }: { onRemove?(): void
  * keeps itself open while the pointer is on it. It follows the window's size
  * and closes when what is under it scrolls.
  */
-export function BoxPreview({ anchor, size, interactive, onKeep, onLeave, onClose, className = '', children }: { anchor: HTMLElement; size: { width: number; height: number }; interactive?: boolean; onKeep?(): void; onLeave?(): void; onClose(): void; className?: string; children: ReactNode }) {
+export function BoxPreview({ id, anchor, size, interactive, onKeep, onLeave, onClose, className = '', children }: { id?: string; anchor: HTMLElement; size: { width: number; height: number }; interactive?: boolean; onKeep?(): void; onLeave?(): void; onClose(): void; className?: string; children: ReactNode }) {
   const [placement, setPlacement] = useState<PreviewPlacement | null>(null);
   const card = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -84,7 +84,7 @@ export function BoxPreview({ anchor, size, interactive, onKeep, onLeave, onClose
     window.addEventListener('scroll', scrolled, true);
     return () => window.removeEventListener('scroll', scrolled, true);
   }, [anchor, onClose]);
-  return createPortal(<div ref={card} className={`attachment-preview attachment-card-preview ${className}`} role="tooltip" data-interactive={interactive || undefined} data-placed={placement ? placement.side : undefined}
+  return createPortal(<div id={id} ref={card} className={`attachment-preview attachment-card-preview ${className}`} role="tooltip" data-interactive={interactive || undefined} data-placed={placement ? placement.side : undefined}
     style={placement ? { left: placement.left, top: placement.top, width: placement.width, maxHeight: placement.height } : undefined}
     onPointerEnter={interactive ? onKeep : undefined} onPointerLeave={interactive ? onLeave : undefined}>
     {children}
@@ -121,14 +121,15 @@ export function CardBox({ icon, title, subtitle, label, variant, state, preview,
 }) {
   const button = useRef<HTMLButtonElement>(null);
   const hover = useBoxPreview();
+  const previewId = useId();
   const [pinned, setPinned] = useState(false);
   // A box with nothing to open shows its details on a click or a tap: the preview, held open.
   const open = onOpen ?? (() => setPinned(value => !value));
-  useEffect(() => { if (!pinned) return; const close = (event: PointerEvent) => { if (!button.current?.contains(event.target as Node)) setPinned(false); }; document.addEventListener('pointerdown', close, true); return () => document.removeEventListener('pointerdown', close, true); }, [pinned]);
+  useEffect(() => { if (!pinned) return; const close = (event: PointerEvent) => { if (!button.current?.contains(event.target as Node) && !document.getElementById(previewId)?.contains(event.target as Node)) setPinned(false); }; document.addEventListener('pointerdown', close, true); return () => document.removeEventListener('pointerdown', close, true); }, [pinned, previewId]);
   const showing = (hover.preview || pinned) && !!preview && !!button.current;
   return <>
     <button ref={button} type="button" className={`attachment-box ${variant === 'composer' ? 'draft-box' : 'sent-box'}`} data-state={state} aria-label={label} title={note}
-      aria-haspopup={onOpen ? 'dialog' : undefined} aria-expanded={onOpen ? undefined : pinned}
+      aria-describedby={showing ? previewId : undefined} aria-haspopup={onOpen ? 'dialog' : undefined} aria-expanded={onOpen ? undefined : pinned}
       {...hover.anchorProps(interactive)}
       onKeyDown={boxKeys({ onRemove: disabled ? undefined : onRemove, onMove: disabled ? undefined : onMove, preview: hover.preview || pinned, hide: () => { hover.hide(); setPinned(false); } })}
       onClick={() => { hover.hide(); open(); }}>
@@ -137,7 +138,7 @@ export function CardBox({ icon, title, subtitle, label, variant, state, preview,
     </button>
     {menu}
     {onRemove && <button type="button" className="attachment-remove" aria-label={removeLabel} title="Remove" disabled={disabled} onClick={onRemove}><Icon name="close" size={12}/></button>}
-    {showing && <BoxPreview anchor={button.current!} size={previewSize ?? { width: 320, height: 140 }} interactive={interactive} onKeep={hover.keep} onLeave={hover.linger} onClose={() => { hover.hide(); setPinned(false); }}>{preview}</BoxPreview>}
+    {showing && <BoxPreview id={previewId} anchor={button.current!} size={previewSize ?? { width: 320, height: 140 }} interactive={interactive} onKeep={hover.keep} onLeave={hover.linger} onClose={() => { hover.hide(); setPinned(false); }}>{preview}</BoxPreview>}
   </>;
 }
 

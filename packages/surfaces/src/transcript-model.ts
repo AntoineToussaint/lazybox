@@ -51,7 +51,7 @@ function reviewNote(data: Record<string, unknown>, finished: boolean): ReviewNot
   return { review: text('review'), workspace: text('workspace'), reviewerSession: text('reviewerSession'), reviewerLabel: text('reviewerLabel') || 'Reviewer', scopeLabel: text('scopeLabel'), blockers: count('blockers'), majors: count('majors'), minors: count('minors'), nits: count('nits'), finished, ...(state ? { state } : {}) };
 }
 /** `requests`: what each question or approval asked, to say how it was answered. */
-export type Transcript = { messages: TranscriptMessage[]; recent: JournalEvent[]; activity: JournalEvent[]; activityTruncated: boolean; cursor: bigint; appendToLast: boolean; reportedPermission?: string; reportedModel:string; reportedContext?: TranscriptMessage['promptContext']; subagents: Subagents; requests: Record<string, RequestNote>; /** The agent's slash commands and models (`command_catalog`). */ catalog: CommandCatalog;
+export type Transcript = { messages: TranscriptMessage[]; recent: JournalEvent[]; activity: JournalEvent[]; activityTruncated: boolean; cursor: bigint; appendToLast: boolean; reportedPermission?: string; reportedModel:string; lastObservedModel?: string; reportedContext?: TranscriptMessage['promptContext']; subagents: Subagents; requests: Record<string, RequestNote>; /** The agent's slash commands and models (`command_catalog`). */ catalog: CommandCatalog;
   /** Send now stopped the turn in progress, which has not ended yet. */
   sendingNow?: boolean;
   /** The agent's turn is running (or a switch of subscription started one): a message accepted now waits in the queue. */
@@ -211,7 +211,10 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
       if (typeof used === 'number' && Number.isFinite(used) && used >= 0) {
         next.reportedContext = { used, capacity: typeof capacity === 'number' && capacity > 0 ? capacity : undefined };
       }
-      if (typeof model === 'string' && model.trim()) next.reportedModel = model;
+      if (typeof model === 'string' && model.trim()) {
+        next.reportedModel = model;
+        next.lastObservedModel = model;
+      }
     }
     if (event.type === 'agent_permission') {
       next.reportedPermission = event.text === 'bypassPermissions' || event.text.toLowerCase() === 'yolo' ? 'YOLO' : event.text;
@@ -388,7 +391,7 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
       } else add({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, ...when });
       next.appendToLast = true;
     } else if (event.type === 'operation_accepted' && (event.text || files?.length)) {
-      accept({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, files, ...when, promptModel: next.reportedModel || undefined, promptContext: next.reportedContext, ...(event.operationId ? { operationId: event.operationId } : {}), ...(ranCommand(event.text, next.catalog) ? { command: true } : {}) });
+      accept({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, files, ...when, promptModel: next.lastObservedModel, promptContext: next.reportedContext, ...(event.operationId ? { operationId: event.operationId } : {}), ...(ranCommand(event.text, next.catalog) ? { command: true } : {}) });
     } else if (event.type === 'failure' && (event.text || files?.length)) {
       const sentence = failureSentence(event.status, event.text);
       add({ id: record.cursor.toString(), type: event.type, text: sentence, turnId: event.turnId, files, ...(event.text.trim() && sentence !== event.text.trim() ? { detail: event.text.trim() } : {}) });

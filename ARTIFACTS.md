@@ -39,7 +39,7 @@ These rules hold for every caller:
 
 ## Design and review to roadmap
 
-New roadmaps are plan artifacts stored as versioned JSON using `roadmap.v1`. Use **Edit roadmap milestones** on the latest revision to update typed fields and save another revision. Concurrent edits are checked against the revision opened. Use `lazybox artifact template roadmap` for the JSON starter and publish it with `--kind plan --format json`. Older Markdown and plan.v1 documents stay readable.
+New roadmaps are plan artifacts stored as versioned JSON using `roadmap.v1`. Use **Edit roadmap milestones** on the latest revision to update typed fields and save another revision. The reader groups milestones by phase and counts accepted, blocked and awaiting-acceptance work. These summaries are included in standalone exports. Mission plans omit already accepted milestones and retain their IDs in dependent task briefs. Concurrent edits are checked against the revision opened. Use `lazybox artifact template roadmap` for the JSON starter and publish it with `--kind plan --format json`. Older Markdown and plan.v1 documents stay readable.
 
 For a milestone roadmap, **Export → Download mission plan** saves a proposal for `lazybox mission plan FILE`. Enter one dependency ID per line, and leave the field empty for an independent milestone. The Runner validates milestone IDs and the dependency graph on save. Mission export also requires a deliverable and definition of done for each task. Each task includes its source revision and milestone brief. Submitting the file requires an orchestrator grant. Execution has a separate approval step.
 

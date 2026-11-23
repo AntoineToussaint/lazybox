@@ -172,3 +172,21 @@ test('mission export carries the definition and pinned evidence, rejects broken 
   assert.throws(() => exportPlan(milestone('A') + '\n' + milestone('A')), /unique/);
   assert.throws(() => exportPlan(milestone('A').replace('Build passes', '')), /definition of done/);
 });
+
+test('phase progress and mission export distinguish accepted work from pending review', async () => {
+  const { newMilestone, roadmapMarkdown, typedMissionPlan } = await import('../packages/surfaces/src/roadmap.ts');
+  const a = newMilestone('A', 'Foundation'), b = newMilestone('B', 'Review');
+  a.phase = b.phase = 'Release';
+  a.status = 'accepted';
+  b.status = 'awaiting-acceptance';
+  b.dependsOn = ['A'];
+  b.definitionOfDone = ['Passing receipt'];
+  b.deliverable = 'Package';
+  const roadmap = { schema: 'roadmap.v1' as const, milestones: [a, b] };
+  assert.match(roadmapMarkdown(roadmap), /## Release\n\n1 of 2 accepted · 1 awaiting acceptance/);
+  const proposal = typedMissionPlan(roadmap, 'Release', 'art', 4);
+  assert.deepEqual(proposal.tasks.map(t => [t.key, t.after]), [['B', []]]);
+  assert.match(proposal.tasks[0].brief, /Depends on: A/);
+  b.status = 'accepted';
+  assert.throws(() => typedMissionPlan(roadmap, 'Release', 'art', 4), /already been accepted/);
+});

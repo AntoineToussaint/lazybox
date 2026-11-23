@@ -37,7 +37,14 @@ try {
   const view = '[lazybox] go test ./... → piped from a terminal, exit status unknown (2.3s)\n--- FAIL: TestParse (0.00s)\n    parser_test.go:42: want 3, got 4\nFAIL\texample.com/parser\n[lazybox] full output (1.4 MiB): /state/command-output/workspace-alpha/go-1.log\n';
   const run = fixture.startTerminalRun('alpha', 'go test ./...', { piped: true, exitCode: 0, outputBytes: '1468006', agentBytes: String(Buffer.byteLength(view)), filter: 'go-test', outputPath: '/state/command-output/workspace-alpha/go-1.log', agentView: view }, { output: full });
 
-  // It opens the console on the run, says where it came from, and keeps focus in the composer.
+  // The console stays folded until the person opens it (COMMAND_OUTPUT.md): the run never takes the
+  // screen or the composer's focus. Opening Command output shows that run and where it came from.
+  // Two listings after the run started: the page has seen it.
+  const seen = lists();
+  await expect.poll(lists, { timeout: 5000 }).toBeGreaterThan(seen + 1);
+  assert.equal(await minimized(), true, 'a run never unfolds the console by itself');
+  await expect(composer).toBeFocused();
+  await page.getByRole('tab', { name: 'Command output', exact: true }).click();
   await expect.poll(minimized, { timeout: 5000 }).toBe(false);
   const panel = page.locator('.command-panel');
   await expect(panel.locator('select')).toHaveValue(run.id);
@@ -48,7 +55,6 @@ try {
   await expect(page.getByTestId('command-report')).toContainText('Piped, exit unknown · an agent would get a 247 B summary of 1.4 MiB (go-test filter)');
   await expect(page.getByTestId('console-output')).toContainText('FULL_OUTPUT_ONLY_MARKER');
   await expect(panel.locator('footer')).toContainText('upstream exit unknown');
-  await expect(composer).toBeFocused();
 
   // "Send to agent" adds the compact view after the draft, as a fenced block.
   const send = panel.getByRole('button', { name: 'Send to agent', exact: true });

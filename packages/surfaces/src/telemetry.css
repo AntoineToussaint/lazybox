@@ -79,6 +79,7 @@
 .context-contributors summary,.context-request>summary{padding:6px 0;cursor:pointer;color:var(--text-tertiary)}
 .context-contributors summary{display:flex;align-items:baseline;gap:6px}
 .context-contributors summary::before{content:'›'}
+.context-items{margin-left:12px;padding-left:8px;border-left:1px solid var(--line)}
 .context-contributors details[open]>summary::before{transform:rotate(90deg)}
 .context-contributors summary span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .context-contributors summary small{margin-left:auto;white-space:nowrap;font-variant-numeric:tabular-nums}

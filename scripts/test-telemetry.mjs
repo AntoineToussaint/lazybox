@@ -43,7 +43,8 @@ try{
  channel.push({type:'compacted'});
  channel.push({type:'message_delta',text:'Child-only text',agentId:'child'});
  channel.push({type:'message_delta',text:'New reply'});
- channel.push({type:'tool_activity',providerDataJson:Buffer.from(JSON.stringify({type:'tool_call',id:'check',name:'Bash',status:'completed',input:{command:'make check'},output:'check output '.repeat(2000)})).toString('base64')});
+ channel.push({type:'tool_activity',providerDataJson:Buffer.from(JSON.stringify({type:'tool_call',id:'check',name:'Bash',status:'completed',input:{command:'/bin/zsh -lc "make check"'},output:'check output '.repeat(2000)})).toString('base64')});
+ for(let i=0;i<6;i++) channel.push({type:'tool_activity',providerDataJson:Buffer.from(JSON.stringify({type:'tool_call',id:'small'+i,name:'Bash',status:'completed',input:{command:'pwd'},output:'x'.repeat(1000)})).toString('base64')});
  const codex = await browser.newPage({viewport:{width:1500,height:1100}});
  await codex.route('**/GetTelemetry',route=>route.fulfill({json:{
    groups:[{scope:{execution:'alpha-session'},source:'sdk',model:'gpt-6.2-sol',records:'1',nanos:'340500000',tokens:{input:'66000',cacheRead:'300000',output:'1100'}}],
@@ -53,11 +54,15 @@ try{
  await codex.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  await codex.getByRole('button',{name:'Context and token cost'}).click();
  const codexPanel=codex.locator('.context-popover');
- const contributors=codexPanel.getByRole('region',{name:'Largest observed contributors'});
- await expect(contributors.locator('summary').first()).toContainText('26,000 bytes');
+ const contributors=codexPanel.getByRole('region',{name:'Transcript size'});
+ await expect(contributors.locator('summary').first()).toHaveText('Tool outputs32 kB');
+ await expect(contributors.getByText('Ran make check')).toBeHidden();
  await contributors.locator('summary').first().click();
+ await expect(contributors.locator('.context-items').first().locator('details')).toHaveCount(5);
+ await contributors.getByText('Ran make check').click();
+ await expect(contributors.locator('pre').first()).toBeVisible();
  await expect(contributors).toContainText('check output');
- await expect(contributors.locator('details')).toHaveCount(2);
+ await expect(contributors.locator(':scope > details')).toHaveCount(2);
  await expect(contributors).not.toContainText('Before compaction');
  await expect(contributors).not.toContainText('Child-only text');
  await codexPanel.getByText('Latest request details',{exact:true}).click();

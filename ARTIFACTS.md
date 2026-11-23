@@ -116,12 +116,12 @@ disappears, the last version is kept and the problem is shown.
 **An agent.** Agents use the `lazybox` CLI with their own scoped credential:
 
 ```sh
-lazybox artifact put PLAN.md --title "Datasource migration plan" --kind plan
-lazybox artifact put - --id ID < PLAN.md      # a new version of the same artifact
+lazybox artifact put plan.json --title "Datasource migration plan" --kind plan
+lazybox artifact put - --id ID < plan.json      # a new version of the same artifact
 lazybox artifact put STATUS.md --title "Status" --supersedes ID1,ID2,ID3
                                               # one artifact replacing several, which are retired
 lazybox artifact retire ID [--superseded-by ID] [--reason "…"]
-lazybox artifact get ID [--version N]         # prints the Markdown
+lazybox artifact get ID [--version N]         # prints the saved content
 lazybox artifact list [--all]                 # --all includes retired artifacts
 ```
 

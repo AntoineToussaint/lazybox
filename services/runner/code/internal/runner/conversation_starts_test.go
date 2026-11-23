@@ -191,13 +191,16 @@ func TestConversationStartRequestsAreBounded(t *testing.T) {
 func TestABriefArtifactGoesWithTheConversation(t *testing.T) {
 	f, _ := startFixture(t)
 	ctx := context.Background()
-	doc, err := f.b.Artifacts.Put(f.workspace.ID, artifacts.Put{Title: "Module review spec", Kind: "spec", Content: "# Review\nEvery module.", Author: artifacts.Author{Kind: "agent", SessionID: f.agent.ID}})
+	doc, err := f.b.Artifacts.Put(f.workspace.ID, artifacts.Put{Title: "Module review spec", Kind: "spec", Format: "json", Content: `{"schema":"spec.v1","problem":"Review","requirements":["Every module"],"acceptanceCriteria":["Coverage"]}`, Author: artifacts.Author{Kind: "agent", SessionID: f.agent.ID}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := f.askStart(t, ConversationStartAsk{Title: "Review modules", Artifact: doc.ID, Workspace: "new"})
 	if r.ArtifactTitle != "Module review spec" || r.ArtifactVersion != 1 || r.Mode != "new" {
 		t.Fatalf("request: %+v", r)
+	}
+	if _, err := f.b.Artifacts.Put(f.workspace.ID, artifacts.Put{ID: doc.ID, Content: strings.Replace(doc.Content, "Every module", "One module", 1)}); err != nil {
+		t.Fatal(err)
 	}
 	started, err := f.b.AnswerConversationStart(ctx, r.ID, ConversationStartAnswer{Decision: "start"})
 	if err != nil {
@@ -210,8 +213,12 @@ func TestABriefArtifactGoesWithTheConversation(t *testing.T) {
 	if err != nil || len(copies) != 1 || copies[0].Title != "Module review spec" {
 		t.Fatalf("copied: %+v %v", copies, err)
 	}
+	copy, err := f.b.Artifacts.Get(started.StartedWorkspace, copies[0].ID, 1)
+	if err != nil || copy.Format != "json" || copy.Content != doc.Content {
+		t.Fatalf("approved typed brief: %+v %v", copy, err)
+	}
 	brief := appliedOp(t, f.fake.Session, "conversation-start-"+r.ID)
-	if !strings.Contains(brief.Text, "lazybox artifact get "+copies[0].ID) {
+	if !strings.Contains(brief.Text, "lazybox artifact get "+copies[0].ID+" --version 1") {
 		t.Fatalf("brief does not name the copy: %s", brief.Text)
 	}
 }

@@ -27,7 +27,7 @@ func TestEachBuiltinSectionTextIsPinnedToItsVersion(t *testing.T) {
 	}{
 		"workspace":     {7, "067d22ee65fdc6c9"},
 		"run":           {3, "5e6c4cdceaa73f01"},
-		"documents":     {5, "1fc1b8fed9a25108"},
+		"documents":     {6, "f57f81ccf9d13ef7"},
 		"conversations": {2, "9eef1f6b082a54f4"},
 	}
 	if len(pins) != len(builtinBriefings) {

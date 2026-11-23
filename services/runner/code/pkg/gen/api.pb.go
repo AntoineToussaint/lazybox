@@ -3164,8 +3164,18 @@ type AcpAgentInfo struct {
 	// flags Lazybox starts it with: a sentence for Settings, empty when they
 	// are all named or it was not checked. A hint; the agent may still start.
 	LaunchProblem string `protobuf:"bytes,8,opt,name=launch_problem,json=launchProblem,proto3" json:"launch_problem,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// The agent whose credentials it uses when it has none of its own
+	// ("gemini" for Antigravity); empty when it shares none.
+	SharesCredentialsWith string `protobuf:"bytes,9,opt,name=shares_credentials_with,json=sharesCredentialsWith,proto3" json:"shares_credentials_with,omitempty"`
+	// The names it takes from that agent now, because that agent has them and
+	// it does not. Their values never leave the Runner.
+	InheritedEnvNames []string `protobuf:"bytes,10,rep,name=inherited_env_names,json=inheritedEnvNames,proto3" json:"inherited_env_names,omitempty"`
+	// The command that signs a built-in agent in on the Runner ("agy acp
+	// --login"), and what else its credentials need; empty when unknown.
+	SignInCommand   string `protobuf:"bytes,11,opt,name=sign_in_command,json=signInCommand,proto3" json:"sign_in_command,omitempty"`
+	CredentialsNote string `protobuf:"bytes,12,opt,name=credentials_note,json=credentialsNote,proto3" json:"credentials_note,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *AcpAgentInfo) Reset() {
@@ -3250,6 +3260,34 @@ func (x *AcpAgentInfo) GetCustom() bool {
 func (x *AcpAgentInfo) GetLaunchProblem() string {
 	if x != nil {
 		return x.LaunchProblem
+	}
+	return ""
+}
+
+func (x *AcpAgentInfo) GetSharesCredentialsWith() string {
+	if x != nil {
+		return x.SharesCredentialsWith
+	}
+	return ""
+}
+
+func (x *AcpAgentInfo) GetInheritedEnvNames() []string {
+	if x != nil {
+		return x.InheritedEnvNames
+	}
+	return nil
+}
+
+func (x *AcpAgentInfo) GetSignInCommand() string {
+	if x != nil {
+		return x.SignInCommand
+	}
+	return ""
+}
+
+func (x *AcpAgentInfo) GetCredentialsNote() string {
+	if x != nil {
+		return x.CredentialsNote
 	}
 	return ""
 }
@@ -38291,7 +38329,7 @@ const file_api_proto_rawDesc = "" +
 	"\x05value\x18\x01 \x01(\tR\x05value\x12!\n" +
 	"\fdisplay_name\x18\x02 \x01(\tR\vdisplayName\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12#\n" +
-	"\reffort_levels\x18\x04 \x03(\tR\feffortLevels\"\xd8\x01\n" +
+	"\reffort_levels\x18\x04 \x03(\tR\feffortLevels\"\x93\x03\n" +
 	"\fAcpAgentInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04icon\x18\x02 \x01(\tR\x04icon\x12\x18\n" +
@@ -38300,7 +38338,12 @@ const file_api_proto_rawDesc = "" +
 	"\tenv_names\x18\x05 \x03(\tR\benvNames\x12\x1a\n" +
 	"\bhomepage\x18\x06 \x01(\tR\bhomepage\x12\x16\n" +
 	"\x06custom\x18\a \x01(\bR\x06custom\x12%\n" +
-	"\x0elaunch_problem\x18\b \x01(\tR\rlaunchProblem\"5\n" +
+	"\x0elaunch_problem\x18\b \x01(\tR\rlaunchProblem\x126\n" +
+	"\x17shares_credentials_with\x18\t \x01(\tR\x15sharesCredentialsWith\x12.\n" +
+	"\x13inherited_env_names\x18\n" +
+	" \x03(\tR\x11inheritedEnvNames\x12&\n" +
+	"\x0fsign_in_command\x18\v \x01(\tR\rsignInCommand\x12)\n" +
+	"\x10credentials_note\x18\f \x01(\tR\x0fcredentialsNote\"5\n" +
 	"\tAcpEnvVar\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"\x98\x01\n" +

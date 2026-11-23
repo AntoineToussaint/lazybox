@@ -158,10 +158,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	if title == "" {
 		title = a.Agent.ID
 	}
-	env := append([]string(nil), o.Env...)
-	for _, name := range a.Agent.EnvNames() {
-		env = append(env, name+"="+a.Agent.Env[name])
-	}
+	env := append(append([]string(nil), o.Env...), a.Agent.LaunchEnv()...)
 	life, cancel := context.WithCancel(ctx)
 	var p *jsonl.Process
 	var err error

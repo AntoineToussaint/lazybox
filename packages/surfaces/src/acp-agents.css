@@ -31,3 +31,7 @@
 .acp-preview{display:inline-block;font-size:calc(9.5px * var(--text-scale));font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--warn-soft);border:1px solid currentColor;border-radius:100px;padding:0 6px;line-height:1.5;vertical-align:1px}
 .acp-preview-note{display:block;margin-top:6px}
 .acp-preview-note .acp-preview{margin-right:6px}
+/* Settings → Subscriptions: agents that share one account (SharedCredentials.tsx). */
+.shared-credentials{margin-top:24px}
+.shared-credentials .acp-agent{grid-template-columns:minmax(0,1fr)}
+.shared-credential-note{color:var(--text-muted)}

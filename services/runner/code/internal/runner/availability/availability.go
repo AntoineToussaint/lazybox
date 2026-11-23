@@ -84,6 +84,13 @@ type ACPAgent struct {
 	Args     []string
 	Env      []string
 	Homepage string
+	// SharesCredentialsWith: the agent whose credentials it uses when it has
+	// none; InheritedEnv the names it takes from it now (never the values).
+	SharesCredentialsWith string
+	InheritedEnv          []string
+	// SignIn and CredentialsNote: how a built-in agent signs in.
+	SignIn          string
+	CredentialsNote string
 	// Custom: the person added it, or changed a built-in one's command.
 	Custom bool
 	// LaunchProblem: the program's help does not name how Lazybox starts it.
@@ -481,7 +488,7 @@ func Build(programs map[string]Program, subscriptions map[string][]Subscription,
 			program = Probe{LookPath: exec.LookPath}.agentProgram(context.Background(), a)
 		}
 		subs := subscriptions[provider]
-		p := Provider{Provider: provider, Title: a.Title, Program: program, Subscriptions: subs, State: summary(program, subs), ACP: &ACPAgent{ID: a.ID, Icon: a.Icon, Command: a.Command, Args: append([]string(nil), a.Args...), Env: a.EnvNames(), Homepage: a.Homepage, Custom: a.Custom, LaunchProblem: program.LaunchProblem}}
+		p := Provider{Provider: provider, Title: a.Title, Program: program, Subscriptions: subs, State: summary(program, subs), ACP: &ACPAgent{ID: a.ID, Icon: a.Icon, Command: a.Command, Args: append([]string(nil), a.Args...), Env: a.EnvNames(), Homepage: a.Homepage, SharesCredentialsWith: a.SharesCredentialsWith, InheritedEnv: a.InheritedEnvNames(), SignIn: a.SignIn, CredentialsNote: a.CredentialsNote, Custom: a.Custom, LaunchProblem: program.LaunchProblem}}
 		if !program.Installed {
 			p.InstallCommand = a.Install
 		}

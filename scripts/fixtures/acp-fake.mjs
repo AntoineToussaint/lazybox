@@ -20,13 +20,16 @@
 // ACP_FAKE_NO_RESUME=1 offers neither session/load nor session/resume;
 // ACP_FAKE_LOAD_ONLY=1 offers session/load (which replays history) only;
 // ACP_FAKE_SLOW_MS sets the pause of `slow`;
-// ACP_FAKE_LOG=<file> appends every line it receives, for assertions.
+// ACP_FAKE_LOG=<file> appends every line it receives, for assertions;
+// ACP_FAKE_LOG_ENV=<names> also appends, at start, `env NAME=value` for each
+// comma-separated name (the agent's environment, for launch assertions).
 import { createInterface } from 'node:readline';
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const send = message => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
 const log = line => { if (process.env.ACP_FAKE_LOG) appendFileSync(process.env.ACP_FAKE_LOG, line + '\n'); };
+for (const name of (process.env.ACP_FAKE_LOG_ENV || '').split(',').filter(Boolean)) log(`env ${name}=${process.env[name] ?? '<unset>'}`);
 let nextId = 1;
 const waiting = new Map();
 /** A request to the client; resolves with { result } or { error }. */

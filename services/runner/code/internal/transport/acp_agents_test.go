@@ -64,3 +64,28 @@ func TestOwnerManagesACPAgents(t *testing.T) {
 		t.Fatalf("an agent credential got %v, want PermissionDenied", err)
 	}
 }
+
+// Antigravity's report names the Gemini key it shares, never its value.
+func TestReportNamesTheSharedGeminiKey(t *testing.T) {
+	f := newAuthorityFixture(t)
+	ctx := bearer(timeout(t), ownerToken)
+	if _, err := f.client.SaveAcpAgent(ctx, &pb.SaveAcpAgentRequest{Id: "gemini", Title: "Gemini CLI", Command: "/bin/sh", Env: []*pb.AcpEnvVar{{Name: "GEMINI_API_KEY", Value: "gemini-secret"}}}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := f.client.SaveAcpAgent(ctx, &pb.SaveAcpAgentRequest{Id: "antigravity", Title: "Google Antigravity", Command: "/bin/sh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *pb.AcpAgentInfo
+	for _, p := range report.Providers {
+		if p.Provider == "acp:antigravity" {
+			found = p.Acp
+		}
+	}
+	if found.GetSharesCredentialsWith() != "gemini" || len(found.GetInheritedEnvNames()) != 1 || found.InheritedEnvNames[0] != "GEMINI_API_KEY" || len(found.EnvNames) != 0 || found.SignInCommand != "agy acp --login" || found.CredentialsNote == "" {
+		t.Fatalf("antigravity: %+v", found)
+	}
+	if strings.Contains(report.String(), "gemini-secret") {
+		t.Fatal("a shared environment value left the Runner")
+	}
+}

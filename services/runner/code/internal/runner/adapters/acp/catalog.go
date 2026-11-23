@@ -30,6 +30,18 @@ type Agent struct {
 	// Install is a command that installs a built-in agent that is missing.
 	Install  string `json:"install,omitempty"`
 	Homepage string `json:"homepage,omitempty"`
+	// SharesCredentialsWith names the built-in agent whose credentials a
+	// built-in one uses when it has none of its own; SharedEnv are the
+	// names it takes. Antigravity uses Gemini CLI's API key.
+	SharesCredentialsWith string   `json:"-"`
+	SharedEnv             []string `json:"-"`
+	// SignIn is the command that signs a built-in agent in on the Runner;
+	// CredentialsNote what else its credentials need, for Settings.
+	SignIn          string `json:"-"`
+	CredentialsNote string `json:"-"`
+	// Inherited is the shared environment the registry resolved: the values
+	// SharedEnv names that the agent's own Env lacks. As private as Env.
+	Inherited map[string]string `json:"-"`
 	// Custom marks an agent the person added (or a built-in they changed).
 	Custom bool `json:"-"`
 }
@@ -39,9 +51,9 @@ type Agent struct {
 // adapters, which do more than their ACP bridges (ACP.md). The order is the
 // order every surface lists them.
 var Builtins = []Agent{
-	{ID: "gemini", Title: "Gemini CLI", Command: "gemini", Args: []string{"--acp"}, Icon: "agent-gemini", Install: "npm install -g @google/gemini-cli", Homepage: "https://github.com/google-gemini/gemini-cli"},
-	{ID: "antigravity", Title: "Google Antigravity", Command: "agy", Args: []string{"acp"}, Icon: "agent-gemini", Install: "curl -fsSL https://antigravity.google/cli/install.sh | bash", Homepage: "https://antigravity.google/docs/cli/acp"},
-	{ID: "hermes", Title: "Hermes Agent", Command: "hermes", Args: []string{"acp"}, Icon: "agent", Install: "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash", Homepage: "https://hermes-agent.nousresearch.com/docs/user-guide/features/acp"},
+	{ID: "gemini", Title: "Gemini CLI", Command: "gemini", Args: []string{"--acp"}, Icon: "agent-gemini", SignIn: "gemini", Install: "npm install -g @google/gemini-cli", Homepage: "https://github.com/google-gemini/gemini-cli"},
+	{ID: "antigravity", Title: "Google Antigravity", Command: "agy", Args: []string{"acp"}, Icon: "agent-gemini", SharesCredentialsWith: "gemini", SharedEnv: []string{"GEMINI_API_KEY"}, SignIn: "agy acp --login", CredentialsNote: `Uses an API key only when ~/.gemini/antigravity-cli/settings.json sets "modelProvider": "gemini".`, Install: "curl -fsSL https://antigravity.google/cli/install.sh | bash", Homepage: "https://antigravity.google/docs/cli/acp"},
+	{ID: "hermes", Title: "Hermes Agent", Command: "hermes", Args: []string{"acp"}, Icon: "agent", SignIn: "hermes model", Install: "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash", Homepage: "https://hermes-agent.nousresearch.com/docs/user-guide/features/acp"},
 	{ID: "goose", Title: "Goose", Command: "goose", Args: []string{"acp"}, Icon: "agent-goose", Install: "brew install block-goose-cli", Homepage: "https://goose-docs.ai"},
 	{ID: "opencode", Title: "OpenCode", Command: "opencode", Args: []string{"acp"}, Icon: "agent-opencode", Install: "npm install -g opencode-ai", Homepage: "https://opencode.ai"},
 	{ID: "qwen", Title: "Qwen Code", Command: "qwen", Args: []string{"--acp"}, Icon: "agent-qwen", Install: "npm install -g @qwen-code/qwen-code", Homepage: "https://github.com/QwenLM/qwen-code"},
@@ -174,7 +186,8 @@ func OpenRegistry(path string) (*Registry, error) {
 }
 
 // Agents is every agent, built-ins first in their order, then the person's
-// own by title. Env maps are copies.
+// own by title, each with the credentials it shares resolved. Env maps are
+// copies.
 func (r *Registry) Agents() []Agent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -189,6 +202,9 @@ func (r *Registry) Agents() []Agent {
 			delete(byID, b.ID)
 		}
 		out = append(out, copyAgent(b))
+	}
+	for i, a := range out {
+		out[i].Inherited = inherited(a, out)
 	}
 	rest := []Agent{}
 	for _, a := range byID {
@@ -308,6 +324,29 @@ func (r *Registry) write(agents []Agent) error {
 	return os.Rename(tmp.Name(), r.path)
 }
 
+// inherited is what a takes from the agent it shares credentials with: each
+// SharedEnv value that agent has and a's own Env does not.
+func inherited(a Agent, agents []Agent) map[string]string {
+	if a.SharesCredentialsWith == "" {
+		return nil
+	}
+	var env map[string]string
+	for _, src := range agents {
+		if src.ID != a.SharesCredentialsWith {
+			continue
+		}
+		for _, name := range a.SharedEnv {
+			if a.Env[name] == "" && src.Env[name] != "" {
+				if env == nil {
+					env = map[string]string{}
+				}
+				env[name] = src.Env[name]
+			}
+		}
+	}
+	return env
+}
+
 func isBuiltin(id string) bool {
 	for _, b := range Builtins {
 		if b.ID == id {
@@ -319,14 +358,21 @@ func isBuiltin(id string) bool {
 
 func copyAgent(a Agent) Agent {
 	a.Args = append([]string(nil), a.Args...)
-	if a.Env != nil {
-		env := make(map[string]string, len(a.Env))
-		for k, v := range a.Env {
-			env[k] = v
-		}
-		a.Env = env
-	}
+	a.SharedEnv = append([]string(nil), a.SharedEnv...)
+	a.Env = copyEnv(a.Env)
+	a.Inherited = copyEnv(a.Inherited)
 	return a
+}
+
+func copyEnv(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // Program finds the agent's executable with lookPath (exec.LookPath): an
@@ -349,9 +395,29 @@ func (a Agent) Program(lookPath func(string) (string, error)) string {
 }
 
 // EnvNames are the names of the agent's private environment, sorted.
-func (a Agent) EnvNames() []string {
-	names := make([]string, 0, len(a.Env))
-	for name := range a.Env {
+func (a Agent) EnvNames() []string { return sortedNames(a.Env) }
+
+// InheritedEnvNames are the names of the environment it shares, sorted.
+func (a Agent) InheritedEnvNames() []string { return sortedNames(a.Inherited) }
+
+// LaunchEnv is the environment added when the agent starts: what it shares,
+// then its own, so its own value wins.
+func (a Agent) LaunchEnv() []string {
+	env := []string{}
+	for _, name := range a.InheritedEnvNames() {
+		if _, own := a.Env[name]; !own {
+			env = append(env, name+"="+a.Inherited[name])
+		}
+	}
+	for _, name := range a.EnvNames() {
+		env = append(env, name+"="+a.Env[name])
+	}
+	return env
+}
+
+func sortedNames(env map[string]string) []string {
+	names := make([]string, 0, len(env))
+	for name := range env {
 		names = append(names, name)
 	}
 	sort.Strings(names)

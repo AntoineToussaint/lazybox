@@ -1,9 +1,13 @@
 package acp
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 )
 
 func TestRegistryKeepsThePersonsAgentsPrivately(t *testing.T) {
@@ -71,5 +75,91 @@ func TestAntigravityAndHermesLaunchCommands(t *testing.T) {
 		if !ok || a.Command != command || len(a.Args) != 1 || a.Args[0] != "acp" {
 			t.Errorf("wrong launch command for %s: %s %v", id, a.Command, a.Args)
 		}
+	}
+}
+
+// Antigravity uses Gemini CLI's API key when it has none of its own; its own
+// wins, and only the shared name crosses.
+func TestAntigravitySharesGeminisAPIKey(t *testing.T) {
+	r, err := OpenRegistry(filepath.Join(t.TempDir(), "agents.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := r.Get("antigravity"); a.SharesCredentialsWith != "gemini" || len(a.Inherited) != 0 || len(a.LaunchEnv()) != 0 {
+		t.Fatalf("nothing to share yet: %+v", a)
+	}
+	if _, err = r.Save(Agent{ID: "gemini", Title: "Gemini CLI", Command: "gemini", Args: []string{"--acp"}, Env: map[string]string{"GEMINI_API_KEY": "gemini-key", "GOOGLE_API_KEY": "google-key", "GEMINI_MODEL": "pro"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := r.Get("antigravity")
+	if got := a.LaunchEnv(); len(got) != 1 || got[0] != "GEMINI_API_KEY=gemini-key" {
+		t.Fatalf("inherited launch env: %v", got)
+	}
+	if names := a.InheritedEnvNames(); len(names) != 1 || names[0] != "GEMINI_API_KEY" || len(a.EnvNames()) != 0 {
+		t.Fatalf("names: inherited %v own %v", names, a.EnvNames())
+	}
+	// A changed Antigravity still shares; its own key wins.
+	if _, err = r.Save(Agent{ID: "antigravity", Title: "Antigravity", Command: "agy", Args: []string{"acp"}, Env: map[string]string{"GEMINI_API_KEY": "own-key", "EXTRA": "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = r.Get("antigravity")
+	if got := a.LaunchEnv(); len(got) != 2 || got[0] != "EXTRA=x" || got[1] != "GEMINI_API_KEY=own-key" || len(a.InheritedEnvNames()) != 0 {
+		t.Fatalf("own key must win: %v inherited %v", got, a.InheritedEnvNames())
+	}
+	// Removing its own key goes back to Gemini's.
+	if _, err = r.Save(Agent{ID: "antigravity", Title: "Antigravity", Command: "agy", Args: []string{"acp"}, Env: map[string]string{"EXTRA": ""}}); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ = r.Get("antigravity"); len(a.LaunchEnv()) != 2 || a.LaunchEnv()[0] != "GEMINI_API_KEY=gemini-key" {
+		t.Fatalf("back to Gemini's key: %v", a.LaunchEnv())
+	}
+	// Nothing is shared once Gemini has no key; other agents share nothing.
+	if err = r.Remove("gemini"); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ = r.Get("antigravity"); len(a.InheritedEnvNames()) != 0 {
+		t.Fatalf("Gemini has no key: %v", a.InheritedEnvNames())
+	}
+	for _, a := range r.Agents() {
+		if a.ID != "antigravity" && (a.SharesCredentialsWith != "" || len(a.Inherited) != 0) {
+			t.Errorf("%s shares credentials", a.ID)
+		}
+	}
+	// The registry file never records what is shared.
+	data, err := os.ReadFile(r.path)
+	if err != nil || strings.Contains(string(data), "gemini-key") || strings.Contains(string(data), "Inherited") {
+		t.Fatalf("registry: %s %v", data, err)
+	}
+}
+
+// The shared key reaches the agent's process, after the Runner's
+// environment, and the agent's own value wins over it.
+func TestSharedKeyReachesTheAgent(t *testing.T) {
+	for name, tc := range map[string]struct {
+		own  map[string]string
+		want string
+	}{
+		"inherited": {nil, "gemini-key"},
+		"own wins":  {map[string]string{"GEMINI_API_KEY": "own-key"}, "own-key"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "acp.log")
+			t.Setenv("ACP_FAKE_LOG", log)
+			t.Setenv("ACP_FAKE_LOG_ENV", "GEMINI_API_KEY")
+			a := fakeAgent(t)
+			a.ID, a.SharesCredentialsWith, a.SharedEnv = "antigravity", "gemini", []string{"GEMINI_API_KEY"}
+			a.Env = tc.own
+			a.Inherited = inherited(a, []Agent{a, {ID: "gemini", Env: map[string]string{"GEMINI_API_KEY": "gemini-key"}}})
+			s, err := Adapter{Agent: a}.Open(context.Background(), agent.Open{Cwd: workspace(t), Env: append(os.Environ(), "GEMINI_API_KEY=runner-key")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			say(t, s, "hello")
+			data, _ := os.ReadFile(log)
+			if !strings.Contains(string(data), "env GEMINI_API_KEY="+tc.want+"\n") {
+				t.Fatalf("agent saw:\n%s", data)
+			}
+		})
 	}
 }

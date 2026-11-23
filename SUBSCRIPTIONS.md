@@ -178,7 +178,13 @@ substituting another account's default policy.
 
 The main workspace Settings page starts with a Subscriptions tab. It lists
 named profiles, native availability, provider plan when supplied, usage windows
-and reset times. Only Runner-enrolled accounts appear here. Existing local
+and reset times. Only Runner-enrolled accounts appear here as subscription
+cards. Under them, ACP agents that share one account are grouped
+(`SharedCredentials.tsx`). Today that is **Google**: Gemini CLI and
+Antigravity. Antigravity uses Gemini CLI's `GEMINI_API_KEY` when it has none
+of its own ([ACP.md](ACP.md#providers-and-profiles)). For each agent the group
+shows where its key comes from, by name only, plus the command that signs it
+in on the Runner. It shows no usage, because neither agent reports any. Existing local
 CLI sign-ins remain read-only references for session startup; Settings cannot
 refresh or enroll into their stores. Viewing Settings does not start or stop
 coding sessions. Refresh state is per subscription: one pending refresh disables

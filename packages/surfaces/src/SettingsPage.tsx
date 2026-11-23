@@ -27,6 +27,7 @@ import './settings.css';
 import { RepositoryBrowser } from './RepositoryBrowser';
 import { RepositoryHomesSettings } from './home-checkouts';
 import { AcpAgentsSettings } from './AcpAgentsSettings';
+import { SharedCredentials } from './SharedCredentials';
 import { ClaudeAuthSettings } from './ClaudeAuthSettings';
 import { AgentSettings, PricingSettings, useRunnerSettings } from './RunnerSettings';
 import { RunnerSection } from './RunnerControl';
@@ -488,6 +489,7 @@ export function SettingsPage({ initialAddSubscription = false, onOpenExtensionPa
           ? <small className="subscription-gated" title="Claude sign-in in Lazybox is off (Settings → Agents & workspaces → Claude)">Not used: Claude sign-in in Lazybox is off</small>
           // Only an account policy switches by itself (Settings → Extensions); this leaves one account out of it.
           : profile.isolation === 'environment' && runnerSettings?.automaticSwitchingProviders.includes(profile.provider) ? <label className="rotation-toggle" title={`When another ${profile.provider === 'codex' ? 'Codex' : 'Claude'} subscription hits a limit, its conversations can continue on this one. Applies to conversations started afterwards.`}><input type="checkbox" role="switch" checked={!excluded.includes(profile.id)} disabled={!runnerSettings || !!rotationSaving} onChange={event => void setRotation(profile, event.target.checked)}/><span>Automatic switching</span></label> : <small>{profile.isolation === 'inherited' ? 'Uses current CLI sign-in' : info?.sharedSubscriptions ? 'Shared subscription' : 'Saved on this Runner'}</small>}/>)}</ProviderGroups>
+      <SharedCredentials enabled={tab === 'subscriptions'}/>
       {profiles.length > 0 && <p className="usage-note">Usage is what each provider reports for the subscription. Lazybox never guesses a number it was not given.</p>}
       {renaming && <RenameSubscriptionDialog profile={renaming} onClose={() => setRenaming(undefined)}/>}
       {removing && <ConfirmDialog title={`Remove ${subscriptionName(removing, removing.id)}?`} closeLabel="Keep it" cancelLabel="Keep it" confirm="Remove" working="Removing…" onClose={() => setRemoving(undefined)}

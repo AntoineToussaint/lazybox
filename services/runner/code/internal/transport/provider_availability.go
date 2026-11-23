@@ -31,7 +31,7 @@ func wireAvailability(report availability.Report) *pb.ProviderAvailability {
 	for _, p := range report.Providers {
 		status := &pb.ProviderStatus{Provider: p.Provider, Title: p.Title, State: p.State, Installed: p.Program.Installed, Path: p.Program.Path, Version: p.Program.Version, Source: p.Program.Source, Error: p.Program.Error, InstallCommand: p.InstallCommand}
 		if a := p.ACP; a != nil {
-			status.Acp = &pb.AcpAgentInfo{Id: a.ID, Icon: a.Icon, Command: a.Command, Args: a.Args, EnvNames: a.Env, Homepage: a.Homepage, Custom: a.Custom, LaunchProblem: a.LaunchProblem}
+			status.Acp = &pb.AcpAgentInfo{Id: a.ID, Icon: a.Icon, Command: a.Command, Args: a.Args, EnvNames: a.Env, Homepage: a.Homepage, SharesCredentialsWith: a.SharesCredentialsWith, InheritedEnvNames: a.InheritedEnv, SignInCommand: a.SignIn, CredentialsNote: a.CredentialsNote, Custom: a.Custom, LaunchProblem: a.LaunchProblem}
 		}
 		for _, m := range p.Models {
 			status.Models = append(status.Models, &pb.ProviderModel{Value: m.Value, DisplayName: m.DisplayName, Description: m.Description, EffortLevels: m.EffortLevels})

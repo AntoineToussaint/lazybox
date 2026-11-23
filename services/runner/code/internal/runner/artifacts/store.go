@@ -284,7 +284,14 @@ func (s *Store) document(a *Artifact, version uint32) (Document, error) {
 	if err != nil {
 		return Document{}, err
 	}
-	return Document{Artifact: clone(a), Content: string(raw), ContentVersion: version}, nil
+	if version == 0 || uint64(version) > uint64(len(a.Versions)) || a.Versions[version-1].Number != version {
+		return Document{}, fmt.Errorf("artifact %q has inconsistent metadata for version %d", a.ID, version)
+	}
+	content := string(raw)
+	if Digest(content) != a.Versions[version-1].Digest {
+		return Document{}, fmt.Errorf("artifact %q version %d failed its content integrity check", a.ID, version)
+	}
+	return Document{Artifact: clone(a), Content: content, ContentVersion: version}, nil
 }
 
 func (s *Store) dir(ws, id string) string { return filepath.Join(s.root, ws, id) }

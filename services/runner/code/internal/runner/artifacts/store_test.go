@@ -438,3 +438,25 @@ func TestReviewRoundsPublishOnceAcrossReopen(t *testing.T) {
 		t.Fatal(prior, err)
 	}
 }
+
+func TestReadDetectsCorruptRevisionAfterRestart(t *testing.T) {
+	root := t.TempDir()
+	s, _ := open(t, root)
+	first, err := s.Put("alpha", Put{Title: "Report", Content: "first", Author: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put("alpha", Put{ID: first.ID, Content: "second", Author: person}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.versionPath(&first.Artifact, 1), []byte("wrong"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = open(t, root)
+	if doc, err := s.Get("alpha", first.ID, 1); err == nil || doc.Content != "" {
+		t.Fatalf("corrupt revision returned content %q, error %v", doc.Content, err)
+	}
+	if latest, err := s.Get("alpha", first.ID, 0); err != nil || latest.Content != "second" {
+		t.Fatalf("healthy revision returned content %q, error %v", latest.Content, err)
+	}
+}

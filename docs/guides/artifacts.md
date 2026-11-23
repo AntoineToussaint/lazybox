@@ -3,6 +3,7 @@
 Agents write plans, reviews and specs — in a chat message, or in a file such as
 `docs/PLAN.md`. Track one as an **artifact** and it becomes a versioned page of
 the workspace: compare versions, export it, and hand it back to an agent.
+The Runner verifies each revision against its saved SHA-256 digest when you open it. If a file is damaged, that revision reports an error. Other intact revisions remain readable.
 
 ![The Artifacts panel with an artifact page open](../images/artifacts.webp)
 

@@ -232,6 +232,20 @@ async function stageCandidate(environmentRoot, revision) {
   const destination = releasePath(environmentRoot, id), source = join(destination, 'source');
   await mkdir(destination, { recursive: true });
   console.log(`Staging ${id}; current working installation is unchanged.`);
+  try { return await buildCandidate(environmentRoot, revision, id, destination, source); }
+  catch (error) { await pruneFailedCandidate(destination); throw error; }
+}
+
+/**
+ * A failed candidate keeps only its diagnostic gates.json (ENVIRONMENTS.md):
+ * its source, dependencies and app are gigabytes no promotion can use, and a
+ * day of failed stages filled the disk.
+ */
+export async function pruneFailedCandidate(destination) {
+  for (const entry of await readdir(destination)) if (entry !== 'gates.json') await rm(join(destination, entry), { recursive: true, force: true });
+}
+
+async function buildCandidate(environmentRoot, revision, id, destination, source) {
   const snippetAdapter=await buildSnippetAdapter(root);
   await copySource(root, source);
   await mkdir(join(source,'resources'),{recursive:true});

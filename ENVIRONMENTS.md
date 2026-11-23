@@ -103,8 +103,8 @@ New candidates use metadata version 2. Promotion rejects partial/failed receipts
 changed gate policy and older metadata without a complete receipt. Previously
 pinned version-1 builds keep their existing launch path; stage again to promote
 them under the new validation rules. Staging stops at the first failed gate and records remaining gates as not run.
-Use `make check-release` for a complete diagnostic run. A failing stage leaves its diagnostic
-`gates.json` without promoting or starting anything.
+Use `make check-release` for a complete diagnostic run. A failing stage leaves only its diagnostic
+`gates.json` (its source, dependencies and app are removed) without promoting or starting anything.
 
 **Working** runs the frozen source and its bundled native **Lazybox** app.
 Codefly builds the Runner from that snapshot at launch; it still requires the

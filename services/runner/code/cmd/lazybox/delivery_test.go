@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -226,7 +227,17 @@ func TestDeliveryStatusPublishAndReview(t *testing.T) {
 	if err := deliveryCommand(context.Background(), c, "", []string{"status", "--json", "--mission", "m", "--task", "t"}, &out, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	if c.lookup.MissionId != "m" || c.lookup.TaskId != "t" || c.lookup.SessionId != "" || !strings.Contains(out.String(), `"verdict": "blocked"`) {
+	// protojson varies its whitespace on purpose: read the JSON, never its bytes.
+	var status struct {
+		Candidates []struct {
+			Current bool   `json:"current"`
+			Verdict string `json:"verdict"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &status); err != nil || len(status.Candidates) == 0 || !status.Candidates[0].Current || status.Candidates[0].Verdict != "blocked" {
+		t.Fatalf("status JSON: %v %+v", err, status)
+	}
+	if c.lookup.MissionId != "m" || c.lookup.TaskId != "t" || c.lookup.SessionId != "" {
 		t.Fatalf("%+v %s", c.lookup, out.String())
 	}
 	for _, args := range [][]string{{"status", "--mission", "m"}, {"status"}} {

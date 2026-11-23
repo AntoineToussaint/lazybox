@@ -602,19 +602,57 @@ func (b *Bench) MergeTrackedPullRequest(ctx context.Context, workspace string, r
 	if b.GitHubPulls == nil {
 		return github.PullRequestStatus{}, "", errors.New(connectForTracking)
 	}
-	var status github.PullRequestStatus
 	readAt := b.ItemReadStart()
-	err = b.githubCredential(ctx, func(token string) error {
-		if err := b.GitHubPulls.MergePullRequest(ctx, token, repository, tracked, method, expectedHead); err != nil {
-			return err
-		}
+	return b.actOnTrackedPullRequest(ctx, workspace, link.Member, repository, tracked, readAt, func(token string) error {
+		return b.GitHubPulls.MergePullRequest(ctx, token, repository, tracked, method, expectedHead)
+	})
+}
+
+// UpdateTrackedPullRequestBranch brings a delivered pull request up to date
+// with its base, when its repository requires that before merging (GitHub's
+// mergeable_state "behind"); only if its head is still the one the person
+// saw. Its checks then run again on the new head.
+func (b *Bench) UpdateTrackedPullRequestBranch(ctx context.Context, workspace string, ref workitems.Ref, number int64, expectedHead string) (github.PullRequestStatus, string, error) {
+	link, err := b.DeliveredLink(workspace, ref)
+	if err != nil {
+		return github.PullRequestStatus{}, "", err
+	}
+	repository, tracked, ok := workitems.ParseGitHubKey(ref.Key)
+	if !ok {
+		return github.PullRequestStatus{}, "", errors.New("not a GitHub pull request")
+	}
+	if number != 0 && number != tracked {
+		return github.PullRequestStatus{}, "", fmt.Errorf("pull request #%d is not %s", number, ref.Key)
+	}
+	if b.GitHubPulls == nil {
+		return github.PullRequestStatus{}, "", errors.New(connectForTracking)
+	}
+	readAt := b.ItemReadStart()
+	return b.actOnTrackedPullRequest(ctx, workspace, link.Member, repository, tracked, readAt, func(token string) error {
+		return b.GitHubPulls.UpdatePullRequestBranch(ctx, token, repository, tracked, expectedHead)
+	})
+}
+
+// actOnTrackedPullRequest runs a write, then reads the pull request again and
+// records it, also when GitHub refused: the person then sees why (behind its
+// base, a moved head) instead of the state they acted on.
+func (b *Bench) actOnTrackedPullRequest(ctx context.Context, workspace, member, repository string, number int64, readAt time.Time, write func(token string) error) (github.PullRequestStatus, string, error) {
+	var status github.PullRequestStatus
+	var writeErr error
+	err := b.githubCredential(ctx, func(token string) error {
+		writeErr = write(token)
 		var err error
-		status, err = b.githubItems().PullRequestByNumber(ctx, token, repository, tracked)
+		status, err = b.githubItems().PullRequestByNumber(ctx, token, repository, number)
 		return err
 	})
-	if err != nil {
-		return github.PullRequestStatus{}, link.Member, err
+	if err == nil {
+		b.ObservePullRequestLoop(workspace, member, repository, status, false, readAt)
 	}
-	b.ObservePullRequestLoop(workspace, link.Member, repository, status, false, readAt)
-	return status, link.Member, nil
+	if writeErr != nil {
+		return github.PullRequestStatus{}, member, writeErr
+	}
+	if err != nil {
+		return github.PullRequestStatus{}, member, err
+	}
+	return status, member, nil
 }

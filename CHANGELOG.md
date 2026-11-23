@@ -23,6 +23,11 @@ written, fold the dated sections above it into it first: `make release`
 refuses a version with dated sections above its own, which its notes would
 leave out.
 
+## [2026-11-23.1] - 2026-11-23 · Out-of-date pull requests and focus
+
+- **Update a pull request that is behind** When a repository requires branches to be up to date and a pull request is behind its base, the Inbox, the Pull requests panel and the workspace's pull request card offer Update branch instead of a Merge GitHub would refuse. It asks first, updates only the head you saw, and the checks run again. A refused merge now shows why.
+- **Focus stays where you put it** A conversation that opens a moment after you start a task (on another Runner, say) no longer takes the keyboard back if you have already moved on.
+
 ## [0.1.0-pre.1] - 2026-11-17 · The first prerelease
 
 ### Install and updates

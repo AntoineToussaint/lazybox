@@ -294,6 +294,10 @@ func TestPullRequestReactions(t *testing.T) {
 			_, err := f.client.MergePullRequest(agentCredential, &pb.MergePullRequestRequest{CollectionId: f.mine.Id, Item: &pb.ItemRef{Key: "team/api#3"}, Method: "squash", ExpectedHead: "sha-three"})
 			return err
 		},
+		"update the branch": func() error {
+			_, err := f.client.UpdatePullRequestBranch(agentCredential, &pb.UpdatePullRequestBranchRequest{CollectionId: f.mine.Id, Item: &pb.ItemRef{Key: "team/api#3"}, ExpectedHead: "sha-three"})
+			return err
+		},
 	} {
 		if status.Code(call()) != codes.PermissionDenied {
 			t.Errorf("an agent credential may not %s", name)
@@ -401,11 +405,35 @@ func TestPullRequestReactions(t *testing.T) {
 		t.Fatalf("repeat import with only external feedback: %+v %v", empty, err)
 	}
 
+	// Behind its base, in a repository that requires up-to-date branches:
+	// GitHub refuses the merge, and the item then says why (not "ready").
+	// Updating the branch, at the head the person saw, makes it mergeable.
+	f.github.Update(func(s *githubtest.Server) { s.Pulls["team/api"][0].MergeableState = "behind" })
+	if _, err = f.client.MergePullRequest(owner, &pb.MergePullRequestRequest{CollectionId: f.mine.Id, Item: ref, Number: 3, Method: "squash", ExpectedHead: "sha-three"}); err == nil || !strings.Contains(err.Error(), "out of date") {
+		t.Fatalf("merge behind its base: %v", err)
+	}
+	if l := f.links(t)["team/api#3"]; l.Item.PullRequest.MergeableState != "behind" {
+		t.Fatalf("a refused merge leaves the item as it was read before: %+v", l.Item.PullRequest)
+	}
+	if _, err = f.client.UpdatePullRequestBranch(owner, &pb.UpdatePullRequestBranchRequest{CollectionId: f.theirs.Id, Item: ref, ExpectedHead: "sha-three"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("updating another workspace's pull request: %v", err)
+	}
+	if _, err = f.client.UpdatePullRequestBranch(owner, &pb.UpdatePullRequestBranchRequest{CollectionId: f.mine.Id, Item: ref, Number: 3, ExpectedHead: "moved"}); err == nil {
+		t.Fatal("updated a branch whose head moved since the person saw it")
+	}
+	updated, err := f.client.UpdatePullRequestBranch(owner, &pb.UpdatePullRequestBranchRequest{CollectionId: f.mine.Id, Item: ref, Number: 3, ExpectedHead: "sha-three"})
+	if err != nil || updated.MergeableState != "clean" || updated.HeadSha == "sha-three" || f.github.Pull("team/api", 3).BranchUpdates != 1 {
+		t.Fatalf("update branch: %+v %v", updated, err)
+	}
+	if l := f.links(t)["team/api#3"]; l.Item.PullRequest.HeadSha != updated.HeadSha || l.Item.PullRequest.MergeableState != "clean" {
+		t.Fatalf("after the update: %+v", l.Item.PullRequest)
+	}
+
 	// Merge a tracked pull request on another branch; one this workspace does not deliver is refused.
-	if _, err = f.client.MergePullRequest(owner, &pb.MergePullRequestRequest{CollectionId: f.theirs.Id, Item: ref, Method: "squash", ExpectedHead: "sha-three"}); status.Code(err) != codes.NotFound {
+	if _, err = f.client.MergePullRequest(owner, &pb.MergePullRequestRequest{CollectionId: f.theirs.Id, Item: ref, Method: "squash", ExpectedHead: updated.HeadSha}); status.Code(err) != codes.NotFound {
 		t.Fatalf("another workspace's pull request: %v", err)
 	}
-	merged, err := f.client.MergePullRequest(owner, &pb.MergePullRequestRequest{CollectionId: f.mine.Id, Item: ref, Number: 3, Method: "squash", ExpectedHead: "sha-three"})
+	merged, err := f.client.MergePullRequest(owner, &pb.MergePullRequestRequest{CollectionId: f.mine.Id, Item: ref, Number: 3, Method: "squash", ExpectedHead: updated.HeadSha})
 	if err != nil || merged.State != "merged" || merged.Branch != "agent/fix" {
 		t.Fatalf("merge: %+v %v", merged, err)
 	}

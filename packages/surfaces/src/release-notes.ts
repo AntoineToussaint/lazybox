@@ -9,6 +9,15 @@ import type { Release } from './onboarding-model';
  */
 export const releaseNotes: readonly Release[] = [
   {
+    id: '2026-11-23.1',
+    date: '2026-11-23',
+    title: 'Out-of-date pull requests and focus',
+    items: [
+      { title: 'Update a pull request that is behind', body: 'When a repository requires branches to be up to date and a pull request is behind its base, the Inbox, the Pull requests panel and the workspace\'s pull request card offer Update branch instead of a Merge GitHub would refuse. It asks first, updates only the head you saw, and the checks run again. A refused merge now shows why.' },
+      { title: 'Focus stays where you put it', body: 'A conversation that opens a moment after you start a task (on another Runner, say) no longer takes the keyboard back if you have already moved on.' },
+    ],
+  },
+  {
     id: '0.1.0-pre.1',
     date: '2026-11-17',
     title: 'The first prerelease',

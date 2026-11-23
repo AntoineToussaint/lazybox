@@ -190,6 +190,15 @@ function PullRequestCard({ workspaceId, member, pr, fix, launcher, onSendChecks,
     catch (e) { setError(errorText(e)); }
     finally { setBusy(false); }
   };
+  // Behind a base its repository requires it to match: GitHub merges the base into the branch
+  // (at the head shown here), then its checks run again before it can merge.
+  const behind = pr.state === 'open' && pr.mergeableState === 'behind' && !failing.length;
+  const update = async () => {
+    setBusy(true); setError('');
+    try { await api.updatePullRequestBranch({ collectionId: workspaceId, number: pr.number, expectedHead: pr.headSha, item: { provider: 'github', key: `${pr.githubRepository}#${pr.number}` } }, { timeoutMs: 60000 }); onRefresh(); }
+    catch (e) { setError(errorText(e)); }
+    finally { setBusy(false); }
+  };
   return <section className={`ship-pr is-${state}`} aria-label={`Pull request #${pr.number}`}>
     <header><Icon name={pr.state === 'merged' ? 'merge' : 'pullRequest'} size={15}/><a href={pr.url} target="_blank" rel="noreferrer" title="Open on GitHub"><strong>#{String(pr.number)}</strong> {pr.title}<Icon name="external" size={11}/></a><button type="button" className="ship-icon" aria-label="Refresh pull request status" title="Refresh checks and reviews" onClick={onRefresh}><Icon name="refresh" size={13}/></button></header>
     <p className="ship-pr-meta"><span className={`ship-chip is-${state}`}>{{ open: 'Open', draft: 'Draft', merged: 'Merged', closed: 'Closed' }[state] || state}</span>
@@ -202,6 +211,7 @@ function PullRequestCard({ workspaceId, member, pr, fix, launcher, onSendChecks,
     {pr.state === 'open' && <div className="ship-pr-actions">
       {launcher && <ReviewWithButton launcher={launcher} scope={{ scope: 'pr', member }} label="Review the PR with"/>}
       {failing.length > 0 && <button type="button" className={fix ? 'primary' : ''} onClick={onSendChecks} title="Puts the failing checks and their log links in the conversation's message box for you to send"><Icon name="chat" size={14}/>Send {failing.length === 1 ? 'failing check' : `${failing.length} failing checks`} to the agent</button>}
+      {behind && !confirming && <button type="button" className="primary" disabled={busy} onClick={() => void update()} title={`Merge ${pr.base} into this branch on GitHub; its checks run again`}><Icon name="refresh" size={14}/>{busy ? 'Updating…' : 'Update branch'}</button>}
       {confirming ? <span className="ship-confirm" role="group" aria-label="Confirm merge">
         <span>{MERGE_METHODS.find(([value]) => value === method)?.[1]} #{String(pr.number)} into {pr.base}?</span>
         <button type="button" className="primary" disabled={busy} autoFocus onClick={() => void merge()}>{busy ? 'Merging…' : 'Confirm merge'}</button><button type="button" disabled={busy} onClick={() => setConfirming(false)}>Cancel</button>

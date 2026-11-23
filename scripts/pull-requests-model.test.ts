@@ -26,6 +26,11 @@ test('a pull request\'s status, most urgent first', () => {
   assert.equal(pullStatus(link({ checks: 'success', review: 'approved', mergeable: true, mergeableState: 'clean' })), 'ready');
   assert.equal(pullStatus(link({ checks: 'none', mergeable: true, mergeableState: 'clean' })), 'ready', 'no checks and no review asked for: ready');
   assert.equal(pullStatus(link({ checks: 'success', review: 'review_required', mergeable: true, mergeableState: 'blocked' })), 'waiting');
+  // Regression: GitHub calls a branch behind its base mergeable (no conflicts), but a repository
+  // that requires up-to-date branches refuses to merge it. It needs an update, not a Merge button.
+  assert.equal(pullStatus(link({ checks: 'success', review: 'approved', mergeable: true, mergeableState: 'behind' })), 'behind');
+  assert.equal(pullStatus(link({ checks: 'success', review: 'review_required', mergeable: true, mergeableState: 'behind' })), 'waiting', 'a review it still needs comes first');
+  assert.equal(pullStatus(link({ checks: 'failure', review: 'approved', mergeable: true, mergeableState: 'behind' })), 'checks-failed');
   assert.equal(pullStatus(link({ checks: 'pending' })), 'checks-running');
   assert.equal(pullStatus(link({ state: 'started', draft: true, checks: 'success' })), 'draft');
   assert.equal(pullStatus(link({ state: 'merged', checks: 'success' })), 'merged');
@@ -116,4 +121,12 @@ test('inbox rows: what needs the person, with the reaction prepared; a dismissal
   assert.deepEqual(pullInboxRows([pushed], dismissed).map(r => r.number), [3]);
   assert.deepEqual(parseDismissed('["a",3,"b"]'), ['a', 'b']);
   assert.deepEqual(parseDismissed('{'), []);
+});
+
+test('an approved, green pull request behind its required base offers Update branch, not Merge', () => {
+  const rows = pullInboxRows([link({ key: 'codefly-dev/core#942', checks: 'success', review: 'approved', mergeable: true, mergeableState: 'behind', title: 'Solution Page' })], new Set());
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].action, 'update');
+  assert.match(rows[0].line, /#942 checks green · out of date with main$/);
+  assert.match(confirmation(rows[0], 'update', 'Claude'), /^Update #942 with main\? GitHub merges main into its branch/);
 });

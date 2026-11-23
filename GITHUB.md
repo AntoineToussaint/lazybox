@@ -159,9 +159,16 @@ or **Merge** is next. Nothing happens without an explicit click.
   review, conflicts, branch protection). It asks for confirmation, merges only
   the head shown (a later push makes GitHub refuse), and shows GitHub's own
   refusal, such as a branch-protection rule, as it is stated.
+- **Update branch** is offered instead of Merge when the repository requires
+  branches to be up to date and this one is behind its base (GitHub's
+  `mergeable_state` `behind`). GitHub calls such a pull request mergeable (no
+  conflicts) but refuses to merge it. The update merges the base into the branch
+  on GitHub, only at the head shown, and its checks run again before it can
+  merge.
 
 The Runner RPCs are `CommitWorkspaceChanges`, `PushWorkspaceBranch`,
-`CreatePullRequest`, `GetPullRequest` and `MergePullRequest`. They take a
+`CreatePullRequest`, `GetPullRequest`, `MergePullRequest` and
+`UpdatePullRequestBranch`. They take a
 workspace and member name, never a path; they are the owner's alone (an agent's
 scoped credential is denied, like every RPC off its allowlist).
 
@@ -294,8 +301,8 @@ merged is history. Each event goes to:
   ready for review;
 - the **Inbox**, whose rows are derived from the current state (a row per
   delivered pull request that checks failed on, has changes requested, is in
-  conflict or is ready to merge; **Dismiss** hides one until its state or head
-  changes).
+  conflict, is out of date with a base it must match, or is ready to merge;
+  **Dismiss** hides one until its state or head changes).
 
 ### Reactions
 
@@ -331,13 +338,19 @@ framing that says it is data, not instructions; Lazybox's own words stay
 outside it.
 - **Merge**: `MergePullRequest` with `item` merges a tracked pull request on
   any branch of a workspace that delivers it, only at the head the person saw.
+- **Update branch**: `UpdatePullRequestBranch` brings a tracked pull request
+  that is behind a base its repository requires it to match up to date, only
+  at the head the person saw. After a merge or an update, refused or not, the
+  Runner reads the pull request again, so the row shows why GitHub refused
+  rather than the state the person acted on.
 
 ### Access
 
 `ListLinks` and `LinkItem` admit an agent's credential for its own execution
 only (the Runner derives the workspace and conversation). Everything else —
-`UnlinkItem`, the reactions, merging — is the owner's; a paired phone reads
-with `read` and sends failures or a review with `respond`, never merges.
+`UnlinkItem`, the reactions, merging, updating a branch — is the owner's; a
+paired phone reads with `read` and sends failures or a review with `respond`,
+never merges or updates a branch.
 
 ## Review comments
 

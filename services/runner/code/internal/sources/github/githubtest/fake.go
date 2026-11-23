@@ -48,10 +48,12 @@ type PR struct {
 	State                    string
 	MergeableState           string
 	MergeMethod, MergeCommit string
-	Reviews                  []string // "login:STATE" or "login:STATE:body"
-	Requested                int
-	Comments                 []Comment
-	CreatedAt                time.Time
+	// BranchUpdates counts update-branch requests GitHub accepted.
+	BranchUpdates int
+	Reviews       []string // "login:STATE" or "login:STATE:body"
+	Requested     int
+	Comments      []Comment
+	CreatedAt     time.Time
 }
 
 // Server is a fake GitHub for one token. Set MergeRefusal to make merges fail
@@ -174,7 +176,7 @@ func (s *Server) wire(full string, pr *PR) map[string]any {
 	}
 	wire := map[string]any{
 		"number": pr.Number, "title": pr.Title, "body": pr.Body, "state": state, "draft": pr.Draft, "merged": pr.Merged,
-		"html_url": "https://github.com/" + full + "/pull/" + strconv.Itoa(pr.Number), "mergeable": pr.MergeableState == "clean" || pr.MergeableState == "unstable",
+		"html_url": "https://github.com/" + full + "/pull/" + strconv.Itoa(pr.Number), "mergeable": pr.MergeableState == "clean" || pr.MergeableState == "unstable" || pr.MergeableState == "behind",
 		"mergeable_state": pr.MergeableState, "merge_commit_sha": pr.MergeCommit, "user": map[string]any{"login": "fixture"},
 		"head": map[string]any{"ref": pr.Head, "sha": pr.HeadSHA}, "base": map[string]any{"ref": pr.Base}, "requested_reviewers": reviewers,
 	}
@@ -315,12 +317,29 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				write(w, 405, map[string]any{"message": s.MergeRefusal})
 				return
 			}
+			// A repository that requires up-to-date branches refuses one behind its base.
+			if pr.MergeableState == "behind" {
+				write(w, 405, map[string]any{"message": "Head branch is out of date. Review and try the merge again."})
+				return
+			}
 			if body.SHA != pr.HeadSHA {
 				write(w, 409, map[string]any{"message": "Head branch was modified. Review and try the merge again."})
 				return
 			}
 			pr.Merged, pr.State, pr.MergeMethod, pr.MergeCommit = true, "closed", body.MergeMethod, "merged-"+pr.HeadSHA
 			write(w, 200, map[string]any{"merged": true, "sha": pr.MergeCommit, "message": "Pull Request successfully merged"})
+		case len(rest) == 3 && rest[2] == "update-branch" && r.Method == "PUT":
+			var body struct {
+				ExpectedHeadSHA string `json:"expected_head_sha"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.ExpectedHeadSHA != "" && body.ExpectedHeadSHA != pr.HeadSHA {
+				write(w, 422, map[string]any{"message": "expected head sha didn't match current head ref."})
+				return
+			}
+			// GitHub merges the base into the branch in the background: a new head, checks to run again.
+			pr.HeadSHA, pr.MergeableState, pr.BranchUpdates = pr.HeadSHA+"-updated", "clean", pr.BranchUpdates+1
+			write(w, 202, map[string]any{"message": "Updating pull request branch.", "url": "https://github.com/" + full + "/pull/" + strconv.Itoa(pr.Number)})
 		default:
 			write(w, 404, map[string]any{"message": "Not Found"})
 		}

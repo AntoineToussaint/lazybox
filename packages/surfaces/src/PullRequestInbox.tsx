@@ -95,7 +95,7 @@ function PullInboxItem({ row, workspace, phone, canRespond, defer, onOpen, onDis
       </button>}
       {confirming && !receipt && !busy && <span role="group" aria-label={`Confirm ${reactionParts[confirming].confirmName}`} className="pr-inbox-confirm">
         <span className="pr-inbox-ask">{confirmation(row, confirming, agent)}</span>
-        <button type="button" className="primary" autoFocus disabled={busy} onClick={() => void run(confirming)}>{confirming === 'merge' ? `Merge #${row.number}` : `Update #${row.number}`}</button>
+        <button type="button" className="primary" autoFocus disabled={busy} onClick={() => void run(confirming)}>{`${reactionParts[confirming].confirmButton} #${row.number}`}</button>
         <button type="button" onClick={() => setConfirming(undefined)}>Cancel</button>
       </span>}
       {openUrl && <a href={openUrl} target="_blank" rel="noreferrer">{openLabel}<Icon name="external" size={11}/></a>}

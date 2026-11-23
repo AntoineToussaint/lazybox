@@ -5,7 +5,7 @@ import { createDockview, type DockviewApi, type DockviewGroupPanel, type Dockvie
 import 'dockview/dist/styles/dockview.css';
 import './dock.css';
 import { iconElement } from './Icons';
-import { focusIntent } from './pending-focus';
+import { PendingFocus, trackFocus } from './pending-focus';
 import { focusWhenShown } from './focus';
 import { beginDrag, type DragAxis } from './drag-gesture';
 import { refreshNativeWebViews } from './native-web-view';
@@ -49,6 +49,8 @@ export type DockHandle = {
   /** The popped-out group whose window has the focus, if any. */
   focusedPopout(): string | undefined;
   focusPanel(panelID: string): void;
+  /** Whether the dock shows this panel yet (a focus asked for it waits until it does). */
+  hasPanel(panelID: string): boolean;
   /** The group a panel is in, as its menus see it. */
   groupOf(panelID: string): GroupView | undefined;
   /** Brings a panel's tab to the front without moving focus into it. */
@@ -154,6 +156,8 @@ const sidebarOf = (layout: LayoutNode | null): { group: Group; ids: string[]; at
  * dockview is reported back through `onArrange`.
  */
 export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(props, ref) {
+  const [intoFocus] = useState(() => new PendingFocus<{ panel: string }>());
+  useEffect(() => trackFocus(intoFocus), [intoFocus]);
   const container = useRef<HTMLDivElement>(null);
   const api = useRef<DockviewApi>(undefined);
   const pendingPopouts = useRef(new Map<string, Promise<boolean>>());
@@ -691,11 +695,11 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
   };
   /** Focus into a panel: where the person last was in it, else its message box, else its first field or control. */
   const focusInto = (panel: IDockviewPanel) => {
-    // Waits as the page's focus intent: focus moved elsewhere before the next frame stays there.
+    // The dock's own focus request (pending-focus.ts): focus moved elsewhere before the next frame stays there.
     const request = { panel: panel.id };
-    focusIntent.ask(request);
+    intoFocus.ask(request);
     requestAnimationFrame(() => {
-      if (!focusIntent.take(request)) return;
+      if (!intoFocus.take(request)) return;
       const host = latest.current.hostFor(panelFrom(panel.id, panel.params));
       const last = lastFocus.current.get(panel.id);
       // Not an element of a window that has closed since (a group popped out and put back), and not
@@ -811,6 +815,7 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     focusWindow: groupID => { const group = api.current?.getGroup(groupID); if (group?.api.location.type === 'popout') group.api.getWindow().focus(); },
     // While this page has the focus no popped-out window does (the palette here does not offer to put one back).
     focusedPopout: () => document.hasFocus() ? undefined : api.current?.getPopouts().find(popout => { try { return popout.window.document.hasFocus(); } catch { return false; } })?.group.id,
+    hasPanel: panelID => !!api.current?.getPanel(panelID),
     focusPanel: panelID => {
       const panel = api.current?.getPanel(panelID);
       if (!panel) return;

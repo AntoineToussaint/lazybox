@@ -130,3 +130,16 @@ test('an approved, green pull request behind its required base offers Update bra
   assert.match(rows[0].line, /#942 checks green · out of date with main$/);
   assert.match(confirmation(rows[0], 'update', 'Claude'), /^Update #942 with main\? GitHub merges main into its branch/);
 });
+
+// The workspace card (canUpdateBranch) and the Inbox (pullStatus) decide "out of date" alike.
+test('the workspace card and the Inbox agree on when a branch needs an update', async () => {
+  const { canUpdateBranch } = await import('../packages/surfaces/src/pull-request-model.ts');
+  for (const checks of ['success', 'none', 'pending', 'failure'])
+    for (const review of ['approved', '', 'review_required', 'changes_requested'])
+      for (const draft of [false, true])
+        for (const mergeableState of ['behind', 'clean', 'blocked']) {
+          const inbox = pullStatus(link({ checks, review, draft, mergeable: true, mergeableState, state: draft ? 'started' : 'review' })) === 'behind';
+          const card = canUpdateBranch({ state: 'open', draft, mergeableState, checksState: checks, reviewDecision: review } as never);
+          assert.equal(card, inbox, JSON.stringify({ checks, review, draft, mergeableState }));
+        }
+});

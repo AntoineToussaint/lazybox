@@ -56,6 +56,12 @@ fn launch() -> u128 {
     })
 }
 
+/// A notification's identifier: unique across launches, so one still in
+/// Notification Center from before a restart is never replaced.
+pub fn identifier(id: i32) -> String {
+    format!("lazybox-attention-{}-{id}", launch())
+}
+
 /// What macOS lets this app do, in the web's words: granted, denied, or
 /// default (never asked).
 pub fn permission_word(status: UNAuthorizationStatus) -> &'static str {
@@ -114,7 +120,7 @@ pub fn show(id: i32, title: &str, body: &str, extra: &[(&str, String)], answer: 
     // userInfo is untyped; its keys and values are strings.
     unsafe { content.setUserInfo(&*(Retained::as_ptr(&info) as *const NSDictionary)) };
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-        &NSString::from_str(&format!("lazybox-attention-{}-{id}", launch())),
+        &NSString::from_str(&identifier(id)),
         &content,
         None,
     );
@@ -212,6 +218,17 @@ mod tests {
         assert_eq!(
             permission_word(UNAuthorizationStatus::NotDetermined),
             "default"
+        );
+    }
+
+    #[test]
+    fn identifiers_carry_this_launch() {
+        let (first, second) = (identifier(1), identifier(2));
+        assert_ne!(first, second);
+        assert!(first.starts_with(&format!("lazybox-attention-{}-", launch())));
+        assert!(
+            launch() > 0,
+            "the launch part is the start time, not a counter that restarts at zero"
         );
     }
 

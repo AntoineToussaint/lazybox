@@ -23,13 +23,6 @@ written, fold the dated sections above it into it first: `make release`
 refuses a version with dated sections above its own, which its notes would
 leave out.
 
-## [2026-11-23.1] - 2026-11-23 · Out-of-date pull requests, notifications and focus
-
-- **Update a pull request that is behind** When a repository requires branches to be up to date and a pull request is behind its base, the Inbox, the Pull requests panel and the workspace's pull request card offer Update branch instead of a Merge GitHub would refuse. It asks first, updates only the head you saw, and the checks run again. A refused merge now shows why.
-- **The Dock shows the Inbox count** The badge on the app icon is the Inbox button's number, pull requests and tasks included, not only conversations waiting for an answer.
-- **Notifications that reach you, or say why not** On macOS, Lazybox asks permission once and posts through macOS's current notification system; Settings → Notifications shows what macOS decided and why a notification was refused, instead of reporting success for notifications macOS dropped.
-- **Focus stays where you put it** A conversation that opens a moment after you start a task (on another Runner, say) no longer takes the keyboard back if you have already moved on.
-
 ## [0.1.0-pre.1] - 2026-11-17 · The first prerelease
 
 ### Install and updates
@@ -62,6 +55,9 @@ leave out.
 
 ### Workspaces and tabs
 
+- **The Dock shows the Inbox count** The badge on the app icon is the Inbox button's number, pull requests and tasks included, not only conversations waiting for an answer.
+- **Notifications that reach you, or say why not** On macOS, Lazybox asks permission once and posts through macOS's current notification system; Settings → Notifications shows what macOS decided and why a notification was refused, instead of reporting success for notifications macOS dropped.
+- **Focus stays where you put it** A conversation that opens a moment after you start a task (on another Runner, say) no longer takes the keyboard back if you have already moved on.
 - **Delete a damaged workspace** A workspace whose Git link or registration is missing (its .git was removed, Git pruned it, or the .git names a deleted worktree) can be deleted once you agree to discard its files. This also works when the workspace folder is inside another Git repository. Branches are kept, and a .git that points anywhere else still blocks deletion.
 - **Mission progress** The board counts canceled and blocked tasks, links to the next task needing attention, and shows acceptance criteria from approved plans.
 
@@ -136,6 +132,7 @@ leave out.
 
 ### Pull requests and issues
 
+- **Update a pull request that is behind** When a repository requires branches to be up to date and a pull request is behind its base, the Inbox, the Pull requests panel and the workspace's pull request card offer Update branch instead of a Merge GitHub would refuse. It asks first, updates only the head you saw, and the checks run again. A refused merge now shows why.
 - **Review feedback on GitHub** When there is nothing eligible to send to the agent, the Inbox points you to the review on GitHub.
 - **Every pull request tracked** The pull requests your agents open, push or link are tracked, with a pill in the header and one badge per sidebar row: checks failed, changes requested or ready to merge.
 - **A Pull requests panel** Needs you, Waiting on others, Merged this week. Send the failing checks or the review comments to the agent in one click, always after your confirmation.

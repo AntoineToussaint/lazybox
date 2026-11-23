@@ -91,7 +91,7 @@ export function trackedPull(link: ItemLink): TrackedPull {
   const key = link.item?.ref?.key || '';
   const { repository, number } = refParts(key);
   const status = pullStatus(link);
-  const detail = status === 'checks-failed' ? failingDetail(link) || statusLabel[status] : status === 'waiting' ? waitingDetail(link) : status === 'behind' ? `Out of date with ${link.item?.pullRequest?.base || 'its base'}` : statusLabel[status];
+  const detail = status === 'checks-failed' ? failingDetail(link) || statusLabel[status] : status === 'waiting' ? waitingDetail(link) : status === 'behind' ? outOfDate(link.item?.pullRequest?.base) : statusLabel[status];
   const tone = status === 'waiting' && link.item?.pullRequest?.checks === 'success' ? 'success' : statusTone[status];
   // An ended pull request is as old as its end; an open one, its last change.
   const closed = millis(link.item?.pullRequest?.closedAtUnixMillis);
@@ -144,6 +144,11 @@ export function pullWords(pull: Pick<TrackedPull, 'status' | 'detail'>): string 
   return (pull.status === 'waiting' ? pull.detail.replace(' · ', ', ') : statusLabel[pull.status]).toLowerCase();
 }
 
+/** "Out of date with main": a pull request behind a base its repository requires it to match. */
+export const outOfDate = (base?: string) => `Out of date with ${base || 'its base'}`;
+/** What updating a branch does, asked before it runs (the Inbox, the panel and the workspace card say the same). */
+export const updateConfirmation = (number: number | bigint, base?: string) => `Update #${number} with ${base || 'its base'}? GitHub merges ${base || 'the base'} into its branch, and its checks run again before it can merge.`;
+
 /** An Inbox row: a pull request that needs the person, with its prepared action. */
 export type PullInboxRow = TrackedPull & {
   /** What dismissing it hides: this status on this head. A new failure or review brings it back. */
@@ -168,7 +173,7 @@ export function pullInboxRows(links: readonly ItemLink[], dismissed: ReadonlySet
     const dismissKey = pullReactionKey(pull);
     if (dismissed.has(dismissKey)) continue;
     const action = pull.status === 'checks-failed' ? 'send' : pull.status === 'changes-requested' ? 'review' : pull.status === 'behind' ? 'update' : pull.status === 'ready' ? 'merge' : 'open';
-    const what = pull.status === 'checks-failed' ? `checks failed · ${pull.detail}` : pull.status === 'ready' ? 'approved · checks green' : pull.status === 'behind' ? `checks green · out of date with ${pull.link.item?.pullRequest?.base || 'its base'}` : statusLabel[pull.status].toLowerCase();
+    const what = pull.status === 'checks-failed' ? `checks failed · ${pull.detail}` : pull.status === 'ready' ? 'approved · checks green' : pull.status === 'behind' ? `checks green · ${outOfDate(pull.link.item?.pullRequest?.base).replace(/^O/, 'o')}` : statusLabel[pull.status].toLowerCase();
     rows.push({ ...pull, dismissKey, action, line: `${pull.repository}#${pull.number} ${what}` });
   }
   return rows.sort(byUrgency);
@@ -189,7 +194,7 @@ export function agentName(provider: string | undefined): string {
 
 /** The confirmation a write asks before it runs. */
 export function confirmation(pull: TrackedPull, action: 'send' | 'review' | 'update' | 'merge', agent: string): string {
-  if (action === 'update') return `Update #${pull.number} with ${pull.link.item?.pullRequest?.base || 'its base'}? GitHub merges ${pull.link.item?.pullRequest?.base || 'the base'} into its branch, and its checks run again before it can merge.`;
+  if (action === 'update') return updateConfirmation(pull.number, pull.link.item?.pullRequest?.base);
   if (action === 'send') return `Send the failing checks of #${pull.number} (${pull.detail}) to ${agent}?`;
   if (action === 'review') return `Import the review of #${pull.number} and send it to ${agent}?`;
   return `Merge #${pull.number} into ${pull.link.item?.pullRequest?.base || 'its base'}?`;

@@ -664,7 +664,8 @@ func (b *Bench) actOnTrackedPullRequest(ctx context.Context, workspace, member, 
 			}
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				// GitHub took the write: stop waiting for it to show, and record what was read.
+				return nil
 			case <-time.After(branchUpdateWait.interval):
 			}
 		}

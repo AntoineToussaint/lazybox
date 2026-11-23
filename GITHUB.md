@@ -161,10 +161,13 @@ or **Merge** is next. Nothing happens without an explicit click.
   refusal, such as a branch-protection rule, as it is stated.
 - **Update branch** is offered instead of Merge when the repository requires
   branches to be up to date and this one is behind its base (GitHub's
-  `mergeable_state` `behind`). GitHub calls such a pull request mergeable (no
-  conflicts) but refuses to merge it. The update merges the base into the branch
-  on GitHub, only at the head shown, and its checks run again before it can
-  merge.
+  `mergeable_state` `behind`), with green checks, no draft and no review still
+  to come: the same rule as the Inbox's **Out of date**
+  (`canUpdateBranch`, `pullStatus`). GitHub calls such a pull request mergeable
+  (no conflicts) but refuses to merge it. It asks first, and updates only at the
+  head the question was asked for: a push since closes the question. The update
+  merges the base into the branch on GitHub, and its checks run again before it
+  can merge.
 
 The Runner RPCs are `CommitWorkspaceChanges`, `PushWorkspaceBranch`,
 `CreatePullRequest`, `GetPullRequest`, `MergePullRequest` and
@@ -342,7 +345,11 @@ outside it.
   that is behind a base its repository requires it to match up to date, only
   at the head the person saw. After a merge or an update, refused or not, the
   Runner reads the pull request again, so the row shows why GitHub refused
-  rather than the state the person acted on.
+  rather than the state the person acted on. GitHub updates a branch in the
+  background (it answers 202), so after an update the Runner reads it again,
+  once a second for up to ten seconds, until the new head shows; if the caller
+  leaves first, it records what it read. A sign-in GitHub refuses on the write
+  itself is reported as the connection's problem.
 
 ### Access
 

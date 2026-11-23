@@ -1,6 +1,6 @@
 import { useDisplayDetail } from './display-detail';
 import { agentIcon, agentTitle } from './providers';
-import { focusIntent, type PendingFocus } from './pending-focus';
+import { PendingFocus, trackFocus } from './pending-focus';
 import { conversationProvider, conversationTitle } from './conversation-model';
 import { LeaderMenu } from './LeaderMenu';
 import { WorkspaceNavigator } from './WorkspaceNavigator';
@@ -380,28 +380,29 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const dockKey = (kind: string) => `${viewState?.root || viewState?.key}:dock:${kind}`;
   const rememberedDock = (kind: string): DockSide => { try { const side = viewState?.getItem(dockKey(kind)); return isDockSide(side) ? side : defaultDock(kind); } catch { return defaultDock(kind); } };
   // Focus follows a panel that moved or was asked for, or returns to the conversation when one closes.
-  // The page's focus intent (pending-focus.ts): focus moved elsewhere while a request waits drops it.
-  // Asking also schedules the request's run: a panel already in view changes no layout, and a
-  // request left waiting for some later, unrelated layout change would fire at a moment nobody chose.
-  const intent = focusIntent as PendingFocus<{ panel: string } | 'content'>;
-  const [focusAsked, setFocusAsked] = useState(0);
-  const focusAfter = { ask: (request: { panel: string } | 'content') => { intent.ask(request); setFocusAsked(value => value + 1); }, get waiting() { return intent.waiting; }, take: (request: { panel: string } | 'content') => intent.take(request) };
+  // This view's own request (pending-focus.ts): focus moved elsewhere while it waits drops it. It runs
+  // when asked and after each layout change, once what it needs is shown; until then it keeps waiting.
+  const [focusRequest] = useState(() => new PendingFocus<{ panel: string } | 'content'>());
+  useEffect(() => trackFocus(focusRequest), [focusRequest]);
+  const runFocus = useRef(() => {});
+  runFocus.current = () => {
+    const request = focusRequest.waiting; if (!request) return;
+    // The conversation in view: a chat tab behind another one has a message box too.
+    const composer = () => [...document.querySelectorAll<HTMLElement>('.page-layout .panel-chat textarea:not(:disabled)')].find(box => box.getClientRects().length > 0);
+    if (request === 'content' ? !composer() : !dock.current?.hasPanel(request.panel)) return;
+    if (!focusRequest.take(request)) return;
+    if (request !== 'content') dock.current?.focusPanel(request.panel); else composer()?.focus({ preventScroll: true });
+  };
+  const focusAfter = useMemo(() => ({ ask: (request: { panel: string } | 'content') => { focusRequest.ask(request); requestAnimationFrame(() => runFocus.current()); } }), [focusRequest]);
   /** A panel navigated to (a conversation opened): a maximized group gives it the zoom, without taking the focus. */
   const revealAfter = useRef('');
   useEffect(() => {
     const reveal = revealAfter.current; revealAfter.current = '';
     if (reveal) dock.current?.reveal(reveal);
-    // Kept until it runs: the dock reporting its settled sizes changes the layout again within the frame.
-    const request = focusAfter.waiting; if (!request) return;
-    const frame = requestAnimationFrame(() => {
-      // Dropped while it waited for this frame: focus moved, and stays where it went.
-      if (!focusAfter.take(request)) return;
-      if (request !== 'content') { dock.current?.focusPanel(request.panel); return; }
-      // The conversation in view: a chat tab behind another one has a message box too.
-      [...document.querySelectorAll<HTMLElement>('.page-layout .panel-chat textarea:not(:disabled)')].find(box => box.getClientRects().length > 0)?.focus({ preventScroll: true });
-    });
+    // The dock reporting its settled sizes changes the layout again within the frame: run after it.
+    const frame = requestAnimationFrame(() => runFocus.current());
     return () => cancelAnimationFrame(frame);
-  }, [layout, focusAsked]);
+  }, [layout]);
   /** Show the page's panel of this kind, or dock a new one where this kind was last docked (or beside the group ⌘\ asked from). */
   const showModule = (kind: string) => {
     if (kind === 'missions') { showMissionsPage(); return ''; }

@@ -89,10 +89,7 @@ export function PullRequestsPanel({ collections, onShowSession }: Pick<ModulePro
     const pull = focused();
     if (event.key === 'j' || event.key === 'ArrowDown') { event.preventDefault(); move(1); }
     else if (event.key === 'k' || event.key === 'ArrowUp') { event.preventDefault(); move(-1); }
-    else if (pull && event.key === 's' && pull.status === 'checks-failed') { event.preventDefault(); ask(pull, 'send'); }
-    else if (pull && event.key === 'r' && pull.status === 'changes-requested') { event.preventDefault(); ask(pull, 'review'); }
-    else if (pull && event.key === 'u' && pull.status === 'behind') { event.preventDefault(); ask(pull, 'update'); }
-    else if (pull && event.key === 'm' && pull.status === 'ready') { event.preventDefault(); ask(pull, 'merge'); }
+    else if (pull && reactionFor(pull) && event.key === reactionParts[reactionFor(pull)!].key) { event.preventDefault(); ask(pull, reactionFor(pull)!); }
     else if (pull && event.key === 'o' && pull.url) { event.preventDefault(); window.open(pull.url, '_blank', 'noopener,noreferrer'); }
   };
   const section = (id: string, title: string, list: TrackedPull[], empty: ReactNode) => <section className={`pr-group group-${id}`} aria-labelledby={`pr-group-${id}`}>

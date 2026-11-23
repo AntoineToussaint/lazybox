@@ -252,7 +252,7 @@ try {
   await panel.locator('.mission-history summary').click();
   await expect(panel.locator('.mission-history li').first()).toContainText('You asked for changes on “Document the parser”');
   await expect(panel.locator('.mission-history')).toContainText('You accepted “Split the parser”');
-  await expect(panel.locator('.mission-history')).toContainText('Ran go test ./... · exit 1');
+  await expect(panel.locator('.mission-history')).toContainText('Ran ' + command + ' · exit 1');
 
   // A refusal says why, in the panel.
   fixture.missions.missions[0].tasks[1].gate = '';

@@ -108,6 +108,8 @@ revision you had open. In a standalone window, Lazybox copies that draft.
 
 New CLI records created with an explicit kind default to its validated JSON schema. To import an existing document, specify `--format markdown` or `--format html`. Updates preserve the original format.
 
+The task list shows how many items are complete. On the current version, use the remaining-tasks action to prepare a chat draft or copy a brief referencing that revision. You can review the draft before sending.
+
 Publish a JSON file with `lazybox artifact put tasks.json --title "Release tasks" --kind todo-list`.
 Each entry has a unique stable ID, text, and a status of `todo` or `done`. Array order is display order.
 

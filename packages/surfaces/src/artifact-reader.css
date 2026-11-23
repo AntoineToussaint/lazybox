@@ -238,3 +238,14 @@ html[data-motion=reduce] .doc-anchor,html[data-motion=reduce] .doc-toc li a{tran
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.artifact-task-progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .65em;
+  margin: 1em 0;
+  color: var(--reader-text);
+  font-family: var(--font-ui);
+}
+.artifact-task-progress progress { width: 6em; height: .45em; accent-color: var(--accent); }

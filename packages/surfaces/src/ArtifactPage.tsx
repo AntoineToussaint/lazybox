@@ -5,7 +5,7 @@ import type { Artifact, ArtifactVersion, Collection } from '@lazybox/protocol';
 import { ActionMenu } from './ActionMenu';
 import { CreateIssueDialog, DeleteArtifactDialog, DiffStats, DiffView, SaveToRepositoryDialog } from './ArtifactDialogs';
 import { artifactsChanged, errorText, restoreArtifacts, retireArtifact } from './artifact-client';
-import { TodoList, todoMarkdown } from './TodoList';
+import { TodoList, todoMarkdown, todoProgress } from './TodoList';
 import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, slug, versionOrigin } from './artifact-model';
 import { extractToc, readingMinutes, tocOutline, withoutRepeatedTitle } from './artifact-reader';
 import { DocumentBody, RenderedDiff, TableOfContents, useScrollSpy } from './ArtifactReader';
@@ -377,8 +377,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
     const reference = agentReference(artifact, currentText ?? '', 1200, shown);
     return excerpt ? `${reference}Selected excerpt:\n${excerpt.split('\n').map(line => `> ${line}`).join('\n')}\n\n` : reference;
   };
-  const sendToAgent = () => {
-    const text = discussionReference();
+  const sendToAgent = (text: string) => {
     if (onDiscuss) {
       if (!discussionVersion && shown) {
         setDiscussionVersion(shown);
@@ -397,6 +396,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
   const compare = (number: number) => { pick(number); setView('changes'); if (!wide) setHistoryOpen(false); };
   const minutes = reading === undefined || Preview ? 0 : readingMinutes(reading);
   const discussLabel = chatOpen ? (excerpt ? 'Add selection to chat' : 'Add to chat') : (excerpt ? 'Discuss selection in chat' : 'Discuss in chat');
+  const progress = artifact.kind === 'todo-list' && content ? todoProgress(content) : undefined;
   const historyLabel = `History · ${versions.length} version${versions.length === 1 ? '' : 's'}`;
 
   return <article ref={measureRef} className={`artifact-page${historyOpen ? ' has-history' : ''}${wide ? ' is-wide' : ''}${scrolled ? ' is-scrolled' : ''}`} aria-label={artifact.title} onKeyDown={toggleKey}>
@@ -421,7 +421,7 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
         <button type="button" className="artifact-tool artifact-history-toggle" aria-expanded={historyOpen} aria-label={historyLabel} aria-keyshortcuts="H" title={`${historyLabel} (H)`} onClick={() => setHistoryOpen(!historyOpen)}><Icon name="history" size={15}/><span className="artifact-tool-label">History</span><span className="artifact-count">{versions.length}</span></button>
         <button type="button" className={onDiscuss ? "artifact-tool artifact-discuss" : "artifact-tool"}
           aria-label={onDiscuss ? discussLabel : (excerpt ? 'Send selection to agent' : 'Send to agent')}
-          onMouseDown={event => { if (excerpt) event.preventDefault(); }} onClick={sendToAgent}
+          onMouseDown={event => { if (excerpt) event.preventDefault(); }} onClick={() => sendToAgent(discussionReference())}
           title={onDiscuss ? 'Open chat and add this reference to its draft' : conversationId ? `Put a reference in the message box of “${conversationTitle || 'the conversation'}” (not sent)` : 'Copy a reference an agent can read'}>
           <Icon name={onDiscuss ? 'chat' : 'send'} size={14}/><span className="artifact-tool-label">{onDiscuss ? discussLabel : excerpt ? 'Send selection' : 'Send to agent'}</span>
         </button>
@@ -503,6 +503,13 @@ export function ArtifactPage({ collectionId, artifactId, summary, collection, on
                 </>}
                 {!artifact.trackedPath && !artifact.retired && <button type="button" className="link-button" disabled={content === undefined || republishing}
                   onClick={() => content !== undefined && void saveRevision(content, `Republished v${shown}.`)}>Republish v{shown}</button>}
+              </div>}
+              {progress && view === 'document' && <div className="artifact-task-progress">
+                <span>{progress.total - progress.remaining} of {progress.total} complete</span>
+                {progress.total > 0 && <progress aria-label="Task completion" value={progress.total - progress.remaining} max={progress.total}/>}
+                {progress.remaining > 0 && shown === latestNumber && !artifact.retired && <button type="button" className="link-button" onClick={() => sendToAgent(
+                  agentReference(artifact, '', 0, shown) + 'Work through the items marked todo in this revision. Check the latest version before starting each item and record completed work using the same item IDs.'
+                )}>{onDiscuss || (conversationId && onShowSession) ? 'Draft remaining tasks in chat' : 'Copy remaining tasks brief'}</button>}
               </div>}
               <div key={`${artifact.id}:${shown}:${view}`} ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <pre className="artifact-html-source">{content}</pre> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : <DocumentBody markdown={reading} headings={headings} scroller={scroller} onReviewShell={reviewShell}/>}</div>
             </div>

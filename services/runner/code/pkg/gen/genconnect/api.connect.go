@@ -326,6 +326,9 @@ const (
 	// RunnerServiceFinishPipeProcedure is the fully-qualified name of the RunnerService's FinishPipe
 	// RPC.
 	RunnerServiceFinishPipeProcedure = "/lazybox.bench.v1.RunnerService/FinishPipe"
+	// RunnerServiceBindDeliveryProcedure is the fully-qualified name of the RunnerService's
+	// BindDelivery RPC.
+	RunnerServiceBindDeliveryProcedure = "/lazybox.bench.v1.RunnerService/BindDelivery"
 	// RunnerServiceListCommandsProcedure is the fully-qualified name of the RunnerService's
 	// ListCommands RPC.
 	RunnerServiceListCommandsProcedure = "/lazybox.bench.v1.RunnerService/ListCommands"
@@ -893,6 +896,10 @@ type RunnerServiceClient interface {
 	RegisterPipe(context.Context, *connect.Request[gen.RegisterPipeRequest]) (*connect.Response[gen.CommandStatus], error)
 	Publish(context.Context, *connect.Request[gen.PublishRequest]) (*connect.Response[gen.CommandStatus], error)
 	FinishPipe(context.Context, *connect.Request[gen.FinishPipeRequest]) (*connect.Response[gen.CommandStatus], error)
+	// Pins a published spec.v2 revision to the caller's conversation, so its
+	// `lazybox run --check` and `--needs` runs record delivery observations.
+	// Binding another revision starts a new attempt (delivery.Store.Bind).
+	BindDelivery(context.Context, *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error)
 	ListCommands(context.Context, *connect.Request[gen.ListCommandsRequest]) (*connect.Response[gen.ListCommandsResponse], error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -1845,6 +1852,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("FinishPipe")),
 			connect.WithClientOptions(opts...),
 		),
+		bindDelivery: connect.NewClient[gen.BindDeliveryRequest, gen.DeliveryBinding](
+			httpClient,
+			baseURL+RunnerServiceBindDeliveryProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("BindDelivery")),
+			connect.WithClientOptions(opts...),
+		),
 		listCommands: connect.NewClient[gen.ListCommandsRequest, gen.ListCommandsResponse](
 			httpClient,
 			baseURL+RunnerServiceListCommandsProcedure,
@@ -2717,6 +2730,7 @@ type runnerServiceClient struct {
 	registerPipe                 *connect.Client[gen.RegisterPipeRequest, gen.CommandStatus]
 	publish                      *connect.Client[gen.PublishRequest, gen.CommandStatus]
 	finishPipe                   *connect.Client[gen.FinishPipeRequest, gen.CommandStatus]
+	bindDelivery                 *connect.Client[gen.BindDeliveryRequest, gen.DeliveryBinding]
 	listCommands                 *connect.Client[gen.ListCommandsRequest, gen.ListCommandsResponse]
 	claimCommandShare            *connect.Client[gen.CommandRequest, gen.ClaimCommandShareResponse]
 	readCommand                  *connect.Client[gen.ReadCommandRequest, gen.ReadCommandResponse]
@@ -3340,6 +3354,11 @@ func (c *runnerServiceClient) Publish(ctx context.Context, req *connect.Request[
 // FinishPipe calls lazybox.bench.v1.RunnerService.FinishPipe.
 func (c *runnerServiceClient) FinishPipe(ctx context.Context, req *connect.Request[gen.FinishPipeRequest]) (*connect.Response[gen.CommandStatus], error) {
 	return c.finishPipe.CallUnary(ctx, req)
+}
+
+// BindDelivery calls lazybox.bench.v1.RunnerService.BindDelivery.
+func (c *runnerServiceClient) BindDelivery(ctx context.Context, req *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error) {
+	return c.bindDelivery.CallUnary(ctx, req)
 }
 
 // ListCommands calls lazybox.bench.v1.RunnerService.ListCommands.
@@ -4167,6 +4186,10 @@ type RunnerServiceHandler interface {
 	RegisterPipe(context.Context, *connect.Request[gen.RegisterPipeRequest]) (*connect.Response[gen.CommandStatus], error)
 	Publish(context.Context, *connect.Request[gen.PublishRequest]) (*connect.Response[gen.CommandStatus], error)
 	FinishPipe(context.Context, *connect.Request[gen.FinishPipeRequest]) (*connect.Response[gen.CommandStatus], error)
+	// Pins a published spec.v2 revision to the caller's conversation, so its
+	// `lazybox run --check` and `--needs` runs record delivery observations.
+	// Binding another revision starts a new attempt (delivery.Store.Bind).
+	BindDelivery(context.Context, *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error)
 	ListCommands(context.Context, *connect.Request[gen.ListCommandsRequest]) (*connect.Response[gen.ListCommandsResponse], error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -5113,6 +5136,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceFinishPipeProcedure,
 		svc.FinishPipe,
 		connect.WithSchema(runnerServiceMethods.ByName("FinishPipe")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceBindDeliveryHandler := connect.NewUnaryHandler(
+		RunnerServiceBindDeliveryProcedure,
+		svc.BindDelivery,
+		connect.WithSchema(runnerServiceMethods.ByName("BindDelivery")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceListCommandsHandler := connect.NewUnaryHandler(
@@ -6083,6 +6112,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServicePublishHandler.ServeHTTP(w, r)
 		case RunnerServiceFinishPipeProcedure:
 			runnerServiceFinishPipeHandler.ServeHTTP(w, r)
+		case RunnerServiceBindDeliveryProcedure:
+			runnerServiceBindDeliveryHandler.ServeHTTP(w, r)
 		case RunnerServiceListCommandsProcedure:
 			runnerServiceListCommandsHandler.ServeHTTP(w, r)
 		case RunnerServiceClaimCommandShareProcedure:
@@ -6742,6 +6773,10 @@ func (UnimplementedRunnerServiceHandler) Publish(context.Context, *connect.Reque
 
 func (UnimplementedRunnerServiceHandler) FinishPipe(context.Context, *connect.Request[gen.FinishPipeRequest]) (*connect.Response[gen.CommandStatus], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.FinishPipe is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) BindDelivery(context.Context, *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.BindDelivery is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) ListCommands(context.Context, *connect.Request[gen.ListCommandsRequest]) (*connect.Response[gen.ListCommandsResponse], error) {

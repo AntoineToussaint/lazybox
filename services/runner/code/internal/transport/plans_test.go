@@ -253,6 +253,29 @@ func testPinnedPlanSpawnsFromReviewedBaseline(t *testing.T, content, want string
 	if !strings.Contains(brief.Text, "\n- "+want) || strings.Contains(brief.Text, "Two rows after reconnect") {
 		t.Fatalf("wrong contract revision in child brief: %s", brief.Text)
 	}
+	// The worker's checks count against the approved contract, never a later revision.
+	pipe, err := o.client.RegisterPipe(owner, &pb.RegisterPipeRequest{SessionId: view.Spawned.SessionId, Title: "go test ./reconnect", Check: "reconnect"})
+	if !strings.HasPrefix(want, "[") {
+		if err == nil || !strings.Contains(err.Error(), "approved plan") {
+			t.Fatalf("checked a text-only contract: %v", err)
+		}
+	} else {
+		if err != nil {
+			t.Fatal(err)
+		}
+		done, err := o.client.FinishPipe(owner, &pb.FinishPipeRequest{CommandId: pipe.Id, Report: &pb.CommandReport{ExitCode: 0}})
+		if err != nil || !strings.HasPrefix(done.Delivery, "check reconnect: passed on candidate:") || !strings.Contains(done.Delivery, "v1)") {
+			t.Fatalf("finish: %v %v", done, err)
+		}
+		recorded := o.bench.Delivery.Observations()
+		last := recorded[len(recorded)-1]
+		if last.Subject.Mission != o.mission || last.Subject.Task != task || last.ContractDigest != plan.Contract.Digest || last.Attempt == "" || strings.HasPrefix(last.Attempt, "conversation:") {
+			t.Fatalf("observation outside the Mission attempt: %+v", last)
+		}
+		if _, err := o.client.BindDelivery(owner, &pb.BindDeliveryRequest{SessionId: view.Spawned.SessionId, ArtifactId: spec.ID, Version: 2}); err == nil {
+			t.Fatal("a Mission worker bound its own spec")
+		}
+	}
 	child, err := manager.Get(view.Spawned.CollectionId)
 	if err != nil {
 		t.Fatal(err)

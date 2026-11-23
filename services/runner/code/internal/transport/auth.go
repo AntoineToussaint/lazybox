@@ -50,6 +50,11 @@ type AgentCredentials interface {
 // workspace and list that workspace's links (never to unlink, react or merge).
 // Every other RPC, including any added later, is the owner's.
 var agentRPCs = map[string]func(agents AgentCredentials, who principal, req any) bool{
+	// An agent binds a spec only to its own conversation.
+	pb.RunnerService_BindDelivery_FullMethodName: func(_ AgentCredentials, who principal, req any) bool {
+		r, ok := req.(*pb.BindDeliveryRequest)
+		return ok && r.SessionId != "" && r.SessionId == who.session
+	},
 	pb.RunnerService_RegisterPipe_FullMethodName: func(_ AgentCredentials, who principal, req any) bool {
 		r, ok := req.(*pb.RegisterPipeRequest)
 		return ok && r.SessionId == who.session && r.CollectionId == "" && r.ShareWith == ""

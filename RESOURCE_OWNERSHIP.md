@@ -114,7 +114,7 @@ uses on its own execution's workspace (`ListArtifacts`, `GetArtifact`,
 (`ListWorkspaceRepositories` for its own workspace, `RequestRepository` for
 its own execution, `WaitRepositoryRequest` for its own requests — asking,
 never adding; see [workspaces](WORKSPACES.md#when-an-agent-needs-another-repository)).
-The agent may also rename its own workspace display name with `RenameCollection`.
+The agent may also rename its own workspace display name with `RenameCollection`, and pin a spec to its own conversation with `BindDelivery` (`lazybox delivery bind`).
 Every RPC outside the allowlist, including any added later, answers `PermissionDenied`; a test
 walks the generated service description to keep that exhaustive. Comparisons are constant-time, and the credential never
 appears in an error, journal or response.

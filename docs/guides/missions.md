@@ -137,4 +137,33 @@ A structured spec can use `spec.v2` to give each acceptance criterion a stable I
 }
 ```
 
-Existing spec.v1 plans continue to use text criteria. Binding observations to named criteria during live runs is pending.
+Existing spec.v1 plans continue to use text criteria.
+
+### Checking delivery criteria
+
+Run each criterion's check through `lazybox run`, naming the criterion:
+
+```bash
+lazybox run --needs generate -- codefly add service catalog
+lazybox run --check storage -- psql -f checks/storage.sql
+lazybox run --check api -- go test ./api -run TestAuthorized
+```
+
+| Run | Exit | Recorded for the criterion |
+|---|---|---|
+| `--check` | 0 | passed |
+| `--check` | non-zero | failed |
+| `--needs` | non-zero | blocked: a prerequisite failed |
+| `--needs` | 0 | nothing proven yet; run its `--check` |
+| either | 126 or 127 (could not start) | blocked |
+| either | stopped, or piped through `lazybox log` | unverified |
+
+The run ends with one line saying what was recorded, for example `check storage: passed on candidate:3f2a… (spec spec-catalog v3)`. The candidate is the commit of each workspace repository when the run finished, so a later commit needs its checks run again.
+
+A worker on a Mission task checks against the plan's approved contract. An ordinary conversation pins a published spec.v2 version first:
+
+```bash
+lazybox delivery bind spec-catalog@3
+```
+
+Binding another version starts a new attempt; earlier results stay with the version they were checked against. A check is refused before it runs when no contract names its criterion. The Runner saves each result with the run's completion and records it once, including after a restart. The verdict on the Mission card and in the conversation is not shown yet.

@@ -41,7 +41,8 @@ Run tests, builds, linters, installs and other noisy commands as ` + "`lazybox r
 - Use ` + "`lazybox run --raw -- <command>`" + ` only when you must parse the exact output, such as a diff or JSON.
 - Commands get no input. Pass non-interactive flags (--yes, CI=1) rather than waiting for a prompt.
 - Servers and watchers never exit; start them with ` + "`lazybox run -- <command>`" + ` too, never with & or nohup. One still running after 20s that listens on a port or looks like a server (npm run dev, docker compose up, --watch) moves to the background, and lazybox run returns with its command id, URL, latest output and output file (` + "`--background`" + ` moves it at once). ` + "`lazybox ls`" + ` lists your commands; ` + "`lazybox stop ID`" + ` stops one.
-- If the workspace defines actions (the command tool's action "actions" lists them, with their URL), start its dev server with "start_action" instead: it gets the workspace's own port, and the user sees it in Run and Preview.`
+- If the workspace defines actions (the command tool's action "actions" lists them, with their URL), start its dev server with "start_action" instead: it gets the workspace's own port, and the user sees it in Run and Preview.
+- When your Mission task's approved spec, or a spec you bound with ` + "`lazybox delivery bind <spec-id>@<version>`" + `, names acceptance criteria, run the check for each as ` + "`lazybox run --check <criterion> -- <command>`" + ` and a step it depends on as ` + "`--needs <criterion>`" + `: the Runner records the result against the commit it ran on.`
 
 const documentStyle = `- Prefer Mermaid for workflows, state transitions, and service interactions. Show the entry point, important decisions, and any failure or retry paths that change the outcome.
 - Use tables for comparisons and checklists for procedures. Link to the code or docs that own the behavior, and record important decisions, assumptions, and what remains unverified.`
@@ -93,6 +94,13 @@ func (b *Bench) outputEnv(id string) string {
 // FinishPipe ends a pipe capture and keeps what a `lazybox run` gave its agent:
 // on the command, for the console, and in telemetry, to measure the savings.
 func (b *Bench) FinishPipe(c *commands.Command, cause error, signal string, report *commands.Report) error {
+	// A check's observation is saved with the completion, on the revisions the
+	// run finished on; a repeated finish keeps the first.
+	if before := c.Status(); report != nil && before.Spec.Check != nil && !before.Done {
+		copied := *report
+		report = &copied
+		b.observeCheck(before, report, signal)
+	}
 	if err := c.FinishPipeSignalled(cause, signal, report); err != nil {
 		return err
 	}
@@ -100,6 +108,8 @@ func (b *Bench) FinishPipe(c *commands.Command, cause error, signal string, repo
 		return nil
 	}
 	state := c.Status()
+	// A failure is visible in DeliveryNote and retried by reconcileDelivery.
+	_ = b.recordObservation(state)
 	b.recordRun(state, report)
 	// A `lazybox run -- gh pr create …` prints the pull request it opened.
 	go b.itemPipeFinished(c)

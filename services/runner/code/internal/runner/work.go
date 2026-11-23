@@ -35,6 +35,12 @@ func (b *Bench) openWork() error {
 		return err
 	}
 	b.Work, b.Prompts = store, prompts
+	if err := b.openDelivery(); err != nil {
+		_ = store.Close()
+		_ = prompts.Close()
+		b.Work, b.Prompts = nil, nil
+		return err
+	}
 	return nil
 }
 
@@ -45,6 +51,9 @@ func (b *Bench) closeWork() error {
 	}
 	if b.Prompts != nil {
 		errs = append(errs, b.Prompts.Close())
+	}
+	if b.Delivery != nil {
+		errs = append(errs, b.Delivery.Close())
 	}
 	return errors.Join(errs...)
 }

@@ -11,6 +11,7 @@ import { ProviderGroups } from './SubscriptionGroups';
 import './subscription-switch.css';
 
 const askedKey = 'auto-switch-asked';
+export const continuationKey = (session: Session) => `subscription-continuation:${session.id}:${session.profileId}:${session.fault}:${session.account?.resetAt ?? ''}`;
 const waitKey = (session: string) => `subscription-wait:${session}`;
 const providerName = (provider: string) => provider === 'codex' ? 'Codex' : 'Claude';
 
@@ -23,6 +24,7 @@ type Props = {
   onCloseDialog(): void;
   onSession(session: Session): void;
   onError(message: string): void;
+  onOpenContinuation(id: string): void;
   onContinueInCodex?(profileId: string): Promise<void>;
 };
 
@@ -34,13 +36,14 @@ type Props = {
  * extension's account policy (EXTENSIONS.md): only when one covers the
  * provider do "Always switch automatically" and its one-time question show.
  */
-export function SubscriptionControls({ session, profiles, viewState, dialogOpen, onCloseDialog, onSession, onError, onContinueInCodex }: Props) {
+export function SubscriptionControls({ session, profiles, viewState, dialogOpen, onCloseDialog, onSession, onError, onContinueInCodex, onOpenContinuation }: Props) {
   const { api, refresh } = useRunner();
   const [askEverywhere, setAskEverywhere] = useState(false);
   const provider = session.provider || profiles.find(p => p.id === session.profileId)?.provider || '';
   const { settings } = useRunnerSettings();
   const automatic = !!settings?.automaticSwitchingProviders.includes(provider);
   const limit = sessionLimit(session);
+  const continuation = limit && readPreference(viewState, continuationKey(session));
   const switchTo = async (profileId: string, always: boolean) => {
     const result = await api.switchSubscription({ sessionId: session.id, profileId, enableRotation: always });
     if (result.session) onSession(result.session);
@@ -49,7 +52,7 @@ export function SubscriptionControls({ session, profiles, viewState, dialogOpen,
   };
   useEffect(() => setAskEverywhere(false), [session.id]);
   return <>
-    {limit ? <LimitCard key={session.id} session={session} profiles={profiles} provider={provider} automatic={automatic} viewState={viewState} switchTo={switchTo} onError={onError} onContinueInCodex={onContinueInCodex}/>
+    {continuation ? <button type="button" className="text-button" onClick={() => onOpenContinuation(continuation)}>Open continued Codex conversation</button> : limit ? <LimitCard key={session.id} session={session} profiles={profiles} provider={provider} automatic={automatic} viewState={viewState} switchTo={switchTo} onError={onError} onContinueInCodex={onContinueInCodex}/>
       : askEverywhere ? <EverywherePrompt provider={provider} onAnswer={async everywhere => {
         try { writePreference(viewState, askedKey, '1'); } catch { /* asked again next time */ }
         setAskEverywhere(false);

@@ -37,9 +37,9 @@ test('a published verdict snapshot reads as a document per candidate', () => {
     candidates: [{ candidate: 'candidate:abcdef1234', current: true, verdict: 'blocked', criteria: [{ id: 'api', expected: 'reads | writes', required: true, state: 'unrun' }, { id: 'generate', expected: 'exists', required: false, state: 'blocked', evidence: [{ reference: 'run:e/1', source: 'command', state: 'blocked', exitCode: 1, output: 'unavailable' }] }] }] });
   const titled = deliveryOutcomeMarkdown({ schema: 'delivery-outcome.v1', contract: { artifact: 'spec-catalog', title: 'Catalog', version: 3 }, subject: { conversation: 'c' },
     candidates: [{ candidate: 'candidate:1', current: true, verdict: 'passed', criteria: [{ id: 'api', expected: 'reads', required: true, state: 'passed', evidence: [{ reference: 'run:e/2', title: 'go test ./api', source: 'command', state: 'passed', exitCode: 0 }] }] }] });
-  assert.match(titled, /^Against “Catalog” v3/);
+  assert.match(titled, /^Checked against “Catalog” v3/);
   assert.match(titled, /passed “go test \.\/api” \(exit 0\)/);
-  assert.match(md, /^Against spec spec-catalog v3 · Mission task t/);
+  assert.match(md, /^Checked against spec spec-catalog v3 · Mission task t/);
   assert.match(md, /\*\*Decision:\*\* accepted\. The technical verdict below is unchanged\./);
   assert.match(md, /## Blocked on the workspace files when published \(abcdef12\)/);
   assert.match(md, /\| \*\*api\*\*: reads \\\| writes \| not run \| — \|/);

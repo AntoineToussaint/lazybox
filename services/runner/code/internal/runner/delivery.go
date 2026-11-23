@@ -130,7 +130,7 @@ func (b *Bench) resolveCheck(e *Execution, criterion string, prerequisite bool) 
 		ids = append(ids, c.ID)
 	}
 	if !slices.Contains(ids, criterion) {
-		return nil, fmt.Errorf("spec %s v%d has no criterion %q (it has %v)", contract.Artifact, contract.Version, criterion, ids)
+		return nil, fmt.Errorf("%s has no criterion %q (it has %v)", contract.Name(), criterion, ids)
 	}
 	candidate, err := b.candidate(e.CollectionID)
 	if err != nil {
@@ -344,7 +344,7 @@ func (b *Bench) RecordReviewCriterion(session, criterion, result string) (delive
 	}
 	contract := fromPlanContract(plan.Contract)
 	if !slices.ContainsFunc(contract.Criteria, func(c delivery.Criterion) bool { return c.ID == criterion }) {
-		return none, delivery.Check{}, fmt.Errorf("spec %s v%d has no criterion %q", contract.Artifact, contract.Version, criterion)
+		return none, delivery.Check{}, fmt.Errorf("%s has no criterion %q", contract.Name(), criterion)
 	}
 	revisions, err := b.candidateRevisions(run.ReviewWorkspace)
 	if err != nil {

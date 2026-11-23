@@ -1964,7 +1964,7 @@ message DeliveryContract {
   // "spec.v2"; a "spec.v1" contract has no named criteria.
   string schema = 4;
   repeated DeliveryCriterion criteria = 5;
-  // The spec's title when it was pinned.
+  // The spec artifact's title when the revision was pinned.
   string title = 6;
 }
 // One observation as a person reads it. command_id names the managed command
@@ -2025,7 +2025,7 @@ message DeliveryBinding {
   string digest = 5;
   // Each criterion as "[id, required|optional] expected".
   repeated string criteria = 6;
-  // The spec's title.
+  // The spec artifact's title when it was bound.
   string title = 7;
 }
 message PublishRequest {
@@ -4602,6 +4602,6 @@ message PlanContract {
   string collection_id = 3;
   string digest = 4;
   repeated string acceptance_criteria = 5;
-  // The spec's title when the plan pinned it.
+  // The spec artifact's title when the plan pinned it.
   string title = 6;
 }

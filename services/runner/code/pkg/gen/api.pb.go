@@ -13839,7 +13839,7 @@ type DeliveryContract struct {
 	// "spec.v2"; a "spec.v1" contract has no named criteria.
 	Schema   string               `protobuf:"bytes,4,opt,name=schema,proto3" json:"schema,omitempty"`
 	Criteria []*DeliveryCriterion `protobuf:"bytes,5,rep,name=criteria,proto3" json:"criteria,omitempty"`
-	// The spec's title when it was pinned.
+	// The spec artifact's title when the revision was pinned.
 	Title         string `protobuf:"bytes,6,opt,name=title,proto3" json:"title,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -14301,7 +14301,7 @@ type DeliveryBinding struct {
 	Digest     string `protobuf:"bytes,5,opt,name=digest,proto3" json:"digest,omitempty"`
 	// Each criterion as "[id, required|optional] expected".
 	Criteria []string `protobuf:"bytes,6,rep,name=criteria,proto3" json:"criteria,omitempty"`
-	// The spec's title.
+	// The spec artifact's title when it was bound.
 	Title         string `protobuf:"bytes,7,opt,name=title,proto3" json:"title,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -38997,7 +38997,7 @@ type PlanContract struct {
 	CollectionId       string   `protobuf:"bytes,3,opt,name=collection_id,json=collectionId,proto3" json:"collection_id,omitempty"`
 	Digest             string   `protobuf:"bytes,4,opt,name=digest,proto3" json:"digest,omitempty"`
 	AcceptanceCriteria []string `protobuf:"bytes,5,rep,name=acceptance_criteria,json=acceptanceCriteria,proto3" json:"acceptance_criteria,omitempty"`
-	// The spec's title when the plan pinned it.
+	// The spec artifact's title when the plan pinned it.
 	Title         string `protobuf:"bytes,6,opt,name=title,proto3" json:"title,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

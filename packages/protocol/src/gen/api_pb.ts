@@ -7138,7 +7138,7 @@ export type DeliveryContract = Message$1<"lazybox.bench.v1.DeliveryContract"> & 
   criteria: DeliveryCriterion[];
 
   /**
-   * The spec's title when it was pinned.
+   * The spec artifact's title when the revision was pinned.
    *
    * @generated from field: string title = 6;
    */
@@ -7401,7 +7401,7 @@ export type DeliveryBinding = Message$1<"lazybox.bench.v1.DeliveryBinding"> & {
   criteria: string[];
 
   /**
-   * The spec's title.
+   * The spec artifact's title when it was bound.
    *
    * @generated from field: string title = 7;
    */
@@ -20281,7 +20281,7 @@ export type PlanContract = Message$1<"lazybox.bench.v1.PlanContract"> & {
   acceptanceCriteria: string[];
 
   /**
-   * The spec's title when the plan pinned it.
+   * The spec artifact's title when the plan pinned it.
    *
    * @generated from field: string title = 6;
    */

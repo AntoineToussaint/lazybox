@@ -23,12 +23,22 @@ import (
 // journal. The workspace's current files are fingerprinted for the headline
 // candidate on every lookup: a cached answer would call files current that a
 // commit or an edit had already replaced, and say Delivered for them. Lookups
-// that arrive while a fingerprint of the same workspace is under way (a board
-// refreshing several tasks at once) share that one.
+// that arrive while a fingerprint of the same workspace is under way never take
+// its result, which may predate a commit they just made: they share the next
+// fingerprint, which starts after all of them (a board refreshing several
+// tasks at once still reads each workspace about once per refresh).
 
 type fingerprintCache struct {
-	mu       sync.Mutex
-	inFlight map[string]*fingerprintCall
+	mu         sync.Mutex
+	workspaces map[string]*fingerprintState
+	// fingerprint replaces Bench.candidate in tests that hold a fingerprint open.
+	fingerprint func(workspace string) (string, error)
+}
+
+// fingerprintState is one workspace's fingerprint under way, and the next one
+// the lookups that arrived during it wait for.
+type fingerprintState struct {
+	current, next *fingerprintCall
 }
 
 type fingerprintCall struct {
@@ -44,25 +54,63 @@ func (b *Bench) currentCandidate(workspace string) string {
 	}
 	c := &b.fingerprints
 	c.mu.Lock()
-	if call, ok := c.inFlight[workspace]; ok {
+	if c.workspaces == nil {
+		c.workspaces = map[string]*fingerprintState{}
+	}
+	st := c.workspaces[workspace]
+	if st == nil {
+		st = &fingerprintState{}
+		c.workspaces[workspace] = st
+	}
+	if st.current == nil {
+		// Nothing under way: run the next fingerprint now (those waiting for
+		// it arrived before it starts, so it is fresh for them too).
+		call := st.next
+		if call == nil {
+			call = &fingerprintCall{done: make(chan struct{})}
+		}
+		st.current, st.next = call, nil
 		c.mu.Unlock()
-		<-call.done
+		b.runFingerprint(workspace, st, call)
 		return call.candidate
 	}
-	if c.inFlight == nil {
-		c.inFlight = map[string]*fingerprintCall{}
+	if st.next == nil {
+		st.next = &fingerprintCall{done: make(chan struct{})}
 	}
-	call := &fingerprintCall{done: make(chan struct{})}
-	c.inFlight[workspace] = call
+	running, mine := st.current, st.next
 	c.mu.Unlock()
-	if candidate, err := b.candidate(workspace); err == nil {
+	<-running.done
+	c.mu.Lock()
+	if st.current == nil && st.next == mine {
+		st.current, st.next = mine, nil
+		c.mu.Unlock()
+		b.runFingerprint(workspace, st, mine)
+		return mine.candidate
+	}
+	c.mu.Unlock()
+	<-mine.done
+	return mine.candidate
+}
+
+// runFingerprint fills call and releases its waiters, even if fingerprinting panics.
+func (b *Bench) runFingerprint(workspace string, st *fingerprintState, call *fingerprintCall) {
+	c := &b.fingerprints
+	defer func() {
+		c.mu.Lock()
+		st.current = nil
+		if st.next == nil && c.workspaces[workspace] == st {
+			delete(c.workspaces, workspace)
+		}
+		c.mu.Unlock()
+		close(call.done)
+	}()
+	fingerprint := c.fingerprint
+	if fingerprint == nil {
+		fingerprint = b.candidate
+	}
+	if candidate, err := fingerprint(workspace); err == nil {
 		call.candidate = candidate
 	}
-	c.mu.Lock()
-	delete(c.inFlight, workspace)
-	c.mu.Unlock()
-	close(call.done)
-	return call.candidate
 }
 
 // ErrNoContract: nothing names what this conversation or task must deliver.

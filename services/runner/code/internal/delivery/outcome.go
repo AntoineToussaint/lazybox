@@ -44,7 +44,7 @@ const (
 // verdict unverified, until a spec.v2 version binds them.
 type Contract struct {
 	Artifact string `json:"artifact"`
-	// Title is the spec's title when it was pinned, for what a person reads.
+	// Title is the spec artifact's title when the revision was pinned, for what a person reads.
 	Title    string      `json:"title,omitempty"`
 	Version  uint32      `json:"version"`
 	Schema   string      `json:"schema"`

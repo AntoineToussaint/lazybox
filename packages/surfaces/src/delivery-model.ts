@@ -70,7 +70,7 @@ type OutcomeJson = {
 
 /** A published verdict snapshot (schema delivery-outcome.v1) as a document. */
 export function deliveryOutcomeMarkdown(o: OutcomeJson): string {
-  const lines = [`Against ${specName(o.contract)}${o.subject.mission ? ` · Mission task ${o.subject.task}` : ''}`];
+  const lines = [`Checked against ${specName(o.contract)}${o.subject.mission ? ` · Mission task ${o.subject.task}` : ''}`];
   if (o.decision) lines.push('', `**Decision:** ${o.decision}. The technical verdict below is unchanged.`);
   if (!o.candidates.length) lines.push('', 'Nothing was checked.');
   o.candidates.forEach((c, i) => {

@@ -66,7 +66,12 @@ func TestStoreBindsAndReplaysObservationsOnce(t *testing.T) {
 	if err != nil || first.Attempt != "conversation:conv/1" {
 		t.Fatal(first, err)
 	}
-	again, _ := s.Bind("conv", catalogContract(t, 3, "d3"))
+	titled := catalogContract(t, 3, "d3")
+	titled.Title = "Catalog"
+	again, _ := s.Bind("conv", titled)
+	if again.Contract.Title != "Catalog" {
+		t.Fatal("re-binding the same revision did not fill in its title", again)
+	}
 	next, _ := s.Bind("conv", catalogContract(t, 4, "d4"))
 	other, _ := s.Bind("other", catalogContract(t, 3, "d3"))
 	if again.Attempt != first.Attempt || next.Attempt != "conversation:conv/2" || other.Attempt != "conversation:other/1" {

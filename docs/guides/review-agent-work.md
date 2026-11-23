@@ -45,6 +45,7 @@ receiving them is your agent.
    conversation's message box — each comment with `repo/path:line`, the quoted
    lines and whether they are still current. Untick any you want to keep back.
    **Nothing is sent until you press Enter**; the comments are then marked *Sent*.
+   In the transcript, open the review comment thumbnail to read or copy the full message.
 4. **Close the loop:** Resolve, Won't fix, Edit, Delete or Reopen from each
    thread. Optionally, *Resolve sent comments when a commit changes their lines*.
 

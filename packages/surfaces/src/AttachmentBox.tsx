@@ -132,7 +132,7 @@ export function CardBox({ icon, title, subtitle, label, variant, state, preview,
       aria-describedby={showing ? previewId : undefined} aria-haspopup={onOpen ? 'dialog' : undefined} aria-expanded={onOpen ? undefined : pinned}
       {...hover.anchorProps(interactive)}
       onKeyDown={boxKeys({ onRemove: disabled ? undefined : onRemove, onMove: disabled ? undefined : onMove, preview: hover.preview || pinned, hide: () => { hover.hide(); setPinned(false); } })}
-      onClick={() => { hover.hide(); open(); }}>
+      onClick={event => { if (onOpen) event.currentTarget.focus({ preventScroll: true }); hover.hide(); open(); }}>
       <span className="attachment-box-icon" aria-hidden="true"><Icon name={icon} size={20}/></span>
       <span className="attachment-box-text"><span className="attachment-box-title">{title}</span><small>{subtitle}</small></span>
     </button>

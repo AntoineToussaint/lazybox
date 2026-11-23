@@ -312,6 +312,10 @@ The shared documents guidance asks agents to prefer Mermaid for workflows,
 state transitions and service interactions, use tables and checklists where
 they help, and record sources, assumptions and verification.
 
+The workspace briefing asks coding agents to use a blocking question when a
+decision is needed. A goal continuation while that decision is pending leaves
+the action waiting for the person's answer.
+
 An agent's briefing is a list of sections, each with an ID and a version
 (`runner/briefing.go`): the person's Settings → Agents text (`settings`) and
 its provider part (`provider`), the Runner's own sections (`workspace`, `run`,

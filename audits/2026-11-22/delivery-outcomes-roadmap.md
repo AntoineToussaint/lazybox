@@ -21,6 +21,35 @@ A failed required assertion produces a failed verdict. A failed prerequisite tha
 
 Finish A's visual check while starting B and the scenario fixture. After B, C and D can proceed independently. E joins those two paths. F1 and F2 can then ship together or independently against the same endpoint. G is the full release gate. The Mind catalog and hosted Hub rollout have their own roadmap; the recorded catalog sequence is sufficient as a Lazybox test fixture.
 
-## November 23 implementation checkpoint
+```mermaid
+flowchart LR
+  A["A. Failed run on card<br/>merged, live UI check open"]
+  B["B. Evidence contract<br/>spec.v2 merged, observation fields open"]
+  C["C. Capture and replay<br/>open"]
+  D["D. Derive outcomes<br/>Assess merged, freshness and acceptance open"]
+  E["E. Outcome endpoint<br/>open"]
+  F1["F1. Conversation and Mission verdict"]
+  F2["F2. Published verdict snapshot"]
+  G{"G. Release qualification<br/>CLI, conversation, Mission and artifact agree<br/>before and after Runner restart"}
+  B --> C --> E
+  B --> D --> E
+  E --> F1 --> G
+  E --> F2 --> G
+  A --> G
+  G -- "any surface disagrees" --> E
+```
 
-B and D are in progress. Structured spec.v2 artifacts now validate named required and optional criteria. Pinned Mission plans retain those bindings and include them in the approval and worker text. The Runner's internal assessment function folds criterion results for one contract digest, candidate and attempt. The catalog regression covers a blocked generator, an unrelated storage pass, a successful repair, an unchecked API and a final authenticated-check result. Transport tests exercised both spec versions through pinned-plan creation and worker briefing. Live command attribution, durable observation capture, the outcome endpoint and user-facing delivery verdicts remain open.
+## November 23 checkpoint: merged
+
+[#76](https://github.com/AntoineToussaint/lazybox/pull/76) landed A's card change and the first slices of B and D.
+
+| Milestone | Merged | Still open |
+|---|---|---|
+| A | The collapsed card and inbox keep the newest unresolved failed run beside the latest run. A failure clears once a later run of the same command (matched by title) passes. | Live visual check on the card and inbox. A stable command identity instead of the title. |
+| B | `spec.v2` with stable criterion IDs and required flags ([`delivery/contract.go`](../../services/runner/code/internal/delivery/contract.go)). `lazybox artifact template delivery-spec` starts one. Publishing recognizes the schema, and each version records the schema it declares. The artifact reader lists criteria by ID and level. Pinned Mission plans keep the bindings and name them in the approval sheet and the worker and reviewer briefs. | Candidate identity, attempt ID, evidence source and separate process-exit, assertion, prerequisite and human-decision fields. Versioned fixtures for the four cases in B. |
+| D | [`delivery.Assess`](../../services/runner/code/internal/delivery/outcome.go) folds observations for one contract digest, candidate and attempt. Failed outranks blocked, which outranks incomplete. No required criteria yields unverified. Observations without a source or reference, an unknown result or an empty scope are ignored. Tests cover the catalog sequence and each guard. | Evidence freshness after candidate changes. Human acceptance and waiver that preserve the technical outcome. |
+| C, E, F1, F2, G | Nothing yet. | Live command attribution, durable observation capture, the outcome endpoint and the user-facing delivery verdict. |
+
+> **Decision** Mission cards match a resolved failure by run title until C supplies a criterion-bound observation. Two different commands with the same title would clear each other.
+
+> **Note** Verified with `make check` and CI on #76. The new card behaviour has not been looked at in the running app.

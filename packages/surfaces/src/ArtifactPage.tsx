@@ -10,7 +10,7 @@ import { ActionMenu } from './ActionMenu';
 import { RoadmapDialog, CreateIssueDialog, DeleteArtifactDialog, DiffStats, DiffView, SaveToRepositoryDialog } from './ArtifactDialogs';
 import { artifactsChanged, errorText, restoreArtifacts, retireArtifact } from './artifact-client';
 import { TodoList, todoMarkdown, todoProgress } from './TodoList';
-import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, roadmapMissionPlan, slug, structuredMarkdown, versionOrigin } from './artifact-model';
+import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, pinnedArtifactReference, roadmapMissionPlan, slug, structuredMarkdown, versionOrigin } from './artifact-model';
 import { extractToc, readingMinutes, tocOutline, withoutRepeatedTitle } from './artifact-reader';
 import { DocumentBody, RenderedDiff, TableOfContents, useScrollSpy } from './ArtifactReader';
 import { openArtifact, revealMessage } from './artifact-events';
@@ -405,11 +405,13 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
     revealMessage({ sessionId: message.sessionId, messageId: message.messageId });
   };
   const openFile = () => { if (filePath && workbench) workbench.open(filePath, { focus: true }); };
-  const discussionReference = () => {
-    const reference = agentReference(artifact, currentText ?? '', 1200, shown);
+  const discussionReference = (compact = false) => {
+    const reference = compact
+      ? pinnedArtifactReference(artifact, shown) + '\n\n'
+      : agentReference(artifact, currentText ?? '', 1200, shown);
     return excerpt ? `${reference}Selected excerpt:\n${excerpt.split('\n').map(line => `> ${line}`).join('\n')}\n\n` : reference;
   };
-  const sendToAgent = (text = discussionReference()) => {
+  const sendToAgent = (text = discussionReference(!!onDiscuss)) => {
     if (onDiscuss) {
       if (!discussionVersion && shown) {
         setDiscussionVersion(shown);

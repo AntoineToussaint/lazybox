@@ -102,6 +102,7 @@ try {
   await relatedDraft.fill('');
   await page.getByRole('button', { name: 'Add to companion', exact: true }).click();
   await expect(relatedDraft).toHaveValue(new RegExp(doc.id + ' --version 1'));
+  assert.equal((await relatedDraft.inputValue()).trim().split('\n').length, 1, 'the companion drafts only the pinned reference');
   await relatedDraft.fill('');
   await page.goto(standalone.replace(doc.id, road.id));
   const launch = page.getByRole('article', { name: 'Release', exact: true });

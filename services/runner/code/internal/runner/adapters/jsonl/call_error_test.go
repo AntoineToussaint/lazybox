@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -27,11 +28,22 @@ func TestAnAdaptersErrorReadsAsItsMessage(t *testing.T) {
 		"data that repeats the message":   {`{"message":"Rate limited","data":{"message":"Rate limited"}}`, "Rate limited"},
 		"a code of another type":          {`{"code":"E_RATE","message":"Rate limited"}`, "Rate limited"},
 		"a string error":                  {`"busy"`, "busy"},
-		"nothing to read":                 {`{"code":-1}`, "turn failed"},
+		"nothing to read":                 {`{"code":-1}`, "turn failed (error -1)"},
 		"not an error object":             {`42`, "turn failed"},
+		"a bare code":                     {`{"code":-32601}`, "turn failed (error -32601)"},
+		"a stack trace in data":           {`{"message":"Internal error","data":"TypeError: x is undefined\n    at a (b.js:1)\n    at c (d.js:2)"}`, "Internal error: TypeError: x is undefined"},
 	} {
 		if got := NewCallError("turn", json.RawMessage(tc.raw)).Error(); got != tc.want {
 			t.Errorf("%s: reads %q, want %q", name, got, tc.want)
 		}
+	}
+}
+
+// A long reason in data is cut to one bounded line: the rest stays in the log.
+func TestALongReasonIsOneBoundedLine(t *testing.T) {
+	long := strings.Repeat("x", 1000)
+	got := NewCallError("turn", json.RawMessage(`{"message":"Internal error","data":"`+long+`"}`)).Error()
+	if n := len([]rune(got)); n > len("Internal error: ")+detailLimit || !strings.HasSuffix(got, "…") {
+		t.Fatalf("%d runes: %q", n, got[:40])
 	}
 }

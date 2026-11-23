@@ -326,13 +326,7 @@ func (m *Manager) ensureOpen(ctx context.Context, b *conv) error {
 	workspace := b.workspace
 	m.mu.Unlock()
 	fail := func(err error) error {
-		// The service answered with an error: its own words (jsonl.CallError reads as them).
-		var call *jsonl.CallError
-		if !errors.As(err, &call) {
-			// The process itself failed: one line for the person, the rest is in its stderr tail.
-			first, _, _ := strings.Cut(err.Error(), "\n")
-			err = fmt.Errorf("the browser service did not start: %s", first)
-		}
+		err = openProblem(err)
 		m.mu.Lock()
 		b.status, b.problem = "failed", err.Error()
 		m.changedLocked(b)
@@ -395,6 +389,19 @@ func (m *Manager) act(ctx context.Context, b *conv, params map[string]any) (actR
 	m.changedLocked(b)
 	m.mu.Unlock()
 	return r, nil
+}
+
+// openProblem is why the browser did not open, for the person: the
+// service's own words when it answered with an error (jsonl.CallError reads
+// as them), else one line of the process's failure (the rest is in its
+// stderr tail).
+func openProblem(err error) error {
+	var call *jsonl.CallError
+	if errors.As(err, &call) {
+		return err
+	}
+	first, _, _ := strings.Cut(err.Error(), "\n")
+	return fmt.Errorf("the browser service did not start: %s", first)
 }
 
 // closeBrowser closes b's page; who is agent or person.

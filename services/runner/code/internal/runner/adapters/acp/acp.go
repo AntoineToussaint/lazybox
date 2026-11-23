@@ -343,20 +343,14 @@ type authMethod struct {
 	Args        []string `json:"args"`
 }
 
-// errorOf reads the JSON-RPC error out of a failed call.
-func errorOf(err error) (*jsonl.CallError, bool) {
-	var call *jsonl.CallError
-	return call, errors.As(err, &call)
-}
-
 // authRequired is ACP's "Authentication required" error code.
 const authRequired = -32000
 
 // startupError says in plain words why an agent did not start: most often it
 // needs the person to sign in once, the way that agent signs in.
 func startupError(title, method string, err error, methods ...authMethod) error {
-	e, ok := errorOf(err)
-	if !ok {
+	var e *jsonl.CallError
+	if !errors.As(err, &e) {
 		return fmt.Errorf("%s did not start (%s): %w", title, method, err)
 	}
 	if e.Code == authRequired {
@@ -371,6 +365,9 @@ func startupError(title, method string, err error, methods ...authMethod) error 
 			hint += " It signs in with: " + strings.Join(how, ", ") + "."
 		}
 		return fmt.Errorf("%s needs you to sign in. %s", title, hint)
+	}
+	if e.Reason() == "" {
+		return fmt.Errorf("%s did not start (%s): error %d", title, method, e.Code)
 	}
 	return fmt.Errorf("%s did not start (%s): %w", title, method, e)
 }

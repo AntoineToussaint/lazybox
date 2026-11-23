@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/adapters/jsonl"
 	"net/url"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/adapters/jsonl"
 )
 
 // AccountClient uses native account RPCs without starting a thread or inference.
@@ -31,6 +32,17 @@ func computer() string {
 		return "Mac"
 	}
 	return "computer"
+}
+
+// callText is everything Codex said about a refused call, its raw answer
+// included: loginError recognises its cases by phrases that may sit in any
+// field of it.
+func callText(err error) string {
+	var call *jsonl.CallError
+	if errors.As(err, &call) {
+		return call.Error() + " " + string(call.Raw)
+	}
+	return err.Error()
 }
 
 func loginError(message string) error {
@@ -83,7 +95,7 @@ func (a *AccountClient) Login(ctx context.Context, method string) (Login, error)
 	}
 	raw, err := a.p.Call(ctx, "account/login/start", map[string]string{"type": kind})
 	if err != nil {
-		return Login{}, loginError(err.Error())
+		return Login{}, loginError(callText(err))
 	}
 	var response struct{ LoginID, AuthURL, VerificationURL, UserCode string }
 	if err = json.Unmarshal(raw, &response); err != nil {

@@ -124,12 +124,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	fail := func(err error) (agent.Session, error) {
 		cancel()
 		p.Close()
-		// Codex's own answer, with the step that refused it.
-		var call *jsonl.CallError
-		if errors.As(err, &call) {
-			err = fmt.Errorf("Codex did not start (%s): %w", call.Method, err)
-		}
-		return nil, err
+		return nil, startError(err)
 	}
 	setup, done := context.WithTimeout(life, 30*time.Second)
 	defer done()
@@ -1140,3 +1135,13 @@ func (s *session) Close() error { err := s.p.Close(); s.cancel(); return err }
 
 // HostID is the session host running the app-server, or "" for a local pipe.
 func (s *session) HostID() string { return s.p.HostID() }
+
+// startError names the step Codex refused when it did not start: only a
+// refusal itself, never one inside a joined error (a fork that ended at the
+// wrong turn, then could not be archived, failed at the fork, not the archive).
+func startError(err error) error {
+	if call, ok := err.(*jsonl.CallError); ok {
+		return fmt.Errorf("Codex did not start (%s): %w", call.Method, err)
+	}
+	return err
+}

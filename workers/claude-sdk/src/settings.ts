@@ -1,6 +1,6 @@
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { errorText } from './error-text.js';
+import { errorReason } from './error-text.js';
 
 /** The help assistant's MCP server: Lazybox's own settings, read and changed through the Runner. */
 export const settingsServerName = 'lazybox_settings';
@@ -59,10 +59,7 @@ export class SettingsApprovals {
 
 type RunnerCall = (name: string, args: unknown) => Promise<string>;
 const text = (value: string, isError = false) => ({ content: [{ type: 'text' as const, text: value }], ...(isError ? { isError: true } : {}) });
-const reason = (error: unknown) => {
-  const message = errorText(error);
-  try { return JSON.parse(message).message || message; } catch { return message; }
-};
+const reason = errorReason;
 
 export function settingsServer(call: RunnerCall, approvals: SettingsApprovals): McpSdkServerConfigWithInstance {
   const { read, update } = settingsTools(call, approvals);

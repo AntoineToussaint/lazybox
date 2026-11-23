@@ -373,17 +373,28 @@ func NewCallError(method string, raw json.RawMessage) *CallError {
 	return e
 }
 
-func (e *CallError) Error() string {
+// Reason is what the adapter said in words: its message, with the reason
+// its data gives when that adds something. Empty when it said nothing
+// readable (a bare code, an object of other fields).
+func (e *CallError) Reason() string {
 	message, detail := e.Message, dataDetail(e.Data)
 	switch {
-	case message == "" && detail == "":
-		return e.Method + " failed"
-	case message == "":
-		return detail
 	case detail == "" || strings.Contains(message, detail):
 		return message
+	case message == "":
+		return detail
 	}
 	return message + ": " + detail
+}
+
+func (e *CallError) Error() string {
+	if reason := e.Reason(); reason != "" {
+		return reason
+	}
+	if e.Code != 0 {
+		return fmt.Sprintf("%s failed (error %d)", e.Method, e.Code)
+	}
+	return e.Method + " failed"
 }
 
 // dataDetail is the reason an error's data gives in words, when it gives
@@ -391,7 +402,7 @@ func (e *CallError) Error() string {
 func dataDetail(data json.RawMessage) string {
 	var text string
 	if json.Unmarshal(data, &text) == nil {
-		return strings.TrimSpace(text)
+		return oneLine(text)
 	}
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(data, &fields) != nil {
@@ -399,8 +410,21 @@ func dataDetail(data json.RawMessage) string {
 	}
 	for _, key := range []string{"details", "message", "reason", "error"} {
 		if json.Unmarshal(fields[key], &text) == nil && strings.TrimSpace(text) != "" {
-			return strings.TrimSpace(text)
+			return oneLine(text)
 		}
 	}
 	return ""
+}
+
+// detailLimit bounds the reason data adds: a stack trace or a stderr dump
+// stays in the adapter's log, not in the line the person reads.
+const detailLimit = 240
+
+func oneLine(text string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(text), "\n")
+	line = strings.TrimSpace(line)
+	if r := []rune(line); len(r) > detailLimit {
+		line = string(r[:detailLimit-1]) + "…"
+	}
+	return line
 }

@@ -105,6 +105,9 @@ pinned version-1 builds keep their existing launch path; stage again to promote
 them under the new validation rules. Staging stops at the first failed gate and records remaining gates as not run.
 Use `make check-release` for a complete diagnostic run. A failing stage leaves only its diagnostic
 `gates.json` (its source, dependencies and app are removed) without promoting or starting anything.
+Each stage first sweeps candidates earlier stages left without a `release.json` (failed, or
+interrupted before their own cleanup) down to their `gates.json`; the pinned release and the one
+before it are never touched.
 
 **Working** runs the frozen source and its bundled native **Lazybox** app.
 Codefly builds the Runner from that snapshot at launch; it still requires the

@@ -31,10 +31,10 @@ func TestAFailedTurnReadsAsTheAgentsWords(t *testing.T) {
 // with the error code when it gave no reason.
 func TestAnAgentThatDidNotStartSaysWhy(t *testing.T) {
 	call := func(raw string) error { return jsonl.NewCallError("initialize", json.RawMessage(raw)) }
-	if got := startupError("Gemini CLI", "initialize", call(`{"code":-32601}`)).Error(); got != "Gemini CLI did not start (initialize): no reason given (error -32601)" {
+	if got := startupError("Gemini CLI", "initialize", call(`{"code":-32601}`)).Error(); got != "Gemini CLI did not start: initialize failed with no reason given (error -32601)" {
 		t.Fatalf("no reason: %q", got)
 	}
-	if got := startupError("Gemini CLI", "initialize", call(`{"data":{"trace":[1]}}`)).Error(); got != "Gemini CLI did not start (initialize): no reason given" {
+	if got := startupError("Gemini CLI", "initialize", call(`{"data":{"trace":[1]}}`)).Error(); got != "Gemini CLI did not start: initialize failed with no reason given" {
 		t.Fatalf("no reason and no code: %q", got)
 	}
 	if got := startupError("Gemini CLI", "initialize", call(`{"code":-32603,"message":"Internal error","data":"no model"}`)).Error(); got != "Gemini CLI did not start (initialize): Internal error: no model" {

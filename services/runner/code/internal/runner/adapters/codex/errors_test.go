@@ -18,7 +18,7 @@ func TestCodexNamesTheStepItRefused(t *testing.T) {
 	}
 	joined := errors.Join(errors.New("Codex fork did not end at the selected turn"), jsonl.NewCallError("thread/archive", json.RawMessage(`{"message":"busy"}`)))
 	bare := jsonl.NewCallError("thread/start", json.RawMessage(`{"code":-32600}`))
-	if got := startError(bare).Error(); got != "Codex did not start (thread/start): no reason given (error -32600)" {
+	if got := startError(bare).Error(); got != "Codex did not start: thread/start failed with no reason given (error -32600)" {
 		t.Fatalf("a refusal without a reason names the step once: %q", got)
 	}
 	if got := startError(joined); got != joined {

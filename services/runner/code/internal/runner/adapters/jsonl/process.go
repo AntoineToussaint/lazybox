@@ -379,7 +379,8 @@ func NewCallError(method string, raw json.RawMessage) *CallError {
 func (e *CallError) Reason() string {
 	message, detail := oneLine(e.Message), dataDetail(e.Data)
 	switch {
-	case detail == "" || strings.Contains(e.Message, strings.TrimSuffix(detail, "…")):
+	// Compared with what the person reads: a reason only a hidden line holds still shows.
+	case detail == "" || strings.Contains(strings.TrimSuffix(message, "…"), strings.TrimSuffix(detail, "…")):
 		return message
 	case message == "":
 		return detail
@@ -391,16 +392,17 @@ func (e *CallError) Reason() string {
 // by a phrase anywhere in it: Reason and Error keep only what the person reads.
 func (e *CallError) Full() string { return e.Message + " " + string(e.Raw) }
 
-// Error is the reason; without one, it says so, with the code. It never
-// names the call: the caller says which step failed.
+// Error is the reason. Without one, it names the call that failed, with
+// the code: most callers pass the error on as it is, and that is then the
+// only clue to which step it was.
 func (e *CallError) Error() string {
 	if reason := e.Reason(); reason != "" {
 		return reason
 	}
 	if e.Code != 0 {
-		return fmt.Sprintf("no reason given (error %d)", e.Code)
+		return fmt.Sprintf("%s failed with no reason given (error %d)", e.Method, e.Code)
 	}
-	return "no reason given"
+	return e.Method + " failed with no reason given"
 }
 
 // FullText is everything an error says, a CallError's whole answer included:

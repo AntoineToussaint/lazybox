@@ -28,9 +28,9 @@ func TestAnAdaptersErrorReadsAsItsMessage(t *testing.T) {
 		"data that repeats the message":   {`{"message":"Rate limited","data":{"message":"Rate limited"}}`, "Rate limited"},
 		"a code of another type":          {`{"code":"E_RATE","message":"Rate limited"}`, "Rate limited"},
 		"a string error":                  {`"busy"`, "busy"},
-		"nothing to read":                 {`{"code":-1}`, "no reason given (error -1)"},
-		"not an error object":             {`42`, "no reason given"},
-		"a bare code":                     {`{"code":-32601}`, "no reason given (error -32601)"},
+		"nothing to read":                 {`{"code":-1}`, "turn failed with no reason given (error -1)"},
+		"not an error object":             {`42`, "turn failed with no reason given"},
+		"a bare code":                     {`{"code":-32601}`, "turn failed with no reason given (error -32601)"},
 		"a stack trace in data":           {`{"message":"Internal error","data":"TypeError: x is undefined\n    at a (b.js:1)\n    at c (d.js:2)"}`, "Internal error: TypeError: x is undefined"},
 	} {
 		if got := NewCallError("turn", json.RawMessage(tc.raw)).Error(); got != tc.want {
@@ -58,8 +58,13 @@ func TestTheReasonIsOneLineButMatchersSeeEverything(t *testing.T) {
 	if got := trace.Error(); got != "TypeError: x is undefined" {
 		t.Fatalf("a multi-line message: %q", got)
 	}
-	hidden := NewCallError("open", json.RawMessage(`{"message":"failed","data":{"log":"line one\nChromium is not installed"}}`))
+	// A phrase on a later line of the message: the person reads the first, matchers read all.
+	hidden := NewCallError("open", json.RawMessage(`{"message":"failed to open\nChromium is not installed"}`))
 	if !strings.Contains(FullText(fmt.Errorf("opening: %w", hidden)), "is not installed") || strings.Contains(hidden.Error(), "is not installed") {
-		t.Fatalf("matchers miss what the person does not read: %q", FullText(hidden))
+		t.Fatalf("matchers miss what the person does not read: %q / %q", FullText(hidden), hidden.Error())
+	}
+	// A reason in data that only a hidden line of the message repeats still shows.
+	if got := NewCallError("turn", json.RawMessage(`{"message":"Internal error\nmodel claude-x not available","data":"model claude-x not available"}`)).Error(); got != "Internal error: model claude-x not available" {
+		t.Fatalf("the cause was dropped: %q", got)
 	}
 }

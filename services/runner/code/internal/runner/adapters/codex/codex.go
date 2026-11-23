@@ -1141,6 +1141,9 @@ func (s *session) HostID() string { return s.p.HostID() }
 // wrong turn, then could not be archived, failed at the fork, not the archive).
 func startError(err error) error {
 	if call, ok := err.(*jsonl.CallError); ok {
+		if call.Reason() == "" {
+			return fmt.Errorf("Codex did not start: %w", err) // the error names the step itself
+		}
 		return fmt.Errorf("Codex did not start (%s): %w", call.Method, err)
 	}
 	return err

@@ -1352,3 +1352,9 @@ appears below **History**. History polling pauses while the Runner is slow
 or disconnected and resumes automatically when it responds again.
 
 Deletion treats a member folder with a missing Git link as potentially dirty, even after Git prunes its worktree registration. Explicitly discarding it removes the remaining workspace files and preserves the source repository and branch.
+
+### Arranging detached windows on desktop
+
+Open a second workspace or detach a conversation, then place both windows on the same display. Under **Surfaces → Arrange Windows**, choose **Equal Columns**, **Focused Window + Stack**, or **Grid**. The focused window goes first. Focus + Stack gives it two thirds of the display and stacks the other windows beside it. Other displays keep their current arrangement. Full-screen and minimized windows are excluded from tiling.
+
+Use **Move Focused Window to Next Display** to send a detached conversation or workspace to another monitor. Use **Save Current Window Positions** before rearranging a laptop and external displays. **Restore Saved Window Positions** reapplies that snapshot to matching open windows for this Runner. Windows whose display is missing fit onto the primary display. Restoring positions keeps each workspace, conversation and draft open. Normal app restart continues to restore the last live arrangement automatically.

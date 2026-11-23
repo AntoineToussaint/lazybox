@@ -139,7 +139,7 @@ func wirePlan(p *work.Plan) *pb.MissionPlan {
 		out.Baseline = append(out.Baseline, &pb.PlanBaselineMember{Name: m.Name, RepositoryId: m.Repository, Commit: m.Commit})
 	}
 	if c := p.Contract; c != nil {
-		out.Contract = &pb.PlanContract{ArtifactId: c.Artifact, Version: c.Version, CollectionId: c.Workspace, Digest: c.Digest, AcceptanceCriteria: c.Criteria}
+		out.Contract = &pb.PlanContract{ArtifactId: c.Artifact, Title: c.Title, Version: c.Version, CollectionId: c.Workspace, Digest: c.Digest, AcceptanceCriteria: c.Criteria}
 	}
 	for _, t := range p.Tasks {
 		out.Tasks = append(out.Tasks, &pb.PlanTask{Key: t.Key, Title: t.Title, Brief: t.Brief, Role: t.Role, ProfileId: t.Profile, Permission: t.Permission, Workspace: t.Workspace, Paths: t.Paths, EstimateUsd: t.EstimateUSD, After: t.After, TaskId: p.Created[t.Key]})

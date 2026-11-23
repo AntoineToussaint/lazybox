@@ -16,6 +16,7 @@ type Check struct {
 	Subject        Subject `json:"subject"`
 	// Contract names the spec revision, for what a person and an agent read.
 	Artifact string `json:"artifact"`
+	Title    string `json:"title,omitempty"`
 	Version  uint32 `json:"version"`
 	// Candidate is the workspace's files when the run registered
 	// (CandidateID); a run that finishes on other files records nothing.
@@ -66,5 +67,15 @@ func (o Observation) Summary(c Check) string {
 			state = "met; run its --check next"
 		}
 	}
-	return fmt.Sprintf("%s %s: %s on %s (spec %s v%d)", role, o.CriterionID, state, o.Candidate, c.Artifact, c.Version)
+	return fmt.Sprintf("%s %s: %s on %s (%s)", role, o.CriterionID, state, o.Candidate, c.SpecName())
+}
+
+// SpecName names the spec revision a check counts for: its title when known.
+func (c Check) SpecName() string { return specName(c.Title, c.Artifact, c.Version) }
+
+func specName(title, artifact string, version uint32) string {
+	if title != "" {
+		return fmt.Sprintf("“%s” v%d", title, version)
+	}
+	return fmt.Sprintf("spec %s v%d", artifact, version)
 }

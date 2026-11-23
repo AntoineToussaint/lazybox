@@ -258,7 +258,7 @@ type Bench struct {
 	// deliveryPending holds the runs whose observation a failed write left unrecorded.
 	deliveryMu      sync.Mutex
 	deliveryPending map[string]error
-	// fingerprints caches each workspace's current candidate briefly (delivery_outcome.go).
+	// fingerprints shares a workspace fingerprint between concurrent outcome lookups (delivery_outcome.go).
 	fingerprints fingerprintCache
 	// snippetCatalog is the catalog last listed, to label snippet messages.
 	snippetCatalog atomic.Pointer[[]snippets.Entry]

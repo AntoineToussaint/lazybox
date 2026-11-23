@@ -29,6 +29,10 @@ export function blocking(c: DeliveryCandidateOutcome): DeliveryCriterionOutcome[
   return c.criteria.filter(x => x.required && rank.includes(x.state)).sort((a, b) => rank.indexOf(a.state) - rank.indexOf(b.state));
 }
 
+/** How a person reads the pinned spec: its title, else its artifact ID. */
+export const specName = (c: { title?: string; artifactId?: string; artifact?: string; version: number } | undefined) =>
+  !c ? 'the spec' : c.title ? `“${c.title}” v${c.version}` : `spec ${c.artifactId ?? c.artifact} v${c.version}`;
+
 /** One line for a card or an inbox row: the verdict and what blocks it. */
 export function summary(o: DeliveryOutcome): string {
   const c = headline(o);
@@ -41,12 +45,13 @@ export function summary(o: DeliveryOutcome): string {
   return parts.join(' · ');
 }
 
-/** What one observation says, for a chip: its state, source and exit. */
+/** What one observation says, for a chip: what ran, its state and exit. */
 export function evidenceLine(e: DeliveryEvidence): string {
+  const ran = e.title ? `${e.title} · ` : '';
   const what = e.source === 'review' ? 'review' : e.prerequisite ? (e.prerequisite === 'passed' ? 'prerequisite met' : 'prerequisite') : 'check';
   const exit = e.exitCode === undefined ? '' : ` · exit ${e.exitCode}`;
   const output = e.output === 'unavailable' ? ' · output no longer kept' : '';
-  return `${stateLabel[e.state] || e.state} · ${what}${exit}${output}`;
+  return `${ran}${stateLabel[e.state] || e.state} · ${what}${exit}${output}`;
 }
 
 /** A failure a later observation of the same criterion resolved. */
@@ -57,22 +62,22 @@ const short = (candidate: string) => candidate.replace(/^candidate:/, '').slice(
 
 type OutcomeJson = {
   schema: string;
-  contract: { artifact: string; version: number; criteria?: { id: string; expected: string; required: boolean }[] | null };
+  contract: { artifact: string; title?: string; version: number; criteria?: { id: string; expected: string; required: boolean }[] | null };
   subject: { conversation: string; mission?: string; task?: string };
   current?: string; decision?: string;
-  candidates: { candidate: string; current?: boolean; verdict: string; criteria: { id: string; expected: string; required: boolean; state: string; evidence?: { reference: string; source: string; state: string; exitCode?: number; prerequisite?: string; output?: string }[] }[] }[];
+  candidates: { candidate: string; current?: boolean; verdict: string; criteria: { id: string; expected: string; required: boolean; state: string; evidence?: { reference: string; title?: string; source: string; state: string; exitCode?: number; prerequisite?: string; output?: string }[] }[] }[];
 };
 
 /** A published verdict snapshot (schema delivery-outcome.v1) as a document. */
 export function deliveryOutcomeMarkdown(o: OutcomeJson): string {
-  const lines = [`Spec ${o.contract.artifact} v${o.contract.version}${o.subject.mission ? ` · Mission task ${o.subject.task}` : ''}`];
+  const lines = [`Against ${specName(o.contract)}${o.subject.mission ? ` · Mission task ${o.subject.task}` : ''}`];
   if (o.decision) lines.push('', `**Decision:** ${o.decision}. The technical verdict below is unchanged.`);
   if (!o.candidates.length) lines.push('', 'Nothing was checked.');
   o.candidates.forEach((c, i) => {
     const which = c.current ? 'the workspace files when published' : i === 0 ? 'the latest files checked' : 'earlier files';
     lines.push('', `## ${verdictLabel[c.verdict] || c.verdict} on ${which} (${short(c.candidate)})`, '', '| Criterion | State | Evidence |', '|---|---|---|');
     for (const criterion of c.criteria) {
-      const evidence = (criterion.evidence || []).map(e => `${stateLabel[e.state] || e.state} ${e.reference}${e.exitCode === undefined ? '' : ` (exit ${e.exitCode})`}${e.output === 'unavailable' ? ', output no longer kept' : ''}`).join('; ') || '—';
+      const evidence = (criterion.evidence || []).map(e => `${stateLabel[e.state] || e.state} ${e.title ? `“${e.title}”` : e.reference}${e.exitCode === undefined ? '' : ` (exit ${e.exitCode})`}${e.output === 'unavailable' ? ', output no longer kept' : ''}`).join('; ') || '—';
       lines.push(`| **${criterion.id}**${criterion.required ? '' : ' (optional)'}: ${criterion.expected.replace(/\|/g, '\\|')} | ${stateLabel[criterion.state] || criterion.state} | ${evidence.replace(/\|/g, '\\|')} |`);
     }
   });

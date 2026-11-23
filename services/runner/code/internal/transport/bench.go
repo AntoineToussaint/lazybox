@@ -844,7 +844,7 @@ func (s *Service) BindDelivery(ctx context.Context, r *pb.BindDeliveryRequest) (
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &pb.DeliveryBinding{Conversation: b.Conversation, Attempt: b.Attempt, ArtifactId: b.Contract.Artifact, Version: b.Contract.Version, Digest: b.Contract.Digest, Criteria: b.Contract.Lines()}, nil
+	return &pb.DeliveryBinding{Conversation: b.Conversation, Attempt: b.Attempt, Title: b.Contract.Title, ArtifactId: b.Contract.Artifact, Version: b.Contract.Version, Digest: b.Contract.Digest, Criteria: b.Contract.Lines()}, nil
 }
 func (s *Service) ListCommands(ctx context.Context, r *pb.ListCommandsRequest) (*pb.ListCommandsResponse, error) {
 	w := &pb.ListCommandsResponse{}

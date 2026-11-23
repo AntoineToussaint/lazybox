@@ -21,19 +21,19 @@ import (
 // task resolve to the same attempt, so both say the same thing, before and
 // after a Runner restart: everything comes from the work log and the delivery
 // journal. The workspace's current files are fingerprinted for the headline
-// candidate, cached briefly so a board refreshing many tasks does not read
-// every repository each time.
-
-const fingerprintTTL = 5 * time.Second
+// candidate on every lookup: a cached answer would call files current that a
+// commit or an edit had already replaced, and say Delivered for them. Lookups
+// that arrive while a fingerprint of the same workspace is under way (a board
+// refreshing several tasks at once) share that one.
 
 type fingerprintCache struct {
-	mu      sync.Mutex
-	entries map[string]fingerprintEntry
+	mu       sync.Mutex
+	inFlight map[string]*fingerprintCall
 }
 
-type fingerprintEntry struct {
+type fingerprintCall struct {
+	done      chan struct{}
 	candidate string
-	at        time.Time
 }
 
 // currentCandidate is the workspace's candidate now, or "" when it is gone or
@@ -44,22 +44,25 @@ func (b *Bench) currentCandidate(workspace string) string {
 	}
 	c := &b.fingerprints
 	c.mu.Lock()
-	if e, ok := c.entries[workspace]; ok && time.Since(e.at) < fingerprintTTL {
+	if call, ok := c.inFlight[workspace]; ok {
 		c.mu.Unlock()
-		return e.candidate
+		<-call.done
+		return call.candidate
 	}
+	if c.inFlight == nil {
+		c.inFlight = map[string]*fingerprintCall{}
+	}
+	call := &fingerprintCall{done: make(chan struct{})}
+	c.inFlight[workspace] = call
 	c.mu.Unlock()
-	candidate, err := b.candidate(workspace)
-	if err != nil {
-		candidate = ""
+	if candidate, err := b.candidate(workspace); err == nil {
+		call.candidate = candidate
 	}
 	c.mu.Lock()
-	if c.entries == nil {
-		c.entries = map[string]fingerprintEntry{}
-	}
-	c.entries[workspace] = fingerprintEntry{candidate: candidate, at: time.Now()}
+	delete(c.inFlight, workspace)
 	c.mu.Unlock()
-	return candidate
+	close(call.done)
+	return call.candidate
 }
 
 // ErrNoContract: nothing names what this conversation or task must deliver.
@@ -156,36 +159,36 @@ func taskDecision(state *work.State, t *work.Task) string {
 	return ""
 }
 
-// markOutputs says, for each command run, whether its full output is still kept.
+// markOutputs names each command run and says whether its full output is still kept.
 func (b *Bench) markOutputs(o *delivery.Outcome) {
 	for i := range o.Candidates {
 		for j := range o.Candidates[i].Criteria {
 			evidence := o.Candidates[i].Criteria[j].Evidence
 			for k := range evidence {
 				if evidence[k].Command != "" {
-					evidence[k].Output = b.outputState(evidence[k].Command)
+					evidence[k].Title, evidence[k].Output = b.runDetail(evidence[k].Command)
 				}
 			}
 		}
 	}
 }
 
-func (b *Bench) outputState(command string) string {
+func (b *Bench) runDetail(command string) (title, output string) {
 	if b.Commands == nil {
-		return "unavailable"
+		return "", "unavailable"
 	}
 	c, err := b.Commands.Get(command)
 	if err != nil {
-		return "unavailable"
+		return "", "unavailable"
 	}
-	report := c.Status().Report
-	if report == nil || report.OutputPath == "" {
-		return "unavailable"
+	state := c.Status()
+	if state.Report == nil || state.Report.OutputPath == "" {
+		return state.Spec.Title, "unavailable"
 	}
-	if _, err := os.Stat(report.OutputPath); err != nil {
-		return "unavailable"
+	if _, err := os.Stat(state.Report.OutputPath); err != nil {
+		return state.Spec.Title, "unavailable"
 	}
-	return "available"
+	return state.Spec.Title, "available"
 }
 
 // PublishDeliveryOutcome publishes o as an immutable verdict snapshot: a new
@@ -201,7 +204,7 @@ func (b *Bench) PublishDeliveryOutcome(o delivery.Outcome, workspace, artifactID
 	}
 	put := artifacts.Put{ID: artifactID, Content: string(content), Author: author, Source: source}
 	if artifactID == "" {
-		put.Title = fmt.Sprintf("Delivery outcome · spec %s v%d", o.Contract.Artifact, o.Contract.Version)
+		put.Title = "Delivery outcome · " + o.Contract.Name()
 		put.Kind, put.Format = "report", "json"
 	}
 	return b.Artifacts.Put(workspace, put)

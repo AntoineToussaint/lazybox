@@ -94,7 +94,7 @@ func (s *Service) RecordReviewCriterion(_ context.Context, r *pb.RecordReviewCri
 
 func wireDeliveryOutcome(o delivery.Outcome) *pb.DeliveryOutcome {
 	w := &pb.DeliveryOutcome{Attempt: o.Attempt, ConversationId: o.Subject.Conversation, MissionId: o.Subject.Mission, TaskId: o.Subject.Task, Current: o.Current, Decision: o.Decision,
-		Contract: &pb.DeliveryContract{ArtifactId: o.Contract.Artifact, Version: o.Contract.Version, Digest: o.Contract.Digest, Schema: o.Contract.Schema}}
+		Contract: &pb.DeliveryContract{ArtifactId: o.Contract.Artifact, Title: o.Contract.Title, Version: o.Contract.Version, Digest: o.Contract.Digest, Schema: o.Contract.Schema}}
 	for _, c := range o.Contract.Criteria {
 		w.Contract.Criteria = append(w.Contract.Criteria, &pb.DeliveryCriterion{Id: c.ID, Expected: c.Expected, Required: c.Required})
 	}
@@ -103,7 +103,7 @@ func wireDeliveryOutcome(o delivery.Outcome) *pb.DeliveryOutcome {
 		for _, criterion := range c.Criteria {
 			wcr := &pb.DeliveryCriterionOutcome{Id: criterion.ID, Expected: criterion.Expected, Required: criterion.Required, State: criterion.State}
 			for _, e := range criterion.Evidence {
-				we := &pb.DeliveryEvidence{Id: e.ID, Source: e.Source, Reference: e.Reference, CommandId: e.Command, Assertion: e.Assertion, Prerequisite: e.Prerequisite, State: e.State, Output: e.Output}
+				we := &pb.DeliveryEvidence{Id: e.ID, Source: e.Source, Reference: e.Reference, CommandId: e.Command, Title: e.Title, Assertion: e.Assertion, Prerequisite: e.Prerequisite, State: e.State, Output: e.Output}
 				if e.ExitCode != nil {
 					code := int32(*e.ExitCode)
 					we.ExitCode = &code

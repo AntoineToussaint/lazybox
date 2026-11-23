@@ -96,7 +96,7 @@ func deliveryCommand(ctx context.Context, client deliveryAPI, session string, ar
 			return err
 		}
 		b := r.Msg
-		fmt.Fprintf(stdout, "Bound spec %s v%d to this conversation (attempt %s).\nCheck each criterion with lazybox run --check <id> -- <command>:\n", b.ArtifactId, b.Version, b.Attempt)
+		fmt.Fprintf(stdout, "Bound %s to this conversation (attempt %s).\nCheck each criterion with lazybox run --check <id> -- <command>:\n", specName(b.Title, b.ArtifactId, b.Version), b.Attempt)
 		for _, c := range b.Criteria {
 			fmt.Fprintln(stdout, "- "+c)
 		}
@@ -158,7 +158,7 @@ func deliveryCommand(ctx context.Context, client deliveryAPI, session string, ar
 func outcomeText(o *pb.DeliveryOutcome) string {
 	var b strings.Builder
 	c := o.GetContract()
-	fmt.Fprintf(&b, "Delivery against spec %s v%d", c.GetArtifactId(), c.GetVersion())
+	fmt.Fprintf(&b, "Delivery against %s", specName(c.GetTitle(), c.GetArtifactId(), c.GetVersion()))
 	if o.MissionId != "" {
 		fmt.Fprintf(&b, " (Mission %s, task %s)", o.MissionId, o.TaskId)
 	}
@@ -183,7 +183,7 @@ func outcomeText(o *pb.DeliveryOutcome) string {
 		}
 		fmt.Fprintf(&b, "  %-10s %s (%s): %s\n", criterion.State, criterion.Id, level, criterion.Expected)
 		for _, e := range criterion.Evidence {
-			line := e.State + " · " + e.Reference
+			line := e.State + " · " + firstNonEmpty(e.Title, e.Reference)
 			if e.ExitCode != nil {
 				line += fmt.Sprintf(" · exit %d", *e.ExitCode)
 			}
@@ -197,4 +197,12 @@ func outcomeText(o *pb.DeliveryOutcome) string {
 		fmt.Fprintf(&b, "Earlier files %s: %s\n", older.Candidate, older.Verdict)
 	}
 	return b.String()
+}
+
+// specName is how a person reads a pinned spec: its title, else its artifact ID.
+func specName(title, artifact string, version uint32) string {
+	if title != "" {
+		return fmt.Sprintf("“%s” v%d", title, version)
+	}
+	return fmt.Sprintf("spec %s v%d", artifact, version)
 }

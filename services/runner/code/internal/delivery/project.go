@@ -51,10 +51,12 @@ type CriterionOutcome struct {
 // managed command a run reference points to; its output is read through
 // that command, never from here.
 type Evidence struct {
-	ID           string `json:"id"`
-	Source       string `json:"source"`
-	Reference    string `json:"reference"`
-	Command      string `json:"command,omitempty"`
+	ID        string `json:"id"`
+	Source    string `json:"source"`
+	Reference string `json:"reference"`
+	Command   string `json:"command,omitempty"`
+	// Title is what ran (the command's title), for what a person reads.
+	Title        string `json:"title,omitempty"`
 	ExitCode     *int   `json:"exitCode,omitempty"`
 	Assertion    string `json:"assertion,omitempty"`
 	Prerequisite string `json:"prerequisite,omitempty"`

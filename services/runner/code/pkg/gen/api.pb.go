@@ -13837,8 +13837,10 @@ type DeliveryContract struct {
 	Version    uint32                 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
 	Digest     string                 `protobuf:"bytes,3,opt,name=digest,proto3" json:"digest,omitempty"`
 	// "spec.v2"; a "spec.v1" contract has no named criteria.
-	Schema        string               `protobuf:"bytes,4,opt,name=schema,proto3" json:"schema,omitempty"`
-	Criteria      []*DeliveryCriterion `protobuf:"bytes,5,rep,name=criteria,proto3" json:"criteria,omitempty"`
+	Schema   string               `protobuf:"bytes,4,opt,name=schema,proto3" json:"schema,omitempty"`
+	Criteria []*DeliveryCriterion `protobuf:"bytes,5,rep,name=criteria,proto3" json:"criteria,omitempty"`
+	// The spec's title when it was pinned.
+	Title         string `protobuf:"bytes,6,opt,name=title,proto3" json:"title,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13908,6 +13910,13 @@ func (x *DeliveryContract) GetCriteria() []*DeliveryCriterion {
 	return nil
 }
 
+func (x *DeliveryContract) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
 // One observation as a person reads it. command_id names the managed command
 // whose output is the evidence; it is read through that command.
 type DeliveryEvidence struct {
@@ -13923,7 +13932,9 @@ type DeliveryEvidence struct {
 	// What this observation alone says: passed, failed, blocked or unverified.
 	State string `protobuf:"bytes,8,opt,name=state,proto3" json:"state,omitempty"`
 	// "available" or "unavailable": whether the command's full output is still kept.
-	Output        string `protobuf:"bytes,9,opt,name=output,proto3" json:"output,omitempty"`
+	Output string `protobuf:"bytes,9,opt,name=output,proto3" json:"output,omitempty"`
+	// What ran: the command's title.
+	Title         string `protobuf:"bytes,10,opt,name=title,proto3" json:"title,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -14017,6 +14028,13 @@ func (x *DeliveryEvidence) GetState() string {
 func (x *DeliveryEvidence) GetOutput() string {
 	if x != nil {
 		return x.Output
+	}
+	return ""
+}
+
+func (x *DeliveryEvidence) GetTitle() string {
+	if x != nil {
+		return x.Title
 	}
 	return ""
 }
@@ -14282,7 +14300,9 @@ type DeliveryBinding struct {
 	Version    uint32 `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
 	Digest     string `protobuf:"bytes,5,opt,name=digest,proto3" json:"digest,omitempty"`
 	// Each criterion as "[id, required|optional] expected".
-	Criteria      []string `protobuf:"bytes,6,rep,name=criteria,proto3" json:"criteria,omitempty"`
+	Criteria []string `protobuf:"bytes,6,rep,name=criteria,proto3" json:"criteria,omitempty"`
+	// The spec's title.
+	Title         string `protobuf:"bytes,7,opt,name=title,proto3" json:"title,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -14357,6 +14377,13 @@ func (x *DeliveryBinding) GetCriteria() []string {
 		return x.Criteria
 	}
 	return nil
+}
+
+func (x *DeliveryBinding) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
 }
 
 type PublishRequest struct {
@@ -38970,8 +38997,10 @@ type PlanContract struct {
 	CollectionId       string   `protobuf:"bytes,3,opt,name=collection_id,json=collectionId,proto3" json:"collection_id,omitempty"`
 	Digest             string   `protobuf:"bytes,4,opt,name=digest,proto3" json:"digest,omitempty"`
 	AcceptanceCriteria []string `protobuf:"bytes,5,rep,name=acceptance_criteria,json=acceptanceCriteria,proto3" json:"acceptance_criteria,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// The spec's title when the plan pinned it.
+	Title         string `protobuf:"bytes,6,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PlanContract) Reset() {
@@ -39037,6 +39066,13 @@ func (x *PlanContract) GetAcceptanceCriteria() []string {
 		return x.AcceptanceCriteria
 	}
 	return nil
+}
+
+func (x *PlanContract) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
 }
 
 var File_api_proto protoreflect.FileDescriptor
@@ -40234,14 +40270,15 @@ const file_api_proto_rawDesc = "" +
 	"\x11DeliveryCriterion\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bexpected\x18\x02 \x01(\tR\bexpected\x12\x1a\n" +
-	"\brequired\x18\x03 \x01(\bR\brequired\"\xbe\x01\n" +
+	"\brequired\x18\x03 \x01(\bR\brequired\"\xd4\x01\n" +
 	"\x10DeliveryContract\x12\x1f\n" +
 	"\vartifact_id\x18\x01 \x01(\tR\n" +
 	"artifactId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\rR\aversion\x12\x16\n" +
 	"\x06digest\x18\x03 \x01(\tR\x06digest\x12\x16\n" +
 	"\x06schema\x18\x04 \x01(\tR\x06schema\x12?\n" +
-	"\bcriteria\x18\x05 \x03(\v2#.lazybox.bench.v1.DeliveryCriterionR\bcriteria\"\x97\x02\n" +
+	"\bcriteria\x18\x05 \x03(\v2#.lazybox.bench.v1.DeliveryCriterionR\bcriteria\x12\x14\n" +
+	"\x05title\x18\x06 \x01(\tR\x05title\"\xad\x02\n" +
 	"\x10DeliveryEvidence\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06source\x18\x02 \x01(\tR\x06source\x12\x1c\n" +
@@ -40252,7 +40289,9 @@ const file_api_proto_rawDesc = "" +
 	"\tassertion\x18\x06 \x01(\tR\tassertion\x12\"\n" +
 	"\fprerequisite\x18\a \x01(\tR\fprerequisite\x12\x14\n" +
 	"\x05state\x18\b \x01(\tR\x05state\x12\x16\n" +
-	"\x06output\x18\t \x01(\tR\x06outputB\f\n" +
+	"\x06output\x18\t \x01(\tR\x06output\x12\x14\n" +
+	"\x05title\x18\n" +
+	" \x01(\tR\x05titleB\f\n" +
 	"\n" +
 	"_exit_code\"\xb8\x01\n" +
 	"\x18DeliveryCriterionOutcome\x12\x0e\n" +
@@ -40277,7 +40316,7 @@ const file_api_proto_rawDesc = "" +
 	"\bdecision\x18\a \x01(\tR\bdecision\x12J\n" +
 	"\n" +
 	"candidates\x18\b \x03(\v2*.lazybox.bench.v1.DeliveryCandidateOutcomeR\n" +
-	"candidates\"\xbe\x01\n" +
+	"candidates\"\xd4\x01\n" +
 	"\x0fDeliveryBinding\x12\"\n" +
 	"\fconversation\x18\x01 \x01(\tR\fconversation\x12\x18\n" +
 	"\aattempt\x18\x02 \x01(\tR\aattempt\x12\x1f\n" +
@@ -40285,7 +40324,8 @@ const file_api_proto_rawDesc = "" +
 	"artifactId\x12\x18\n" +
 	"\aversion\x18\x04 \x01(\rR\aversion\x12\x16\n" +
 	"\x06digest\x18\x05 \x01(\tR\x06digest\x12\x1a\n" +
-	"\bcriteria\x18\x06 \x03(\tR\bcriteria\"[\n" +
+	"\bcriteria\x18\x06 \x03(\tR\bcriteria\x12\x14\n" +
+	"\x05title\x18\a \x01(\tR\x05title\"[\n" +
 	"\x0ePublishRequest\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x16\n" +
@@ -42488,14 +42528,15 @@ const file_api_proto_rawDesc = "" +
 	"\x12PlanBaselineMember\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12#\n" +
 	"\rrepository_id\x18\x02 \x01(\tR\frepositoryId\x12\x16\n" +
-	"\x06commit\x18\x03 \x01(\tR\x06commit\"\xb7\x01\n" +
+	"\x06commit\x18\x03 \x01(\tR\x06commit\"\xcd\x01\n" +
 	"\fPlanContract\x12\x1f\n" +
 	"\vartifact_id\x18\x01 \x01(\tR\n" +
 	"artifactId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\rR\aversion\x12#\n" +
 	"\rcollection_id\x18\x03 \x01(\tR\fcollectionId\x12\x16\n" +
 	"\x06digest\x18\x04 \x01(\tR\x06digest\x12/\n" +
-	"\x13acceptance_criteria\x18\x05 \x03(\tR\x12acceptanceCriteria*d\n" +
+	"\x13acceptance_criteria\x18\x05 \x03(\tR\x12acceptanceCriteria\x12\x14\n" +
+	"\x05title\x18\x06 \x01(\tR\x05title*d\n" +
 	"\bDecision\x12\x18\n" +
 	"\x14DECISION_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fDECISION_ACCEPT\x10\x01\x12\x14\n" +

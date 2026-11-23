@@ -63,6 +63,7 @@ type (
 	}
 	PlanContract struct {
 		Artifact  string               `json:"artifact"`
+		Title     string               `json:"title,omitempty"`
 		Version   uint32               `json:"version"`
 		Workspace string               `json:"workspace"`
 		Digest    string               `json:"digest"`

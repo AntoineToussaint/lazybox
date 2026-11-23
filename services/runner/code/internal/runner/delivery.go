@@ -97,7 +97,7 @@ func (b *Bench) missionContract(conversation string) (check delivery.Check, cont
 }
 
 func fromPlanContract(p *work.PlanContract) delivery.Contract {
-	c := delivery.Contract{Artifact: p.Artifact, Version: p.Version, Digest: p.Digest, Schema: "spec.v1", Legacy: p.Criteria}
+	c := delivery.Contract{Artifact: p.Artifact, Title: p.Title, Version: p.Version, Digest: p.Digest, Schema: "spec.v1", Legacy: p.Criteria}
 	if len(p.Bindings) > 0 {
 		c.Schema, c.Criteria, c.Legacy = "spec.v2", p.Bindings, nil
 	}
@@ -137,7 +137,7 @@ func (b *Bench) resolveCheck(e *Execution, criterion string, prerequisite bool) 
 		return nil, fmt.Errorf("cannot say which files the check runs on: %w", err)
 	}
 	check.CriterionID, check.Prerequisite, check.Candidate = criterion, prerequisite, candidate
-	check.ContractDigest, check.Artifact, check.Version = contract.Digest, contract.Artifact, contract.Version
+	check.ContractDigest, check.Artifact, check.Title, check.Version = contract.Digest, contract.Artifact, contract.Title, contract.Version
 	return &check, nil
 }
 
@@ -207,6 +207,7 @@ func (b *Bench) BindDelivery(e *Execution, artifactID string, version uint32) (d
 	if err != nil {
 		return delivery.Binding{}, err
 	}
+	contract.Title = doc.Title
 	if !contract.Bound() {
 		return delivery.Binding{}, errors.New("spec.v1 criteria have no IDs to check: publish a spec.v2 version (`lazybox artifact template delivery-spec`) and bind that")
 	}
@@ -370,6 +371,6 @@ func (b *Bench) RecordReviewCriterion(session, criterion, result string) (delive
 	if _, err := b.Delivery.Record(o); err != nil {
 		return none, delivery.Check{}, err
 	}
-	check := delivery.Check{CriterionID: criterion, ContractDigest: run.ContractDigest, Attempt: run.ReviewAttempt, Subject: o.Subject, Artifact: contract.Artifact, Version: contract.Version, Candidate: candidate}
+	check := delivery.Check{CriterionID: criterion, ContractDigest: run.ContractDigest, Attempt: run.ReviewAttempt, Subject: o.Subject, Artifact: contract.Artifact, Title: contract.Title, Version: contract.Version, Candidate: candidate}
 	return o, check, nil
 }

@@ -61,7 +61,7 @@ func (b *Bench) ProposePlan(ctx context.Context, session, operation, summary str
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w: %v", work.ErrRefused, err)
 		}
-		contract := &work.PlanContract{Artifact: artifactID, Version: version, Workspace: c.e.CollectionID, Digest: spec.Digest, Criteria: spec.Lines(), Bindings: spec.Criteria}
+		contract := &work.PlanContract{Artifact: artifactID, Title: doc.Title, Version: version, Workspace: c.e.CollectionID, Digest: spec.Digest, Criteria: spec.Lines(), Bindings: spec.Criteria}
 		if len(strings.Join(contract.Criteria, "\n")) > 4096 {
 			return nil, nil, fmt.Errorf("%w: mission acceptance criteria exceed 4 KiB", work.ErrRefused)
 		}

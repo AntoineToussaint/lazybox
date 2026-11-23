@@ -250,7 +250,7 @@ func testPinnedPlanSpawnsFromReviewedBaseline(t *testing.T, content, want string
 		t.Fatalf("worker options: %v, %v", execution, err)
 	}
 	brief := <-o.fake.session(view.Spawned.SessionId).Applied
-	if !strings.Contains(brief.Text, "One row after reconnect") || strings.Contains(brief.Text, "Two rows after reconnect") {
+	if !strings.Contains(brief.Text, "\n- "+want) || strings.Contains(brief.Text, "Two rows after reconnect") {
 		t.Fatalf("wrong contract revision in child brief: %s", brief.Text)
 	}
 	child, err := manager.Get(view.Spawned.CollectionId)
@@ -269,7 +269,7 @@ func testPinnedPlanSpawnsFromReviewedBaseline(t *testing.T, content, want string
 		t.Fatal(err)
 	}
 	reviewerBrief := briefOf(t, o.fake.session(review.Session.Id).Applied)
-	if !strings.Contains(reviewerBrief.Text, "Approved Mission contract") || !strings.Contains(reviewerBrief.Text, plan.Contract.Digest) || !strings.Contains(reviewerBrief.Text, "One row after reconnect") || strings.Contains(reviewerBrief.Text, "Unapproved local criteria") {
+	if !strings.Contains(reviewerBrief.Text, "Approved Mission contract") || !strings.Contains(reviewerBrief.Text, plan.Contract.Digest) || !strings.Contains(reviewerBrief.Text, want) || strings.Contains(reviewerBrief.Text, "Unapproved local criteria") {
 		t.Fatalf("wrong reviewer contract: %s", reviewerBrief.Text)
 	}
 	git(t, child.Members[0].Path, "commit", "--allow-empty", "-m", "new candidate head")

@@ -13,7 +13,7 @@ import (
 //go:embed templates/*.json
 var templates embed.FS
 
-var starterNames = []string{"pr-walkthrough", "incident-timeline", "release-checklist", "roadmap"}
+var starterNames = []string{"pr-walkthrough", "incident-timeline", "release-checklist", "roadmap", "delivery-spec"}
 
 // Template returns an editable artifact example by kind or named starter.
 func Template(kind string) (string, error) {
@@ -22,6 +22,15 @@ func Template(kind string) (string, error) {
 	}
 	data, err := templates.ReadFile("templates/" + kind + ".json")
 	return string(data), err
+}
+
+// structuredSchema names the schema a validated body declares, such as spec.v2.
+func structuredSchema(kind, content string) string {
+	var header struct{ Schema string }
+	if json.Unmarshal([]byte(content), &header) != nil || header.Schema == "" {
+		return kind + ".v1"
+	}
+	return header.Schema
 }
 
 func validateStructured(kind, content string) error {

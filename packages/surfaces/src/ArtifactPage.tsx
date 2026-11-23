@@ -7,7 +7,7 @@ import { ActionMenu } from './ActionMenu';
 import { RoadmapDialog, CreateIssueDialog, DeleteArtifactDialog, DiffStats, DiffView, SaveToRepositoryDialog } from './ArtifactDialogs';
 import { artifactsChanged, errorText, restoreArtifacts, retireArtifact } from './artifact-client';
 import { TodoList, todoMarkdown, todoProgress } from './TodoList';
-import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, roadmapMissionPlan, slug, versionOrigin } from './artifact-model';
+import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, roadmapMissionPlan, slug, structuredMarkdown, versionOrigin } from './artifact-model';
 import { extractToc, readingMinutes, tocOutline, withoutRepeatedTitle } from './artifact-reader';
 import { DocumentBody, RenderedDiff, TableOfContents, useScrollSpy } from './ArtifactReader';
 import { openArtifact, revealMessage } from './artifact-events';
@@ -232,12 +232,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
     if (artifact?.kind === 'todo-list') return todoMarkdown(body);
     const parsed = JSON.parse(body);
     if (artifact?.kind === 'plan' && parsed.schema === 'roadmap.v1') return roadmapMarkdown(parsed);
-    const fields = parsed as Record<string, string | string[]>;
-    return Object.entries(fields).filter(([name]) => name !== 'schema').map(([name, value]) => {
-      const title = name[0].toUpperCase() + name.slice(1).replace(/[A-Z]/g, letter => ' ' + letter.toLowerCase());
-      const text = Array.isArray(value) ? value.map(entry => '- ' + entry).join('\n') : value;
-      return '## ' + title + '\n\n' + text;
-    }).join('\n\n');
+    return structuredMarkdown(parsed);
   };
   const currentText = useMemo(() => content === undefined ? undefined : project(content), [content, structured, artifact?.kind]);
   const previousText = useMemo(() => baseContent === undefined ? undefined : project(baseContent), [baseContent, structured, artifact?.kind]);

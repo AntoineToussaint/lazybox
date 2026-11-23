@@ -33,7 +33,7 @@ without anyone asking:
 - **commits** made through the PR loop;
 - **pull requests** explicitly delivered by the assigned conversation, and their **checks**. Run `lazybox link <PR URL>` in that conversation, or create the PR there with a supported tool such as `gh pr create`. Link it while the conversation has one active task so the Runner can identify the attempt. A workspace branch alone does not associate its PR with a mission. An ambiguous command or result needs an explicit link. When a task changes hands, the replacement attempt starts with its own evidence. Previously recorded workspace-only checks and earlier attempts remain in the expanded history. Verification requires a check observation after delivery to the current attempt.
 
-The collapsed task card and acceptance inbox show the latest run and the most recent failed run when they differ. Expand the card for the full history. A later passing command can test a different part of the work.
+The collapsed task card and acceptance inbox show the latest run and the most recent unresolved failed run when they differ. A failure stays until a later run of the same command passes: a different passing command can test a different part of the work. Expand the card for the full history.
 
 Click a run to open its output in the console; click a pull request to open it
 on GitHub. Each delivered PR has its own chip. Linking another PR keeps existing check results visible.
@@ -121,7 +121,7 @@ Promotion is an explicit owner decision. It verifies the worker reviews, clean c
 
 ### Naming delivery criteria
 
-A structured spec can use `spec.v2` to give each acceptance criterion a stable ID and mark it required or optional. Publish the JSON as a spec and pin its artifact version in the Mission plan. The approval sheet and worker brief include the IDs and requirement levels.
+A structured spec can use `spec.v2` to give each acceptance criterion a stable ID and mark it required or optional. Start from `lazybox artifact template delivery-spec`, publish it with `lazybox artifact put spec.json --title "…"` (the Runner recognizes the schema), and pin its artifact version in the Mission plan. The artifact reader lists each criterion by ID and requirement level. The approval sheet and worker brief include the IDs and requirement levels.
 
 ```json
 {

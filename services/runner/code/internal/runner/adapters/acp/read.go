@@ -3,6 +3,7 @@ package acp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/adapters/jsonl"
@@ -83,13 +84,32 @@ func (s *session) answered(m jsonl.Message, emit func(agent.Event)) bool {
 		loaded <- m
 		return false
 	}
-	if s.state.Prompt == nil || string(m.ID) != string(s.state.Prompt) {
+	turn := ""
+	switch {
+	case s.state.Prompt != nil && string(m.ID) == string(s.state.Prompt):
+		turn = s.state.Turn
+	case s.state.Prompt == nil && s.state.Next != nil && string(m.ID) == string(s.state.Next):
+		// The previous Runner wrote this prompt and died before it recorded
+		// so: the reply still ends the turn the journal says is running.
+		s.state.Turns++
+		turn = fmt.Sprintf("turn-%d", s.state.Turns)
+		s.state.Next = s.p.NewID()
+	default:
 		s.mu.Unlock()
 		return false
 	}
-	turn := s.state.Turn
 	s.state.Prompt, s.state.Turn = nil, ""
+	// The agent stopped waiting on what it asked in this turn: those
+	// requests are over. The host forgets them (never redelivered to a later
+	// Runner as if the agent still waited), and the conversation stops
+	// showing them.
+	open := s.requests
+	s.requests = map[string]pending{}
 	s.mu.Unlock()
+	for id, req := range open {
+		_ = s.p.Resolve(req.native)
+		emit(agent.Event{Type: "request_resolved", RequestID: id, TurnID: turn, Status: "turn_ended"})
+	}
 	for _, ev := range turnEnd(turn, m.Result, m.Error, s.title) {
 		emit(ev)
 	}

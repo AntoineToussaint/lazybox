@@ -54,10 +54,13 @@ type Session struct {
 	// Titles names the conversation (agent.Titler); nil: ErrUnsupported.
 	Titles func(description string) (string, error)
 	// State is the fake's DurableState; nil means it cannot outlive a Runner.
-	State     json.RawMessage
-	Detached  bool
-	Committed []uint64
-	detached  chan struct{}
+	State    json.RawMessage
+	Detached bool
+	// BeforeDetach, when set, runs first in each Detach; an error it
+	// returns fails that Detach (a host that cannot be told).
+	BeforeDetach func() error
+	Committed    []uint64
+	detached     chan struct{}
 	// committed is closed and replaced on every commit (see AwaitCommits).
 	committed chan struct{}
 	held      map[agent.Kind]hold
@@ -89,6 +92,14 @@ func (s *Session) Commit(ev agent.Event) {
 	}
 }
 func (s *Session) Detach() error {
+	s.mu.Lock()
+	before := s.BeforeDetach
+	s.mu.Unlock()
+	if before != nil {
+		if err := before(); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.State == nil {

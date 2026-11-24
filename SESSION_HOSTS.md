@@ -70,9 +70,12 @@ speak the version in its record without displacing the attached Runner.
   acknowledged but never answered are replayed too: the agent is still waiting.
   A request the Runner answered is never replayed, and neither is one the agent
   stopped waiting on without a reply: when the Codex app-server resolves a
-  request itself (`serverRequest/resolved`) or ends the turn it belonged to,
-  the adapter sends the host a `resolve` frame and the host forgets it, as it
-  would an answer. Otherwise every re-attach showed a phantom "waiting for
+  request itself (`serverRequest/resolved`) or ends the turn it belonged to
+  (the main agent's or a sub-agent's), or an ACP agent answers the prompt the
+  request was asked in, the adapter sends the host a `resolve` frame and the
+  host forgets it, as it would an answer. The adapter also records
+  `request_resolved` (status `turn_ended` for a turn's end, with the agent
+  that asked), so the conversation stops showing it. Otherwise every re-attach showed a phantom "waiting for
   approval", and enough of them (64) faulted adoption. `resolve` is additive: a
   host older than it ignores the frame (and keeps redelivering, as before), so
   the wire version did not change.
@@ -87,7 +90,10 @@ speak the version in its record without displacing the attached Runner.
   - a declined command is declined again: nothing ran;
   - a native approval or question the user answered (its reply never reached
     the agent, or the host would not replay it) is answered again with the
-    user's response, which the journal records with its decision and answers;
+    user's response, which the journal records with its decision and answers,
+    and is recorded resolved (`answered_after_restart`) so its card clears.
+    Until then the Runner refuses a second answer to it; if the adapter
+    cannot give the recorded answer and asks again, the person can answer;
   - an unanswered approval simply stays pending (recorded once, not twice).
 - While no Runner is attached the host keeps reading until a 64 MiB buffer is
   full, then stops: the program blocks on its own output instead of losing it.
@@ -111,9 +117,10 @@ speak the version in its record without displacing the attached Runner.
 | Restored exactly | How |
 | --- | --- |
 | Live native process, its conversation and in-flight turn | session host |
-| Pending approvals and questions | snapshot + host redelivery, deduplicated |
+| Pending approvals and questions | journal (asked, not resolved) + host redelivery, deduplicated |
+| Whether a turn is running | journal (the main agent's last turn started and did not end); a message delivered whose turn has not started yet, from the snapshot |
 | Queued, undelivered messages (including image bytes) | `<id>.attach.json` |
-| Operation idempotency and receipts | journal scan |
+| Operation idempotency and receipts | journal scan; the latest 4,096 operations, plus any queued or running, keep their identity (live too) |
 | Codex turn ID, model, provider settings and overrides | adapter state in `<id>.attach.json` |
 | Subscription-rotation attempt and current profile | rotation state |
 | The conversation excerpt a later rotation hands over | rebuilt from the journal |
@@ -134,7 +141,10 @@ notices in the conversation.
   managed commands stay too. `Bench.Close` and ending a session still stop them.
 - A Runner shutting down closes every journal under its readers, but a live
   conversation goes on in the next Runner. So a `WatchEvents` stream it cuts
-  ends `Unavailable`, and the app reconnects from its cursor; only a
+  ends `Unavailable`, and the app reconnects from its cursor. The same holds
+  for a conversation Resume re-attaches in place (below): its old engine is
+  detached (`engine.ErrDetached`) and its journal handle released, and its
+  readers reconnect to the new one; only a
   conversation that is over (closed, or read-only history) ends its stream
   cleanly, which tells a reader to stop following. A `ReadSessionTail` page a
   restart interrupts is read again from the next Runner: journals keep their
@@ -163,7 +173,9 @@ notices in the conversation.
   A Runner that fails to start detaches from what it re-attached rather than
   stopping it.
 - `Bench.Adopt` runs once at startup. It re-attaches every unclosed execution
-  with an attachment record. Then it stops any agent or command host nobody
+  with an attachment record, and installs the turn hooks (checkpoints,
+  reviews) before it reads the agent (`engine.AdoptStopped`, then `Start`), so
+  a turn that ends at once is checkpointed like any other. Then it stops any agent or command host nobody
   attached: a program this Runner cannot supervise must not keep writing in a
   workspace. The record of a host it cannot reach is removed only if the host
   is gone; a slow or interrupted probe is reported and the host left alone.
@@ -185,7 +197,18 @@ notices in the conversation.
 - Resume on a live conversation with such a fault re-attaches it in place, as
   a restart would (`Bench.reconnect`: Detach, then adopt). A receive loop
   that has not returned can already have lost its supervisor; Resume never
-  clears a transport fault on that evidence alone. No second agent is
+  clears a transport fault on that evidence alone. A Detach that failed is
+  not remembered: the engine keeps supervising, and the next Resume tries
+  again. If its receive loop stopped reading while it detached, the failed
+  Detach leaves a transport fault, never a conversation that silently stops
+  hearing its agent.
+- A message the provider refused outright (a JSON-RPC error, a Codex reply
+  that names no turn, `agent.ErrRejected`) is a turn's failure
+  (`delivery_rejected`): nothing is in flight, and the next message (or one
+  queued behind it) continues the conversation. Only a delivery whose outcome
+  is unknown (the write or the connection failed) faults it with "provider
+  delivery failed", and that never replaces a lost-stream fault said
+  meanwhile, which Resume settles. No second agent is
   started. If the host is gone, or cannot be adopted (it is stopped), the
   conversation ends as interrupted and resumes natively.
 - The Runner's own writes (the journal, the saved snapshot, metering, account
@@ -587,7 +610,15 @@ directory, in `hosts/` and `command-hosts/`.
   `TestAdoptionPassesTheRecordedDecision`,
   `TestAdoptedConversationPlacesMessagesWhereTheyWereDelivered`,
   `TestReplayedReplyTextIsHandedOverOnce`,
-  `TestResolvedRequestIsNotReplayedAfterReattach` (Codex), and in `internal/redact`
+  `TestResolvedRequestIsNotReplayedAfterReattach` (Codex),
+  `TestASubAgentsUnansweredApprovalEndsWithItsTurn` (Codex),
+  `TestARequestOpenWhenTheTurnEndsIsResolved` (ACP),
+  `TestATurnWhosePromptWasNotRecordedStillEnds` (ACP),
+  `TestWatchEventsAskToReconnectWhenResumeReattaches`,
+  `TestAdoptionReadsBusyAndPendingFromTheJournal`,
+  `TestAnAnsweredApprovalIsNotAnsweredTwiceAfterAdoption`,
+  `TestAFailedDetachCanBeRetried`,
+  `TestADetachThatFailsAfterTheLoopStoppedIsALostStream`, and in `internal/redact`
   `TestSecretCutByTheWindowDoesNotLeak`.
 - Robustness fixes, each failing without its fix:
   `TestALineThatIsNotJSONDoesNotBlockTheConnection`,

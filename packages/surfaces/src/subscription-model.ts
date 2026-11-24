@@ -225,6 +225,7 @@ const codeSentences: Record<string, string> = {
   error_max_budget_usd: 'This conversation reached its spending limit.',
   provider_process_exit: 'The agent process stopped unexpectedly.',
   delivery_failed: 'Your message could not be delivered to the agent.',
+  delivery_rejected: 'The agent refused your message. Send a message to continue the conversation.',
   account_state_write_failed: 'Lazybox could not save the subscription status.',
   authentication_failed: 'The subscription needs you to sign in again.',
   billing_error: 'The subscription has a billing problem.',

@@ -606,6 +606,11 @@ func (s *Service) WatchEvents(r *pb.WatchEventsRequest, stream grpc.ServerStream
 		if err != nil && ctx.Err() == nil && s.Bench.Stopping() {
 			return grpcError(codes.Unavailable, fmt.Errorf("the Runner is restarting; reconnect after cursor %d", cursor))
 		}
+		// Resume re-attached the conversation in place (a new engine on the
+		// same journal): the stream of the one it replaced ends the same way.
+		if errors.Is(err, engine.ErrDetached) && ctx.Err() == nil {
+			return grpcError(codes.Unavailable, fmt.Errorf("the conversation was re-attached; reconnect after cursor %d", cursor))
+		}
 		if err == io.EOF {
 			return nil
 		}

@@ -653,12 +653,133 @@ func TestPendingPermissionIsRedeliveredAfterARestart(t *testing.T) {
 	}
 	defer third.Close()
 	end := until(t, third, typed("turn_ended"))
+	resolved := false
 	for _, ev := range end {
 		if ev.Type == "approval" {
 			t.Fatal("an answered request was asked again")
 		}
+		resolved = resolved || (ev.Type == "request_resolved" && ev.RequestID == approval.RequestID && ev.Status == "answered_after_restart")
+	}
+	if !resolved {
+		// The card the previous Runner showed would never clear.
+		t.Fatal("the request answered again was not resolved")
 	}
 	if got := text(end); got != "decision=allow-always" {
 		t.Fatalf("answer after restart: %q", got)
+	}
+}
+
+// The Runner died after writing a prompt and before recording which request
+// it was: the attachment it left knows no running prompt. The reply still ends
+// the turn (it answers the id reserved for that prompt), where it used to be
+// ignored and the conversation stayed busy for good.
+func TestATurnWhosePromptWasNotRecordedStillEnds(t *testing.T) {
+	t.Setenv("ACP_FAKE_SLOW_MS", "800")
+	root := fixtureRoot(t)
+	cwd := workspace(t)
+	a := Adapter{Agent: fakeAgent(t)}
+	first, err := a.Open(context.Background(), agent.Open{Cwd: cwd, Permission: "ask", Host: &agent.Hosting{Root: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the engine saved before delivering the message, and no more.
+	before := first.(agent.Durable).DurableState()
+	if _, err = first.Apply(context.Background(), agent.Operation{ID: "slow", Kind: agent.Message, Text: "slow"}); err != nil {
+		t.Fatal(err)
+	}
+	seen := until(t, first, typed("message_delta"))
+	commitAll(first, seen)
+	if err = first.(agent.Detacher).Detach(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := a.Open(context.Background(), agent.Open{Cwd: cwd, Permission: "ask", Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: before, Reference: "fake-session-1", Cursor: seen[len(seen)-1].Cursor}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	rest := until(t, again, typed("turn_ended"))
+	if end := rest[len(rest)-1]; end.Status != "completed" {
+		t.Fatalf("the unrecorded prompt's turn: %s", summary(rest))
+	}
+	commitAll(again, rest)
+	// The next turn is a new prompt, answered as usual.
+	if got := text(say(t, again, "hello")); got != "Hello from the fake ACP agent." {
+		t.Fatalf("next turn: %q", got)
+	}
+}
+
+// A permission request the agent stopped waiting on (its turn ended) is
+// over: the conversation is told, and the host forgets it, so no later
+// Runner shows it again as a phantom approval.
+func TestARequestOpenWhenTheTurnEndsIsResolved(t *testing.T) {
+	root := fixtureRoot(t)
+	cwd := workspace(t)
+	a := Adapter{Agent: fakeAgent(t)}
+	first, err := a.Open(context.Background(), agent.Open{Cwd: cwd, Permission: "ask", Host: &agent.Hosting{Root: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = first.Apply(context.Background(), agent.Operation{ID: "abandon", Kind: agent.Message, Text: "abandon"}); err != nil {
+		t.Fatal(err)
+	}
+	seen := until(t, first, typed("turn_ended"))
+	commitAll(first, seen)
+	var asked, resolved agent.Event
+	for _, ev := range seen {
+		switch ev.Type {
+		case "approval":
+			asked = ev
+		case "request_resolved":
+			resolved = ev
+		}
+	}
+	if asked.RequestID == "" || resolved.RequestID != asked.RequestID || resolved.Status != "turn_ended" {
+		t.Fatalf("the abandoned request was not resolved: %s", summary(seen))
+	}
+	state := first.(agent.Durable).DurableState()
+	if err = first.(agent.Detacher).Detach(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := a.Open(context.Background(), agent.Open{Cwd: cwd, Permission: "ask", Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: state, Reference: "fake-session-1", Cursor: seen[len(seen)-1].Cursor}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for {
+		ev, err := again.Receive(ctx)
+		if err != nil {
+			return // nothing redelivered
+		}
+		if ev.Type == "approval" {
+			t.Fatalf("a request nobody waits on was redelivered: %+v", ev)
+		}
+	}
+}
+
+// An answer whose write failed leaves the request answerable.
+func TestAnAnswerThatWasNotWrittenCanBeGivenAgain(t *testing.T) {
+	root := fixtureRoot(t)
+	a := Adapter{Agent: fakeAgent(t)}
+	s, err := a.Open(context.Background(), agent.Open{Cwd: workspace(t), Permission: "ask", Host: &agent.Hosting{Root: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Apply(context.Background(), agent.Operation{ID: "ask", Kind: agent.Message, Text: "ask"}); err != nil {
+		t.Fatal(err)
+	}
+	seen := until(t, s, typed("approval"))
+	id := seen[len(seen)-1].RequestID
+	// The connection to the host is gone: nothing can be written.
+	_ = s.(*session).p.Detach()
+	if _, err = s.Apply(context.Background(), agent.Operation{ID: "yes", Kind: agent.Approve, RequestID: id, Decision: "accept"}); err == nil {
+		t.Fatal("setup: the answer was written")
+	}
+	s.(*session).mu.Lock()
+	_, waiting := s.(*session).requests[id]
+	s.(*session).mu.Unlock()
+	if !waiting {
+		t.Fatal("an answer that was never written took the request away")
 	}
 }

@@ -83,16 +83,24 @@ type Engine struct {
 	state         Snapshot
 	queue         []agent.Operation
 	ops           map[string]accepted
-	done          chan struct{}
-	closeOnce     sync.Once
-	closeErr      error
-	capture       func(Snapshot, json.RawMessage) error
+	// opOrder is ops' identities, oldest first: ops keeps a bounded window
+	// of them (rememberLocked).
+	opOrder   []string
+	done      chan struct{}
+	closeOnce sync.Once
+	startOnce sync.Once
+	closeErr  error
+	capture   func(Snapshot, json.RawMessage) error
 	// durable records what a later Runner needs to re-attach; nil disables it.
 	durable     func(Attachment) error
 	lastDurable []byte
-	detaching   bool
-	detachOnce  sync.Once
-	detachErr   error
+	// detaching: the snapshot and attachment were saved for the next Runner,
+	// which owns the journal from here; nothing more is recorded.
+	detaching bool
+	// detachMu serializes Detach; detached is set once one succeeded. A
+	// failed Detach is not remembered: it can be tried again.
+	detachMu sync.Mutex
+	detached bool
 	// messageOpen is whether the next main-agent delta continues LastMessage.
 	messageOpen bool
 	// hooks observe the main agent's turns; turnOp is the message whose turn
@@ -362,9 +370,11 @@ func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, 
 		e.mu.Unlock()
 		return agent.Receipt{}, err
 	}
-	if len(e.ops) >= 4096 || len(e.queue) >= 64 {
+	// Only messages wait in the queue: a full one never holds a stop or an
+	// answer the agent waits for.
+	if op.Kind == agent.Message && len(e.queue) >= 64 {
 		e.mu.Unlock()
-		return agent.Receipt{}, errors.New("session operation/queue capacity exhausted")
+		return agent.Receipt{}, errors.New("session queue capacity exhausted: 64 messages wait for the current turn")
 	}
 	if op.Kind == agent.Answer || op.Kind == agent.Approve {
 		pending, ok := e.state.Pending[op.RequestID]
@@ -447,7 +457,7 @@ func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, 
 		}
 		return r, errors.New("journal unavailable")
 	}
-	e.ops[op.ID] = accepted{fingerprint: fingerprint, receipt: r}
+	e.rememberLocked(op.ID, accepted{fingerprint: fingerprint, receipt: r})
 	if op.Kind == agent.Message {
 		if agent.TurnFault(e.state.Fault) {
 			e.state.Fault = ""
@@ -478,8 +488,10 @@ func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, 
 		r.Error = err.Error()
 	}
 	e.mu.Lock()
-	e.ops[op.ID] = accepted{fingerprint: fingerprint, receipt: r}
-	if errors.Is(err, agent.ErrUnsupported) {
+	e.rememberLocked(op.ID, accepted{fingerprint: fingerprint, receipt: r})
+	if err != nil && (op.Kind == agent.Answer || op.Kind == agent.Approve) {
+		// The answer did not reach the agent (refused, or its write failed):
+		// the request still waits, and the person can answer it again.
 		delete(e.responses, op.RequestID)
 	}
 	if op.Kind == agent.Interrupt && err != nil {
@@ -587,9 +599,7 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 		if r.Delivery == "" {
 			r.Delivery = "accepted"
 		}
-		old := e.ops[op.ID]
-		old.receipt = r
-		e.ops[op.ID] = old
+		e.setReceiptLocked(op.ID, r)
 		// The receipt says it was steered: a client shows the message here,
 		// inside the running turn, where every other delivery starts a turn.
 		status := "steered"
@@ -637,10 +647,53 @@ func (e *Engine) deleteQueuedLocked(at int) (agent.Receipt, error) {
 		return agent.Receipt{}, errors.New("could not record queued message deletion")
 	}
 	delete(e.queuedAt, id)
-	old := e.ops[id]
-	old.receipt = r
-	e.ops[id] = old
+	e.setReceiptLocked(id, r)
 	return r, nil
+}
+
+// opWindow is how many of the latest operations keep their identity: a
+// client retrying one of them gets its first receipt instead of a second
+// delivery. Older ones are forgotten, so a long conversation never runs out
+// of operations; a queued message, or the one whose turn runs, is kept
+// whatever its age.
+var opWindow = 4096
+
+// rememberLocked records operation id's acceptance, then forgets the oldest
+// operations beyond opWindow (in batches, so it stays cheap).
+func (e *Engine) rememberLocked(id string, a accepted) {
+	if _, known := e.ops[id]; !known {
+		e.opOrder = append(e.opOrder, id)
+	}
+	e.ops[id] = a
+	if len(e.opOrder) <= opWindow+opWindow/8 {
+		return
+	}
+	keep := map[string]bool{e.turnOp: true}
+	for _, op := range e.queue {
+		keep[op.ID] = true
+	}
+	excess := len(e.opOrder) - opWindow
+	order := make([]string, 0, opWindow+len(keep))
+	for _, old := range e.opOrder {
+		if excess > 0 && !keep[old] {
+			delete(e.ops, old)
+			excess--
+			continue
+		}
+		order = append(order, old)
+	}
+	e.opOrder = order
+}
+
+// setReceiptLocked replaces operation id's receipt. One already forgotten
+// is remembered again without its fingerprint, as an adopted one is.
+func (e *Engine) setReceiptLocked(id string, r agent.Receipt) {
+	old, known := e.ops[id]
+	if !known {
+		old.adopted = true
+	}
+	old.receipt = r
+	e.rememberLocked(id, old)
 }
 
 // stillQueued reports whether the message id waits in the queue.
@@ -700,18 +753,36 @@ func (e *Engine) dispatch() {
 		e.mu.Unlock()
 		return
 	}
-	old := e.ops[op.ID]
-	old.receipt = r
-	e.ops[op.ID] = old
+	e.setReceiptLocked(op.ID, r)
 	e.appendLocked(map[string]any{"type": "receipt", "receipt": r})
 	if err != nil {
 		e.state.Busy = false
 		// Its turn never starts: a stop that waited for it has nothing to stop.
 		e.stop.undelivered()
-		e.state.Fault = "provider delivery failed; reconcile before continuing"
-		e.observe(agent.Event{Type: "failure", Status: "delivery_failed"})
+		// A fault said meanwhile (the stream from the agent was lost) says
+		// more than this one, and says how to settle it: it stays.
+		if e.state.Fault == "" {
+			e.state.Fault = deliveryFault(err)
+			e.observe(agent.Event{Type: "failure", Status: "delivery_failed"})
+		}
 	}
 	e.mu.Unlock()
+	if err != nil && errors.Is(err, agent.ErrRejected) {
+		// Refused, not lost: what is queued behind it goes next.
+		go e.dispatch()
+	}
+}
+
+// deliveryFault is the fault of a message the provider did not take. A
+// refusal (agent.ErrRejected) leaves nothing in flight: it is a turn's
+// failure, and the next message continues the conversation. Otherwise
+// whether the provider got the message is unknown, and the conversation must
+// be reconciled before anything else is sent.
+func deliveryFault(err error) string {
+	if errors.Is(err, agent.ErrRejected) {
+		return agent.DeliveryRejectedFault
+	}
+	return "provider delivery failed; reconcile before continuing"
 }
 
 func (e *Engine) appendLocked(value any) bool {
@@ -822,7 +893,7 @@ func (e *Engine) receive() {
 		case "profile_switching":
 			for id, pending := range e.state.Pending {
 				e.appendLocked(agent.Event{Type: "request_resolved", RequestID: id, AgentID: pending.AgentID, Status: "profile_switched"})
-				delete(e.state.Pending, id)
+				e.resolvedLocked(id)
 			}
 		case "turn_started":
 			if rootEvent {
@@ -841,7 +912,7 @@ func (e *Engine) receive() {
 			for id, pending := range e.state.Pending {
 				if pending.AgentID == "" || pending.AgentID == "root" {
 					e.appendLocked(agent.Event{Type: "request_resolved", RequestID: id, Status: "turn_ended"})
-					delete(e.state.Pending, id)
+					e.resolvedLocked(id)
 				}
 			}
 		case agent.GrantEvent:
@@ -856,6 +927,9 @@ func (e *Engine) receive() {
 		case "approval", "question":
 			if _, known := e.state.Pending[ev.RequestID]; known && ev.RequestID != "" {
 				// A request redelivered after re-attachment is already recorded.
+				// The agent asks again: an answer the previous Runner took
+				// never reached it, and the person can answer it now.
+				delete(e.responses, ev.RequestID)
 				e.mu.Unlock()
 				e.commit(ev)
 				continue
@@ -870,7 +944,7 @@ func (e *Engine) receive() {
 			if pending, ok := e.state.Pending[ev.RequestID]; ok {
 				ev.AgentID = pending.AgentID
 			}
-			delete(e.state.Pending, ev.RequestID)
+			e.resolvedLocked(ev.RequestID)
 		case "profile_changed":
 			// A new native session: no stop is pending in it.
 			if rootEvent {
@@ -916,7 +990,13 @@ func (e *Engine) receive() {
 		}
 		e.mu.Unlock()
 		if !ok && !(retry && e.recordAgain(ev)) {
+			e.mu.Lock()
+			// Detaching hands the agent to the next Runner; if that fails
+			// after this, detach says the stream is lost (lostStreamLocked).
+			// Any other end of the loop already said why (a capture fault, the
+			// conversation closed).
 			close(e.done)
+			e.mu.Unlock()
 			return
 		}
 		e.commit(ev)
@@ -932,8 +1012,33 @@ func (e *Engine) receive() {
 	}
 }
 
+// resolvedLocked forgets request id: it waits on nobody now, and an answer
+// to it is no longer outstanding. (A provider can reuse a request id in a
+// later process.)
+func (e *Engine) resolvedLocked(id string) {
+	delete(e.state.Pending, id)
+	delete(e.responses, id)
+}
+
+// ErrDetached ends a reader of a conversation this engine handed over: to the
+// next Runner, or to the engine Resume re-attached in its place. The
+// conversation goes on there; the reader reconnects from its cursor.
+var ErrDetached = errors.New("the conversation was handed to another supervisor")
+
+// Events returns the record after cursor. Once the engine is detached its
+// journal is closed (and may be released) under its readers: they end with
+// ErrDetached, never with io.EOF, which says the conversation is over.
 func (e *Engine) Events(ctx context.Context, cursor uint64) (journal.Record, error) {
-	return e.journal.Next(ctx, cursor)
+	r, err := e.journal.Next(ctx, cursor)
+	if err != nil && ctx.Err() == nil && !errors.Is(err, journal.ErrCursor) {
+		e.mu.Lock()
+		detaching := e.detaching
+		e.mu.Unlock()
+		if detaching {
+			return journal.Record{}, fmt.Errorf("%w: %v", ErrDetached, err)
+		}
+	}
+	return r, err
 }
 
 func (e *Engine) Close() error {
@@ -942,7 +1047,7 @@ func (e *Engine) Close() error {
 	e.mu.Unlock()
 	if detached {
 		// The native process belongs to whichever Runner adopts it next.
-		return e.detachErr
+		return nil
 	}
 	e.closeOnce.Do(func() {
 		e.mu.Lock()

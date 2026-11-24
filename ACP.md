@@ -192,11 +192,21 @@ The agent runs in a session host like Claude and Codex
 ([SESSION_HOSTS.md](SESSION_HOSTS.md)). The durable state records the
 in-flight `session/prompt` id and turn, the permission mode, modes, models,
 the readable attachments and pending decline notes. The prompt is written with
-an id recorded *before* it is written (`jsonl.Process.NewID`, `Request`), and
-its reply reaches the reader as an ordinary line with a transport cursor, so a
-turn that ends while no Runner is attached ends correctly in the next one, and
-is never ended twice. A permission request the host redelivers is answered
-with the person's recorded decision when they had answered, else asked again.
+an id recorded *before* it is written: the durable state always holds the id
+the next `session/prompt` will use (`next`, from `jsonl.Process.NewID`), and
+the engine saves it before each delivery. Its reply reaches the reader as an
+ordinary line with a transport cursor (`Request`), so a turn that ends while
+no Runner is attached ends correctly in the next one, and is never ended
+twice; a Runner that died after writing the prompt but before recording it
+running leaves `next`, and the reply to it still ends that turn. A permission
+request the host redelivers is answered with the person's recorded decision
+when they had answered (and recorded resolved, so its card clears), else
+asked again. When the prompt's reply arrives, a permission request still
+open is over: the adapter tells the host to forget it (never redelivered to
+a later Runner) and records `request_resolved`. An answer whose write fails
+leaves the request open, to be answered again. A message sent while a turn
+still runs is refused (`agent.ErrRejected`): a turn failure the next message
+continues.
 A redelivered `terminal/create` is refused with an explicit "unknown whether it
 started" — never run twice; terminal reads and waits are served again (the
 commands outlived the Runner too).

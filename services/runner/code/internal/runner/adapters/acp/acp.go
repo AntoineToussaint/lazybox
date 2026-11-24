@@ -36,6 +36,12 @@ type durable struct {
 	Prompt json.RawMessage `json:"prompt,omitempty"`
 	Turn   string          `json:"turn,omitempty"`
 	Turns  int             `json:"turns,omitempty"`
+	// Next is the id the next session/prompt is written with, reserved and
+	// recorded before it is written: the attachment the engine saves before
+	// each delivery holds it. A Runner that died between writing the prompt
+	// and recording Prompt left Next, and the reply to it ends that turn
+	// (answered) instead of being ignored, which left it running for good.
+	Next json.RawMessage `json:"next,omitempty"`
 	// Briefed: the conversation's context reached the agent (in its system
 	// prompt, or with the first message).
 	Briefed    bool            `json:"briefed,omitempty"`
@@ -264,6 +270,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	}
 	s.mu.Lock()
 	s.ref = ref
+	s.state.Next = s.p.NewID()
 	s.state.Briefed = o.Context == "" || params["systemPrompt"] != nil || o.Resume != ""
 	s.state.Modes, s.state.Models = opened.Modes, opened.Models
 	if present(opened.Config) {
@@ -325,6 +332,10 @@ func attach(ctx context.Context, o agent.Open) (agent.Session, error) {
 	s := newSession(p, life, cancel, o)
 	s.ref = o.Host.Attach.Reference
 	s.state = state
+	if s.state.Next == nil {
+		// Recorded by a Runner before Next was.
+		s.state.Next = p.NewID()
+	}
 	s.title = state.Agent.Title
 	s.responded = o.Host.Attach.Responded
 	go s.read()
@@ -525,7 +536,7 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		s.mu.Lock()
 		if s.state.Prompt != nil {
 			s.mu.Unlock()
-			return r, errors.New("a turn is still running")
+			return r, agent.Rejected(errors.New("a turn is still running"))
 		}
 		context := ""
 		if !s.state.Briefed {
@@ -541,8 +552,11 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		}
 		s.state.Turns++
 		turn := fmt.Sprintf("turn-%d", s.state.Turns)
-		id := s.p.NewID()
-		s.state.Prompt, s.state.Turn = id, turn
+		id := s.state.Next
+		if id == nil {
+			id = s.p.NewID()
+		}
+		s.state.Prompt, s.state.Turn, s.state.Next = id, turn, s.p.NewID()
 		s.state.Briefed, s.state.Notes = true, nil
 		ref := s.ref
 		s.mu.Unlock()

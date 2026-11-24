@@ -1152,6 +1152,8 @@ func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args
 		return "", agent.ErrUnsupported
 	}
 	var p struct {
+		AgentInput bool     `json:"agentInput"`
+		Input      string   `json:"input"`
 		Action     string   `json:"action"`
 		Argv       []string `json:"argv"`
 		ID         string   `json:"id"`
@@ -1174,11 +1176,17 @@ func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args
 	}
 	var value any
 	if p.Action == agent.InteractiveCommandAction {
-		v, err := b.requestTerminalHandoff(ctx, e, p.Argv, p.Cwd, pinnedEnv)
+		v, err := b.requestTerminalHandoff(ctx, e, p.Argv, p.Cwd, pinnedEnv, p.AgentInput)
 		if err != nil {
 			return "", err
 		}
 		value = v
+	} else if p.Action == "interactive_read" || p.Action == "interactive_write" {
+		result, err := b.interactiveTerminalIO(ctx, e, p.Action, p.ID, p.Input, p.Offset)
+		if err != nil {
+			return "", err
+		}
+		value = result
 	} else if p.Action == "verify" {
 		v, err := b.startVerification(ctx, e, reviews.VerificationCheck{Name: p.Name, Member: p.Member, Expected: p.Expected, Regression: p.Regression, Argv: p.Argv})
 		if err != nil {

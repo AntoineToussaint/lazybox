@@ -352,6 +352,12 @@ test('the Queued strip: at once from the transcript, never also in the conversat
  assert.equal((queuedMessages([],fromLazybox)[0].origin as any)?.kind,'review_findings');
 });
 
+test('a resumed execution keeps a held prompt in the queue before the first turn',()=>{
+ const transcript=foldAll([{...q.accepted('held','Original'),status:'queued_for_edit'}]);
+ assert.equal(transcript.pending?.held?.text,'Original');
+ assert.equal(transcript.messages.some(message=>message.operationId==='held'),false);
+});
+
 test('a queued message never delivered is never said; one the closing session dropped neither',()=>{
  const t=foldAll([q.accepted('first','Start the server.'),q.receipt('first'),q.started,q.tool('t1','npm run dev'),q.accepted('later','Then check the logs.'),q.delta('Started on port 3000.')]);
  assert.deepEqual(lines(t),['You: Start the server.','tools t1','Agent: Started on port 3000.']);

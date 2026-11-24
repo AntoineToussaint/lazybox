@@ -23,14 +23,29 @@ const TERMINAL=['done','failed','stopped'];
 const SPAWN_TOOLS=new Set(['Task','Agent']);
 // Tool calls remembered for naming a forked run, and forked runs at once: the newest.
 const CALL_LIMIT=512, FORK_LIMIT=256;
+// A sign-in Claude cannot use, renew or keep. oauth_refresh_store_refused: the
+// macOS Keychain did not take a renewed login (since Claude Code 2.1.329 its
+// coarse error is invalid_request, no longer authentication_failed).
+const AUTH_CODES = ['authentication_failed', 'oauth_org_not_allowed', 'cloud_credential_error', 'gateway_signin_required', 'gateway_session_expired', 'org_config_refused', 'oauth_refresh_store_refused'];
 export function limitState(code: string): string {
-  if (['authentication_failed', 'oauth_org_not_allowed', 'cloud_credential_error', 'gateway_signin_required', 'org_config_refused'].includes(code)) return 'auth_required';
+  if (AUTH_CODES.includes(code)) return 'auth_required';
   if (code === 'rate_limit') return 'throttled';
   if (code === 'billing_error') return 'billing_error';
   if (code === 'credits_required') return 'exhausted';
   if (code === 'context_length_exceeded') return 'context_full';
   if (['error_max_turns', 'error_max_budget_usd'].includes(code)) return 'budget_exceeded';
   return 'unknown';
+}
+/**
+ * Claude Code's typed cause of an API error (`api_error` on an assistant or
+ * result message), when it names a state of its own. The SDK's types leave the
+ * field out, but Claude Code writes it for hosts that key on the cause rather
+ * than the text, and the coarse `error` alone no longer tells a Keychain that
+ * refused a renewed login (`invalid_request`) from a malformed request.
+ */
+export function typedCause(m: object): string | undefined {
+  const cause = (m as { api_error?: unknown }).api_error;
+  return typeof cause === 'string' && cause && limitState(cause) !== 'unknown' ? cause : undefined;
 }
 /** Reduces structured CLI events. Text is never used as a control signal. */
 export class NativeStatus {
@@ -127,10 +142,11 @@ export class NativeStatus {
       emit({type:'context',agentId:child,data:{model:m.message.model,used,capacity:this.capacities.get(m.message.model)}});
       }
       if (m.error) {
-        let state = limitState(m.error);
+        const code = typedCause(m) || m.error;
+        let state = limitState(code);
         if (!child && this.failure === 'exhausted' && (state === 'throttled' || state === 'unknown')) state = this.failure;
         if (!child) this.failure = state;
-        emit({ type: 'failure', agentId: child, status: state, account: { state, reason: m.error }, text: m.error });
+        emit({ type: 'failure', agentId: child, status: state, account: { state, reason: code }, text: code });
       }
       // A sub-agent's prose arrives as whole messages (forwardSubagentText),
       // unless it already streamed. Thinking is never forwarded.
@@ -157,8 +173,8 @@ export class NativeStatus {
       for(const [id,context] of this.contexts)emit({type:'context',agentId:id,data:{...context,capacity:this.capacities.get(context.model)}});
       emit({ type: 'usage', data: { totalCostUSD: m.total_cost_usd, modelUsage: m.modelUsage, cumulative: true } });
       if (m.is_error && !this.failure) {
-        const state = limitState(('startup_failure_reason' in m ? m.startup_failure_reason : '') || m.subtype);
-        emit({ type: 'failure', status: state === 'unknown' ? 'provider_error' : state, account: { state, reason: m.subtype }, text: 'errors' in m ? m.errors.join('\n') : m.result });
+        const state = limitState(('startup_failure_reason' in m ? m.startup_failure_reason : '') || typedCause(m) || m.subtype);
+        emit({ type: 'failure', status: state === 'unknown' ? 'provider_error' : state, account: { state, reason: typedCause(m) || m.subtype }, text: 'errors' in m ? m.errors.join('\n') : m.result });
       }
       if (!child) this.endTurn(emit);
       const turnId = !child && m.stop_reason === 'end_turn' ? this.forkPoint : undefined;

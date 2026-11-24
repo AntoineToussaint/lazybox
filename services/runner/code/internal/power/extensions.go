@@ -586,7 +586,11 @@ var extensionAssets embed.FS
 // Extensions keeps the extension folders scanned, the person's approvals,
 // and the open panels' sessions.
 type Extensions struct {
-	diskReport    diskResult
+	diskReport diskResult
+	// diskScan is the scan under way, if any. It is started and cancelled
+	// under mu, together with the snapshot that allows it, so no scan runs
+	// once its extension is turned off, revoked or removed.
+	diskScan      *diskScanRun
 	dir           string
 	approvalsPath string
 
@@ -648,6 +652,10 @@ func (e *Extensions) reloadLocked() (ExtensionsSnapshot, bool) {
 	e.stamp = stamp
 	e.snap = ExtensionsSnapshot{Dir: e.dir, Extensions: list, Revision: e.snap.Revision + 1}
 	e.revokeStaleLocked()
+	if e.diskScan != nil && !e.snap.diskScanEnabled() {
+		e.diskScan.cancel()
+		e.diskScan = nil
+	}
 	return e.snap, true
 }
 

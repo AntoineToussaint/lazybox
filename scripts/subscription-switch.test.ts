@@ -58,6 +58,9 @@ test('a limit is one plain sentence, never a provider token', () => {
     assert.doesNotMatch(sentence, /^[a-z_]+$|rate_limit|provider_error|exhausted/i, `${status}/${text} → ${sentence}`);
   }
   assert.match(failureSentence('unknown', 'model_not_found'), /Choose another model/);
+  // Claude Code 2.1.329's typed cause for a Keychain that refused a renewed login (the worker's status.ts).
+  assert.match(failureSentence('auth_required', 'oauth_refresh_store_refused'), /Keychain.*sign in again/);
+  assert.match(failureSentence('auth_required', 'gateway_session_expired'), /Sign in again/);
   assert.equal(failureSentence('provider_error', 'The model refused the request.'), 'The model refused the request.', 'provider prose is kept');
   assert.equal(faultSentence('provider delivery failed; reconcile before continuing'), 'A message could not be delivered to the agent. Check the conversation before sending again.');
   assert.match(faultSentence('unknown'), /Send a message to continue/);

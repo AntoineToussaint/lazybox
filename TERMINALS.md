@@ -45,10 +45,15 @@ Choose **Run and take over** to launch the command and focus its terminal, or
 **Decline** to tell the agent to continue without it. This decision is required
 even in full-access mode.
 
-You handle the keyboard for the lifetime of the command. When it exits, the
-tool returns the exit status or signal to the agent so it can continue. The
-tool gives the agent no access to the terminal stream or your input. The
-command runs in the conversation's workspace and environment, with terminal
+For sign-in, **Run and take over** gives you the keyboard. The agent receives
+only the exit status or signal. For ordinary prompts, the agent can request
+`agentInput: true`. **Run with agent input** lets that writable conversation
+read output and send keystrokes until the command exits, including after a
+subscription switch. A shell or interpreter can execute further commands
+through those keystrokes without another approval. Older clients offer the
+private handoff and keep the keyboard with you.
+
+The command runs in the conversation's workspace and environment, with terminal
 variables added and Lazybox credentials stripped. Closing its terminal hangs
 up the command. Undecided requests expire after ten minutes or a Runner
 restart. An approved terminal survives a Runner restart and can be reopened

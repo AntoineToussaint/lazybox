@@ -17,6 +17,12 @@ import { randomUUID } from 'node:crypto';
  * conservatively: an exact command, or a prefix of plain words on a command
  * with no shell operators. Anything else asks again.
  *
+ * Claude's Monitor tool runs a shell command too. Since SDK 0.3.325 Claude
+ * suggests rules for Bash and Monitor only when saving them would allow that
+ * command, so either can ask with no suggestions: the worker then offers the
+ * exact command and its plain prefix, never a tool-wide grant, which would
+ * allow every command.
+ *
  * Every choice for this conversation is a grant the worker holds, never a
  * rule handed to Claude's session: Claude forgets its session rules when its
  * process ends, and has no way to take one back. The worker reports each
@@ -36,11 +42,13 @@ export type Grant = GrantRule & { id: string; label: string };
 type Choice = AlwaysChoice & { updates?: PermissionUpdate[]; grant?: GrantRule };
 
 const SHELL_OPERATORS = /[;&|<>`$()\n\\]/;
+/** Tools whose request runs a command: a grant for every request would allow any command. */
+const COMMAND_TOOLS = new Set(['Bash', 'Monitor', 'mcp__lazybox__command']);
 const words = (command: string) => command.trim().split(/\s+/).filter(Boolean);
 
-/** The command a request runs, as one line, for Bash and the managed command tool. */
+/** The command a request runs, as one line, for Bash, Monitor and the managed command tool. */
 export function commandOf(tool: string, input: Record<string, unknown>): string {
-  if (tool === 'Bash' && typeof input.command === 'string') return input.command.trim();
+  if ((tool === 'Bash' || tool === 'Monitor') && typeof input.command === 'string') return input.command.trim();
   if (tool === 'mcp__lazybox__command' && input.action === 'start' && Array.isArray(input.argv) && input.argv.every(a => typeof a === 'string')) return (input.argv as string[]).join(' ');
   return '';
 }
@@ -71,7 +79,7 @@ function atoms(updates: readonly PermissionUpdate[]): string[] {
 /** Whether a grant the worker holds covers this request; `suggestions` are Claude's for it. */
 export function covers(grant: GrantRule, tool: string, input: Record<string, unknown>, suggestions?: readonly PermissionUpdate[]): boolean {
   if (grant.tool !== tool) return false;
-  if (grant.all) return true;
+  if (grant.all) return !COMMAND_TOOLS.has(tool);
   if (grant.updates) {
     const want = atoms(allowing(suggestions));
     const have = new Set(atoms(grant.updates));
@@ -137,9 +145,9 @@ export function alwaysChoices(tool: string, input: Record<string, unknown>, cont
     out.push({ id: 'command', scope: 'conversation', label: `\`${command.length > 80 ? command.slice(0, 79) + '…' : command}\``, detail: 'This exact command, for the rest of this conversation.', grant: { tool, exact: command } });
     return out;
   }
-  // Bash and the managed command tool without suggestions are covered above;
-  // a tool-wide rule for them would allow every command.
-  if (tool === 'Bash' || tool === 'mcp__lazybox__command') return [];
+  // A command tool without suggestions is covered above (a Monitor of a
+  // WebSocket has no command); a tool-wide rule for it would allow every command.
+  if (COMMAND_TOOLS.has(tool)) return [];
   return [{ id: 'conversation', scope: 'conversation', label: ruleText({ toolName: tool }), detail: 'Claude stops asking for the rest of this conversation, also after it restarts.', grant: { tool, all: true } }];
 }
 
@@ -172,6 +180,13 @@ export function restoreGrant(value: unknown): Grant | undefined {
   if (typeof g.exact === 'string' && g.exact) return { ...base, exact: g.exact };
   if (Array.isArray(g.prefix) && g.prefix.length && g.prefix.every(w => typeof w === 'string' && w)) return { ...base, prefix: g.prefix as string[] };
   if (Array.isArray(g.updates) && g.updates.length && g.updates.every(u => u && typeof u === 'object' && typeof (u as { type?: unknown }).type === 'string')) return { ...base, updates: g.updates as PermissionUpdate[] };
-  if (g.all === true) return { ...base, all: true };
+  // A tool-wide grant for a command tool (one an earlier worker offered for a
+  // Monitor without suggestions) is dropped: the next such request asks.
+  if (g.all === true && !COMMAND_TOOLS.has(g.tool)) return { ...base, all: true };
   return undefined;
+}
+
+export function runnerApprovesTerminalAction(name: string, action: unknown): boolean {
+  return name === 'mcp__lazybox__command' &&
+    (action === 'interactive' || action === 'interactive_read' || action === 'interactive_write');
 }

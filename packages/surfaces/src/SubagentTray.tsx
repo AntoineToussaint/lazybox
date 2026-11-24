@@ -36,12 +36,18 @@ function work(view: SubagentView, index: Subagents) {
   // What the person cleared stays in the transcript; the list and its counts leave it out.
   const shown = (agent: Subagent) => !hiddenFromWork(agent, view.cleared, status, index.byId);
   const fullTree = newestFirstTree(index), allCommands = backgroundCommands(index, view.runner);
-  const tree = fullTree.filter(node => shown(node.agent)), commands = allCommands.filter(shown);
+  const depths = new Map<string, number>();
+  const tree = fullTree.filter(({ agent }) => activeSubagent(status(agent))).map(({ agent }) => {
+    const depth = (depths.get(agent.parentId) ?? -1) + 1;
+    depths.set(agent.id, depth);
+    return { agent, depth };
+  });
+  const commands = allCommands.filter(shown);
   const agentsRunning = subagentTree(index).filter(({ agent }) => activeSubagent(status(agent)));
   const commandsRunning = commands.filter(agent => activeSubagent(status(agent)));
   const counts = workCounts(tree.map(node => node.agent), commands, status);
-  const finished = finishedWork([...tree.map(node => node.agent), ...commands], status);
-  return { tree, commands, agentsRunning, commandsRunning, counts, finished, total: fullTree.length + allCommands.length };
+  const finished = finishedWork(commands, status);
+  return { tree, commands, agentsRunning, commandsRunning, counts, finished, total: tree.length + allCommands.length };
 }
 
 /** How many sub-agents and background commands are at work now. */
@@ -57,11 +63,11 @@ export function useBackgroundRunning(): number {
 /** Takes the person to an item: a sub-agent's card, or a background command's panel. */
 const show = (view: SubagentView, agent: Subagent) => agent.kind === 'command' ? view.open(agent.id) : view.reveal(agent.id);
 
-/** Every sub-agent, nested under who started it, and every background command. */
+/** Active sub-agents and background commands in this conversation. */
 function WorkList({ view, index, now, placement, onClose }: { view: SubagentView; index: Subagents; now: number; placement: 'above' | 'below'; onClose(focus?: boolean): void }) {
   const list = useRef<HTMLDivElement>(null);
   const { tree, commands, counts, finished } = work(view, index);
-  const [all, setAll] = useState({ agents: false, commands: false });
+  const [allCommands, setAllCommands] = useState(false);
   const undo = useRef<HTMLButtonElement>(null);
   // An Undo belongs to the list it was offered in.
   useEffect(() => () => view.dismissUndo(), [view]);
@@ -91,21 +97,16 @@ function WorkList({ view, index, now, placement, onClose }: { view: SubagentView
     </li>;
   };
   const notable = (agent: Subagent) => { const status = statusOf(view, agent); return activeSubagent(status) || status === 'failed'; };
-  // Sub-agents fold by their top-level one, with everything it spawned.
-  const groups: { agent: Subagent; depth: number }[][] = [];
-  // One whose parent was cleared starts a group of its own.
-  for (const node of tree) { const group = groups.at(-1); if (node.depth === 0 || !group?.some(member => member.agent.id === node.agent.parentId)) groups.push([node]); else group.push(node); }
-  const agentList = all.agents ? { shown: groups, earlier: 0 } : recentWork(groups, group => group.some(node => notable(node.agent)), RECENT);
-  const commandList = all.commands ? { shown: commands, earlier: 0 } : recentWork(commands, notable, RECENT);
+  const commandList = allCommands ? { shown: commands, earlier: 0 } : recentWork(commands, notable, RECENT);
   const heading = (label: string, total: number, running: number, failed: number) => <h4>
     <span>{label}</span><span className="subagent-tree-count">{total}</span>
     {running > 0 && <span className="subagent-tree-state" data-state="running">{running} running</span>}
     {failed > 0 && <span className="subagent-tree-state" data-state="failed">{failed} failed</span>}
   </h4>;
   // Showing the earlier ones keeps the keyboard where it was: on the first of them.
-  const earlier = (n: number, which: 'agents' | 'commands') => n > 0 && <li className="subagent-tree-more"><button type="button" className="subagent-tree-row subagent-tree-earlier" onClick={event => {
+  const earlier = (n: number) => n > 0 && <li className="subagent-tree-more"><button type="button" className="subagent-tree-row subagent-tree-earlier" onClick={event => {
     const section = event.currentTarget.closest('section'), shown = new Set([...section?.querySelectorAll<HTMLElement>('li[data-id]') || []].map(li => li.dataset.id));
-    setAll(value => ({ ...value, [which]: true }));
+    setAllCommands(true);
     requestAnimationFrame(() => ([...section?.querySelectorAll<HTMLElement>('li[data-id]') || []].find(li => !shown.has(li.dataset.id))?.querySelector<HTMLElement>('.subagent-tree-row') || list.current?.querySelector<HTMLElement>('.subagent-tree-row'))?.focus());
   }}>
     <Icon name="expand" size={11}/><span>Show {n} earlier</span>
@@ -127,8 +128,8 @@ function WorkList({ view, index, now, placement, onClose }: { view: SubagentView
     </p>}
     {index.truncated && <p className="subagent-tree-truncated" role="note">Earlier finished work is no longer listed: a conversation keeps its latest {SUBAGENT_LIMIT} sub-agents and commands.</p>}
     <div className="subagent-tree-body">
-      {tree.length > 0 && <section aria-label="Sub-agents">{heading('Sub-agents', counts.agents, counts.agentsRunning, counts.agentsFailed)}<ul>{agentList.shown.flat().map(({ agent, depth }) => row(agent, depth))}{earlier(agentList.earlier, 'agents')}</ul></section>}
-      {commands.length > 0 && <section aria-label="Background commands">{heading('Commands', counts.commands, counts.commandsRunning, counts.commandsFailed)}<ul>{commandList.shown.map(agent => row(agent, 0))}{earlier(commandList.earlier, 'commands')}</ul></section>}
+      {tree.length > 0 && <section aria-label="Sub-agents">{heading('Sub-agents', counts.agents, counts.agentsRunning, counts.agentsFailed)}<ul>{tree.map(({ agent, depth }) => row(agent, depth))}</ul></section>}
+      {commands.length > 0 && <section aria-label="Background commands">{heading('Commands', counts.commands, counts.commandsRunning, counts.commandsFailed)}<ul>{commandList.shown.map(agent => row(agent, 0))}{earlier(commandList.earlier)}</ul></section>}
       {!tree.length && !commands.length && <p className="subagent-empty">{view.cleared.size ? 'Nothing running. Finished work is cleared from this list; the conversation keeps it.' : 'Nothing has run in the background yet.'}</p>}
     </div>
   </div>;
@@ -138,7 +139,7 @@ function WorkList({ view, index, now, placement, onClose }: { view: SubagentView
  * What runs in the background, beside the composer: one chip each for the
  * sub-agents and background commands at work, side by side, with state and
  * how long it has run. A sub-agent's chip takes you to its card; a command's
- * opens its output. The list shows everything, sub-agents as a tree.
+ * opens its output.
  */
 export function SubagentTray({ live, rootBusy, fallback = null }: { live: LiveStatus; rootBusy: boolean; /** Shown when nothing runs in the background. */ fallback?: ReactNode }) {
   const view = useSubagentView();
@@ -151,14 +152,15 @@ export function SubagentTray({ live, rootBusy, fallback = null }: { live: LiveSt
   const now = useNow(busy);
   if (!view || !state || !busy) return <>{fallback}</>;
   const { agentsRunning, commandsRunning, counts } = state;
-  // Chips are for the sub-agents the main agent started; a nested one shows on its top-level chip.
-  const top = agentsRunning.filter(({ agent }) => agent.parentId === 'root' || !index.byId[agent.parentId]);
-  const nestedRunning = (agent: Subagent): number => agent.children.reduce((sum, id) => { const child = index.byId[id]; return child ? sum + (activeSubagent(statusOf(view, child)) ? 1 : 0) + nestedRunning(child) : sum; }, 0);
+  // An active child gets its own chip once its parent finishes.
+  const activeIds = new Set(agentsRunning.map(({ agent }) => agent.id));
+  const top = agentsRunning.filter(({ agent }) => !activeIds.has(agent.parentId));
+  const nestedRunning = (agent: Subagent): number => agent.children.reduce((sum, id) => { const child = index.byId[id]; return child && activeIds.has(id) ? sum + 1 + nestedRunning(child) : sum; }, 0);
   return <div className="subagent-tray" role="group" aria-label="Background work">
     {rootBusy && <span className="subagent-tray-root" aria-hidden="true"><LiveIndicator tone={live.tone}/>{live.text}</span>}
     <span className="subagent-tray-count" role="status">{runningSummary(counts)}</span>
     <div className="subagent-chips" role="toolbar" aria-label="Running in the background" onKeyDown={event => roving(event, '.subagent-chip', ['ArrowLeft', 'ArrowRight'])}>
-      {(top.length ? top : agentsRunning).map(({ agent }) => {
+      {top.map(({ agent }) => {
         const status = statusOf(view, agent), elapsed = agentElapsed(agent, now), action = currentAction({ ...agent, status }), nested = nestedRunning(agent), title = subagentTitle(agent, view);
         return <span key={agent.id} className="subagent-chip-item">
           <button type="button" className="subagent-chip" data-status={status}
@@ -188,7 +190,7 @@ export function SubagentTray({ live, rootBusy, fallback = null }: { live: LiveSt
         </span>;
       })}
     </div>
-    <button ref={trigger} type="button" className="subagent-tray-all" data-work-trigger aria-haspopup="dialog" aria-expanded={open} aria-label={`All background work: ${workSummary(counts)}`} title={`Every sub-agent and background command of this conversation, running or ended: ${workSummary(counts)}`} onClick={() => setOpen(value => !value)}>
+    <button ref={trigger} type="button" className="subagent-tray-all" data-work-trigger aria-haspopup="dialog" aria-expanded={open} aria-label={`All background work: ${workSummary(counts)}`} title={`Active sub-agents and background commands: ${workSummary(counts)}`} onClick={() => setOpen(value => !value)}>
       <Icon name="subagent" size={13}/><span>All<span className="subagent-tray-noun"> · {workTotals(counts)}</span></span>
     </button>
     {open && <WorkList view={view} index={index} now={now} placement="above" onClose={focus => { setOpen(false); if (focus) trigger.current?.focus(); }}/>}
@@ -196,8 +198,7 @@ export function SubagentTray({ live, rootBusy, fallback = null }: { live: LiveSt
 }
 
 /**
- * In the chat header, the way to everything that ran in the background, also
- * once nothing runs any more: hidden until something has.
+ * Opens active sub-agents and command history from the chat header.
  */
 export function BackgroundWorkButton() {
   const view = useSubagentView();

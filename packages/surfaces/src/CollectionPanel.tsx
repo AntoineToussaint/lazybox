@@ -428,6 +428,11 @@ function WorkspaceList({
               {rows.length > 1 && !folded.includes(collection.id) && (
                 <div className="workspace-conversations">
                   <ConversationList
+                    order={collection.conversationOrder}
+                    arrange={async conversationIds => {
+                      await api.arrangeConversations({ collectionId: collection.id, conversationIds }, { timeoutMs: 10000 });
+                      refresh();
+                    }}
                     sessions={rows}
                     compact
                     collectionId={collection.id}

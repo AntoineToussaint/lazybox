@@ -73,6 +73,7 @@ export type ShellCommand = {
   onTyped?(how: ShellTyped): void;
   /** The command line the person or Run started there ended, with its status, when the shell says. */
   onEnd?(status: number): void;
+  onLost?(): void;
 };
 
 /**
@@ -84,7 +85,7 @@ async function typeAndWatch(api: RunnerClient, workspaceId: string, terminalId: 
   taken.add(terminalId);
   try {
     const status = reused ? await statusOf(api, workspaceId, terminalId).catch(() => undefined) : await whenReady(api, workspaceId, terminalId);
-    if (!status || status.done) return;
+    if (!status || status.done) { how.onLost?.(); return; }
     const base = status.commandEnds;
     const run = how.mode !== 'paste' && runsAtOnce(command);
     await api.writeTerminal({ terminalId, data: encoder.encode(shellInput(command, run, reused)) });
@@ -97,10 +98,11 @@ async function typeAndWatch(api: RunnerClient, workspaceId: string, terminalId: 
       const elapsed = Date.now() - started;
       await pause(elapsed < 10_000 ? 250 : elapsed < 10 * 60_000 ? 1000 : 10_000);
       const now = await statusOf(api, workspaceId, terminalId).catch(() => undefined);
-      if (!now || now.done) return;
+      if (!now || now.done) { how.onLost?.(); return; }
       if (now.commandEnds > base) { how.onEnd?.(now.lastCommandStatus); return; }
     }
-  } finally { taken.delete(terminalId); }
+    how.onLost?.();
+  } catch { how.onLost?.(); } finally { taken.delete(terminalId); }
 }
 
 /**

@@ -31,8 +31,12 @@ it did.
   Steer, and the strip says so. After Send
   now the conversation shows one quiet line, *Stopped to send your message*,
   and your message goes as soon as the step stops, the other queued messages
-  in order after it. A message never waits while the agent is idle, even
-  after Lazybox restarted.
+  in order after it.
+  **Edit** pauses delivery before the editor opens. The message keeps its place
+  and attachments, even if the current turn ends. **Save** releases the
+  revised message. **Cancel edit** releases the original. If you reload the
+  tab while editing, choose **Resume edit** to continue.
+
   A queued message is in one place at a time: above the message box while it
   waits, then in the conversation where the agent got it, starting its own
   turn after the one it waited for (and after *Stopped to send your
@@ -364,14 +368,12 @@ details.
 
 Beside the message box, one chip per running sub-agent or background command
 takes you to it; **All**, and the background-work button in the chat header,
-list everything that ran. Each kind is counted apart (*2 sub-agents · 17
-commands · 0 running · 1 failed*), newest first, sub-agents as a tree under
-who started them; older finished items fold behind **Show 12 earlier**, but
-anything running or failed always shows. **Clear finished** hides what ended
-from that list for this conversation (*Cleared 12 · Undo*), also after you
-reopen or resume it; the conversation keeps it, and running work always
-shows. A failure you looked at stays dismissed the same way. A conversation
-keeps its latest 256 sub-agents and commands: past that, the oldest finished
+list active sub-agents and background commands. Starting, running and
+waiting sub-agents count as active. Finished sub-agents remain in the
+conversation. Older finished commands fold behind **Show earlier**.
+**Clear finished** hides finished commands from the list for this
+conversation, with an option to undo. A failure you looked at stays
+dismissed. A conversation keeps its latest 256 sub-agents and commands: past that, the oldest finished
 ones leave, and the list says so. A background command (Claude's
 `run_in_background`) is not a sub-agent: it reads as what the agent said it
 does (*Generate the protobuf code*), whole, with what runs beneath it, and

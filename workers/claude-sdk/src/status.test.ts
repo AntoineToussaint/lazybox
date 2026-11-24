@@ -3,6 +3,22 @@ import assert from 'node:assert/strict';
 import { NativeStatus, limitState } from './status.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 const message = (value: object) => value as SDKMessage;
+test('a completed root turn forks at its last assistant UUID and clears it before the next turn', () => {
+  const status = new NativeStatus();
+  const assistant = (uuid: string, parent_tool_use_id?: string) => status.normalize(message({
+    type: 'assistant', uuid, parent_tool_use_id, message: { content: [], model: 'fixture' },
+  }));
+  const end = (stop_reason: string) => status.normalize(message({ type: 'result', uuid: 'result-id', subtype: 'success', stop_reason }))
+    .find(event => event.type === 'turn_ended');
+  assistant('earlier');
+  assistant('last-root');
+  assistant('child-only', 'agent-tool');
+  assert.equal(end('end_turn')?.turnId, 'last-root');
+  assert.equal(end('end_turn')?.turnId, undefined);
+  assistant('unfinished');
+  assert.equal(end('tool_use')?.turnId, undefined);
+});
+
 test('child output and task completion cannot replace the main conversation', () => {
   const status = new NativeStatus();
   status.normalize(message({ type: 'system', subtype: 'init', session_id: 'root-native' }));
@@ -218,18 +234,37 @@ test('late progress and start notifications cannot restart a completed task', ()
   assert.equal(status.normalize(message({ ...task, subtype: 'task_started', run_id: '003', description: 'Retry' }))[0].status, 'running');
 });
 
-test('a completed root turn forks at its last assistant UUID and clears it before the next turn', () => {
+test('a sign-in Claude cannot keep is auth required, a Keychain refusal included, never a provider error', () => {
+  // Claude Code 2.1.329 (SDK 0.3.329): a Keychain that refuses a renewed login
+  // says invalid_request (no HTTP status), with the typed cause in api_error.
+  const keychain = new NativeStatus();
+  const failure = keychain.normalize(message({ type: 'assistant', error: 'invalid_request', api_error: 'oauth_refresh_store_refused', is_api_error_message: true, parent_tool_use_id: null, message: { id: 'm', model: '<synthetic>', content: [{ type: 'text', text: "Could not refresh your login: can't save to the Keychain" }] } })).find(e => e.type === 'failure');
+  assert.equal(failure?.status, 'auth_required');
+  assert.deepEqual(failure?.account, { state: 'auth_required', reason: 'oauth_refresh_store_refused' });
+  assert.equal(failure?.text, 'oauth_refresh_store_refused', 'the typed cause, which the client words; never the coarse invalid_request');
+  // The result that ends the turn adds no second, generic failure.
+  const ended = keychain.normalize(message({ type: 'result', subtype: 'success', is_error: true, api_error_status: null, api_error: 'oauth_refresh_store_refused', result: "Could not refresh your login: can't save to the Keychain", uuid: 'r' }));
+  assert.equal(ended.filter(e => e.type === 'failure').length, 0);
+  // A result alone (no assistant error first) still says auth required.
+  const alone = new NativeStatus().normalize(message({ type: 'result', subtype: 'success', is_error: true, api_error_status: null, api_error: 'oauth_refresh_store_refused', result: 'x', uuid: 'r' })).find(e => e.type === 'failure');
+  assert.equal(alone?.status, 'auth_required'); assert.equal(alone?.account?.reason, 'oauth_refresh_store_refused');
+  // An expired or missing sign-in, as before.
+  for (const [error, cause] of [['authentication_failed', undefined], ['invalid_request', 'gateway_signin_required'], ['invalid_request', 'gateway_session_expired']]) {
+    const event = new NativeStatus().normalize(message({ type: 'assistant', error, ...(cause ? { api_error: cause } : {}), message: { id: 'm', model: 'm', content: [] } })).find(e => e.type === 'failure');
+    assert.equal(event?.status, 'auth_required', `${error}/${cause}`);
+  }
+  assert.equal(new NativeStatus().normalize(message({ type: 'auth_status', isAuthenticating: false, output: [], error: 'Login expired' })).find(e => e.type === 'failure')?.status, 'auth_required');
+  // A cause with no state of its own leaves the coarse error in charge: a malformed request is not a sign-in.
+  const media = new NativeStatus().normalize(message({ type: 'assistant', error: 'invalid_request', api_error: 'media_removed', message: { id: 'm', model: 'm', content: [] } })).find(e => e.type === 'failure');
+  assert.equal(media?.status, 'unknown'); assert.equal(media?.text, 'invalid_request');
+  assert.equal(new NativeStatus().normalize(message({ type: 'assistant', error: 'invalid_request', message: { id: 'm', model: 'm', content: [] } })).find(e => e.type === 'failure')?.status, 'unknown');
+});
+
+test('a hook heartbeat (tool_progress naming no tool call) reports nothing', () => {
+  // SDK 0.3.323: a turn waiting on a long hook sends tool_progress heartbeats whose
+  // tool_use_id begins hook- and whose parent_tool_use_id may name no tool call.
   const status = new NativeStatus();
-  const assistant = (uuid: string, parent_tool_use_id?: string) => status.normalize(message({
-    type: 'assistant', uuid, parent_tool_use_id, message: { content: [], model: 'fixture' },
-  }));
-  const end = (stop_reason: string) => status.normalize(message({ type: 'result', uuid: 'result-id', subtype: 'success', stop_reason }))
-    .find(event => event.type === 'turn_ended');
-  assistant('earlier');
-  assistant('last-root');
-  assistant('child-only', 'agent-tool');
-  assert.equal(end('end_turn')?.turnId, 'last-root');
-  assert.equal(end('end_turn')?.turnId, undefined);
-  assistant('unfinished');
-  assert.equal(end('tool_use')?.turnId, undefined);
+  status.normalize(message({ type: 'system', subtype: 'init', session_id: 'root' }));
+  assert.deepEqual(status.normalize(message({ type: 'tool_progress', tool_use_id: 'hook-1', tool_name: 'PreToolUse', parent_tool_use_id: 'hook-parent', elapsed_time_seconds: 5, heartbeat: true })), []);
+  assert.deepEqual(status.normalize(message({ type: 'tool_progress', tool_use_id: 'hook-2', tool_name: 'Stop', parent_tool_use_id: null, elapsed_time_seconds: 5, heartbeat: true })), []);
 });

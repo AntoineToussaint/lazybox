@@ -28,3 +28,8 @@
   .queued-text{flex:1 1 100%}
   .queued-actions{margin-left:auto;max-width:100%;flex-wrap:wrap}
 }
+
+.queued-edit { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.queued-edit label { width: 100%; }
+.queued-edit textarea { display: block; width: 100%; min-height: 4em; box-sizing: border-box; font: inherit; }
+.queued-message:has(.queued-edit textarea) .queued-actions { display: none; }

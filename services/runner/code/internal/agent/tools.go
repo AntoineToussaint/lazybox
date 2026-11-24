@@ -19,7 +19,7 @@ func IsInteractiveCommand(name string, args json.RawMessage) bool {
 	var call struct {
 		Action string `json:"action"`
 	}
-	return json.Unmarshal(args, &call) == nil && call.Action == InteractiveCommandAction
+	return json.Unmarshal(args, &call) == nil && (call.Action == InteractiveCommandAction || call.Action == "interactive_read" || call.Action == "interactive_write")
 }
 
 // SettingsReadTool and SettingsUpdateTool are the Runner tools through which the
@@ -71,5 +71,5 @@ func ToolReplaySafe(name string, args json.RawMessage) bool {
 	if json.Unmarshal(args, &call) != nil {
 		return false
 	}
-	return call.Action == "read" || call.Action == "tail" || call.Action == "wait" || call.Action == "actions"
+	return call.Action == "interactive_read" || call.Action == "read" || call.Action == "tail" || call.Action == "wait" || call.Action == "actions"
 }

@@ -282,3 +282,55 @@ func TestDelegateQueuedRequestsChildWithoutInterrupt(t *testing.T) {
 		t.Fatalf("duplicate request: %v", err)
 	}
 }
+
+func TestQueuedEditHoldsDeliveryUntilReleased(t *testing.T) {
+	for _, action := range []string{"save_edit", "cancel_edit"} {
+		t.Run(action, func(t *testing.T) {
+			e, s := bench(t, true)
+			ctx := contextFor(t)
+			original := strings.Repeat("original message ", 40)
+			for _, op := range []agent.Operation{{ID: "current", Kind: agent.Message, Text: "current"}, {ID: "queued", Kind: agent.Message, Text: original}, {ID: "later", Kind: agent.Message, Text: "later"}} {
+				if _, err := e.Apply(ctx, op); err != nil {
+					t.Fatal(err)
+				}
+				if op.ID == "current" {
+					applied(t, s)
+				}
+			}
+			for range 2 {
+				text, err := e.EditQueued("queued", "edit", "editor", "")
+				if err != nil || text != original {
+					t.Fatalf("begin edit: %q, %v", text, err)
+				}
+			}
+			for _, how := range []string{DeliverNow, DeliverSteer, DelegateQueued} {
+				if _, err := e.DeliverQueued(ctx, "queued", how); err == nil {
+					t.Fatalf("delivered held message with %s", how)
+				}
+			}
+			if _, err := e.EditQueued("queued", "save_edit", "other", "wrong"); err == nil {
+				t.Fatal("another editor released the message")
+			}
+			s.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+			eventually(t, "turn ends", func() bool { return !e.Snapshot().Busy })
+			e.dispatch()
+			if q := e.Snapshot().QueuedMessages; len(q) != 2 || !q[0].Editing {
+				t.Fatalf("queue while editing: %+v", q)
+			}
+			if _, err := e.EditQueued("queued", action, "editor", "revised"); err != nil {
+				t.Fatal(err)
+			}
+			want := original
+			if action == "save_edit" {
+				want = "revised"
+			}
+			if op := applied(t, s); op.ID != "queued" || op.Text != want {
+				t.Fatalf("wrong delivery: %+v", op)
+			}
+			s.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+			if op := applied(t, s); op.ID != "later" {
+				t.Fatalf("lost queue order: %+v", op)
+			}
+		})
+	}
+}

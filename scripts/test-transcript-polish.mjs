@@ -133,15 +133,14 @@ try{
 
  // ── Background work: each kind counted apart, newest first, older finished ones folded.
  const workButton=chat.locator('.chat-heading').getByRole('button',{name:/^Background work:/});
- await expect(workButton).toHaveAccessibleName('Background work: 2 sub-agents · 17 commands · 0 running · 2 failed');
- await expect(workButton).toHaveText('2 sub-agents · 17 commands');
+ await expect(workButton).toHaveAccessibleName('Background work: 17 commands · 0 running · 1 failed');
+ await expect(workButton).toHaveText('17 commands');
  await workButton.click();
  const list=page.getByRole('dialog',{name:'Background work',exact:true});
- await expect(list.locator('.subagent-tree-summary')).toHaveText('2 sub-agents · 17 commands0 running2 failed');
+ await expect(list.locator('.subagent-tree-summary')).toHaveText('17 commands0 running1 failed');
  const agentsSection=list.getByRole('region',{name:'Sub-agents'}),commandsSection=list.getByRole('region',{name:'Background commands'});
- await expect(agentsSection.locator('h4')).toHaveText('Sub-agents21 failed');
+ await expect(agentsSection).toHaveCount(0);
  await expect(commandsSection.locator('h4')).toHaveText('Commands171 failed');
- await expect(agentsSection.locator('li .subagent-tree-name').first(),'newest first').toContainText('Audit the token refresh path for races');
  const rows=commandsSection.locator('li[data-kind=command]');
  await expect(rows).toHaveCount(6,{timeout:5000});
  await expect(rows.first().locator('.subagent-tree-name'),'newest first').toHaveText('Run the load test');

@@ -104,8 +104,8 @@ func (p Probe) GoPlatform() string {
 	return goos + "-" + arch
 }
 
-// RunProbe runs the probe script on the host.
-func RunProbe(ctx context.Context, r SSHRoute) (Probe, error) {
+// RunProbe runs the probe script on the host (an ssh host, a Kubernetes container).
+func RunProbe(ctx context.Context, r OwnerRoute) (Probe, error) {
 	out, err := r.Run(ctx, strings.NewReader(probeScript), "sh", "-s")
 	if err != nil {
 		return Probe{}, err
@@ -113,7 +113,7 @@ func RunProbe(ctx context.Context, r SSHRoute) (Probe, error) {
 	var p Probe
 	line := lastLine(string(out))
 	if err = json.Unmarshal([]byte(line), &p); err != nil || p.OS == "" {
-		return Probe{}, fmt.Errorf("%s answered the probe with something else than Lazybox expects: %q", r.Host, truncate(string(out), 200))
+		return Probe{}, fmt.Errorf("%s answered the probe with something else than Lazybox expects: %q", r.Describe().Host, truncate(string(out), 200))
 	}
 	return p, nil
 }

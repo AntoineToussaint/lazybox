@@ -43,6 +43,12 @@ you are reaching it under another name or address.
 
 ## Power verbs
 
+A verb's flags may come before or after its other arguments (`send review
+--steer text` as well as `send review text --steer`). A `--` ends the flags:
+every word after it is an argument, even one that looks like a flag, so
+`send review -- try -runner=x` sends that text and never changes the Runner.
+Put `--` before text or an ID that may begin with `-`.
+
 | Verb | What it does |
 |---|---|
 | `ls [--all]` | Workspaces, their conversations and agents with live state (needs input, failed, working, review, idle, ended), sub-agents still running. `--all` lists every registered Runner, grouped by Runner. Inside an agent: its own commands instead, running first (a server in the background with its URL), then the last five that ended. |

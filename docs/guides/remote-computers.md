@@ -92,8 +92,9 @@ Lazybox never copies a sign-in, token or key from this Mac to it.
 - **Its own key per computer.** This Mac has a key of its own (in
   `~/.config/lazybox/keys/`, readable only by you). That computer keeps the
   keys it accepts in its owners list; `lazybox link owners ls` there shows
-  them, and `lazybox link owners revoke <key>` cuts one off: its links end
-  within a second.
+  them, and `lazybox link owners revoke -- <key>` cuts one off: its links end
+  within a second. (A key ID may begin with `-`; the `--` keeps it from being
+  read as an option.)
 - **The other Runner's key is pinned.** If the name ever points at another
   computer, or the Runner was replaced, Lazybox says *This is not build-box's
   Runner* and sends nothing.

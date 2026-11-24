@@ -804,7 +804,7 @@ func (c *cli) remoteRemove(args []string) error {
 		}
 		cancel()
 		if err != nil {
-			result["problem"] = "this computer's key is still enrolled on " + r.Host + ": " + err.Error() + ". Revoke it there with `lazybox link owners revoke " + r.KeyID + "`."
+			result["problem"] = stillEnrolled(r.Host, r.KeyID, err)
 		} else {
 			result["revoked"] = true
 		}
@@ -822,6 +822,13 @@ func (c *cli) remoteRemove(args []string) error {
 		c.out("  Revoked this computer's key on %s.\n", r.Host)
 	}
 	return nil
+}
+
+// stillEnrolled says the key could not be revoked on the host, and the command
+// that revokes it there. A key ID is base64url and may begin with "-", so the
+// command puts it after `--`, where it is never read as a flag.
+func stillEnrolled(host, keyID string, err error) string {
+	return "this computer's key is still enrolled on " + host + ": " + err.Error() + ". Revoke it there with `lazybox link owners revoke -- " + keyID + "`."
 }
 
 func (c *cli) remoteHosts(args []string) error {

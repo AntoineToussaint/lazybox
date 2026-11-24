@@ -183,7 +183,11 @@ Login shell       session leader, the terminal as its controlling terminal
   scripts and `bash -c` get `BASH_ENV`. `command -v lazybox` shows which one
   runs.
 - `OpenTerminal` takes a request key: a retried request returns the shell it
-  already started instead of starting a second one.
+  already started instead of starting a second one. A request that arrives
+  while the first is still starting waits for it and gets the same terminal.
+  The key names the shell while it runs: once the shell has exited (or the
+  terminal is discarded) the key is free, and a request with it starts a new
+  shell.
 - In an interactive zsh the integration marks, after the person's own
   startup files: the end of each command line with its status (OSC
   133;D;<status>, first among the precmd hooks), the start of one (OSC 133;C,

@@ -200,7 +200,7 @@ These work while the panel or card has focus, never while you type in a text fie
 | Where | Keys |
 | --- | --- |
 | Message box | `Enter` sends · `Shift+Enter` new line · `↑` in an empty box recalls your sent messages, `↓` walks back · `⌥↑` / `⌥↓` jump between your prompts in the conversation |
-| Approval card | `y` allow once · `a` always allow (at the first scope offered) · `n` deny, with an optional reason · `1`–`9` pick a row |
+| Approval card | `y` allow once · `a` always allow (at the first scope offered) · `n` deny, with an optional reason · `1`–`9` pick a row · `↑` `↓` move between rows · a *default to no* request: only `n` (allowing takes a click, or `↓` and `Enter`) |
 | Question card | `1`–`9`, `↑` `↓`, `Space` and `Enter` pick options · `⌘↵` sends the answers |
 | Sub-agent card, chip or Background work row | `Delete` or `⌫` stops a running sub-agent or background command (the main agent continues) · `Space` opens a card in a floating panel · `Esc` closes its steps |
 | Changes | `n` / `p` next / previous hunk · `Shift+N` / `Shift+P` next / previous file · `v` marks the file viewed and moves on · `s` switches unified / split |

@@ -213,8 +213,15 @@ folder to read or write), the card names exactly what: **Allow once** grants
 it for this turn, **Always allow** for the rest of the conversation, and
 nothing beyond what it asked.
 
-Keys work while the chat has focus, never while you are typing. With two
-conversations side by side, a key pressed on the page answers the one you
+When the agent marks a request as one to refuse unless you are sure (Claude's
+*default to no*), no single key allows it: its allow rows have no key and show
+none, and only `n` (deny) works. Allow it with a click, or `↓` to the row and
+`Enter`.
+
+Keys work while the chat has focus, never while you are typing. A card that
+appears takes the focus itself, not one of its buttons, so a `Space` or
+`Enter` meant for the conversation (to page down, say) never answers it. With
+two conversations side by side, a key pressed on the page answers the one you
 last clicked or typed in, never both.
 
 What you always allow for a Claude conversation stays with the conversation:

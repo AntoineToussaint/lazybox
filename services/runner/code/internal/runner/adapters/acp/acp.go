@@ -36,6 +36,16 @@ type durable struct {
 	Prompt json.RawMessage `json:"prompt,omitempty"`
 	Turn   string          `json:"turn,omitempty"`
 	Turns  int             `json:"turns,omitempty"`
+	// Next is the id the next session/prompt is written with, reserved and
+	// recorded before it is written: the attachment the engine saves before
+	// each delivery holds it.
+	Next json.RawMessage `json:"next,omitempty"`
+	// Orphans are ids a previous Runner reserved and may have written a
+	// prompt with before it died, without recording it running (attach moves
+	// an unrecorded Next here). New prompts never reuse them; a reply to one
+	// still ends the turn it started (answered), where it used to be ignored
+	// and the conversation stayed busy for good. Bounded: maxOrphans.
+	Orphans []json.RawMessage `json:"orphans,omitempty"`
 	// Briefed: the conversation's context reached the agent (in its system
 	// prompt, or with the first message).
 	Briefed    bool            `json:"briefed,omitempty"`
@@ -55,6 +65,11 @@ type durable struct {
 	// Title is the session's title as the agent last reported it.
 	Title string `json:"title,omitempty"`
 }
+
+// maxOrphans bounds durable.Orphans: each is a prompt a Runner may have
+// written just before it died, and a conversation idle across many restarts
+// leaves one per restart that was never written.
+const maxOrphans = 8
 
 // errNoTitle: the agent has not named the conversation yet; a later turn
 // may (session_info_update).
@@ -264,6 +279,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	}
 	s.mu.Lock()
 	s.ref = ref
+	s.state.Next = s.p.NewID()
 	s.state.Briefed = o.Context == "" || params["systemPrompt"] != nil || o.Resume != ""
 	s.state.Modes, s.state.Models = opened.Modes, opened.Models
 	if present(opened.Config) {
@@ -325,6 +341,16 @@ func attach(ctx context.Context, o agent.Open) (agent.Session, error) {
 	s := newSession(p, life, cancel, o)
 	s.ref = o.Host.Attach.Reference
 	s.state = state
+	if s.state.Prompt == nil && s.state.Next != nil {
+		// The previous Runner may have written a prompt with Next and died
+		// before recording it: that prompt may be running. Its reply still
+		// ends its turn, and the next prompt gets an id of its own.
+		s.state.Orphans = append(s.state.Orphans, s.state.Next)
+		if n := len(s.state.Orphans); n > maxOrphans {
+			s.state.Orphans = s.state.Orphans[n-maxOrphans:]
+		}
+	}
+	s.state.Next = p.NewID()
 	s.title = state.Agent.Title
 	s.responded = o.Host.Attach.Responded
 	go s.read()
@@ -525,7 +551,8 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		s.mu.Lock()
 		if s.state.Prompt != nil {
 			s.mu.Unlock()
-			return r, errors.New("a turn is still running")
+			// Nothing sent: the message waits for the running turn's end.
+			return r, agent.ErrTurnRunning
 		}
 		context := ""
 		if !s.state.Briefed {
@@ -541,8 +568,11 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		}
 		s.state.Turns++
 		turn := fmt.Sprintf("turn-%d", s.state.Turns)
-		id := s.p.NewID()
-		s.state.Prompt, s.state.Turn = id, turn
+		id := s.state.Next
+		if id == nil {
+			id = s.p.NewID()
+		}
+		s.state.Prompt, s.state.Turn, s.state.Next = id, turn, s.p.NewID()
 		s.state.Briefed, s.state.Notes = true, nil
 		ref := s.ref
 		s.mu.Unlock()

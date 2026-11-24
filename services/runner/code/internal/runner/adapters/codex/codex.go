@@ -515,7 +515,9 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 				} `json:"turn"`
 			}
 			if err = json.Unmarshal(result, &response); err != nil || response.Turn.ID == "" {
-				return r, errors.New("Codex omitted native turn id")
+				// Codex answered: a turn it did start says so itself
+				// (turn/started), so nothing is left in flight to reconcile.
+				return r, agent.Rejected(errors.New("Codex omitted native turn id"))
 			}
 			s.mu.Lock()
 			if s.turn != response.Turn.ID {
@@ -628,6 +630,11 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 			return r, err
 		}
 		if err = s.p.Reply(p.message.ID, response); err != nil {
+			// Not written: the request still waits for an answer.
+			s.mu.Lock()
+			p.answered = false
+			s.requests[op.RequestID] = p
+			s.mu.Unlock()
 			return r, err
 		}
 		r.Delivery = "submitted"
@@ -862,6 +869,8 @@ func (s *session) read() {
 					// The app-server acts only once it has the reply, so the
 					// user's recorded response is given again rather than asked anew.
 					if reply, err := nativeResponse(m.Method, m.Params, response); err == nil && s.p.Reply(m.ID, reply) == nil {
+						// The card the previous Runner showed is answered.
+						emit(agent.Event{Type: "request_resolved", RequestID: id, AgentID: ev.AgentID, Status: "answered_after_restart"})
 						return
 					}
 				}
@@ -920,7 +929,7 @@ func (s *session) read() {
 					failure.Status = failure.Account.State
 					emit(failure)
 				}
-				var over []json.RawMessage
+				over := map[string]json.RawMessage{}
 				s.mu.Lock()
 				if ev.AgentID == "root" {
 					s.turn = ""
@@ -930,15 +939,21 @@ func (s *session) read() {
 					_ = json.Unmarshal(request.message.Params, &scope)
 					if scope.ThreadID == p.ThreadID {
 						delete(s.requests, id)
-						over = append(over, request.message.ID)
+						over[id] = request.message.ID
 					}
 				}
 				s.mu.Unlock()
 				// The turn ended without these being answered: the app-server
 				// no longer waits on them, so the host must not redeliver them
-				// to a later Runner as if it did.
-				for _, id := range over {
-					_ = s.p.Resolve(id)
+				// to a later Runner as if it did, and the conversation stops
+				// showing them, a sub-agent's as much as the main agent's.
+				for id, native := range over {
+					_ = s.p.Resolve(native)
+					resolved := agent.Event{Type: "request_resolved", RequestID: id, AgentID: ev.AgentID, Status: "turn_ended", SessionID: ev.SessionID}
+					if ev.AgentID != "root" {
+						resolved.ParentAgentID, resolved.NativeID = ev.ParentAgentID, ev.NativeID
+					}
+					emit(resolved)
 				}
 			case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
 				ev.Type, ev.Status = "activity", "thinking"

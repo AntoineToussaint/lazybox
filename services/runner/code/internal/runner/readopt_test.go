@@ -15,6 +15,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/adapters/claude"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/engine"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/journal"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/telemetry"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/sessionhost"
@@ -259,6 +260,11 @@ func TestResumeReconnectsALiveAgentInPlace(t *testing.T) {
 	}
 	if resumed.Engine == e.Engine {
 		t.Fatal("Resume kept the engine whose provider stream ended")
+	}
+	// The replaced engine's journal is released, not leaked; a reader still
+	// on it is told to reconnect, never that the conversation is over.
+	if _, err = e.Engine.Events(context.Background(), 0); !errors.Is(err, engine.ErrDetached) {
+		t.Fatalf("a reader of the replaced engine got %v, want engine.ErrDetached (its journal released)", err)
 	}
 	approveAndFinish(t, b, e.ID, pid)
 	// Again, now that nothing is wrong: Resume has nothing to do for a live

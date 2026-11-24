@@ -61,6 +61,8 @@ test('a limit is one plain sentence, never a provider token', () => {
   assert.equal(failureSentence('provider_error', 'The model refused the request.'), 'The model refused the request.', 'provider prose is kept');
   assert.equal(faultSentence('provider delivery failed; reconcile before continuing'), 'A message could not be delivered to the agent. Check the conversation before sending again.');
   assert.match(faultSentence('unknown'), /Send a message to continue/);
+  // A message the provider refused is a turn's failure: the next one continues (agent.DeliveryRejectedFault).
+  assert.match(faultSentence('delivery_rejected'), /Send a message to continue/);
   assert.doesNotMatch(faultSentence('provider_failure'), /provider_failure/);
 });
 
@@ -155,7 +157,7 @@ test('a new Codex subscription signs in with the browser only from the Runner\'s
 });
 
 test('an agent process that ended is not a turn fault the next message continues (mirrors agent.TurnFault)', () => {
-  for (const fault of ['provider_error', 'provider_failure', 'invalid_request']) assert.equal(turnFault(fault), true, fault);
+  for (const fault of ['provider_error', 'provider_failure', 'invalid_request', 'delivery_rejected']) assert.equal(turnFault(fault), true, fault);
   for (const fault of ['provider_process_exit', 'sdk_error', 'provider stream ended: EOF', 'native_exit_unconfirmed', 'exhausted', '']) assert.equal(turnFault(fault), false, fault);
   // An exit is not a lost stream: Resume continues it in a new process (mirrors agent.ProcessExitFault).
   assert.equal(exitFault('provider_process_exit'), true);

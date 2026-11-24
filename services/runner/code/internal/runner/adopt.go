@@ -316,7 +316,9 @@ func (b *Bench) adopt(r sessionstore.Record) error {
 	// The re-attached process holds them already; a later subscription
 	// attempt starts with them.
 	open.Grants = r.Snapshot.Grants
-	eng, err := engine.Adopt(b.ctx, adapter, open, spool, r.Snapshot, record, func(snapshot engine.Snapshot, settings json.RawMessage) error {
+	// Stopped until its turn hooks are in: a turn the agent ends at once,
+	// or a queued message delivered at once, still gets its checkpoints.
+	eng, err := engine.AdoptStopped(b.ctx, adapter, open, spool, r.Snapshot, record, func(snapshot engine.Snapshot, settings json.RawMessage) error {
 		return b.History.SaveState(context.Background(), r.ID, snapshot, settings)
 	}, func(a engine.Attachment) error { return b.saveAttachment(r.ID, a) })
 	if err != nil {
@@ -325,6 +327,7 @@ func (b *Bench) adopt(r sessionstore.Record) error {
 	}
 	e.Engine = eng
 	b.watchTurns(e)
+	eng.Start()
 	b.mu.Lock()
 	b.items[r.ID] = e
 	b.mu.Unlock()
@@ -362,6 +365,12 @@ func (b *Bench) reconnect(ctx context.Context, e *Execution, live *engine.Engine
 	}
 	delete(b.archives, e.ID)
 	b.mu.Unlock()
+	// Nothing reaches the detached execution any more: its readers end with
+	// engine.ErrDetached and reconnect to its successor, which opened the
+	// journal again. Its own handle is released here, not leaked.
+	if err := e.spool.Dispose(); err != nil {
+		log.Printf("reconnect %s: releasing the previous journal: %v", e.ID, err)
+	}
 	if next != nil {
 		if err != nil {
 			// Re-attached; only the workspace's ownership is unconfirmed.

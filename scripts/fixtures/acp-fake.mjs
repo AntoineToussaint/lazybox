@@ -8,6 +8,8 @@
 //                    request (written through fs/write_text_file), a command
 //                    in a client terminal, usage with cost, a closing message
 //   ask              one permission request; says which option was chosen
+//   abandon          one permission request, then ends the turn without
+//                    waiting for its answer
 //   wait             runs until session/cancel
 //   slow             a chunk, a pause, a chunk (Runner restart tests)
 //   fail | refuse | auth | limit   ends the turn with that error/stop reason
@@ -111,6 +113,7 @@ async function prompt(id, params) {
       const outcome = await permission({ toolCallId: 'call-ask', title: 'Run make deploy', kind: 'execute', status: 'pending', rawInput: { command: 'make deploy' } });
       say(`decision=${outcome.outcome === 'selected' ? outcome.optionId : outcome.outcome}`);
     }
+    else if (/^abandon\b/i.test(last)) { permission({ toolCallId: 'call-abandon', title: 'Run make clean', kind: 'execute', status: 'pending', rawInput: { command: 'make clean' } }); say('Gave up waiting.'); }
     else if (/^wait\b/i.test(last)) { say('Waiting until cancelled.'); await done; }
     else if (/^slow\b/i.test(last)) { say('slow part one. '); await sleep(Number(process.env.ACP_FAKE_SLOW_MS || 1500)); say('slow part two.'); }
     // The agent process dies mid-turn.

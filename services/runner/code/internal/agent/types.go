@@ -444,6 +444,34 @@ type ProfileSwitcher interface {
 // process that may still run. Adapters wrap it; test with errors.Is.
 var ErrProcessExited = errors.New("native process exited")
 
+// ErrRejected marks a request the provider answered without acting on it: a
+// JSON-RPC error reply, a refusal the adapter decided before writing anything,
+// or an answer that names no turn it started. Its outcome is known, nothing
+// is in flight, so a message it refused is a turn's failure
+// (DeliveryRejectedFault) the next message continues, never a fault to
+// reconcile. A delivery whose outcome is unknown (the write or the connection
+// failed) is not this. Adapters wrap it (Rejected); test with errors.Is.
+var ErrRejected = errors.New("the provider refused the request")
+
+// Rejected marks err as the provider's definite refusal (ErrRejected).
+func Rejected(err error) error { return rejected{err} }
+
+type rejected struct{ error }
+
+func (r rejected) Is(target error) bool { return target == ErrRejected }
+func (r rejected) Unwrap() error        { return r.error }
+
+// ErrTurnRunning marks a message the adapter did not send because the agent
+// is still in a turn the engine did not know of (one a previous Runner
+// started). Nothing was sent: the engine keeps the message first in line,
+// counts the conversation busy, and delivers it when that turn ends.
+var ErrTurnRunning = errors.New("the agent is still in a turn")
+
+// DeliveryRejectedFault is the fault of a conversation whose message the
+// provider refused (ErrRejected): a turn fault, so the next message
+// continues the conversation.
+const DeliveryRejectedFault = "delivery_rejected"
+
 // ProcessExitFault is the fault of a conversation whose native process
 // exited. It is a Runner fault, neither a turn fault (no process takes the
 // next message) nor a TransportFault: re-attaching cannot bring the process

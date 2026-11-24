@@ -115,8 +115,17 @@ func fixtureAppServer() {
 				continue
 			}
 			if os.Getenv("FIXTURE_NATIVE_APPROVAL") != "" {
-				send(map[string]any{"id": 42, "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": "thread-1", "turnId": "turn-1", "command": "rm -rf build", "proposedExecpolicyAmendment": []string{"rm", "-rf"}}})
+				thread := "thread-1"
+				if os.Getenv("FIXTURE_APPROVAL_ENDS") == "subagent" {
+					thread = "thread-2" // a sub-agent's thread asks
+				}
+				send(map[string]any{"id": 42, "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": thread, "turnId": "turn-1", "command": "rm -rf build", "proposedExecpolicyAmendment": []string{"rm", "-rf"}}})
 				switch os.Getenv("FIXTURE_APPROVAL_ENDS") {
+				case "subagent":
+					// The sub-agent's turn ends while its request is unanswered,
+					// then the main agent's.
+					send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread-2", "turn": map[string]string{"id": "sub-turn", "status": "completed"}}})
+					send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread-1", "turn": map[string]string{"id": "turn-1", "status": "completed"}}})
 				case "resolved":
 					// The app-server resolves the request itself, with no reply.
 					send(map[string]any{"method": "serverRequest/resolved", "params": map[string]any{"threadId": "thread-1", "requestId": 42}})
@@ -475,6 +484,7 @@ func TestRedeliveredAnsweredApprovalIsAnsweredAgain(t *testing.T) {
 	defer again.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
+	resolved := false
 	for {
 		ev, err := again.Receive(ctx)
 		if err != nil {
@@ -483,12 +493,88 @@ func TestRedeliveredAnsweredApprovalIsAnsweredAgain(t *testing.T) {
 		switch ev.Type {
 		case "approval":
 			t.Fatal("an answered approval was asked again")
+		case "request_resolved":
+			// The card the previous Runner showed clears.
+			resolved = ev.RequestID == "n:42" && ev.Status == "answered_after_restart"
 		case "message_delta":
 			if ev.Text != "decision=decline" {
 				t.Fatalf("app-server got %q", ev.Text)
 			}
+			if !resolved {
+				t.Fatal("the answered approval was given again without request_resolved: its card never clears")
+			}
 			return
 		}
+	}
+}
+
+// A sub-agent's request still unanswered when its turn ends is over: the
+// conversation is told (request_resolved, for that sub-agent), as it is for
+// the main agent's, instead of showing an approval nobody waits on forever.
+func TestASubAgentsUnansweredApprovalEndsWithItsTurn(t *testing.T) {
+	t.Setenv("FIXTURE_NATIVE_APPROVAL", "1")
+	t.Setenv("FIXTURE_APPROVAL_ENDS", "subagent")
+	root := fixtureRoot(t)
+	self, _ := os.Executable()
+	s, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Host: &agent.Hosting{Root: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err = s.Apply(context.Background(), agent.Operation{ID: "go", Kind: agent.Message, Text: "clean"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	var asked, resolved agent.Event
+	for {
+		ev, err := s.Receive(ctx)
+		if err != nil {
+			t.Fatalf("before the main turn ended: %v", err)
+		}
+		switch {
+		case ev.Type == "approval":
+			asked = ev
+		case ev.Type == "request_resolved":
+			resolved = ev
+		case ev.Type == "turn_ended" && ev.AgentID == "root":
+			if asked.AgentID == "" || asked.AgentID == "root" {
+				t.Fatalf("setup: the approval was not the sub-agent's: %+v", asked)
+			}
+			if resolved.RequestID != "n:42" || resolved.Status != "turn_ended" || resolved.AgentID != asked.AgentID {
+				t.Fatalf("the sub-agent's approval was not resolved with its turn: %+v", resolved)
+			}
+			return
+		}
+	}
+}
+
+// An answer whose write failed leaves the request answerable, where it used
+// to stay marked answered: the card could be clicked again only to be told
+// it was already answered.
+func TestAnAnswerThatWasNotWrittenCanBeGivenAgain(t *testing.T) {
+	t.Setenv("FIXTURE_NATIVE_APPROVAL", "1")
+	root := fixtureRoot(t)
+	self, _ := os.Executable()
+	s, err := Adapter{Binary: self}.Open(context.Background(), agent.Open{Cwd: t.TempDir(), Host: &agent.Hosting{Root: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err = s.Apply(context.Background(), agent.Operation{ID: "go", Kind: agent.Message, Text: "clean"}); err != nil {
+		t.Fatal(err)
+	}
+	approval := receive(t, s, "approval")
+	// The connection to the host is gone: nothing can be written.
+	_ = s.(*session).p.Detach()
+	if _, err = s.Apply(context.Background(), agent.Operation{ID: "yes", Kind: agent.Approve, RequestID: approval.RequestID, Decision: "accept"}); err == nil {
+		t.Fatal("setup: the answer was written")
+	}
+	s.(*session).mu.Lock()
+	request, waiting := s.(*session).requests[approval.RequestID]
+	s.(*session).mu.Unlock()
+	if !waiting || request.answered {
+		t.Fatalf("an answer that was never written counts as given: waiting %v, answered %v", waiting, request.answered)
 	}
 }
 
@@ -586,7 +672,7 @@ func TestNotificationWithUnexpectedFieldsIsSkipped(t *testing.T) {
 // is not shown a phantom approval.
 func TestResolvedRequestIsNotReplayedAfterReattach(t *testing.T) {
 	t.Setenv("FIXTURE_NATIVE_APPROVAL", "1")
-	for _, ends := range []string{"resolved", "turn"} {
+	for _, ends := range []string{"resolved", "turn", "subagent"} {
 		t.Run(ends, func(t *testing.T) {
 			t.Setenv("FIXTURE_APPROVAL_ENDS", ends)
 			root := fixtureRoot(t)

@@ -9,6 +9,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent/agenttest"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/engine"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -123,6 +124,52 @@ func TestWatchEventsAskToReconnectWhenTheRunnerRestarts(t *testing.T) {
 		}
 		if status.Code(err) != codes.Unavailable {
 			t.Fatalf("includePrevious=%v: a stream cut by a Runner restart ended with %v, want Unavailable so the reader reconnects", includePrevious, err)
+		}
+	}
+}
+
+// Resume re-attaches a conversation whose stream from its agent was lost in
+// place: it detaches the engine (closing its journal under its readers) and
+// adopts the agent again, with no Runner restart. A stream of the detached
+// engine ends Unavailable too, so its reader reconnects to the new one; it
+// used to end cleanly, and the reader stopped following a live conversation.
+func TestWatchEventsAskToReconnectWhenResumeReattaches(t *testing.T) {
+	for _, includePrevious := range []bool{true, false} {
+		b, err := runner.New(runner.Config{State: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = b.Close() })
+		b.Adapters["codex"] = &agenttest.Adapter{Durable: json.RawMessage(`{"host":"fixture-host"}`)}
+		e, err := b.Open("codex-default", t.TempDir(), "", accounts.Options{}, "direct", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		history := e.Retained()
+		stream := &eventStream{ctx: context.Background(), sent: make(chan *pb.JournalEvent, 64)}
+		done := make(chan error, 1)
+		go func() {
+			done <- (&Service{Bench: b}).WatchEvents(&pb.WatchEventsRequest{SessionId: e.ID, IncludePrevious: includePrevious}, stream)
+		}()
+		for seen := uint64(0); seen < history; {
+			select {
+			case event := <-stream.sent:
+				seen = event.Cursor
+			case <-time.After(5 * time.Second):
+				t.Fatal("history not replayed")
+			}
+		}
+		// What Resume's reconnect does first; the Runner itself goes on.
+		if err = e.Engine.(*engine.Engine).Detach(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err = <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the stream outlived its engine")
+		}
+		if status.Code(err) != codes.Unavailable {
+			t.Fatalf("includePrevious=%v: the stream of a re-attached conversation ended with %v, want Unavailable so the reader reconnects", includePrevious, err)
 		}
 	}
 }

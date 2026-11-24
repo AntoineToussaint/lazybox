@@ -82,9 +82,20 @@ func (e *Engine) Detachable() bool {
 // it. In-flight provider calls get a bounded chance to settle first so their
 // receipts are exact; the snapshot and attachment are recorded last. After
 // Detach the engine is inert: Close is a no-op and nothing more is journaled.
+//
+// A Detach that failed left the engine supervising its agent, and can be
+// tried again (Resume reconnects through it).
 func (e *Engine) Detach() error {
-	e.detachOnce.Do(func() { e.detachErr = e.detach() })
-	return e.detachErr
+	e.detachMu.Lock()
+	defer e.detachMu.Unlock()
+	if e.detached {
+		return nil
+	}
+	if err := e.detach(); err != nil {
+		return err
+	}
+	e.detached = true
+	return nil
 }
 
 func (e *Engine) detach() error {
@@ -108,24 +119,50 @@ func (e *Engine) detach() error {
 		defer e.opMu.Unlock()
 	}
 	e.mu.Lock()
+	// Detaching only once both are saved: until then this engine still
+	// records what the agent says, and nothing it receives is dropped.
 	err := e.persistLocked()
-	e.detaching = true
+	if err == nil {
+		e.detaching = true
+	}
 	e.mu.Unlock()
 	if err != nil {
-		e.mu.Lock()
-		e.detaching = false
-		e.mu.Unlock()
 		return fmt.Errorf("could not record re-attachment state: %w", err)
 	}
 	if err = e.provider.(agent.Detacher).Detach(); err != nil {
 		e.mu.Lock()
 		e.detaching = false
+		e.lostStreamLocked(fmt.Errorf("detaching failed: %w", err), false)
 		e.mu.Unlock()
 		return err
 	}
 	e.cancel()
 	<-e.done
 	return e.journal.Close()
+}
+
+// lostStreamLocked is a failed detach's end, when the receive loop stopped
+// reading the agent while it detached (it records nothing then): the agent
+// still runs, unsupervised. That is a lost stream (agent.TransportFault),
+// which Resume settles by re-attaching; never a conversation that silently
+// stops hearing its agent. ending says the caller is the loop itself,
+// ending; otherwise a loop that has not ended is still reading (or will
+// decide, under this lock, that it is not: receive).
+func (e *Engine) lostStreamLocked(cause error, ending bool) {
+	if !ending {
+		select {
+		case <-e.done:
+		default:
+			return // Still reading the agent.
+		}
+	}
+	if e.state.Closed || e.state.Fault != "" {
+		return
+	}
+	e.state.Fault = fmt.Sprintf("provider stream ended: %v", cause)
+	exit := agent.Event{Type: "process_exit", Status: "unknown", Text: cause.Error()}
+	e.observe(exit)
+	e.appendLocked(exit)
 }
 
 // Adopt re-attaches to a live execution recorded by an earlier Runner. The
@@ -136,6 +173,18 @@ func (e *Engine) detach() error {
 // old Runner accepted but cannot prove it delivered gets an explicit
 // "unknown_after_runner_restart" receipt rather than a silent redelivery.
 func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *journal.Journal, saved Snapshot, record Attachment, capture func(Snapshot, json.RawMessage) error, durable func(Attachment) error) (*Engine, error) {
+	e, err := AdoptStopped(ctx, adapter, open, spool, saved, record, capture, durable)
+	if err != nil {
+		return nil, err
+	}
+	e.Start()
+	return e, nil
+}
+
+// AdoptStopped is Adopt without reading the agent yet: the caller installs
+// what must see every event (SetTurnHooks), then calls Start. Until then the
+// agent's output waits in its session host.
+func AdoptStopped(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *journal.Journal, saved Snapshot, record Attachment, capture func(Snapshot, json.RawMessage) error, durable func(Attachment) error) (*Engine, error) {
 	if record.Version != AttachmentVersion || len(record.Provider) == 0 {
 		return nil, fmt.Errorf("unsupported attachment record version %d", record.Version)
 	}
@@ -149,6 +198,10 @@ func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *j
 	if err != nil {
 		return nil, err
 	}
+	// The journal is the record of what happened; the snapshot is saved after
+	// it, and a Runner that died in between left a stale one. What waits on
+	// the person, and whether a turn runs, are read from the journal.
+	saved.Pending = scan.pending
 	responded := map[string]agent.Operation{}
 	for id, response := range scan.responded {
 		if _, pending := saved.Pending[id]; pending {
@@ -190,8 +243,11 @@ func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *j
 		return nil, err
 	}
 	e := &Engine{capture: capture, durable: durable, provider: s, journal: spool, ctx: life, cancel: cancel, ops: map[string]accepted{}, responses: map[string]bool{}, done: make(chan struct{}), state: saved}
-	if e.state.Pending == nil {
-		e.state.Pending = map[string]agent.Event{}
+	// A request the person answered is not answered twice: the adapter gives
+	// the agent that answer again if it asks again (Attachment.Responded),
+	// and says so (request_resolved); one it asks anew clears this.
+	for id := range responded {
+		e.responses[id] = true
 	}
 	if e.state.Agents == nil {
 		e.state.Agents = map[string]agent.Activity{}
@@ -207,26 +263,36 @@ func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *j
 		} else if !ok {
 			r = agent.Receipt{ID: id, Delivery: "accepted"}
 		}
-		// Fingerprints are not journaled; a retried ID returns its first receipt.
-		e.ops[id] = accepted{receipt: r, adopted: true}
+		// Fingerprints are not journaled; a retried ID returns its first
+		// receipt. Only the latest opWindow are kept, as live.
+		e.rememberLocked(id, accepted{receipt: r, adopted: true})
 	}
+	// Busy as the journal says: a turn started and did not end. A message
+	// delivered since the last turn ended whose turn has not started yet is
+	// known only to the snapshot (dispatch is not journaled), so it counts
+	// only when the snapshot says busy too. A turn_ended recorded just
+	// before the previous Runner died, without its snapshot, is not lost.
+	busy := scan.turnOpen || (saved.Busy && scan.awaitingStart)
 	// The previous Runner stopped while delivering a message that never
 	// started a turn (it waited for its code checkpoint): the conversation
 	// was saved busy, and no turn_ended would ever come. It is not busy; the
 	// message's outcome is unknown (its receipt above says so), and what is
 	// queued goes next. A turn it did start reports turn_started from the host.
-	if e.state.Busy {
+	if busy {
 		for _, id := range scan.order {
 			if scan.startedNothing(id, queued) {
-				e.state.Busy = false
-				if root, ok := e.state.Agents["root"]; ok && (root.Status == agent.Starting || root.Status == agent.Running) {
-					root.Status, root.Phase, root.Tool = agent.Ready, "", ""
-					e.state.Agents["root"] = root
-				}
+				busy = false
 				break
 			}
 		}
 	}
+	if e.state.Busy && !busy {
+		if root, ok := e.state.Agents["root"]; ok && (root.Status == agent.Starting || root.Status == agent.Running) {
+			root.Status, root.Phase, root.Tool = agent.Ready, "", ""
+			e.state.Agents["root"] = root
+		}
+	}
+	e.state.Busy = busy
 	e.replayed, e.replayedAfter = scan.partial, scan.cursor
 	// A stop the previous Runner asked for is still the stop that ends the
 	// turn in progress: its report is not a provider error here either.
@@ -246,11 +312,21 @@ func Adopt(ctx context.Context, adapter agent.Adapter, open agent.Open, spool *j
 		_ = s.(agent.Detacher).Detach()
 		return nil, errors.New("journal unavailable during adoption")
 	}
-	go e.receive()
-	if len(e.queue) > 0 && !e.state.Busy {
-		go e.dispatch()
-	}
 	return e, nil
+}
+
+// Start reads the agent of an engine AdoptStopped returned, and delivers
+// what is queued if no turn runs. It starts once.
+func (e *Engine) Start() {
+	e.startOnce.Do(func() {
+		go e.receive()
+		e.mu.Lock()
+		deliver := len(e.queue) > 0 && !e.state.Busy
+		e.mu.Unlock()
+		if deliver {
+			go e.dispatch()
+		}
+	})
 }
 
 type journalScan struct {
@@ -277,6 +353,13 @@ type journalScan struct {
 	// record positions counted from 1 (0: never).
 	acceptedAt             map[string]int
 	lastStarted, lastEnded int
+	// turnOpen: the main agent's last turn started and did not end, as the
+	// live engine marks it busy (receive). awaitingStart: a message was
+	// delivered since the last turn ended or started, and its turn has not
+	// started.
+	turnOpen, awaitingStart bool
+	// pending are the approvals and questions recorded and not resolved.
+	pending map[string]agent.Event
 }
 
 // startedNothing reports whether message id was taken from the queue for
@@ -327,7 +410,7 @@ func (s *journalScan) delivered(r agent.Receipt) {
 // counts events from the current native attempt: a profile rotation starts a new
 // host whose cursors restart.
 func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, error) {
-	s := journalScan{kinds: map[string]agent.Kind{}, receipts: map[string]agent.Receipt{}, responded: map[string]agent.Operation{}, awaiting: map[string]int{}, acceptedAt: map[string]int{}}
+	s := journalScan{kinds: map[string]agent.Kind{}, receipts: map[string]agent.Receipt{}, responded: map[string]agent.Operation{}, awaiting: map[string]int{}, acceptedAt: map[string]int{}, pending: map[string]agent.Event{}}
 	partial := map[uint64]map[string]int{}
 	for i, n := uint64(0), spool.Count(); i < n; i++ {
 		r, err := spool.Next(ctx, i)
@@ -357,14 +440,26 @@ func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, erro
 			s.interrupting = ""
 			partial = map[uint64]map[string]int{}
 			s.lastStarted = int(i) + 1
+			// A checkpoint for the next message is no turn (receive).
+			if root && v.Status != "checkpoint_next_message" {
+				s.turnOpen, s.awaitingStart = true, false
+			}
 		case "turn_started":
 			if root {
 				s.lastStarted = int(i) + 1
+				s.turnOpen, s.awaitingStart = true, false
 			}
 		case "turn_ended":
 			if root {
 				s.interrupting = ""
 				s.lastEnded = int(i) + 1
+				s.turnOpen, s.awaitingStart = false, false
+			}
+		case "approval", "question":
+			// Read whole: v's own data field hides the event's.
+			var request agent.Event
+			if json.Unmarshal(r.Value, &request) == nil && request.RequestID != "" {
+				s.pending[request.RequestID] = request
 			}
 		case "operation_accepted":
 			if _, seen := s.acceptedAt[v.OperationID]; !seen {
@@ -396,12 +491,22 @@ func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, erro
 			if r.ID != "" {
 				s.receipts[r.ID] = r
 				s.delivered(r)
+				if s.kinds[r.ID] == agent.Message {
+					switch {
+					case r.Delivery == "failed":
+						// Never delivered: the live engine is not busy for it.
+						s.turnOpen, s.awaitingStart = false, false
+					case r.Error == "" && r.Delivery != "canceled_before_delivery" && r.Delivery != "unknown_after_runner_restart":
+						s.awaitingStart = true
+					}
+				}
 				if r.ID == s.interrupting && (r.Delivery == "failed" || r.Error != "") {
 					s.interrupting = ""
 				}
 			}
 		case "request_resolved":
 			delete(s.responded, v.RequestID)
+			delete(s.pending, v.RequestID)
 		}
 		switch {
 		case v.Cursor == 0:

@@ -73,6 +73,8 @@ func (s *session) permission(m jsonl.Message, emit func(agent.Event)) {
 		// The person answered before the Runner restarted; the agent never
 		// got the answer, and has done nothing yet: give it again.
 		if outcome, err := permissionOutcome(req.Options, response); err == nil && s.p.Reply(m.ID, map[string]any{"outcome": outcome}) == nil {
+			// The card the previous Runner showed is answered.
+			emit(agent.Event{Type: "request_resolved", RequestID: id, TurnID: turn, Status: "answered_after_restart"})
 			return
 		}
 	}
@@ -218,6 +220,7 @@ func (s *session) approve(op agent.Operation) (agent.Receipt, error) {
 		return r, err
 	}
 	delete(s.requests, op.RequestID)
+	notes := s.state.Notes
 	if op.Decision == "decline" && strings.TrimSpace(op.Reason) != "" {
 		what := "that request"
 		var call struct {
@@ -230,6 +233,11 @@ func (s *session) approve(op agent.Operation) (agent.Receipt, error) {
 	}
 	s.mu.Unlock()
 	if err = s.p.Reply(p.native, map[string]any{"outcome": outcome}); err != nil {
+		// Not written: the request still waits, and can be answered again.
+		s.mu.Lock()
+		s.requests[op.RequestID] = p
+		s.state.Notes = notes // the decline's reason goes with the answer
+		s.mu.Unlock()
 		return r, err
 	}
 	s.emit(agent.Event{Type: "request_resolved", RequestID: op.RequestID, Status: "response_written"})

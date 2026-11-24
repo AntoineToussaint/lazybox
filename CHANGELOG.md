@@ -23,11 +23,6 @@ written, fold the dated sections above it into it first: `make release`
 refuses a version with dated sections above its own, which its notes would
 leave out.
 
-## [2026-11-24.1] - 2026-11-24 · Interactive commands and artifact companions
-
-- **Review interactive commands** Read the command with shell quoting and expand its working directory to inspect the full path.
-- **Start an artifact companion** The companion receives the pinned version and selection at startup. Its message box opens empty, and you can return to it from the artifact.
-
 ## [0.1.0-pre.1] - 2026-11-17 · The first prerelease
 
 ### Install and updates
@@ -97,6 +92,8 @@ leave out.
 
 ### Home checkouts and your terminal
 
+- **Review interactive commands** Read the command with shell quoting and expand its working directory to inspect the full path.
+- **Start an artifact companion** The companion receives the pinned version and selection at startup. Its message box opens empty, and you can return to it from the artifact.
 - **Take over an interactive command** When Codex or Claude needs you to sign in, review the command in chat and run it in the workspace terminal. The agent resumes when it exits.
 
 - **Your own clone of each repository** A repository can have a home checkout: a regular clone outside every workspace, at ~/lazybox/repos/owner/name or a folder you already have, for logins, dev servers you keep running and trying a module by hand. Create one or pick a folder in Settings → Repositories or a workspace's repositories. Lazybox never deletes it and no agent changes it; its branch is yours. Update to latest main fetches, then moves main forward only when it is clean, and otherwise says why. On a phone, Settings → Repositories fits the screen: a long path keeps its last folders and the buttons wrap.

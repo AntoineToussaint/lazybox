@@ -9,15 +9,6 @@ import type { Release } from './onboarding-model';
  */
 export const releaseNotes: readonly Release[] = [
   {
-    id: '2026-11-24.1',
-    date: '2026-11-24',
-    title: 'Interactive commands and artifact companions',
-    items: [
-      { title: 'Review interactive commands', body: 'Read the command with shell quoting and expand its working directory to inspect the full path.' },
-      { title: 'Start an artifact companion', body: 'The companion receives the pinned version and selection at startup. Its message box opens empty, and you can return to it from the artifact.' },
-    ],
-  },
-  {
     id: '0.1.0-pre.1',
     date: '2026-11-17',
     title: 'The first prerelease',
@@ -76,6 +67,8 @@ export const releaseNotes: readonly Release[] = [
       { group: 'Workspaces and tabs', title: 'Tabs behind stay out of the way', body: 'A conversation in a tab behind another no longer holds a live connection; it catches up the moment you bring it forward. In a browser window with many tabs, a review\'s card and the window\'s other reads no longer wait behind them.' },
       { group: 'Workspaces and tabs', title: 'Tidier agent rows', body: 'A conversation whose sub-agents are listed under it no longer repeats their count on its own line, and a sub-agent panel says Ended without a report once.' },
       { group: 'Workspaces and tabs', title: 'A clearer Missions board', body: 'The mission picker is a menu with each mission\'s progress, a working task leads with Open conversation, and the process reads One agent per task.' },
+      { group: 'Home checkouts and your terminal', title: 'Review interactive commands', body: 'Read the command with shell quoting and expand its working directory to inspect the full path.' },
+      { group: 'Home checkouts and your terminal', title: 'Start an artifact companion', body: 'The companion receives the pinned version and selection at startup. Its message box opens empty, and you can return to it from the artifact.' },
       { group: 'Home checkouts and your terminal', title: 'Take over an interactive command', body: 'When Codex or Claude needs you to sign in, review the command in chat and run it in the workspace terminal. The agent resumes when it exits.' },
       { group: 'Home checkouts and your terminal', title: 'Your own clone of each repository', body: 'A repository can have a home checkout: a regular clone outside every workspace, at ~/lazybox/repos/owner/name or a folder you already have, for logins, dev servers you keep running and trying a module by hand. Create one or pick a folder in Settings → Repositories or a workspace\'s repositories. Lazybox never deletes it and no agent changes it; its branch is yours. Update to latest main fetches, then moves main forward only when it is clean, and otherwise says why. On a phone, Settings → Repositories fits the screen: a long path keeps its last folders and the buttons wrap.' },
       { group: 'Home checkouts and your terminal', title: 'Run runs it in a terminal', body: 'Run on a command the agent wrote runs it, exactly as written, in a shell of the Terminal panel: the one already open there when it is idle, otherwise a new one, once its prompt is ready, so the command shows once. It is a real terminal, so logins and browser sign-ins work. A script of several lines, or a command with something to fill in, is typed at the prompt for you to review and run with Return; Paste in terminal (don\'t run), in the ▾, does that for any command. Nothing is sent to the agent; asking the agent to run it is still in the ▾, marked no terminal, and never offered for a login. The shell takes the keyboard once, as it opens: go straight back to the chat and what you type stays there.' },

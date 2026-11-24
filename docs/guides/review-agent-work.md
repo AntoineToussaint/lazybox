@@ -173,8 +173,10 @@ The report identifies ambiguous intent and remaining coverage gaps for the
 person to decide. Passing commands establish only the assertions they execute.
 
 Pause holds later rounds, Resume continues a pending recheck, and Cancel ends
-running verification commands and the review. Checkouts are retained with the
-review conversation and removed when its checkpoints are deleted.
+running verification commands and the review. Each checkout is removed once
+its command finishes (its exit status and output stay with the command), or at
+once when the command cannot start; any left are removed when the review
+conversation's checkpoints are deleted.
 
 ## Undo a turn: checkpoints
 

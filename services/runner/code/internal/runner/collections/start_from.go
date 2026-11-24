@@ -9,8 +9,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitidentity"
 )
 
 // The branch each repository's new workspaces start from ("Start from" in New
@@ -58,11 +56,11 @@ func (m *Manager) loadStarts() {
 // identityLocked is a registered repository's checkout-independent identity,
 // or "". The caller holds m.mu.
 func (m *Manager) identityLocked(id string) string {
-	r, ok := m.repos[id]
+	_, ok := m.repos[id]
 	if !ok || m.common[id] == "" {
 		return ""
 	}
-	return gitidentity.Repository(m.common[id], r.SourceURL)
+	return m.identity(id)
 }
 
 // StartFrom is the branch a repository's new workspaces start from when the

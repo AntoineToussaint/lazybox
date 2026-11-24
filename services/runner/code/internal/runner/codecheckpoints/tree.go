@@ -104,32 +104,34 @@ func snapshot(ctx context.Context, dir, scratch string, limits Limits) (workTree
 	}
 	for attempt := 0; ; attempt++ {
 		w.Skipped, w.SkippedCount = nil, 0
-		raw, _, err := call.run(ctx, "ls-files", "-z", "--others", "--exclude-standard")
-		if err != nil {
-			return workTree{}, err
-		}
 		var add bytes.Buffer
 		count := 0
-		for _, path := range splitNUL(raw) {
+		// Streamed: memory holds at most MaxUntracked paths however many
+		// untracked files there are; the rest are only counted.
+		err := call.stream(ctx, func(path string) error {
 			if strings.HasSuffix(path, "/") {
 				w.skip(path, "nested repository")
-				continue
-			}
-			info, err := os.Lstat(filepath.Join(top, filepath.FromSlash(path)))
-			if err != nil {
-				continue // gone since it was listed
-			}
-			if info.Mode().IsRegular() && info.Size() > limits.MaxFileBytes {
-				w.skip(path, fmt.Sprintf("%d MiB, over the %d MiB checkpoint limit", info.Size()>>20, limits.MaxFileBytes>>20))
-				continue
+				return nil
 			}
 			if count >= limits.MaxUntracked {
 				w.skip(path, "over the untracked file limit")
-				continue
+				return nil
+			}
+			info, err := os.Lstat(filepath.Join(top, filepath.FromSlash(path)))
+			if err != nil {
+				return nil // gone since it was listed
+			}
+			if info.Mode().IsRegular() && info.Size() > limits.MaxFileBytes {
+				w.skip(path, fmt.Sprintf("%d MiB, over the %d MiB checkpoint limit", info.Size()>>20, limits.MaxFileBytes>>20))
+				return nil
 			}
 			count++
 			add.WriteString(path)
 			add.WriteByte(0)
+			return nil
+		}, "ls-files", "-z", "--others", "--exclude-standard")
+		if err != nil {
+			return workTree{}, err
 		}
 		if count == 0 {
 			break
@@ -185,20 +187,25 @@ type entry struct {
 
 const gitlink = "160000"
 
-// rawDiff lists what differs from a to b, without rename detection.
+// rawDiff lists what differs from a to b, without rename detection. Restore
+// needs every entry, so the list is not cut; it is parsed as Git writes it.
 func rawDiff(ctx context.Context, top, a, b string) ([]entry, error) {
-	out, _, err := gitCall{dir: top}.run(ctx, "diff-tree", "-r", "-z", "--no-renames", "--no-commit-id", a, b)
+	entries := []entry{}
+	var meta []string
+	err := gitCall{dir: top}.stream(ctx, func(field string) error {
+		if meta == nil {
+			meta = strings.Fields(strings.TrimPrefix(field, ":"))
+			if len(meta) != 5 {
+				return errors.New("unexpected git diff-tree output")
+			}
+			return nil
+		}
+		entries = append(entries, entry{OldMode: meta[0], NewMode: meta[1], Status: meta[4][:1], Path: field})
+		meta = nil
+		return nil
+	}, "diff-tree", "-r", "-z", "--no-renames", "--no-commit-id", a, b)
 	if err != nil {
 		return nil, err
-	}
-	fields := splitNUL(out)
-	entries := []entry{}
-	for i := 0; i+1 < len(fields); i += 2 {
-		meta := strings.Fields(strings.TrimPrefix(fields[i], ":"))
-		if len(meta) != 5 {
-			return nil, errors.New("unexpected git diff-tree output")
-		}
-		entries = append(entries, entry{OldMode: meta[0], NewMode: meta[1], Status: meta[4][:1], Path: fields[i+1]})
 	}
 	return entries, nil
 }
@@ -219,60 +226,82 @@ func changes(ctx context.Context, top, a, b string) ([]FileChange, bool, error) 
 	if a == b {
 		return []FileChange{}, false, nil
 	}
-	names, _, err := gitCall{dir: top}.run(ctx, "diff-tree", "-r", "-z", "-M", "--no-commit-id", "--name-status", a, b)
-	if err != nil {
-		return nil, false, err
-	}
+	// Both listings are streamed and stop one file past changeLimit, so a
+	// turn that touched a million files is read no further than shown.
 	files := []FileChange{}
 	byPath := map[string]int{}
-	fields := splitNUL(names)
-	for i := 0; i < len(fields); {
-		status := fields[i]
+	var pending []string // the current record's fields, status first
+	err := gitCall{dir: top}.stream(ctx, func(field string) error {
+		pending = append(pending, field)
+		status := pending[0]
 		if status == "" {
-			break
+			return errStop
 		}
 		f := FileChange{Status: status[:1]}
-		if (f.Status == "R" || f.Status == "C") && i+2 < len(fields) {
-			f.OriginalPath, f.Path = fields[i+1], fields[i+2]
-			i += 3
-		} else if i+1 < len(fields) {
-			f.Path = fields[i+1]
-			i += 2
-		} else {
-			break
+		switch {
+		case (f.Status == "R" || f.Status == "C") && len(pending) == 3:
+			f.OriginalPath, f.Path = pending[1], pending[2]
+		case f.Status != "R" && f.Status != "C" && len(pending) == 2:
+			f.Path = pending[1]
+		default:
+			return nil
 		}
+		pending = pending[:0]
 		byPath[f.Path] = len(files)
 		files = append(files, f)
-	}
-	stats, _, err := gitCall{dir: top}.run(ctx, "diff-tree", "-r", "-z", "-M", "--no-commit-id", "--numstat", a, b)
+		if len(files) > changeLimit {
+			return errStop
+		}
+		return nil
+	}, "diff-tree", "-r", "-z", "-M", "--no-commit-id", "--name-status", a, b)
 	if err != nil {
 		return nil, false, err
-	}
-	fields = splitNUL(stats)
-	for i := 0; i < len(fields); i++ {
-		parts := strings.SplitN(fields[i], "\t", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		path := parts[2]
-		if path == "" && i+2 < len(fields) {
-			path = fields[i+2] // a rename: the source and destination follow
-			i += 2
-		}
-		index, ok := byPath[path]
-		if !ok {
-			continue
-		}
-		if parts[0] == "-" {
-			files[index].Binary = true
-			continue
-		}
-		files[index].Additions, _ = strconv.Atoi(parts[0])
-		files[index].Deletions, _ = strconv.Atoi(parts[1])
 	}
 	truncated := len(files) > changeLimit
 	if truncated {
 		files = files[:changeLimit]
+	}
+	// numstat lists the same files in the same order: one record per file,
+	// "added\tdeleted\tpath", or "added\tdeleted\t" then source and
+	// destination for a rename.
+	seen, renameFields := 0, 0
+	var counts []string
+	err = gitCall{dir: top}.stream(ctx, func(field string) error {
+		path := ""
+		if renameFields > 0 {
+			renameFields--
+			if renameFields > 0 {
+				return nil // the rename's source
+			}
+			path = field
+		} else {
+			parts := strings.SplitN(field, "\t", 3)
+			if len(parts) != 3 {
+				return nil
+			}
+			counts = parts
+			if parts[2] == "" {
+				renameFields = 2
+				return nil
+			}
+			path = parts[2]
+		}
+		seen++
+		if index, ok := byPath[path]; ok && index < len(files) {
+			if counts[0] == "-" {
+				files[index].Binary = true
+			} else {
+				files[index].Additions, _ = strconv.Atoi(counts[0])
+				files[index].Deletions, _ = strconv.Atoi(counts[1])
+			}
+		}
+		if seen >= len(files) {
+			return errStop
+		}
+		return nil
+	}, "diff-tree", "-r", "-z", "-M", "--no-commit-id", "--numstat", a, b)
+	if err != nil {
+		return nil, false, err
 	}
 	return files, truncated, nil
 }
@@ -298,8 +327,10 @@ func fileDiff(ctx context.Context, top, a, b, path, original string) (Diff, erro
 // restore makes the work tree's files match tree to, given they currently
 // match tree from: it writes only the paths that differ, through a private
 // index, and deletes the files to does not have. The repository's index,
-// HEAD and branch are untouched; ignored files are never in either tree, so
-// they stay as they are. It returns what it changed and what it could not.
+// HEAD and branch are untouched. Files the from snapshot skipped (ignored,
+// too large, past the untracked limit, nested repositories) are in neither
+// tree, so a path that would overwrite or remove one is left as it is and
+// reported. It returns what it changed and what it could not.
 func restore(ctx context.Context, top, scratch, from, to string) ([]entry, []string, error) {
 	diff, err := rawDiff(ctx, top, from, to)
 	if err != nil || len(diff) == 0 {
@@ -337,7 +368,12 @@ func restore(ctx context.Context, top, scratch, from, to string) ([]entry, []str
 		if e.Status == "D" || e.OldMode == gitlink || e.NewMode == gitlink {
 			continue
 		}
-		if _, err := inside(root, top, e.Path); err != nil {
+		full, err := inside(root, top, e.Path)
+		if err != nil {
+			problems = append(problems, e.Path+": "+err.Error())
+			continue
+		}
+		if err = unsaved(top, full, e.Status); err != nil {
 			problems = append(problems, e.Path+": "+err.Error())
 			continue
 		}
@@ -362,6 +398,53 @@ func restore(ctx context.Context, top, scratch, from, to string) ([]entry, []str
 		}
 	}
 	return changed, problems, nil
+}
+
+// errUnsaved names a file restore would overwrite that the safety checkpoint
+// does not hold, so undoing the revert could not bring it back.
+var errUnsaved = errors.New("left as it is: a file there is not in the saved checkpoint (ignored, too large, past the untracked limit, or in a nested repository)")
+
+// unsaved refuses to write full when checkout-index -f would destroy bytes the
+// safety tree (the from side of the diff) does not hold. Deletions have run, so
+// what remains on disk at an added path, a directory with entries at any
+// written path, or a non-directory where a directory must be created was
+// skipped by the snapshot.
+func unsaved(top, full, status string) error {
+	for dir := filepath.Dir(full); dir != top && strings.HasPrefix(dir, top+string(filepath.Separator)); dir = filepath.Dir(dir) {
+		info, err := os.Lstat(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return errUnsaved
+		}
+	}
+	info, err := os.Lstat(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		entries, err := os.ReadDir(full)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return errors.New("left as it is: a directory there still holds files the saved checkpoint does not (ignored or skipped)")
+		}
+		return nil
+	}
+	// Modified and type-changed paths are in the safety tree as they are on
+	// disk; an added one is not.
+	if status == "A" {
+		return errUnsaved
+	}
+	return nil
 }
 
 // inside resolves a repository-relative path, refusing one that escapes the

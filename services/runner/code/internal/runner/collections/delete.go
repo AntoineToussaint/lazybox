@@ -55,11 +55,17 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 			return p, fmt.Errorf("%s: %w", member.Name, err)
 		}
 		// Include ignored build artifacts: they are user bytes too.
-		dirty, err := m.git(ctx, member.Path, "status", "--porcelain", "--untracked-files=normal", "--ignored")
+		dirty, err := m.git(ctx, member.Path, "status", "--porcelain", "--untracked-files=normal", "--ignored", "--ignore-submodules=none")
 		if err != nil {
 			return p, err
 		}
-		if dirty != "" {
+		unsaved := ""
+		if dirty == "" {
+			if unsaved, err = m.unsavedHistory(ctx, member.Path); err != nil {
+				return p, err
+			}
+		}
+		if dirty != "" || unsaved != "" {
 			p.Dirty = append(p.Dirty, member.Name)
 		}
 	}
@@ -74,6 +80,54 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 	}
 	return p, nil
 }
+
+// inProgressMarkers are the Git administrative paths that exist while an
+// operation that stopped part-way (rebase, merge, cherry-pick, revert, bisect)
+// waits for the user. Its state lives in the worktree's own Git directory, so
+// removing the worktree throws the operation away.
+var inProgressMarkers = []struct{ path, operation string }{
+	{"rebase-merge", "rebase"}, {"rebase-apply", "rebase"}, {"MERGE_HEAD", "merge"},
+	{"CHERRY_PICK_HEAD", "cherry-pick"}, {"REVERT_HEAD", "revert"}, {"sequencer", "cherry-pick or revert"},
+	{"BISECT_LOG", "bisect"},
+}
+
+// unsavedHistory names what removing the checkout at path would lose that
+// `git status` does not show: commits on no branch, or an operation in
+// progress. It returns "" when HEAD is on a branch and nothing is in progress.
+// Removing a worktree deletes its HEAD reflog, so a commit only HEAD reaches
+// becomes garbage.
+func (m *Manager) unsavedHistory(ctx context.Context, path string) (string, error) {
+	args := []string{"rev-parse"}
+	for _, marker := range inProgressMarkers {
+		args = append(args, "--git-path", marker.path)
+	}
+	out, err := m.git(ctx, path, args...)
+	if err != nil {
+		return "", err
+	}
+	paths := strings.Split(out, "\n")
+	if len(paths) != len(inProgressMarkers) {
+		return "", fmt.Errorf("git rev-parse --git-path returned %d paths for %d markers", len(paths), len(inProgressMarkers))
+	}
+	for i, marker := range paths {
+		if !filepath.IsAbs(marker) {
+			marker = filepath.Join(path, marker)
+		}
+		if _, err := os.Lstat(marker); err == nil {
+			return "a " + inProgressMarkers[i].operation + " is in progress", nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	}
+	// A branch always contains the HEAD that names it, so a symbolic HEAD
+	// leaves nothing unreachable. A detached HEAD is treated as unsaved even
+	// when a ref happens to contain it today, as RemoveRepositoryMember does.
+	if _, err := m.git(ctx, path, "symbolic-ref", "-q", "HEAD"); err != nil {
+		return "HEAD is detached; its commits may be on no branch", nil
+	}
+	return "", nil
+}
+
 func (m *Manager) PreviewDeletion(ctx context.Context, id string, active func(string) bool) (DeletionPreview, error) {
 	c, err := m.Get(id)
 	if err != nil {
@@ -113,7 +167,7 @@ func (m *Manager) BeginDeletion(ctx context.Context, id, name string, discard, s
 		return Collection{}, errors.New("explicitly stop workspace sessions and commands before deletion")
 	}
 	if (len(p.Dirty) > 0 || p.FilesOutsideRepositories) && !discard {
-		return Collection{}, errors.New("workspace contains changed, untracked or ignored files; explicitly choose discard to delete them")
+		return Collection{}, errors.New("workspace contains changed, untracked or ignored files, commits on no branch, or an unfinished rebase or merge; explicitly choose discard to delete them")
 	}
 	if c.State == "deleting" && c.KeepArtifacts != keepArtifacts {
 		return Collection{}, errors.New("artifact choice cannot change once workspace deletion has begun")

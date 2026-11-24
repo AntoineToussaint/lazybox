@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/delivery"
 	"io/fs"
 	"os"
 	"path"
@@ -24,6 +23,9 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/atomicfile"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/delivery"
 )
 
 // Limits on what one artifact holds.
@@ -553,7 +555,7 @@ func (s *Store) append(a *Artifact, content string, author Author, source Source
 	}
 	now := s.now().UnixMilli()
 	v := Version{Schema: schema, Number: a.Latest() + 1, CreatedAt: now, Author: author, Source: source, Digest: Digest(content), Size: uint64(len(content))}
-	if err := writeFile(s.versionPath(a, v.Number), []byte(content)); err != nil {
+	if err := atomicfile.WriteFile(s.versionPath(a, v.Number), []byte(content)); err != nil {
 		return err
 	}
 	a.Versions = append(a.Versions, v)
@@ -570,23 +572,7 @@ func (s *Store) save(a *Artifact) error {
 	if err != nil {
 		return err
 	}
-	return writeFile(filepath.Join(s.dir(a.Workspace, a.ID), "artifact.json"), raw)
-}
-
-func writeFile(target string, data []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(target), ".artifact-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
-	}
-	if err = errors.Join(err, f.Close()); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), target)
+	return atomicfile.WriteFile(filepath.Join(s.dir(a.Workspace, a.ID), "artifact.json"), raw)
 }
 
 // FirstHeading is the text of the first level-one ATX heading, or "".

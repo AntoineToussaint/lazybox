@@ -95,12 +95,16 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 				state := e.Engine.Snapshot()
 				if state.Closed || state.Fault != "" || state.Status == "switching" {
 					e.activity.Unlock()
+					_ = b.Checkpoints.RemoveVerificationCheckout(dir)
 					return check, errors.New("reviewer execution is unavailable")
 				}
 			}
 			command, startErr = b.Commands.Start(commands.Spec{SessionID: e.ID, Kind: "verification", Action: fmt.Sprintf("%s/%d/%s/%s", run.ID, run.Round, check.Name, side), Title: "Verify " + check.Name + " (" + side + ")", Cwd: dir, Argv: check.Argv})
 			e.activity.Unlock()
-			if startErr == nil {
+			if startErr != nil {
+				// Nothing will run in it; no finished command will name it.
+				_ = b.Checkpoints.RemoveVerificationCheckout(dir)
+			} else {
 				if side == "base" {
 					result.BaseCommand = command.Status().ID
 				} else {
@@ -225,6 +229,21 @@ func (b *Bench) cancelVerification(run reviews.Run) {
 	}
 }
 
+// removeFinishedVerificationCheckouts deletes the checkout of every
+// verification command that has finished. Its result is the command's exit
+// status, kept by the command manager; the checkout, a full repository with
+// whatever the test built, is not needed after it.
+func (b *Bench) removeFinishedVerificationCheckouts() {
+	if b.Commands == nil || b.Checkpoints == nil {
+		return
+	}
+	for _, status := range b.Commands.List("") {
+		if status.Spec.Kind == "verification" && status.Done {
+			_ = b.Checkpoints.RemoveVerificationCheckout(status.Spec.Cwd)
+		}
+	}
+}
+
 // watchVerification resumes undelivered round transitions and bounds test
 // execution across Runner restarts using the managed command's saved start.
 func (b *Bench) watchVerification() {
@@ -239,6 +258,7 @@ func (b *Bench) watchVerification() {
 				return
 			case <-ticker.C:
 			}
+			b.removeFinishedVerificationCheckouts()
 			for _, workspace := range b.reviewWorkspaces() {
 				review, err := b.Reviews.Load(workspace)
 				if err != nil {

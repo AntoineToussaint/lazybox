@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/atomicfile"
 )
 
 // Bounds that keep the file small whatever agents print.
@@ -72,7 +75,8 @@ type Store struct {
 }
 
 // Open reads the store at path, or starts an empty one. An unreadable file is
-// kept aside (path.corrupt) rather than silently overwritten.
+// kept aside (path.corrupt-<time>, never over an earlier one) rather than
+// silently overwritten; when it cannot be moved aside, Open fails.
 func Open(path string) (*Store, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("item store path must be absolute")
@@ -90,7 +94,9 @@ func Open(path string) (*Store, error) {
 	}
 	var loaded state
 	if err = json.Unmarshal(raw, &loaded); err != nil {
-		_ = os.Rename(path, path+".corrupt")
+		if qErr := quarantine(path, time.Now()); qErr != nil {
+			return nil, fmt.Errorf("item store %s is unreadable (%v) and could not be kept aside: %w", path, err, qErr)
+		}
 		return st, nil
 	}
 	if loaded.Items == nil {
@@ -103,34 +109,68 @@ func Open(path string) (*Store, error) {
 	return st, nil
 }
 
-func (s *Store) write() error {
-	raw, err := json.Marshal(s.s)
-	if err != nil {
-		return err
+// quarantine moves an unreadable store aside under a name no earlier
+// quarantine holds, so every damaged copy stays for inspection.
+func quarantine(path string, now time.Time) error {
+	base := path + ".corrupt-" + now.UTC().Format("20060102T150405Z")
+	for n := 0; n < 1000; n++ {
+		target := base
+		if n > 0 {
+			target = fmt.Sprintf("%s-%d", base, n)
+		}
+		// A hard link never replaces an existing name, unlike a rename.
+		err := os.Link(path, target)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err = os.Remove(path); err != nil {
+			return err
+		}
+		return atomicfile.SyncDir(filepath.Dir(path))
 	}
-	f, err := os.CreateTemp(filepath.Dir(s.path), ".items-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	_, err = f.Write(raw)
-	if err == nil {
-		err = f.Sync()
-	}
-	if err = errors.Join(err, f.Close()); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), s.path)
+	return errors.New("too many quarantined copies")
 }
 
-// update applies change under the lock and persists it when it says so.
+func write(path string, st state) error {
+	raw, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(path, raw)
+}
+
+// clone copies everything a change can modify, so a change is applied to the
+// copy and kept only once it is on disk.
+func (st state) clone() state {
+	c := st
+	c.Links = slices.Clone(st.Links)
+	c.Items = maps.Clone(st.Items)
+	c.Tracking = maps.Clone(st.Tracking)
+	c.Branches = slices.Clone(st.Branches)
+	c.Events = slices.Clone(st.Events)
+	c.Backfilled = maps.Clone(st.Backfilled)
+	return c
+}
+
+// update applies change under the lock and persists it when it says so. A
+// change that need not be persisted (SeeBranch's last-seen time) is kept in
+// memory only. A failed write leaves memory as it was, matching the file.
 func (s *Store) update(change func(*state) bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !change(&s.s) {
+	next := s.s.clone()
+	if !change(&next) {
+		s.s = next
 		return nil
 	}
-	return s.write()
+	if err := write(s.path, next); err != nil {
+		return err
+	}
+	s.s = next
+	return nil
 }
 
 func newEventID() string {

@@ -46,6 +46,13 @@ func (m *Manager) RemoveRepositoryMember(ctx context.Context, id, name string, a
 		if err != nil || !strings.HasPrefix(branch, "refs/heads/") {
 			return Collection{}, errors.New("switch to a local branch before removing this worktree")
 		}
+		unsaved, err := m.unsavedHistory(ctx, member.Path)
+		if err != nil {
+			return Collection{}, err
+		}
+		if unsaved != "" {
+			return Collection{}, fmt.Errorf("%s; finish or abort it before removing this worktree", unsaved)
+		}
 		dirty, err := m.git(ctx, member.Path, "status", "--porcelain", "--untracked-files=all", "--ignored", "--ignore-submodules=none")
 		if err != nil {
 			return Collection{}, err

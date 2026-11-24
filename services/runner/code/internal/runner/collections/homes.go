@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitidentity"
 )
 
 // Where a repository's home checkout comes from (Manager.Home).
@@ -37,9 +35,9 @@ func (m *Manager) home(id string) (string, string) {
 	if r.Home != "" {
 		return r.Home, HomeConfigured
 	}
-	identity := gitidentity.Repository(m.common[id], r.SourceURL)
+	identity := m.identity(id)
 	for _, other := range m.repos {
-		if other.Home != "" && gitidentity.Repository(m.common[other.ID], other.SourceURL) == identity {
+		if other.Home != "" && m.identity(other.ID) == identity {
 			return other.Home, HomeConfigured
 		}
 	}
@@ -62,8 +60,7 @@ func (m *Manager) SetHome(id, path string) (Repository, error) {
 	if m.closed {
 		return Repository{}, errors.New("workspace manager closed")
 	}
-	r, ok := m.repos[id]
-	if !ok {
+	if _, ok := m.repos[id]; !ok {
 		return Repository{}, os.ErrNotExist
 	}
 	if path != "" {
@@ -75,12 +72,12 @@ func (m *Manager) SetHome(id, path string) (Repository, error) {
 		}
 	}
 	// One home per repository: aliases of the same repository forget theirs.
-	identity := gitidentity.Repository(m.common[id], r.SourceURL)
+	identity := m.identity(id)
 	list := make([]Repository, 0, len(m.repos))
 	for _, old := range m.repos {
 		if old.ID == id {
 			old.Home = path
-		} else if old.Home != "" && gitidentity.Repository(m.common[old.ID], old.SourceURL) == identity {
+		} else if old.Home != "" && m.identity(old.ID) == identity {
 			old.Home = ""
 		}
 		list = append(list, old)

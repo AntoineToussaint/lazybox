@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -134,6 +135,191 @@ func TestGitHubRepositoryRegistrationUnifiesClonesAndPreservesWorkspace(t *testi
 	m = newTest(t, root)
 	if len(m.Repositories()) != 1 || m.Repositories()[0] != one || len(m.List()) != 1 {
 		t.Fatal("identity or workspace lost across restart")
+	}
+}
+
+// Removing a GitHub repository hides its entry; its workspaces still name the
+// removed clone's Git directory. Adding the repository again from another
+// clone must not take over that entry, or those workspaces cannot be deleted.
+func TestReaddingRemovedGitHubRepositoryFromAnotherCloneKeepsItsWorkspaces(t *testing.T) {
+	ctx := context.Background()
+	first, second := repoTest(t), repoTest(t)
+	for _, repo := range []Repository{first, second} {
+		gitTest(t, repo.Path, "remote", "add", "origin", "https://github.com/team/api.git")
+		gitTest(t, repo.Path, "update-ref", "refs/remotes/origin/main", "HEAD")
+	}
+	root := t.TempDir()
+	m := newTest(t, root)
+	one, err := m.AddLocalRepository(ctx, first.Path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := m.Create(ctx, "from-first-clone", Spec{Name: "feature", Members: []MemberSpec{{RepositoryID: one.ID}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.RemoveRepository(one.ID); err != nil {
+		t.Fatal(err)
+	}
+	two, err := m.AddLocalRepository(ctx, second.Path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if two.ID == one.ID {
+		t.Fatal("another clone took over the removed repository's entry")
+	}
+	if hidden, ok := m.Repository(one.ID); !ok || !hidden.Hidden || hidden.Path != one.Path {
+		t.Fatalf("removed entry changed: %+v", hidden)
+	}
+	if list := m.Repositories(); len(list) != 1 || list[0].ID != two.ID {
+		t.Fatalf("library = %+v", list)
+	}
+	again, err := m.AddLocalRepository(ctx, second.Path, "")
+	if err != nil || again != two {
+		t.Fatal("re-adding the same clone was not idempotent", again, err)
+	}
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m = newTest(t, root)
+	inactive := func(string) bool { return false }
+	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.FinishDeletion(ctx, c.ID, false, inactive); err != nil {
+		t.Fatal("workspace from the removed clone stranded", err)
+	}
+}
+
+// A registered repository whose folder is gone (moved, deleted, unmounted),
+// hidden or not, configured or added later, must not stop the Runner.
+func TestMissingRepositoryFoldersAreUnavailableNotFatal(t *testing.T) {
+	ctx := context.Background()
+	configured, added, hidden, kept := repoTest(t), repoTest(t), repoTest(t), repoTest(t)
+	configured.ID, kept.ID = "configured", "kept"
+	root := t.TempDir()
+	m := newTest(t, root, configured, kept)
+	addedRepo, err := m.AddLocalRepository(ctx, added.Path, "added")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hiddenRepo, err := m.AddLocalRepository(ctx, hidden.Path, "hidden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.RemoveRepository(hiddenRepo.ID); err != nil {
+		t.Fatal(err)
+	}
+	c, err := m.Create(ctx, "survivor", specTest(kept.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{configured.Path, added.Path, hidden.Path} {
+		if err = os.RemoveAll(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m = newTest(t, root, configured, kept)
+	for _, id := range []string{configured.ID, addedRepo.ID, hiddenRepo.ID} {
+		if r, ok := m.Repository(id); !ok || r.Unavailable == "" {
+			t.Fatalf("%s: %+v, want an unavailable entry", id, r)
+		}
+		if _, err = m.Create(ctx, "from-"+id, specTest(id)); err == nil || !strings.Contains(err.Error(), "unavailable") {
+			t.Fatalf("%s: created a workspace from a missing folder: %v", id, err)
+		}
+	}
+	if got, err := m.Get(c.ID); err != nil || got.State != "ready" {
+		t.Fatal("other workspace lost", got, err)
+	}
+	if _, err = m.Create(ctx, "still-works", specTest(kept.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Repositories()) != 3 {
+		t.Fatalf("library = %+v", m.Repositories())
+	}
+}
+
+// A GitHub repository whose folder was moved is unavailable after a restart;
+// adding it at its new path registers the working clone, not the unavailable
+// entry, and that entry stays (hidden) for the workspaces made from it.
+func TestMovedRepositoryAddedAtItsNewPathIsUsable(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	gitTest(t, repo.Path, "remote", "add", "origin", "https://github.com/team/api.git")
+	gitTest(t, repo.Path, "update-ref", "refs/remotes/origin/main", "HEAD")
+	root := t.TempDir()
+	m := newTest(t, root)
+	old, err := m.AddLocalRepository(ctx, repo.Path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(t.TempDir(), "api")
+	if err = os.Rename(repo.Path, moved); err != nil {
+		t.Fatal(err)
+	}
+	m = newTest(t, root)
+	if r, _ := m.Repository(old.ID); r.Unavailable == "" {
+		t.Fatal("moved repository not unavailable")
+	}
+	added, err := m.AddLocalRepository(ctx, moved, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, _ := filepath.EvalSymlinks(moved)
+	if added.Unavailable != "" || added.Path != canonical || added.ID == old.ID {
+		t.Fatalf("added %+v, want the working clone under its own ID", added)
+	}
+	if list := m.Repositories(); len(list) != 1 || list[0].ID != added.ID {
+		t.Fatalf("library = %+v", list)
+	}
+	if hidden, ok := m.Repository(old.ID); !ok || !hidden.Hidden {
+		t.Fatalf("unavailable entry = %+v, want it kept hidden", hidden)
+	}
+	if _, err = m.Create(ctx, "after-move", Spec{Name: "after-move", Members: []MemberSpec{{RepositoryID: added.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m = newTest(t, root)
+	if list := m.Repositories(); len(list) != 1 || list[0].ID != added.ID || list[0].Unavailable != "" {
+		t.Fatalf("after restart: %+v", list)
+	}
+}
+
+// The same folder back at the same path is the same registration again.
+func TestRepositoryFolderBackAtItsPathIsRevivedInPlace(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	root := t.TempDir()
+	m := newTest(t, root)
+	old, err := m.AddLocalRepository(ctx, repo.Path, "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	aside := repo.Path + "-aside"
+	if err = os.Rename(repo.Path, aside); err != nil {
+		t.Fatal(err)
+	}
+	m = newTest(t, root)
+	if err = os.Rename(aside, repo.Path); err != nil {
+		t.Fatal(err)
+	}
+	again, err := m.AddLocalRepository(ctx, repo.Path, "api")
+	if err != nil || again.ID != old.ID || again.Unavailable != "" {
+		t.Fatalf("revived %+v, %v", again, err)
+	}
+	if _, err = m.Create(ctx, "revived", specTest(old.ID)); err != nil {
+		t.Fatal(err)
 	}
 }
 

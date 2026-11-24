@@ -14,6 +14,10 @@ Rust per `rust-toolchain.toml`), plus:
 - the [Codefly](https://github.com/codefly-dev/cli) CLI, which builds and
   supervises the Runner in Dev and Working and generates its service code;
 - `tmux`, for the session-host tests (`brew install tmux`);
+- `cargo-nextest`, which `make check-desktop` runs the Rust tests under, at
+  the version `.config/nextest.toml` requires or later
+  (`cargo install --locked cargo-nextest@0.9.152`, or
+  `brew install cargo-nextest`); `make install-check` reports it;
 - network access on the first `make dev`: Dev and Working build the snippet
   helper (`tools/lazybox-snippets`), and Cargo fetches the library it links
   from the public [lazybox-v1](https://github.com/AntoineToussaint/lazybox-v1)
@@ -41,7 +45,10 @@ Runner, and the next one picks the agents up again.
 ## Test
 
 Every behaviour change lands with a test; every bug fix with one that fails
-without the fix.
+without the fix. Every unit test finishes within 30 seconds, and the suites
+stop one that does not and name it
+([RELEASE_GATES.md](RELEASE_GATES.md#a-deadline-on-every-unit-test)): make a
+slow test fast at its cause, never raise the limit.
 
 ```sh
 npm run typecheck                 # TypeScript, every workspace
@@ -50,7 +57,7 @@ make test                         # the Runner's Go tests
 make test-environments            # launcher, release and install scripts
 npm run test:updates              # one UI suite (Playwright); npm run lists them all
 make check                        # format, vet, typecheck, generated code, Go and client tests
-make check-desktop                # the Tauri crate: fmt, tests, clippy
+make check-desktop                # the Tauri crate: fmt, tests (nextest), clippy
 make check-release                # the full release catalog, every UI suite included
 npm run docs:check                # build the docs site and check its links
 ```

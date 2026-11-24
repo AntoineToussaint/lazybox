@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { appPath, compareVersions, evaluate, linuxRuntimePath, report, requirements, runningCopies, versionIn } from './install.mjs';
+import { appPath, compareVersions, evaluate, evaluateDevelopment, linuxRuntimePath, report, reportDevelopment, requirements, runningCopies, versionIn } from './install.mjs';
 import { sourceManifest, sourceVersion, tauriReleaseConfig } from './build.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -19,6 +19,21 @@ test('the prerequisites are the versions this checkout pins', async () => {
   assert.equal(pinned.npm, /\d+(?:\.\d+)*/.exec(pkg.engines.npm)[0]);
   assert.match(pinned.rust, /^\d+\.\d+/);
   assert.equal(pinned.macos, '13.5');
+  const nextest = await readFile(resolve(root, '.config/nextest.toml'), 'utf8');
+  assert.equal(pinned.nextest, /^nextest-version = \{ required = "([\d.]+)" \}$/m.exec(nextest)[1]);
+});
+
+test('install-check reports cargo-nextest for development on a Mac, without making it a build need', () => {
+  const dev = { ...need, nextest: '0.9.152' };
+  assert.ok(evaluate(dev, { ...everything, nextest: '' }).every(c => c.ok), 'make install builds without it');
+  assert.ok(evaluateDevelopment(dev, { nextest: '0.9.152' }).every(c => c.ok));
+  const [old] = evaluateDevelopment(dev, { nextest: '0.9.100' });
+  assert.equal(old.ok, false);
+  assert.equal(old.fix, 'cargo install --locked cargo-nextest@0.9.152   (or brew install cargo-nextest)');
+  assert.deepEqual(evaluateDevelopment(dev, {}, 'linux'), [], 'check-desktop is the Mac app');
+  const lines = [];
+  assert.equal(reportDevelopment(evaluateDevelopment(dev, { nextest: '' }), line => lines.push(line)), false);
+  assert.match(lines.join('\n'), /not to install it:\n  ✗ cargo-nextest 0\.9\.152 or later: not found\n      cargo install --locked cargo-nextest@0\.9\.152/);
 });
 
 test('versions compare as numbers, part by part', () => {

@@ -2,6 +2,7 @@ import { readFile, mkdir, writeFile, rename, appendFile } from 'node:fs/promises
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { UNIT_TEST_TIMEOUT_MS, unitTestTimeoutViolations } from './unit-test-timeouts.mjs';
 
 const profiles = new Set(['release', 'core', 'native', 'ui']);
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -43,6 +44,9 @@ export async function loadGateCatalog(root) {
   for (const name of Object.keys(scripts).filter(name => name.startsWith('test:'))) {
     if (!covered.has(name)) throw new Error(`Test is absent from release gate catalog: ${name}`);
   }
+  // Every unit test has a per-test deadline, in every suite (AGENTS.md).
+  const unbounded = unitTestTimeoutViolations(root);
+  if (unbounded.length) throw new Error(`Every unit test must finish within ${UNIT_TEST_TIMEOUT_MS / 1000} s, enforced per test (scripts/unit-test-timeouts.mjs):\n  ${unbounded.join('\n  ')}`);
   // Script bodies are part of the policy fingerprint, not just their names.
   const commands = Object.fromEntries([...covered].sort().map(name => [name, scripts[name]]));
   const policyFiles = {};

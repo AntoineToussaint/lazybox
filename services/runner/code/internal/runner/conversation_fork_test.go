@@ -101,8 +101,16 @@ func TestForkCheckpointWorkspaceLeavesSourceFilesAlone(t *testing.T) {
 	}
 	write("present")
 	execution := &Execution{ID: "source-chat", CollectionID: source.ID, Purpose: "coding"}
+	// The bench's own goroutines read items (the power poll lists them every
+	// second), so the test registers its execution under the bench's lock.
+	b.mu.Lock()
 	b.items[execution.ID] = execution
-	t.Cleanup(func() { delete(b.items, execution.ID) })
+	b.mu.Unlock()
+	t.Cleanup(func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		delete(b.items, execution.ID)
+	})
 	for _, test := range []struct {
 		key    string
 		before bool

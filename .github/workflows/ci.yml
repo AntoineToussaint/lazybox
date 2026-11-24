@@ -240,14 +240,32 @@ jobs:
     name: desktop (Tauri fmt, test, clippy)
     runs-on: macos-15
     timeout-minutes: 40
+    env:
+      # The Rust tests run under cargo-nextest, which ends any test still
+      # running after 30 s (.config/nextest.toml). The release this config
+      # requires, pinned with its checksum; bump both with nextest-version.
+      NEXTEST_VERSION: "0.9.152"
+      NEXTEST_SHA256: 2fadf57df4243e691f088ee3bff4f4ab9af16da0c95a1db84b5cb1685e098a76
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install cargo-nextest
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="cargo-nextest-${NEXTEST_VERSION}-universal-apple-darwin.tar.gz"
+          gh release download "cargo-nextest-${NEXTEST_VERSION}" --repo nextest-rs/nextest --pattern "$archive"
+          echo "${NEXTEST_SHA256}  ${archive}" | shasum -a 256 --check
+          mkdir -p nextest-bin && tar -xzf "$archive" -C nextest-bin cargo-nextest
+          echo "$PWD/nextest-bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/desktop/src-tauri -> target
+          workspaces: |
+            apps/desktop/src-tauri -> target
+            tools/lazybox-snippets -> target
           # Save only from main: a PR restores main's cache (GitHub scopes
           # caches to the base branch) without filling the 10GB pool per PR.
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -256,8 +274,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
-      # fmt --check, the UI assets Tauri embeds, cargo test --locked,
-      # clippy --locked -D warnings.
+      # fmt --check, the UI assets Tauri embeds, the Tauri crate's and the
+      # snippet helper's tests under nextest, clippy --locked -D warnings.
       - run: make check-desktop CARGO_BUILD_JOBS="$(sysctl -n hw.ncpu)"
 
   ui:

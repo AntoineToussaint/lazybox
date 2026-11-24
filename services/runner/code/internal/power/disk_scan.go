@@ -162,21 +162,46 @@ func (e *Extensions) watchDiskScans(ctx context.Context, poll, interval, startup
 			if done != nil || now.Before(ready) || now.Before(state.Started.Add(interval)) {
 				continue
 			}
+			run := e.startDiskScan(ctx, scan)
+			if run == nil {
+				continue
+			}
 			state.Started = now
 			save()
-			cancel, done = startDiskScan(ctx, scan)
+			cancel, done = run.cancel, run.result
 		}
 	}
 }
 
-func startDiskScan(ctx context.Context, scan func(context.Context) diskResult) (context.CancelFunc, chan diskResult) {
+// diskScanRun is one scan under way.
+type diskScanRun struct {
+	cancel context.CancelFunc
+	result chan diskResult
+}
+
+// startDiskScan starts a scan if the snapshot still allows one, deciding and
+// registering it under e.mu: a SetEnabled, Approve or Remove that takes the
+// grant away (reloadLocked) cancels it before returning, and none starts after.
+func (e *Extensions) startDiskScan(ctx context.Context, scan func(context.Context) diskResult) *diskScanRun {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.snap.diskScanEnabled() {
+		return nil
+	}
 	scanCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	result := make(chan diskResult, 1)
+	run := &diskScanRun{cancel: cancel, result: make(chan diskResult, 1)}
+	e.diskScan = run
 	go func() {
 		defer cancel()
-		result <- scan(scanCtx)
+		page := scan(scanCtx)
+		e.mu.Lock()
+		if e.diskScan == run {
+			e.diskScan = nil
+		}
+		e.mu.Unlock()
+		run.result <- page
 	}()
-	return cancel, result
+	return run
 }
 
 // DiskPressureNotice returns the workspace notice ID for the last measured warning while a scan grant is active.

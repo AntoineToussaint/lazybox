@@ -60,10 +60,51 @@ func TestDiskScanScheduleRequiresApprovalAndCancelsOnDisable(t *testing.T) {
 	if _, err := e.SetEnabled("disk-cleanup", false); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-runs:
-		t.Fatal("ran after disable")
-	case <-time.After(50 * time.Millisecond):
+	// A scan already registered may still be scheduled after this, but never
+	// with a live context: turning the extension off cancelled it.
+	deadline := time.After(50 * time.Millisecond)
+	for {
+		select {
+		case scanCtx := <-runs:
+			if scanCtx.Err() == nil {
+				t.Fatal("a scan ran after disable")
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+func TestTurningTheScanOffCancelsItAtOnceAndStartsNone(t *testing.T) {
+	e := NewExtensions(t.TempDir(), filepath.Join(t.TempDir(), "approvals.json"))
+	if _, err := e.InstallExample("disk-cleanup"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Approve("disk-cleanup", []string{GrantDiskScan}, nil); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan context.Context, 1)
+	run := e.startDiskScan(context.Background(), func(ctx context.Context) diskResult {
+		started <- ctx
+		<-ctx.Done()
+		return diskResult{}
+	})
+	if run == nil {
+		t.Fatal("an approved, enabled scan did not start")
+	}
+	scanCtx := <-started
+	if _, err := e.SetEnabled("disk-cleanup", false); err != nil {
+		t.Fatal(err)
+	}
+	if scanCtx.Err() == nil {
+		t.Fatal("the scan under way kept running once its extension was turned off")
+	}
+	<-run.result
+	if e.startDiskScan(context.Background(), func(context.Context) diskResult {
+		t.Error("a scan started after its extension was turned off")
+		return diskResult{}
+	}) != nil {
+		t.Fatal("startDiskScan registered a scan the snapshot no longer allows")
 	}
 }
 

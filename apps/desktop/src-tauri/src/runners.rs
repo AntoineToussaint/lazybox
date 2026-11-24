@@ -11,7 +11,10 @@
 //! its locator, written by `lazybox remote add`, names the endpoint file of
 //! the link agent that serves it on loopback (links.rs keeps one running), and
 //! carries a `remote` field; the agent's `status.json` says how the link is.
-use crate::{Bootstrap, RPC_PATH, host::APP_WEBVIEWS};
+use crate::{
+    Bootstrap, RPC_PATH,
+    host::{APP_WEBVIEWS, hex},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -183,7 +186,7 @@ fn write_added(path: &Path, added: &Added) -> Result<(), String> {
 /// same whether it was registered or added, so it is listed once.
 fn runner_id(endpoint: &Path) -> String {
     let digest = Sha256::digest(endpoint.to_string_lossy().as_bytes());
-    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    hex(&digest[..8])
 }
 
 /// The channel a launcher's name stands for.
@@ -422,7 +425,7 @@ fn allow(app: &tauri::AppHandle, runners: &Runners, url: &str) -> Result<(), Str
         return Ok(());
     }
     app.add_capability(
-        CapabilityBuilder::new(format!("runner-{:x}", Sha256::digest(url.as_bytes())))
+        CapabilityBuilder::new(format!("runner-{}", hex(&Sha256::digest(url.as_bytes()))))
             .webviews(APP_WEBVIEWS)
             .permission_scoped(
                 "http:default",

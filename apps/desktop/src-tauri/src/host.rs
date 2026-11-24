@@ -95,7 +95,14 @@ pub fn authority(connection: &Bootstrap) -> String {
         hash.update(b"runner-identity:");
         hash.update(connection.runner_id.as_bytes());
     }
-    format!("{:x}", hash.finalize())
+    hex(&hash.finalize())
+}
+
+/// Lowercase hex, two digits a byte: the form saved window scopes, viewer
+/// labels and capability names are written in. digest 0.11 hashes no longer
+/// format with `{:x}`, and a different spelling would orphan saved state.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 struct LaunchOptions {
@@ -905,8 +912,8 @@ fn adopt(window: &Webview, current: &mut Bootstrap, next: Bootstrap) -> Result<(
             .app_handle()
             .add_capability(
                 CapabilityBuilder::new(format!(
-                    "reconnected-{:x}",
-                    Sha256::digest(next.url.as_bytes())
+                    "reconnected-{}",
+                    hex(&Sha256::digest(next.url.as_bytes()))
                 ))
                 .webviews(APP_WEBVIEWS)
                 .permission_scoped(
@@ -1789,6 +1796,12 @@ mod tests {
         assert_ne!(second, authority(&connection));
         connection.runner_id = "stable-runner-identity".replace('-', "");
         let stable = authority(&connection);
+        // The spelling saved scopes were written in: SHA-256 of
+        // "runner-identity:stablerunneridentity", lowercase hex.
+        assert_eq!(
+            stable,
+            "8f1d20be92b07b7d62892caa1af7e6dfa66af4d37fcfc171c099aec3bca1eb86"
+        );
         connection.token = "refreshed".into();
         connection.url = "http://localhost:54321".into();
         assert_eq!(stable, authority(&connection));

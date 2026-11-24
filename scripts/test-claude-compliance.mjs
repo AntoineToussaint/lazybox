@@ -9,6 +9,7 @@
 // switching on, with its warning for Claude.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const f=await startRunnerFixture();
 // Someone for whom both changes matter, as the migration leaves them: switching was on (kept, through the
 // extension), and Claude subscriptions were saved in Lazybox (kept working: sign-in carried over on), one imported from a token.
@@ -20,7 +21,7 @@ const saves=()=>f.mutations.filter(m=>m.method==='SaveRunnerSettings').map(m=>m.
 try{
  await server.listen();await mkdir('.cache',{recursive:true});browser=await webkit.launch();
  const page=await browser.newPage({viewport:{width:1360,height:900},locale:'en-US'});page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  const base=`http://127.0.0.1:${server.httpServer.address().port}`;
  await page.goto(`${base}/?view=workspace&collection=alpha#token=${f.token}`);
 

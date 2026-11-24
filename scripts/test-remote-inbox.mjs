@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -44,7 +45,7 @@ try {
   const errors = [];
   const pairPhone = async (grants, name) => {
     const context = await browser.newContext({ ...devices['iPhone 13'], ...(process.env.TEST_CHROMIUM ? { isMobile: false } : {}) });
-    const page = await context.newPage(); page.on('pageerror', e => errors.push(String(e)));
+    const page = await context.newPage(); await collectPageErrors(page, errors);
     await page.goto(await offer(grants));
     await page.getByRole('textbox', { name: 'Name this phone' }).fill(name);
     await page.getByRole('button', { name: 'Pair this phone' }).click();

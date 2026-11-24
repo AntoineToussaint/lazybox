@@ -29,6 +29,7 @@ import {createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 // Five conversations in Alpha, so the sidebar lists them under the workspace, and the review of the first.
@@ -51,19 +52,11 @@ await server.listen();
 await mkdir('.cache',{recursive:true});
 const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
 
-/**
- * Page errors, but not the requests a reload cuts in flight: WebKit reports
- * those on the page being left as "access control checks". Anything else fails.
- */
-function watchErrors(page){
- const state={reloading:false,errors:[]};
- page.on('pageerror',error=>{const text=String(error);if(state.reloading&&/access control checks/.test(text))return;state.errors.push(text);});
- state.reload=async()=>{
-  state.reloading=true;
-  try{await page.reload();await page.locator('.page-layout .panel-chat').first().waitFor({state:'attached'});await page.waitForTimeout(400);}
-  finally{state.reloading=false;}
- };
- return state;
+/** The page's errors, and a reload that waits for the chat to come back. */
+async function watchErrors(page){
+ const errors=await collectPageErrors(page);
+ const reload=async()=>{await page.reload();await page.locator('.page-layout .panel-chat').first().waitFor({state:'attached'});await page.waitForTimeout(400);};
+ return {errors,reload};
 }
 /** What every scenario reads of the chat tabs. */
 function tabsOf(page){
@@ -127,7 +120,7 @@ async function tabsOn(){
  const context=await browser.newContext({viewport:{width:1600,height:900}});
  await context.addInitScript(([key,a,b])=>{if(sessionStorage.getItem('seeded'))return;sessionStorage.setItem('seeded','1');localStorage.setItem(`${key}:workspace:alpha:pages`,a);localStorage.setItem(`${key}:workspace:beta:pages`,b);},[scope,JSON.stringify(alpha),JSON.stringify(beta)]);
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const watched=watchErrors(page);
+ const watched=await watchErrors(page);
  const {chatTabs,tab,titles,previews,row,inFront,workspace}=tabsOf(page);
  const all=['Review of the main conversation','Main alpha conversation','Second alpha conversation','Third alpha conversation','Fourth alpha conversation','Fifth alpha conversation'];
  await page.goto(`${origin}/?view=workspace&collection=alpha#token=${fixture.token}`);
@@ -257,7 +250,7 @@ async function previewTabs(){
  const context=await browser.newContext({viewport:{width:1600,height:900},colorScheme:'dark'});
  await context.addInitScript(()=>{try{localStorage.setItem('lazybox:workspace.conversation-tabs','off');}catch{/* a popup without storage */}});
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const watched=watchErrors(page);
+ const watched=await watchErrors(page);
  const shot=name=>page.screenshot({path:`.cache/conversation-tabs-${name}.png`});
  await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const {chatTabs,tab,groupOf,titles,previews,row,inFront,fontStyle}=tabsOf(page);

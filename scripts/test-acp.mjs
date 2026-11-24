@@ -11,6 +11,7 @@ import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {acpJournal} from './fixtures/acp-ui-fake.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 fixture.acp.install('gemini','0.68.0');
@@ -27,7 +28,7 @@ const applied=kind=>fixture.mutations.filter(m=>m.method==='Apply'&&m.body[kind]
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});let browser;
 try{
  await server.listen();browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1450,height:1000}});page.setDefaultTimeout(10000);
- const errors=[];page.on('pageerror',e=>{errors.push(String(e));console.error('Browser error:',e);});
+ const errors=await collectPageErrors(page);
  page.on('dialog',dialog=>void dialog.accept());
  await page.addInitScript(()=>localStorage.setItem('lazybox:chat.activity-detail','verbose'));
  const base=`http://127.0.0.1:${server.httpServer.address().port}`;

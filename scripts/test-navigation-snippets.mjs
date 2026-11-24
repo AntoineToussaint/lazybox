@@ -5,6 +5,7 @@ import { webkit, expect } from "./fixtures/playwright.mjs";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { startRunnerFixture } from "./fixtures/runner-ui.mjs";
+import { collectPageErrors } from "./fixtures/page-errors.mjs";
 const f = await startRunnerFixture();
 Object.assign(f.library[0], {
   name: "handbook",
@@ -36,7 +37,7 @@ try {
   });
   page.setDefaultTimeout(10000);
   const errors = [];
-  page.on("pageerror", (e) => errors.push(String(e)));
+  await collectPageErrors(page, errors);
   await page.route("**/ListSnippets", async route => {
     const response = await route.fetch();
     const { snippets } = await response.json();

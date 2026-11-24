@@ -9,6 +9,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f=await startRunnerFixture();
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
@@ -46,7 +47,7 @@ try{
   window.__menus=[];window.addEventListener('contextmenu',event=>{setTimeout(()=>window.__menus.push(event.defaultPrevented),0);});
  });
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${session.id}#token=${f.token}`);
  const chat=page.locator('.embedded-chat:visible').first(),bar=chat.getByRole('region',{name:'What the agent is doing'});
  const menu=page.locator('.context-menu[data-depth="0"]'),item=name=>menu.getByRole('menuitem',{name,exact:true});

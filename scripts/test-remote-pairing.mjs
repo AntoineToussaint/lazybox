@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const proxy = { '/lazybox.bench.v1.RunnerService/': { target: f.url }, '/remote/v1/': { target: f.url } };
@@ -24,7 +25,7 @@ try {
   f.remote.phoneUrl = origin;
   browser = await (process.env.TEST_CHROMIUM ? chromium : webkit).launch();
   const desktop = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-  const errors = []; desktop.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(desktop, errors);
   await desktop.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
   await desktop.getByRole('button', { name: 'Settings', exact: true }).click();
   await desktop.getByRole('tab', { name: 'Devices', exact: true }).click();
@@ -76,7 +77,7 @@ try {
   const iPhone = devices['iPhone 13'];
   const phoneContext = await browser.newContext({ ...iPhone, ...(process.env.TEST_CHROMIUM ? { isMobile: false } : {}) });
   const phone = await phoneContext.newPage();
-  const phoneErrors = []; phone.on('pageerror', e => phoneErrors.push(String(e)));
+  const phoneErrors = []; await collectPageErrors(phone, phoneErrors);
   const phoneBearers = new Set();
   phone.on('request', request => { const value = request.headers().authorization; if (value) phoneBearers.add(value); });
   await phone.goto(link);

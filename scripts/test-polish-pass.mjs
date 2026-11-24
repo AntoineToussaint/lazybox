@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 Object.assign(fixture.sessions[0], { title: 'Ship the front door with a long conversation title', busy: true, status: 'running' });
@@ -24,7 +25,7 @@ try {
   browser = await webkit.launch();
   const url = `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`;
   const errors = [];
-  const open = async viewport => { const page = await (await browser.newContext({ viewport })).newPage(); page.setDefaultTimeout(15000); page.on('pageerror', error => errors.push(String(error))); await page.goto(url); await expect(page.getByRole('textbox', { name: 'Message', exact: true }).first()).toBeVisible(); return page; };
+  const open = async viewport => { const page = await (await browser.newContext({ viewport })).newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors); await page.goto(url); await expect(page.getByRole('textbox', { name: 'Message', exact: true }).first()).toBeVisible(); return page; };
 
   // 1. A chat squeezed between the sidebar and three docked panels.
   {

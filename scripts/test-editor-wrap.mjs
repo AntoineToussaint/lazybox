@@ -7,6 +7,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 const long='**Canonical instructions live in [AGENTS.md](AGENTS.md).** '+'This file is a forwarding note so tools looking for it find the same content every other agent uses. '.repeat(4);
 fixture.workspaceFiles.set('alpha/api/README.md',{path:'api/README.md',text:`# Title\n\n${long}\n`,version:'v1',binary:false,truncated:false});
@@ -15,7 +16,7 @@ const server=await createServer({...testViteCache(import.meta.url),configFile:fa
 let browser;
 try{
  await server.listen();browser=await webkit.launch({headless:true});const page=await browser.newPage({viewport:{width:1200,height:900}});page.setDefaultTimeout(20000);
- const errors=[];page.on('pageerror',error=>errors.push(String(error)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const open=async()=>{await page.getByRole('button',{name:'README',exact:true}).click({modifiers:['Alt']});const dialog=page.getByRole('dialog',{name:'File preview',exact:true});await dialog.getByRole('button',{name:'Edit file',exact:true}).click();
   // Monaco's first load from a cold dev server outlasts expect's 5 s on a CI runner.

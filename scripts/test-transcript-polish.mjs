@@ -5,6 +5,7 @@
 // dark and light.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f=await startRunnerFixture();
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
@@ -64,7 +65,7 @@ const server=await createServer({...testViteCache(import.meta.url),configFile:fa
 try{
  await server.listen();await mkdir('.cache',{recursive:true});browser=await (process.env.TEST_CHROMIUM?chromium:webkit).launch();
  const page=await browser.newPage({viewport:{width:1440,height:960},colorScheme:'dark'});page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.route('**/GetTelemetry',route=>route.fulfill({json:usage}));
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
  const chat=page.locator('.embedded-chat:visible').first(),messages=chat.locator('.messages:visible');
@@ -207,7 +208,7 @@ try{
  const branchRequests=[];
  const branchPage=await browser.newPage({viewport:{width:1440,height:960}});
  const branchErrors=[];
- branchPage.on('pageerror',error=>branchErrors.push(String(error)));
+ await collectPageErrors(branchPage, branchErrors);
  await branchPage.route('**/OpenSession',async route=>{
    const {fork}=route.request().postDataJSON();
    branchRequests.push(fork);

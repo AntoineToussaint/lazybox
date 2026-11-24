@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createRunnerClient } from '../packages/client-core/src/index.ts';
 import assert from 'node:assert/strict';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const endpointPath = process.env.LAZYBOX_V2_ENDPOINT;
 if (!endpointPath) throw new Error('Set LAZYBOX_V2_ENDPOINT; start the real Codefly Runner before this test');
@@ -23,7 +24,7 @@ try {
   const context = await browser.newContext({ viewport: { width: 1500, height: 1050 } });
   const page = await context.newPage();
   const errors = [];
-  page.on('pageerror', error => errors.push(String(error)));
+  await collectPageErrors(page, errors);
   const denied = await context.newPage();
   await denied.goto(url.replace(endpoint.token, 'invalid-token'));
   await expect(denied.getByRole('alert')).toContainText('unauthenticated');

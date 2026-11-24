@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const alpha = f.collections.find(c => c.id === 'alpha'), beta = f.collections.find(c => c.id === 'beta');
@@ -33,7 +34,7 @@ try {
   browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1400, height: 950 } });
   page.setDefaultTimeout(10_000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${f.token}`);
   const nav = page.getByRole('navigation', { name: 'Workspaces' });
   // The sidebar's list is polled by more than one reader (every 3 s), so a

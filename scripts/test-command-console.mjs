@@ -7,6 +7,7 @@ import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -15,7 +16,7 @@ try {
   await server.listen();
   browser = await chromium.launch({ headless: true });
   const page = await (await browser.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
-  const errors = []; page.on('pageerror', error => errors.push(String(error)));
+  const errors = []; await collectPageErrors(page, errors);
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`);
   await page.getByRole('combobox', { name: 'Workspace', exact: true }).selectOption('alpha');
   await page.getByRole('combobox', { name: 'Session', exact: true }).selectOption('alpha-session');
@@ -131,7 +132,7 @@ try {
   const base = `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`;
   const fresh = async () => {
     const view = await (await browser.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
-    view.on('pageerror', error => errors.push(String(error)));
+    await collectPageErrors(view, errors);
     await view.goto(base);
     await view.getByRole('combobox', { name: 'Workspace', exact: true }).selectOption('alpha');
     await view.getByRole('combobox', { name: 'Session', exact: true }).selectOption('alpha-session');

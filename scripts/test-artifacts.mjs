@@ -17,6 +17,7 @@ import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
 import {reportTitle,seedReport} from './fixtures/artifact-sample.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];
 Object.assign(session,{busy:false,status:'done',conversationId:'conversation-alpha',agents:[{id:'root',status:'done'}]});
@@ -33,7 +34,7 @@ try{
  await mkdir('.cache',{recursive:true});await server.listen();browser=await (process.env.TEST_CHROMIUM?chromium:webkit).launch({headless:true});
  const context=await browser.newContext({viewport:{width:1400,height:900},acceptDownloads:true});
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  // Copies are recorded; the rest of the real clipboard (which the editor uses) is left alone.
  await page.addInitScript(()=>{window.__copies=[];if(navigator.clipboard)navigator.clipboard.writeText=async text=>{window.__copies.push(text);};else Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__copies.push(text);}}});});
  // Printing is counted, not shown: the system dialog would block the page.
@@ -316,7 +317,7 @@ try{
 
  // Density: a report whose first heading nearly repeats its title, in its own window.
  const report=seedReport(fixture);
- const reader=await context.newPage();reader.setDefaultTimeout(15000);reader.on('pageerror',e=>errors.push(String(e)));
+ const reader=await context.newPage();reader.setDefaultTimeout(15000);await collectPageErrors(reader, errors);
  await reader.setViewportSize({width:1000,height:800});
  await reader.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=artifact&collection=alpha&artifact=${report.id}#token=${fixture.token}`);
  const reportPage=reader.getByRole('article',{name:reportTitle});

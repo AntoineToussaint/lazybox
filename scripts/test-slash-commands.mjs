@@ -6,6 +6,7 @@
 // insert mode works, and ⌘K, the ⋯ menu and the header reach the same pickers.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const f=await startRunnerFixture();
 const data=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const catalog={commands:[{name:'compact',description:'Clear history but keep a summary',argumentHint:'<instructions>',builtin:true},{name:'review-pr',description:'Review a pull request',argumentHint:'<number>'},{name:'init',description:'Initialize a CLAUDE.md',argumentHint:'',builtin:true},{name:'model',description:'native',argumentHint:''}],models:[{value:'claude-opus-5-5',displayName:'Opus 5.5',description:'Most capable'},{value:'claude-sonnet-5',displayName:'Sonnet 5',description:'Fast and capable'}]};
@@ -27,9 +28,8 @@ const mod='Meta';
 const applies=()=>f.mutations.filter(m=>m.method==='Apply');
 try{
  await server.listen();await mkdir('.cache',{recursive:true});browser=await webkit.launch();const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(15000);
- // Leaving a page cuts its in-flight polls, which WebKit reports as page errors ("access control checks"): not failures.
- let navigating=false;const errors=[];page.on('pageerror',e=>{if(!navigating)errors.push(String(e));});
- const go=async url=>{navigating=true;await page.goto(url);await page.waitForLoadState('load');navigating=false;};
+ const errors=await collectPageErrors(page);
+ const go=async url=>{await page.goto(url);await page.waitForLoadState('load');};
  const base=`http://127.0.0.1:${server.httpServer.address().port}`;
  await page.goto(`${base}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
  const chat=page.locator('.embedded-chat:visible').first();

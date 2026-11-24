@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectContextPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const internalRepoID='github-'+'9'.repeat(64);
@@ -21,9 +22,9 @@ try {
   const context = await browser.newContext({ viewport: { width: 1500, height: 1100 } });
   // One chat that shows the conversation chosen (the preview tab): "Open a workspace's conversations as tabs" off; test-conversation-tabs covers it on.
   await context.addInitScript(() => { try { localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'); } catch { /* a popup without storage */ } });
+  // Every page of the context: this one, the chat windows it pops out and the page that replaces it.
+  const errors = await collectContextPageErrors(context);
   let page = await context.newPage();
-  const errors = [];
-  context.on('page', page => page.on('pageerror', error => errors.push(String(error))));
   await page.goto(url);
   await expect(page.locator('.workspace-row').filter({hasText:'Alpha feature'}).locator('.workspace-link')).toBeVisible();
   const collection = page.getByRole('combobox', { name: 'Workspace', exact: true });

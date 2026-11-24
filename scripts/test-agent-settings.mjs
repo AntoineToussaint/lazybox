@@ -7,6 +7,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {mkdir} from 'node:fs/promises';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 fixture.library.splice(0,fixture.library.length,...['api','web'].map((name,i)=>({id:i?'frontend':'backend',name,gitIdentity:`github:team/${name}`,sourceUrl:`https://github.com/team/${name}`,path:`/fixture/${name}`})));
 fixture.profiles.push({id:'saved-codex',provider:'codex',label:'Codex personal',managed:true,isolation:'environment'});
@@ -14,7 +15,7 @@ const server=await createServer({...testViteCache(import.meta.url),configFile:fa
 let browser;
 try{
  await server.listen();browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1450,height:1000}});page.setDefaultTimeout(10000);
- const errors=[];page.on('pageerror',error=>{errors.push(String(error));console.error('Browser error:',error);});
+ const errors=await collectPageErrors(page);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`);
  await page.getByRole('button',{name:'New workspace',exact:true}).click();
  const dialog=page.getByRole('dialog',{name:'New workspace',exact:true}),name=dialog.getByLabel('Workspace name',{exact:true});

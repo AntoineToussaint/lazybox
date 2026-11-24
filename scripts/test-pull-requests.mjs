@@ -12,6 +12,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -51,7 +52,7 @@ try {
   const desktop = await browser.newContext({viewport: {width: 1500, height: 950}});
   const page = await desktop.newPage();
   page.setDefaultTimeout(10_000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
   await mkdir('.cache', {recursive: true});
 
@@ -147,7 +148,7 @@ try {
 
   // 4. The conversation shows what Lazybox sent, as its chip, not the person's words.
   // (A fresh window: this one remembers the page it last showed for the workspace.)
-  const chat = await (await browser.newContext({viewport: {width: 1400, height: 900}})).newPage(); chat.on('pageerror', e => errors.push(String(e)));
+  const chat = await (await browser.newContext({viewport: {width: 1400, height: 900}})).newPage(); await collectPageErrors(chat, errors);
   await chat.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
   const chip = chat.locator('.system-event').filter({hasText: 'Checks failed on acme/api#812'});
   await expect(chip).toBeVisible();
@@ -242,7 +243,7 @@ try {
   f.remote.phoneUrl = origin;
   const offer = await (await fetch(`${f.url}/lazybox.bench.v1.RunnerService/BeginDevicePairing`, {method: 'POST', headers: {authorization: `Bearer ${f.token}`, 'content-type': 'application/json'}, body: JSON.stringify({grants: ['respond']})})).json();
   const phoneContext = await browser.newContext({...devices['iPhone 13'], isMobile: false});
-  const phone = await phoneContext.newPage(); phone.on('pageerror', e => errors.push(String(e)));
+  const phone = await phoneContext.newPage(); await collectPageErrors(phone, errors);
   await phone.goto(offer.url);
   await phone.getByRole('textbox', {name: 'Name this phone'}).fill('iPhone');
   await phone.getByRole('button', {name: 'Pair this phone'}).click();

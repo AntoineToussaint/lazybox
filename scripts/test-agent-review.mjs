@@ -17,6 +17,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const author=fixture.sessions[0];
@@ -46,7 +47,7 @@ try{
  await server.listen();await mkdir('.cache',{recursive:true});
  browser=await chromium.launch({headless:true});
  let page=await browser.newPage({viewport:{width:1500,height:1000}});page.setDefaultTimeout(10000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  const mod='Meta';
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}#token=${fixture.token}`);
  await expect(page.locator('.messages:visible')).toContainText('REPLY_ONE');
@@ -159,7 +160,7 @@ try{
 
  // 9. A turn's ⋯ menu: "Review this turn with Codex".
  // A fresh window on the author's conversation.
- await page.close();page=await browser.newPage({viewport:{width:1500,height:1000}});page.setDefaultTimeout(10000);page.on('pageerror',e=>errors.push(String(e)));
+ await page.close();page=await browser.newPage({viewport:{width:1500,height:1000}});page.setDefaultTimeout(10000);await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}#token=${fixture.token}`);
  const marker=page.locator('.messages:visible').getByRole('group',{name:'Turn 1 checkpoint'});
  await marker.getByLabel('Turn 1 actions',{exact:true}).click();

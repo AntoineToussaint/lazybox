@@ -14,6 +14,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const site = `http://127.0.0.1:${fixture.previewPort}`;
@@ -34,7 +35,7 @@ try {
   // Searches never leave the machine: the engine's page is a fixture.
   await context.route('https://duckduckgo.com/**', route => route.fulfill({ contentType: 'text/html', body: '<title>Search</title><h1>Search fixture</h1>' }));
   const page = await context.newPage();
-  const errors = []; page.on('pageerror', error => errors.push(String(error)));
+  const errors = []; await collectPageErrors(page, errors);
   const app = `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`;
   await page.goto(app);
   await mkdir('.cache', { recursive: true });
@@ -220,7 +221,7 @@ try {
   await nativeServer.listen();
   const native = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
   const host = await native.newPage();
-  host.on('pageerror', error => errors.push(String(error)));
+  await collectPageErrors(host, errors);
   await host.goto(`http://127.0.0.1:${nativeServer.httpServer.address().port}/?collection=alpha&session=alpha-session#token=${fixture.token}`);
   await host.locator('.panel-chat').getByRole('link', { name: 'the fixture site' }).click({ modifiers: ['Alt'] });
   const nativeViewer = host.getByRole('region', { name: 'Web page' }).first();

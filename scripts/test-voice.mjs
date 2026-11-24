@@ -13,6 +13,7 @@ import { webkit, chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -107,7 +108,7 @@ try {
   });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   await page.route('**/WisprStatus', route => route.fulfill({ json: { configured: true } }));
   let wisprAudio;
   await page.route('**/TranscribeWispr', route => {

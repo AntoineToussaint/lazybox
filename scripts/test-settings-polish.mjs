@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture, defaultModelPrices } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 // A ~/.zshenv that puts V1's lazybox first: the Runner's shell integration fixed it.
@@ -33,7 +34,7 @@ let browser, page;
 try {
   await server.listen(); browser = await chromium.launch({ headless: true });
   page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   await mkdir('.cache', { recursive: true });
   // Hold the automatic refresh, so "checking" can be seen before the answer.
   let release; const held = new Promise(resolve => { release = resolve; });

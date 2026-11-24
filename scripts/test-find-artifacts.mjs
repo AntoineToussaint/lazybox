@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];
 Object.assign(session,{busy:false,status:'done',conversationId:'conversation-alpha',agents:[{id:'root',status:'done'}]});
@@ -36,7 +37,7 @@ try{
  await mkdir('.cache',{recursive:true});await server.listen();browser=await (process.env.TEST_CHROMIUM?chromium:webkit).launch({headless:true});
  const context=await browser.newContext({viewport:{width:1500,height:920}});
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${session.id}#token=${fixture.token}`);
  const messages=page.locator('.messages:visible');
  await expect(messages.getByText('Nothing yet; I will write one.')).toBeVisible();

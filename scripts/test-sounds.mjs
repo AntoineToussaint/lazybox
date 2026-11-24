@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 /** A short sine beep as a 16-bit mono WAV. */
 function wav(seconds = 0.15, rate = 8000) {
@@ -44,7 +45,7 @@ try {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: scheme });
     await context.addInitScript(listen);
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    const errors = []; page.on('pageerror', e => errors.push(String(e)));
+    const errors = []; await collectPageErrors(page, errors);
     const openSounds = async () => {
       await page.getByRole('button', { name: 'Settings', exact: true }).click();
       await page.getByRole('tab', { name: 'Notifications', exact: true }).click();

@@ -26,6 +26,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {longConversation} from './fixtures/long-conversation.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const turns=Number(process.env.PERF_TURNS||200),runs=Number(process.env.PERF_RUNS||3),strict=!!process.env.PERF_STRICT;
 // For a quiet machine (PERF_STRICT=1); the unfixed reader took several times
@@ -58,7 +59,7 @@ try{
  const results=[],calibrations=[];
  const open=async({target,collection,count,long})=>{
   const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(60000);
-  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+  const errors=[];await collectPageErrors(page, errors);
   const marker=`ANSWER_END_${count-1}`;
   await page.addInitScript(marker=>{
    const perf={first:undefined,visible:undefined,frames:[],marker};window.__perf=perf;let last=performance.now();

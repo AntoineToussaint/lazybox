@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -22,10 +23,7 @@ try {
   browser = await (process.env.TEST_CHROMIUM ? chromium : webkit).launch();
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
-  // A reload cuts every panel's in-flight poll, which WebKit reports as page
-  // errors ("access control checks") on the page being left: not failures.
-  let navigating = false;
-  const errors = []; page.on('pageerror', error => { if (!navigating) errors.push(String(error)); });
+  const errors = await collectPageErrors(page);
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
   await expect(page.locator('.panel-chat').getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
 
@@ -300,10 +298,8 @@ try {
   await page.getByRole('group', { name: 'Mission: Speed up startup menu' }).getByRole('button', { name: /^Ship the parser split\s*1 needs you · 1 of 2 done$/ }).click();
   await expect(panel.getByLabel('Mission: Ship the parser split', { exact: true })).toBeVisible();
   assert.deepEqual(errors, []);
-  navigating = true;
   await page.reload();
   await expect(page.getByRole('region', { name: 'Missions and tasks', exact: true }).getByRole('heading', { name: 'Ship the parser split' })).toBeVisible();
-  navigating = false;
 
   // Docked narrow, columns stack and nothing scrolls sideways; on a phone too.
   await page.setViewportSize({ width: 390, height: 844 });

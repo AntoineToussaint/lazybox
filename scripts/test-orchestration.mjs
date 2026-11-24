@@ -16,6 +16,7 @@ import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const shots = fileURLToPath(new URL('../.cache/', import.meta.url));
 mkdirSync(shots, { recursive: true });
@@ -45,7 +46,7 @@ async function run(scheme) {
   fixture.openEvents('alpha-session').push({ type: 'message_delta', text: 'I can split the search work: an index and a ranker.' });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
   const page = await context.newPage();
-  const errors = []; page.on('pageerror', error => errors.push(String(error)));
+  const errors = []; await collectPageErrors(page, errors);
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
   // The conversation in view: typing in one keeps its tab, so the child opens in a preview tab beside it.
   const chat = page.locator('.panel-chat').filter({ visible: true });

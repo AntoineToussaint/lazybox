@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 f.completeGitHub();
@@ -34,7 +35,7 @@ try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
     await context.addInitScript(() => localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'));
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    const errors = []; page.on('pageerror', e => errors.push(String(e)));
+    const errors = []; await collectPageErrors(page, errors);
     await page.goto(`${base}#token=${f.token}`);
 
     // An empty window says how to start, with the key.

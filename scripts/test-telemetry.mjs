@@ -5,12 +5,13 @@ import {chromium,webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 let browser;
 try{
  await server.listen();browser=await (process.env.TEST_WEBKIT?webkit:chromium).launch({headless:true});const page=await browser.newPage({viewport:{width:1500,height:1100}});page.setDefaultTimeout(10000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.route('**/GetTelemetry',route=>route.fulfill({json:{groups:[{scope:{workspace:'alpha',execution:'alpha-session',profile:'Account one'},source:'gateway',model:'fixture',records:'2',unpriced:'1',incomplete:'1',nanos:'12300000',tokens:{input:'1200',cacheRead:'800',output:'100'}}],contexts:[{scope:{execution:'alpha-session'},agent:'root',used:'80000',capacity:'1000000',reserve:'33000',source:'sdk_summary_estimate',observedAt:'2026-11-02T12:00:00Z',categories:[{name:'messages',tokens:'24500',kind:'used',included:true},{name:'system_tools',tokens:'20600',kind:'used',included:true},{name:'mcp_tools',tokens:'16800',kind:'used',included:true},{name:'system_prompt',tokens:'11500',kind:'used',included:true},{name:'skills',tokens:'6600',kind:'used',included:true},{name:'mcp_tools_deferred',tokens:'50000',kind:'deferred',included:false}]}]}}));
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`);
  await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');await page.getByRole('combobox',{name:'Session',exact:true}).selectOption('alpha-session');

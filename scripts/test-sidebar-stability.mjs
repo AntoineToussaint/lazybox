@@ -19,6 +19,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 // Five more workspaces, each with a conversation of its own.
@@ -58,10 +59,8 @@ try{
   });
  },{saved,token:fixture.token});
  const p=await context.newPage();p.setDefaultTimeout(15000);
- // A reload cuts in-flight polls, which WebKit reports as page errors ("access control checks") on the page being left: not failures.
- let navigating=false;
- const errors=[];p.on('pageerror',e=>{if(!navigating)errors.push(String(e));});
- const reload=async()=>{navigating=true;await p.reload();await expect(sidebarGroup).toBeVisible();navigating=false;};
+ const errors=await collectPageErrors(p);
+ const reload=async()=>{await p.reload();await expect(sidebarGroup).toBeVisible();};
  await p.goto(url);
  const sidebarGroup=p.locator('.dv-groupview:has(.dv-tab [data-kind="collections"])');
  await expect(sidebarGroup).toBeVisible();

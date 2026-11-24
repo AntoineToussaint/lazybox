@@ -7,6 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 fixture.sessions.push({...fixture.sessions[0],id:'alpha-history',workId:'alpha-history',title:'Earlier investigation',closed:true,status:'stopped'});
 fixture.sessions[0].title='Investigate API contract';fixture.sessions[1].title='Release web';
@@ -14,7 +15,7 @@ const server=await createServer({...testViteCache(import.meta.url),configFile:fa
 let browser;
 try{
  await server.listen();browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1500,height:1000}});page.setDefaultTimeout(10000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));const reads=[];
+ const errors=[];await collectPageErrors(page, errors);const reads=[];
  const lists=[];await page.route('**/ListWorkspaceChanges',route=>{lists.push(route.request().postDataJSON());return route.fulfill({json:{repositories:[{member:'api',branch:'feature/steady-otter',head:'a'.repeat(40),base:'c'.repeat(40),committed:[{path:'handler.go',indexStatus:'M'}],branches:['feature/steady-otter','main','origin/main','release/2'],defaultBranch:'origin/main',commits:[{id:'d'.repeat(40),subject:'Add contract handler',committedAtUnix:String(Math.floor(Date.now()/1000)-120)}],files:[{path:'contract.ts',indexStatus:'M',worktreeStatus:'M'}]},{member:'web',branch:'feature/steady-otter',head:'b'.repeat(40),files:[{path:'new-view.tsx',indexStatus:'?',worktreeStatus:'?'}]}]}})});
  await page.route('**/ReadWorkspaceDiff',route=>{const body=route.request().postDataJSON();reads.push(body);return route.fulfill({json:{text:body.committed?'@@ branch @@\n+branch change':body.staged?'@@ staged @@\n+saved change':'@@ working tree @@\n+working change'}})});
  const url=`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`;await page.goto(url);

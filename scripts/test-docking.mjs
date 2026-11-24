@@ -16,6 +16,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectContextPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),logLevel:'warn',plugins:[react(),monacoVimCompat()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
@@ -25,8 +26,8 @@ let browser;
 try{
  browser=await webkit.launch({headless:true});
  const context=await browser.newContext({viewport:{width:1440,height:900}});
+ const errors=await collectContextPageErrors(context);
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const errors=[];context.on('page',p=>p.on('pageerror',e=>errors.push(String(e))));page.on('pageerror',e=>errors.push(String(e)));
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const tab=name=>page.locator('.dv-tab').filter({has:page.locator(`[data-kind="${name}"]`)});
  const content=kind=>page.locator(`[data-dock-panel]:has(> .panel-host > .panel-${kind})`);

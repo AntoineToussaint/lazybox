@@ -5,6 +5,7 @@ import { webkit, expect } from "./fixtures/playwright.mjs";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { startRunnerFixture } from "./fixtures/runner-ui.mjs";
+import { collectPageErrors } from "./fixtures/page-errors.mjs";
 const f = await startRunnerFixture();
 Object.assign(f.github, {
   state: "connected",
@@ -37,12 +38,7 @@ try {
     viewport: { width: 1280, height: 900 },
   });
   page.setDefaultTimeout(10000);
-  // Leaving a page (the reload, the goto below) cuts its in-flight polls, which WebKit
-  // reports as page errors ("access control checks") on the page being left: not failures. Anything else is.
-  const errors = [];
-  let leaving = 0;
-  page.on("pageerror", (e) => { const text = String(e); if (leaving && /access control checks/.test(text)) return; errors.push(text); });
-  const leave = async (go) => { leaving++; try { await go(); } finally { leaving--; } };
+  const errors = await collectPageErrors(page);
   await page.goto(
     `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${f.token}`,
   );
@@ -118,7 +114,7 @@ try {
   assert.equal(created.members.length, 2);
   await expect.poll(() => f.mutations.filter(m => m.method === "OpenSession" && m.body.collectionId === created.id).length).toBe(1);
   await page.waitForLoadState("networkidle");
-  await leave(() => page.reload());
+  await page.reload();
   const row = page
     .locator(".workspace-row")
     .filter({ hasText: "Datasource work" });
@@ -188,7 +184,7 @@ try {
   );
   await page.screenshot({ path: "/tmp/lazybox-unified-repositories.png" });
   // A long selection must not hide the primary action on small screens.
-  await leave(() => page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${f.token}`));
+  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${f.token}`);
   await page.route('**/GetRepositoryCatalog', route => route.fulfill({json:{
     entries:Array.from({length:20},(_,i)=>({identity:`github:large-team/service-with-a-long-name-${i}`,name:`large-team/service-with-a-long-name-${i}`})),
     sources:[{id:'github',state:'connected'}],refreshSeconds:300

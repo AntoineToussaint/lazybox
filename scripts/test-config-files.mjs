@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: f.url } } } });
@@ -41,7 +42,7 @@ async function scenario(browser, scheme, full) {
   await context.addInitScript(() => { window.__clipboard = ''; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => { window.__clipboard = text; }, readText: async () => window.__clipboard, write: async () => undefined, read: async () => [] } }); });
   const page = await context.newPage();
   page.setDefaultTimeout(10000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   const shot = name => page.screenshot({ path: `.cache/config-files-${name}-${scheme}.png` });
   await page.goto(url);
   const composer = page.locator('.page-layout .panel-chat').getByRole('textbox', { name: 'Message', exact: true });

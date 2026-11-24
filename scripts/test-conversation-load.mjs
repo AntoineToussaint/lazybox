@@ -20,6 +20,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {longConversation} from './fixtures/long-conversation.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const turns=Number(process.env.LOAD_TURNS||135),budget=Number(process.env.LOAD_BUDGET_MS||1500);
 const f=await startRunnerFixture();
@@ -50,7 +51,7 @@ try{
  await server.listen();await mkdir('.cache',{recursive:true});browser=await chromium.launch({headless:true});
  const open=async(collection,session)=>{
   const page=await browser.newPage({viewport:{width:1400,height:900}});page.setDefaultTimeout(20000);
-  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+  const errors=[];await collectPageErrors(page, errors);
   await page.addInitScript(timing);await page.addInitScript(want=>{window.__load.want.push(want);},last);
   const callsBefore=f.calls.length;
   let releaseHistory;
@@ -119,7 +120,7 @@ try{
  // ── A Runner restart while the earlier history loads.
  f.tailReadDelayMs=250;
  const restart=await browser.newPage({viewport:{width:1400,height:900}});restart.setDefaultTimeout(20000);
- const restartErrors=[];restart.on('pageerror',e=>restartErrors.push(String(e)));
+ const restartErrors=[];await collectPageErrors(restart, restartErrors);
  await restart.goto(url('alpha',alpha.id));
  const view=restart.locator('.embedded-chat:visible').first().locator('.messages:visible');
  await expect(view).toContainText(last,{timeout:30000});

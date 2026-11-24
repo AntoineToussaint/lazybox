@@ -15,6 +15,7 @@ import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
 import { seedConversation, visitKeyPages } from './fixtures/appearance-pages.mjs';
 import { TOKENS } from '../packages/surfaces/src/appearance/tokens.ts';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 seedConversation(fixture);
@@ -93,7 +94,7 @@ try {
 
   // System follows the computer: dark, then light, with nothing chosen.
   const dark = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
-  let page = await dark.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', e => errors.push(String(e)));
+  let page = await dark.newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors);
   await visitKeyPages(page, base, fixture.token, name => audit(page, 'dark', name), { settingsTabs: ['Subscriptions', 'Appearance'], artifactId: fixture.designDoc.id });
   assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--surface').trim()), '#1d1e24', 'Dark keeps its canvas');
   // The audits are not vacuous: a literal colour and faint body text are caught.
@@ -104,7 +105,7 @@ try {
   await dark.close();
 
   const light = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'light' });
-  page = await light.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', e => errors.push(String(e)));
+  page = await light.newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors);
   await visitKeyPages(page, base, fixture.token, name => audit(page, 'light', name), { settingsTabs: ['Subscriptions', 'Appearance'], artifactId: fixture.designDoc.id });
   const css = name => page.evaluate(n => getComputedStyle(document.documentElement).getPropertyValue(`--${n}`).trim(), name);
   assert.equal(await css('surface'), '#fafafc');
@@ -231,7 +232,7 @@ try {
   for (const scheme of ['dark', 'light']) {
     fixture.config.setFile('settings', { value: { notifications: {}, appearance: {} } });
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
-    page = await context.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', e => errors.push(String(e)));
+    page = await context.newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors);
     const css = name => page.evaluate(n => getComputedStyle(document.documentElement).getPropertyValue(`--${n}`).trim(), name);
     await page.goto(`${base}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
     await expect(page.getByRole('heading', { name: 'Parser fix' })).toBeVisible();

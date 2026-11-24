@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const HOUR = 3600000, DAY = 24 * HOUR;
 // The browser runs in UTC, so the dashboard's local days are UTC days here.
@@ -96,7 +97,7 @@ async function scenario(browser, scheme, full) {
   // injects a style into each frame, which the policy refuses: not the extension's.)
   const errors = [];
   let shooting = false;
-  page.on('pageerror', e => errors.push(String(e)));
+  await collectPageErrors(page, errors);
   page.on('console', m => { if (m.type() === 'error' && m.location().url.includes('/x/') && !shooting) errors.push(`console: ${m.text()} @ ${m.location().url}`); });
   const shot = async (locator, name) => { shooting = true; await locator.screenshot({ path: `.cache/cost-dashboard-${name}-${scheme}.png` }); await page.waitForTimeout(150); shooting = false; };
   await page.goto(url);

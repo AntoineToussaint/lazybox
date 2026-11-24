@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 Object.assign(f.sessions[0], { title: 'fix the tests', status: 'done', agents: [{ id: 'root', status: 'done' }] });
@@ -42,7 +43,7 @@ try {
   browser = await webkit.launch();
   const page = await browser.newPage({ viewport: { width: 1360, height: 900 } });
   page.setDefaultTimeout(10000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
   const message = page.getByRole('textbox', { name: 'Message', exact: true });
   const leader = async (...keys) => { await message.focus(); await message.press(']'); await message.press(']'); for (const key of keys) await page.keyboard.press(key); };

@@ -12,6 +12,7 @@ import {webkit, chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -51,7 +52,7 @@ try {
   });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
   const workspace = page.getByRole('combobox', {name: 'Workspace', exact: true});
@@ -234,7 +235,7 @@ try {
 
   // A detached chat window has the palette too; going to a conversation drives the main window.
   const chat = await context.newPage();
-  chat.on('pageerror', e => errors.push(String(e)));
+  await collectPageErrors(chat, errors);
   await chat.goto(`${origin}/?view=chat&panel=detached-test&collection=alpha&session=alpha-session#token=${f.token}`);
   await expect(chat.locator('[data-agent-composer]').filter({visible: true}).first()).toBeVisible();
   await chat.locator('[data-agent-composer]').filter({visible: true}).first().focus();

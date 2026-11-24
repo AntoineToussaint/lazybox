@@ -5,6 +5,7 @@ import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 // WebKit is the desktop engine; Chromium has a different scroll pipeline
 // (threaded wheel scrolling, native scroll anchoring), so both are covered.
@@ -20,7 +21,7 @@ async function run(name,engine){
  let browser,streaming;
  try{
   await server.listen();browser=await engine.launch(name==='chromium'?{headless:true,ignoreDefaultArgs:['--hide-scrollbars']}:{headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(15000);
-  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+  const errors=[];await collectPageErrors(page, errors);
   await page.route('**/GetSession',async route=>{await new Promise(resolve=>setTimeout(resolve,500));await route.continue();});
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
   const pane=page.locator('.messages:visible');const gap=()=>pane.evaluate(node=>node.scrollHeight-node.clientHeight-node.scrollTop);

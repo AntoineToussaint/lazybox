@@ -21,6 +21,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { monacoVimCompat } from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error',
@@ -137,7 +138,7 @@ try {
   for (const scheme of ['dark', 'light']) {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, colorScheme: scheme });
     const errors = [];
-    const open = async query => { const page = await context.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', e => errors.push(`${query}: ${e}`)); await page.goto(`${origin}/?${query}&${runner}`); return page; };
+    const open = async query => { const page = await context.newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors, { label: query }); await page.goto(`${origin}/?${query}&${runner}`); return page; };
 
     // A workspace window: brand, pages and actions after the buttons.
     {

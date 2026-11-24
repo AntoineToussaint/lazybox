@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const b64 = value => Buffer.from(JSON.stringify(value)).toString('base64');
@@ -96,7 +97,7 @@ try {
     try {
       for (const width of [1440, 1000]) {
         const page = await (await browser.newContext({ viewport: { width, height: 900 } })).newPage(); page.setDefaultTimeout(15000);
-        const errors = []; page.on('pageerror', error => errors.push(String(error)));
+        const errors = []; await collectPageErrors(page, errors);
         // A render loop is a flicker of its own: React reports it on the console.
         page.on('console', message => { if (message.type() === 'error' && /Maximum update depth|ResizeObserver loop/.test(message.text())) errors.push(message.text().slice(0, 200)); });
         if (report) { await page.addInitScript(() => { const original = console.error; let n = 0; console.error = (...args) => { if (String(args[0]).includes('Maximum update depth') && n++ < 1) original('LOOPSTACK ' + new Error().stack); original(...args); }; }); page.on('console', message => { if (message.text().startsWith('LOOPSTACK')) console.log(message.text().split('\n').filter(line => !line.includes('node_modules')).join('\n').slice(0, 3000)); }); }

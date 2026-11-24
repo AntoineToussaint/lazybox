@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const E = '\x1b';
 const addresses = n => Array.from({ length: n }, (_, i) => i % 3 === 2 ? `[2a01:cb0d:5c4:${i}::1]:57771` : `192.168.${i}.21:57771`).join(' ');
@@ -57,7 +58,7 @@ try {
   // The dev server the log announces: a page, so a browser tab shows where it went.
   await context.route(/^http:\/\/localhost:5777[0-9]\//, route => route.fulfill({ contentType: 'text/html', body: '<h1>fte-tracker</h1>' }));
   const page = await context.newPage(); page.setDefaultTimeout(15000);
-  const errors = []; page.on('pageerror', error => errors.push(String(error)));
+  const errors = []; await collectPageErrors(page, errors);
   page.on('console', message => { if (message.type() === 'error' && /Maximum update depth|ResizeObserver loop|key/.test(message.text())) errors.push(message.text().slice(0, 300)); });
   await page.goto(`${base}/?view=workspace&collection=alpha&session=${session.id}#token=${fixture.token}`);
   await page.getByRole('tab', { name: 'Command output', exact: true }).click();

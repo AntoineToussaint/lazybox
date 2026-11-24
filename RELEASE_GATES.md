@@ -275,11 +275,20 @@ and presence afterward cannot depend on how long CI stalls between commands.
 Docking resize assertions wait for the final movement to reach the layout
 before releasing the pointer, then verify the width remains persisted.
 
-The workspace-reorder fixture collects browser runtime errors and unhandled
-rejections through DOM events. WebKit's protocol can label a caught fetch
-failure during navigation as `pageerror`; that diagnostic is not an uncaught
-application error. The page-errors gate tests both browsers, retains genuine
-throws and rejected promises, and exercises caught fetches across navigation.
+Every UI gate, and the scenario runner, counts browser runtime errors and
+unhandled rejections through DOM events (`collectPageErrors` and
+`collectContextPageErrors` in `scripts/fixtures/page-errors.mjs`), never
+through Playwright's raw `pageerror`. WebKit's protocol labels a fetch that a
+navigation cut, and the app caught, as `pageerror` ("… due to access control
+checks"); that diagnostic is not an uncaught application error, and counting
+it failed gates at random whenever a reload or goto cut a poll. The collector
+is an init script, so it must be installed before the page's first navigation
+(it refuses otherwise); the context form also covers popups and pages opened
+later. The page-errors gate tests both browsers, retains genuine throws and
+rejected promises, exercises caught fetches across navigation, and checks the
+context, label and refusal behaviour. `scripts/page-errors.test.ts`
+(`npm run test:client`) fails when a script listens to the raw event without a
+`raw-pageerror: <why>` exception.
 
 The issue-start gate checks the action row at 1024×680 and 390×680. The new-task form scrolls its fields independently of the footer, including when agent controls wrap; repository selection and branch pickers remain covered by their existing gates.
 

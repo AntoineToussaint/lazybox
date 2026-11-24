@@ -18,6 +18,7 @@ import {testViteCache} from './fixtures/vite-cache.mjs';
 import {seedDesignDoc} from './fixtures/artifact-sample.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
 import {SPLITS} from '../packages/surfaces/src/resizable-model.ts';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 for(const id of ['alpha','beta']){
@@ -34,10 +35,8 @@ try{
  browser=await webkit.launch({headless:true});
  const context=await browser.newContext({viewport:{width:1600,height:950}});
  const page=await context.newPage();page.setDefaultTimeout(15000);
- // A reload aborts the Runner's open streams, which WebKit reports: not this page's errors.
- let navigating=false;
- const errors=[];page.on('pageerror',e=>{if(!navigating)errors.push(String(e));});
- const reload=async()=>{navigating=true;await page.reload();await page.waitForLoadState('load');await page.waitForTimeout(500);navigating=false;};
+ const errors=await collectPageErrors(page);
+ const reload=async()=>{await page.reload();await page.waitForLoadState('load');await page.waitForTimeout(500);};
  page.on('console',message=>{if(message.type()==='error'&&/React|Warning|ResizeObserver/.test(message.text()))errors.push(message.text());});
  const base=`http://127.0.0.1:${server.httpServer.address().port}`;
  await page.goto(`${base}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);

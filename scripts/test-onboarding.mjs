@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {releaseNotes} from '../packages/surfaces/src/release-notes.ts';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
@@ -24,7 +25,7 @@ try{
  const scope=createHash('sha256').update(origin+'\0'+fixture.token).digest('hex');
  const welcomeKey=`${scope}:onboarding.welcome`,whatsNewKey=`${scope}:onboarding.whats-new`;
  const stored=(page,key)=>page.evaluate(key=>localStorage.getItem(key),key);
- const open=async context=>{const page=await context.newPage();page.setDefaultTimeout(10000);const errors=[];page.on('pageerror',e=>errors.push(String(e)));await page.goto(url);return {page,errors};};
+ const open=async context=>{const page=await context.newPage();page.setDefaultTimeout(10000);const errors=[];await collectPageErrors(page, errors);await page.goto(url);return {page,errors};};
  const help=async(page,item)=>{await page.locator('summary[aria-label="Help"]').click();await page.getByRole('button',{name:item,exact:true}).click();};
  await mkdir('.cache',{recursive:true});
 

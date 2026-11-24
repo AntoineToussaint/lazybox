@@ -733,3 +733,18 @@ func TestConcurrentReviewStartsShareOneActiveScope(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMissingReviewerDoesNotPreventNewReview(t *testing.T) {
+	f := newReviewFixture(t)
+	_, err := f.bench.Reviews.CreateRun(f.mine.Id, reviews.Run{
+		ReviewerSession: "missing-reviewer", ReviewerLabel: "Codex",
+		SourceSession: f.conversation.ID, Scope: reviews.ScopeChanges,
+		State: reviews.RunRunning, Loop: reviews.LoopAsk, Phase: reviews.PhaseReviewing,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -446,7 +446,7 @@ var ErrReviewEnded = errors.New("this review has already ended")
 
 // InProgress reports whether a review is still under way: its reviewer
 // works, or its loop waits for the next round.
-func (r Run) InProgress() bool { return r.State == RunRunning || r.Active() }
+func (r Run) InProgress() bool { return r.State == RunRunning || (r.State == RunDone && r.Active()) }
 
 // endByHand ends a review the person ended: the loop stops, the round under
 // way closes where it is, and questions still waiting go unanswered.

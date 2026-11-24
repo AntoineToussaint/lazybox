@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -616,7 +617,8 @@ func (b *Bench) startReview(ctx context.Context, req ReviewRequest, markStarted 
 		if !run.InProgress() || run.Scope != req.Scope {
 			continue
 		}
-		if key == target(run.Scope, run.Compare, run.Member, firstOf(run.SourceConversation, run.SourceSession), run.Turn) {
+		existing := target(run.Scope, run.Compare, run.Member, firstOf(run.SourceConversation, run.SourceSession), run.Turn)
+		if existing == key && b.ReviewRunView(run).InProgress() {
 			return nil, reviews.Run{}, fmt.Errorf("%s already has a review in progress for %s; open it in the Review tray", run.ReviewerLabel, run.ScopeLabel)
 		}
 	}
@@ -775,6 +777,7 @@ func (b *Bench) startReview(ctx context.Context, req ReviewRequest, markStarted 
 	origin := &agent.Origin{Kind: agent.OriginReviewBrief, Summary: fmt.Sprintf("Asked %s to review %s's work", label, authorLabel), Detail: scope.label}
 	if err = b.sendLazyboxMessage(ctx, e, run.BriefOperation, brief, origin); err != nil {
 		run, _ = b.Reviews.UpdateRun(workspace.ID, run.ID, func(r *reviews.Run) error {
+			r.StopReason, r.Phase = reviews.StopError, reviews.PhaseDone
 			r.State, r.Detail = reviews.RunFailed, "The brief could not be sent to "+label+": "+err.Error()
 			return nil
 		})
@@ -1049,7 +1052,9 @@ func (b *Bench) ReviewRunView(run reviews.Run) reviews.Run {
 	}
 	e, err := b.Get(run.ReviewerSession)
 	if err != nil {
-		run.State, run.Detail = reviews.RunFailed, "The reviewer conversation is gone."
+		if errors.Is(err, os.ErrNotExist) {
+			run.State, run.Detail = reviews.RunFailed, "The reviewer conversation is gone."
+		}
 		return run
 	}
 	if latest, err := b.latest(e); err == nil {

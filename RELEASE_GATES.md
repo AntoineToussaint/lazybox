@@ -24,6 +24,16 @@ conversations, checkpoints, missions, queued messages and command history come
 back and the agent resumes its provider session with a notice
 ([SESSION_HOSTS.md](SESSION_HOSTS.md#after-a-reboot)).
 
+The `claude-settings` gate (`npm run test:claude-settings`) starts the
+bundled Claude Code with bad settings and checks it still prints the
+settings-not-in-effect warning committed in
+`workers/claude-sdk/src/testdata/settings-not-in-effect.json`, which the
+worker's unit tests read. Starting the real binary takes as long as the
+machine allows, so it is a gate with its own deadline (and its own CI step),
+never a unit test: a unit test reads only committed files. Drift, a start
+that times out and a platform with no bundled binary fail it;
+`npm run test:claude-settings -- --write` rewrites the fixture, and refuses to when a capture is not the warning naming its case's source (a crash, a sign-in prompt) or `--version` fails.
+
 The catalog covers core Go/TypeScript/contracts/worker checks, native desktop
 checks and all isolated UI fixtures, including continuity, scrolling, navigation,
 activity and sidebar tests previously omitted by staging. The responsive-shell

@@ -1,24 +1,43 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { writeFileSync } from 'node:fs';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { nativeOptions } from './options.js';
 import { SettingsWatch, asksBySettings, settingsNotInEffect } from './settings-effect.js';
-import { CAPTURE_TIMEOUT_MS, bundledClaude, capture, claudeVersion, fixtureFile, loadFixture, settingsCases, workspace } from './settings-capture.js';
+import { drift, expectedSource, invalidCapture, settingsCases } from './settings-capture.js';
+import { loadFixture, workspace } from './settings-fixture.js';
 
-// What the bundled Claude Code prints for each case (settings-capture.ts).
+// What the bundled Claude Code prints for each case, as committed. These tests
+// never start the binary: `npm run test:claude-settings` checks the fixture
+// against it, as a gate of its own (settings-capture.ts).
 const real = loadFixture().warnings;
 const listed = real['inline did not load (permissions)'];
 const warning = (content: string) => ({ type: 'system', subtype: 'informational', tag: 'settings_not_in_effect', level: 'warning', content, uuid: 'u', session_id: 's' }) as unknown as SDKMessage;
 
-test('the warnings these tests read are what the bundled Claude Code prints', t => {
-  const binary = bundledClaude();
-  // Bounded under the 30 s every unit test finishes in, the version query of an update included.
-  assert.ok((settingsCases.length + 1) * CAPTURE_TIMEOUT_MS < 30000, 'the captures could outlast 30 s');
-  if (!binary) { t.skip(`no bundled Claude Code for ${process.platform}-${process.arch}`); return; }
-  const now = Object.fromEntries(settingsCases.map(c => [c.name, capture(binary, c)]));
-  if (process.env.LAZYBOX_UPDATE_FIXTURES === '1') writeFileSync(fixtureFile, JSON.stringify({ claudeCode: claudeVersion(binary), warnings: now }, null, 2) + '\n');
-  assert.deepEqual(now, real, 'Claude Code changed its warning: rerun with LAZYBOX_UPDATE_FIXTURES=1 and check settings-effect.ts still reads it');
+test('the fixture holds every case the check captures, and the check names what drifted', () => {
+  assert.deepEqual(Object.keys(real).sort(), settingsCases.map(c => c.name).sort());
+  assert.deepEqual(drift(loadFixture(), { ...real }), []);
+  const changed = drift(loadFixture(), { ...real, 'inline entry skipped (permissions)': 'reworded' });
+  assert.equal(changed.length, 1);
+  assert.match(changed[0], /^inline entry skipped \(permissions\):/);
+  assert.equal(drift(loadFixture(), {}).length, settingsCases.length, 'a case the binary no longer prints is drift too');
+});
+
+test('--write saves only the settings warning, naming its case’s source, never a crash or a prompt', () => {
+  // Every committed case is a warning that names its own source.
+  for (const c of settingsCases) assert.equal(invalidCapture(c, real[c.name]), undefined, c.name);
+  const inline = settingsCases.find(c => !c.file)!, project = settingsCases.find(c => c.file === 'settings.json')!;
+  assert.equal(expectedSource(inline), '--settings (inline JSON)');
+  assert.equal(expectedSource(project), `${workspace}/.claude/settings.json`);
+  for (const [what, c, text] of [
+    ['a crash', inline, 'Segmentation fault (core dumped)'],
+    ['a sign-in prompt', inline, 'Not logged in · Please run /login'],
+    ['nothing at all', project, ''],
+    ['the warning for another source', project, real['inline did not load (permissions)']],
+  ] as const) {
+    const why = invalidCapture(c, text);
+    assert.ok(why, `${what} was accepted`);
+    assert.ok(why.includes(`"${c.name}"`), `${what}: the refusal names the case: ${why}`);
+  }
 });
 
 test('Claude’s settings_not_in_effect warning is read; other informational lines are not', () => {

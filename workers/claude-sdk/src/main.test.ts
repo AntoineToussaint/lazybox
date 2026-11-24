@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { loadFixture } from './settings-capture.js';
+import { loadFixture } from './settings-fixture.js';
 
 /**
  * The worker as the Runner runs it (main.ts over its pipe), with a stand-in
@@ -77,7 +77,7 @@ async function drive(open: Record<string, unknown>, say: unknown[], until: (line
 }
 
 const warning = (content: string) => ({ type: 'system', subtype: 'informational', tag: 'settings_not_in_effect', level: 'warning', content, uuid: '00000000-0000-4000-8000-000000000001', session_id: 'native' });
-// What the bundled Claude Code prints (settings-capture.ts; settings-effect.test.ts checks it still does).
+// What the bundled Claude Code prints, as committed (settings-fixture.ts; npm run test:claude-settings checks it still does).
 const real = loadFixture().warnings;
 const events = (lines: Line[]) => lines.filter(l => l.method === 'event').map(l => l.params!);
 

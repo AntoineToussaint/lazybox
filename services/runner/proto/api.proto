@@ -1521,6 +1521,8 @@ message QueuedMessage {
   int64 queued_at_unix_millis = 3;
   // Set on a message Lazybox wrote rather than the person.
   MessageOrigin origin = 4;
+  // Automatic and manual delivery are paused while a person edits this message.
+  bool editing = 5;
 }
 // MessageOrigin marks a message Lazybox wrote, not the person: the answer to a
 // repository request, a review's findings, a question between two agents, a
@@ -1831,6 +1833,9 @@ message RevokeGrant {
 message DeliverQueued {
   string operation_id = 1;
   string how = 2;
+  // For edit, save_edit, or cancel_edit. Only the editing client can release the hold.
+  string edit_id = 3;
+  string text = 4;
 }
 // Switches a running session's model for its following turns, when
 // Capabilities.live_model. A setting, not a response: the owner's alone.
@@ -1850,6 +1855,8 @@ message Permission {
   string exit_plan_request_id = 2;
 }
 message Receipt {
+  // Complete message returned after acquiring the edit hold.
+  string queued_text = 5;
   string operation_id = 1;
   string delivery = 2;
   string provider_id = 3;

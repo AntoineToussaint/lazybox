@@ -293,7 +293,7 @@ function ConversationPeek({ sessionId, onResolved, onTitle }: { sessionId: strin
     {error && !session && <Problem>Could not read this conversation: {error}</Problem>}
     <div ref={scroller} className="peek-transcript" onScroll={event => { const node = event.currentTarget; stuck.current = node.scrollHeight - node.scrollTop - node.clientHeight < 32; }}>
       {transcript.messages.length
-        ? <MessageList key={sessionId} messages={transcript.messages} visible={visible} agentName={agentName} onShowEarlier={() => setVisible(value => value + 40)} loadingEarlier={transcript.partial}/>
+        ? <MessageList conversationId={session?.conversationId || sessionId} key={sessionId} messages={transcript.messages} visible={visible} agentName={agentName} onShowEarlier={() => setVisible(value => value + 40)} loadingEarlier={transcript.partial}/>
         : <p className="peek-empty">{session ? 'No messages yet.' : 'Loading the conversation…'}</p>}
     </div>
     {session && <PeekComposer session={session}/>}

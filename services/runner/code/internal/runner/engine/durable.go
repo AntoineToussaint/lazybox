@@ -212,13 +212,9 @@ func AdoptStopped(ctx context.Context, adapter agent.Adapter, open agent.Open, s
 		return nil, errors.New("adoption requires session hosting")
 	}
 	queued := map[string]bool{}
-	var queue []agent.Operation
-	for _, op := range record.Queue {
-		if scan.receipts[op.ID].Delivery == "canceled_before_delivery" {
-			continue
-		}
+	queue := scan.restoreQueue(record.Queue)
+	for _, op := range queue {
 		queued[op.ID] = true
-		queue = append(queue, op)
 	}
 	// A queued message has not reached the agent yet; it joins the transcript
 	// when it is delivered. (One accepted but not queued, without a receipt,
@@ -329,7 +325,43 @@ func (e *Engine) Start() {
 	})
 }
 
+// RestoreQueued applies journaled changes before carrying an interrupted queue
+// into a successor execution. The attachment can lag the journal after a crash.
+func RestoreQueued(ctx context.Context, spool *journal.Journal, saved []agent.Operation) ([]agent.Operation, error) {
+	if len(saved) == 0 {
+		return nil, nil
+	}
+	scan, err := scanJournal(ctx, spool)
+	if err != nil {
+		return nil, err
+	}
+	return scan.restoreQueue(saved), nil
+}
+
+func (scan *journalScan) restoreQueue(saved []agent.Operation) []agent.Operation {
+	var queue []agent.Operation
+	for _, op := range saved {
+		if scan.receipts[op.ID].Delivery == "canceled_before_delivery" {
+			continue
+		}
+		if edit, ok := scan.edits[op.ID]; ok {
+			op.QueueEditID = edit.editor
+			if edit.text != nil {
+				op.Text = *edit.text
+			}
+		}
+		queue = append(queue, op)
+	}
+	return queue
+}
+
+type queuedEdit struct {
+	editor string
+	text   *string
+}
+
 type journalScan struct {
+	edits map[string]queuedEdit
 	// cursor is the last native line whose every event is recorded.
 	cursor uint64
 	// partial counts the recorded events of a line recorded only in part,
@@ -410,7 +442,7 @@ func (s *journalScan) delivered(r agent.Receipt) {
 // counts events from the current native attempt: a profile rotation starts a new
 // host whose cursors restart.
 func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, error) {
-	s := journalScan{kinds: map[string]agent.Kind{}, receipts: map[string]agent.Receipt{}, responded: map[string]agent.Operation{}, awaiting: map[string]int{}, acceptedAt: map[string]int{}, pending: map[string]agent.Event{}}
+	s := journalScan{edits: map[string]queuedEdit{}, kinds: map[string]agent.Kind{}, receipts: map[string]agent.Receipt{}, responded: map[string]agent.Operation{}, awaiting: map[string]int{}, acceptedAt: map[string]int{}, pending: map[string]agent.Event{}}
 	partial := map[uint64]map[string]int{}
 	for i, n := uint64(0), spool.Count(); i < n; i++ {
 		r, err := spool.Next(ctx, i)
@@ -418,6 +450,7 @@ func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, erro
 			return s, err
 		}
 		var v struct {
+			EditID string `json:"editId"`
 			agent.Event
 			OperationID string              `json:"operationId"`
 			Kind        agent.Kind          `json:"kind"`
@@ -479,6 +512,16 @@ func scanJournal(ctx context.Context, spool *journal.Journal) (journalScan, erro
 				s.said = append(s.said, utterance{operation: v.OperationID, text: "\nUSER: " + agent.Prompt(agent.Operation{Text: v.Text, Files: v.Operation.Files}) + "\n"})
 				s.awaiting[v.OperationID] = len(s.said) - 1
 			}
+		case "queued_message_edit":
+			edit := s.edits[v.OperationID]
+			edit.editor = v.EditID
+			if v.Status == "save_edit" {
+				edit.text = &v.Text
+				if index, ok := s.awaiting[v.OperationID]; ok {
+					s.said[index].text = "\nUSER: " + agent.Prompt(agent.Operation{Text: v.Text, Files: v.Operation.Files}) + "\n"
+				}
+			}
+			s.edits[v.OperationID] = edit
 		case "message_delta":
 			if v.AgentID == "" || v.AgentID == "root" {
 				s.said = append(s.said, utterance{text: v.Text})

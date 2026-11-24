@@ -38,7 +38,7 @@ const sentAs=text=>f.mutations.findLast(m=>m.method==='Apply'&&m.body.message?.t
 
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,logLevel:'error',root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:f.url}}}});let browser;
 try{
- await server.listen();await mkdir('.cache',{recursive:true});browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1400,height:900}});page.setDefaultTimeout(15000);
+ await server.listen();await mkdir('.cache',{recursive:true});browser=await chromium.launch({headless:true});const context=await browser.newContext({viewport:{width:1400,height:900}});const page=await context.newPage();page.setDefaultTimeout(15000);
  const errors=[];await collectPageErrors(page, errors);
  const open=async session=>page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=${session.collectionId}&session=${session.id}#token=${f.token}`);
  await open(claude);
@@ -252,6 +252,31 @@ try{
  assert.deepEqual(codex.queuedMessages.filter(message => message.text.startsWith('Shift queue')).map(message => message.text),
    ['Shift queue first', 'Shift queue second', 'Shift queue third']);
  assert.equal(deliveries().length,delivered,'the custom send shortcut queues without interrupting');
+ const editingRow=strip.getByRole('listitem',{name:/Shift queue first/});
+ await editingRow.getByRole('button',{name:'Edit',exact:true}).click();
+ const editor=editingRow.getByRole('textbox');
+ await expect(editor).toHaveValue('Shift queue first');
+ await editor.fill('Updated queued message');
+ const other=await context.newPage();
+ await other.goto(page.url());
+ const otherRow=other.getByRole('listitem',{name:/Shift queue first/}).first();
+ await otherRow.getByRole('button',{name:'Resume edit'}).click();
+ await expect(otherRow.getByRole('alert')).toContainText('another window');
+ await expect(otherRow.getByRole('textbox')).toHaveCount(0);
+ await other.close();
+ await page.reload();
+ await editingRow.getByRole('button',{name:'Resume edit'}).click();
+ await expect(editor).toHaveValue('Updated queued message');
+ await editingRow.getByRole('button',{name:'Save',exact:true}).click();
+ const revised=strip.getByRole('listitem',{name:/Updated queued message/});
+ await expect(revised).toBeVisible();
+ await revised.getByRole('button',{name:'Edit',exact:true}).click();
+ await revised.getByRole('textbox').fill('Discard this edit');
+ await revised.getByRole('button',{name:'Cancel edit'}).click();
+ await expect(revised.getByRole('textbox')).toHaveCount(0);
+ assert.equal(codex.queuedMessages[0].text,'Updated queued message');
+ await revised.getByRole('button',{name:'Steer'}).click();
+ await expect(youSaid(chat,'Updated queued message')).toBeVisible();
  assert.deepEqual(errors,[]);
  console.log('PASS queued messages: a message sent during a busy turn shows as queued with what the agent is busy with, from the stream at once even while the session poll lags, and its ticking time is not announced; once delivered it is never also in a stale poll\'s strip; it is in the strip only, never also a bubble in the running turn; Send now delivers it in one click (interrupt, then next), said once after the stop, also after a reload, and its tooltip names the step it stops; Steer for Codex delivers into the running turn; Claude says it cannot be steered; several collapse and hide; phone width. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

@@ -23,3 +23,4 @@ running now shows under its summary.
   command palette (*Activity detail: Quiet / Smart / Verbose / Use the default*).
 - **Cycle quickly:** `]] v` switches the conversation you last clicked through
   the three modes, with a short note saying which one you are in.
+- **For one answer:** use the response detail selector on its prompt. The choice survives reopening or reloading the conversation. Choose **Session** to follow the conversation setting again.

@@ -31,8 +31,12 @@ it did.
   Steer, and the strip says so. After Send
   now the conversation shows one quiet line, *Stopped to send your message*,
   and your message goes as soon as the step stops, the other queued messages
-  in order after it. A message never waits while the agent is idle, even
-  after Lazybox restarted.
+  in order after it.
+  **Edit** pauses delivery before the editor opens. The message keeps its place
+  and attachments, even if the current turn ends. **Save** releases the
+  revised message. **Cancel edit** releases the original. If you reload the
+  tab while editing, choose **Resume edit** to continue.
+
   A queued message is in one place at a time: above the message box while it
   waits, then in the conversation where the agent got it, starting its own
   turn after the one it waited for (and after *Stopped to send your

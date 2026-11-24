@@ -74,7 +74,7 @@ import { Composer } from './Composer';
 import { ComposerInfo } from './ComposerInfo';
 import { ConsoleWindow, EventLog, SessionCommands } from './SessionCommands';
 import { faultSentence, sessionLimit, subscriptionName, turnFault } from './subscription-model';
-import { ACTIVITY_LABELS, CurrentChatContext, useConversationActivity } from './activity-detail';
+import { ACTIVITY_LABELS, ResponseDetailStore, CurrentChatContext, useConversationActivity } from './activity-detail';
 import { bindings, displayBinding, useActions } from './actions';
 import { CodeRunContext, CodeRuns, type RunActions } from './code-runs';
 import { shellBlocksIn } from './code-run';
@@ -709,7 +709,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       ? <div className="empty">Select an existing session to view its chat.</div>
       : !sessionID
         ? <NewSessionForm launcher={launcher} info={info} purpose={purpose} emptyWorkspace={emptyWorkspace} collectionId={collectionId} agentName={agentName}/>
-        : <SubagentContext.Provider value={subagents}><CurrentChatContext.Provider value={activity.current}><PromptSnippets.Provider value={slash.snippetRows}><section className="single-session">
+        : <SubagentContext.Provider value={subagents}><CurrentChatContext.Provider value={activity.current}><ResponseDetailStore.Provider value={viewState}><PromptSnippets.Provider value={slash.snippetRows}><section className="single-session">
           {embedded
             ? <ChatHeader agentName={agentName} session={session} sessionID={sessionID} title={title} status={status} statusText={live.text + (session?.queued ? ` · ${session.queued} queued` : '')} statusBusy={live.tone === 'busy' || live.tone === 'waiting'}
               modelLabel={modelLabel} stats={stats} realTitle={realTitle} branch={branch} shownAccount={headerAccount} onOpenChat={onOpenChat} origin={assistant ? undefined : <ItemOriginChip workspace={workspace}/>}
@@ -800,6 +800,6 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             onSendToAgent={canCompose && !sending ? text => { addToDraft(text, HANDOVER_NOTICE); return ''; } : undefined}/>}
           {!embedded && <EventLog events={events}/>}
           <SubagentPanel/>
-        </section></PromptSnippets.Provider></CurrentChatContext.Provider></SubagentContext.Provider>}
+        </section></PromptSnippets.Provider></ResponseDetailStore.Provider></CurrentChatContext.Provider></SubagentContext.Provider>}
   </main>;
 }

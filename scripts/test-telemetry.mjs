@@ -52,9 +52,18 @@ try{
    contexts:[{scope:{execution:'alpha-session'},agent:'root',model:'gpt-6.2-sol',used:'367100',capacity:'475000',source:'sdk_token_breakdown',
      categories:[['uncached_input','66000'],['cached_input','300000'],['reasoning_output','800'],['other_output','300']].map(([name,tokens])=>({name,tokens,kind:'used',included:true}))}]
  }}));
+ // The conversation's details arrive after the usage chip: held here until the popover is open, so
+ // resolving which conversation this is (no change of conversation) is shown not to close it.
+ let releaseSession;const sessionHeld=new Promise(resolve=>{releaseSession=resolve;});
+ await codex.route('**/GetSession',async route=>{await sessionHeld;await route.continue();});
  await codex.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  await codex.getByRole('button',{name:'Context and token cost'}).click();
  const codexPanel=codex.locator('.context-popover');
+ await expect(codexPanel).toBeVisible();
+ await expect(codex.getByRole('button',{name:'Rename conversation'})).toBeDisabled();
+ releaseSession();
+ await expect(codex.getByRole('button',{name:'Rename conversation'})).toBeEnabled();
+ await expect(codexPanel).toBeVisible();
  const contributors=codexPanel.getByRole('region',{name:'Transcript size'});
  await expect(contributors.locator('summary').first()).toHaveText('Tool outputs32 kB');
  await expect(contributors.getByText('Ran make check')).toBeHidden();
@@ -66,6 +75,11 @@ try{
  await expect(contributors.locator(':scope > details')).toHaveCount(2);
  await expect(contributors).not.toContainText('Before compaction');
  await expect(contributors).not.toContainText('Child-only text');
+ // Folding a group back is not closing the popover: the breakdown stays.
+ await contributors.getByText('Ran make check').click();
+ await contributors.locator('summary').first().click();
+ await expect(contributors.locator('summary').first()).toHaveText('Tool outputs32 kB');
+ await expect(contributors.locator('.context-items').first()).toBeHidden();
  await codexPanel.getByText('Latest request details',{exact:true}).click();
  for(const label of ['Uncached input','Cached input','Reasoning output','Other output']) await expect(codexPanel).toContainText(label);
  await expect(codexPanel).toContainText('Token types from the latest Codex request.');

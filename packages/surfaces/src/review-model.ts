@@ -262,7 +262,7 @@ export const loopNeedsYou = (run: LoopRun) => ['max_rounds', 'stuck', 'error', '
 /** Whether the person can still steer the loop. */
 export const loopActive = (run: LoopRun) => !!run.loop && run.loop !== 'off' && !run.stopReason && run.phase !== 'done' && !!run.phase;
 /** A review still under way, which the person can cancel: its reviewer works, or its loop waits for the next round. */
-export const reviewInProgress = (run: LoopRun & Pick<ReviewRun, 'state'>) => run.state === 'running' || loopActive(run);
+export const reviewInProgress = (run: LoopRun & Pick<ReviewRun, 'state'>) => run.state === 'running' || (run.state === 'done' && loopActive(run));
 /** The same review again (its scope, reviewer and focus), for "Review again" once one was cancelled or stopped. */
 export function reviewAgain(run: Pick<ReviewRun, 'scope' | 'turn' | 'compare' | 'member' | 'reviewerLabel' | 'reviewerProvider' | 'reviewerProfileId'>): { scope: { scope: 'changes'; compare: string } | { scope: 'turn'; turn: number } | { scope: 'pr'; member: string }; choice: ReviewerChoice } {
   const scope = run.scope === 'turn' ? { scope: 'turn' as const, turn: run.turn } : run.scope === 'pr' ? { scope: 'pr' as const, member: run.member } : { scope: 'changes' as const, compare: run.compare };

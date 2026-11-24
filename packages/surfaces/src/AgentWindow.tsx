@@ -316,6 +316,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       if ((prWorkflow || uncertainSend.startsWith('review-') || (reviewKey && isReviewSnippet(reviewKey))) && !files.length) {
         const launcher = chatReview.launcher;
         if (launcher.unavailable) { setError(launcher.unavailable); return false; }
+        const active = launcher.activeFor({scope: 'changes'});
+        if (active && !uncertainSend) {
+          showReview({collectionId: chatReview.workspaceId, reviewId: active.id});
+          return false;
+        }
         const requestKey = uncertainSend || (prWorkflow ? 'review-pr-ci-' : 'review-') + crypto.randomUUID();
         draftSnippet.current = {key: reviewKey || "review", text};
         setUncertainSend(requestKey);
@@ -727,7 +732,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
 
   return <main className={'agent-window' + (embedded ? ' embedded-chat' : '') + (drop.dragging ? ' file-drag-active' : '')} {...drop.handlers} onFocusCapture={activity.mark} onPointerDownCapture={activity.mark}>
     {!embedded && <LeaderMenu hint={keyboardHint}/>}
-    {snippetsOpen && <SnippetPicker workspace={session?.collectionId || collectionId} store={viewState} canSend={canCompose && !sending && !message.trim() && !files.length && !missingFiles.length}
+    {snippetsOpen && <SnippetPicker activeReviewer={uncertainSend ? undefined : chatReview.running?.reviewerLabel} workspace={session?.collectionId || collectionId} store={viewState} canSend={canCompose && !sending && !message.trim() && !files.length && !missingFiles.length}
       onClose={() => { setSnippetsOpen(false); composer.current?.focus(); }}
       onCatalog={slash.updateSnippetCatalog} onInsert={insertSnippet}
       onSend={(text, key) => send(undefined, text, key)}/>}
@@ -806,6 +811,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
               recall.reset(); setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles);
               setHistoryOpen(false); requestAnimationFrame(() => composer.current?.focus());
             }}/>}
+          {chatReview.visible?.map(run => <div key={run.id} className="reviewer-notice" role="note" aria-label="Review in progress">
+            <Icon name="review" size={14}/><strong>{run.scopeLabel} in review</strong>
+            <span>{run.reviewerLabel}{run.paused ? ' · Paused' : run.phase === 'triage' ? ' · Findings ready' : run.phase === 'fixing' ? ' · Fixes in progress' : ''}</span>
+            <button type="button" onClick={() => showReview({collectionId: chatReview.workspaceId, reviewId: run.id})}>View review</button>
+          </div>)}
           <Composer textarea={composer} fileInput={fileInput} agentName={agentName} embedded={embedded} session={session} sessionID={sessionID} viewState={viewState} keymap={keymap}
             limited={limited} message={message} files={files} attachments={boxes} missingFiles={missingFiles} uncertainSend={uncertainSend} handedOver={handedOver}
             sending={sending} canCompose={canCompose} canAttach={canAttach} canSend={canSend}

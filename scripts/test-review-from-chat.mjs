@@ -48,6 +48,7 @@ try{
  await expect(button).toHaveAttribute('title',/^Review with Codex \(\] \] (⇧|Shift\+)r\)$/);
  await page.screenshot({path:'.cache/review-from-chat-header.png'});
  // One click: the same review Changes starts (the workspace's changes), the default reviewer left to the Runner.
+ await box().fill('Keep this draft during review');
  await button.click();
  await expect.poll(()=>starts().length).toBe(1);
  assert.deepEqual(pick(starts()[0]),{provider:'',profileId:'',focus:'',scope:'changes',compare:''});
@@ -65,6 +66,15 @@ try{
  await expect(chat().locator('.messages:visible').getByRole('group',{name:'Codex review'})).toContainText('Codex is reviewing changes');
  await expect(reviewTabs().first().locator('.dock-tab-badge')).toHaveAttribute('data-tone','busy');
  await expect(review.getByRole('button',{name:'Reviewing'})).toBeVisible();
+ const notice=chat().getByRole('note',{name:'Review in progress'});
+ await expect(notice).toContainText('Codex');
+ await expect(box()).toHaveValue('Keep this draft during review');
+ await box().fill('');
+ await expect(notice.getByRole('button',{name:'View review'})).toBeVisible();
+ await review.getByLabel('Choose the reviewer',{exact:true}).click();
+ await expect(page.getByRole('button',{name:/^Review with Claude/})).toBeDisabled();
+ await page.keyboard.press('Escape');
+ assert.equal(starts().length,1);
  await page.screenshot({path:'.cache/review-from-chat-tab.png'});
 
  // 2. Codex files three findings and ends its turn: the tab says "3 findings"; they are in the tray as before.
@@ -105,6 +115,8 @@ try{
  assert.equal(focused.focus,'the error path of Handle');
  await expect(chat().locator('.messages:visible .review-card').last().locator('.review-card-note')).toHaveText('Focus: the error path of Handle');
 
+ fixture.finishReview(focused.id);
+ await expect(notice).toHaveCount(0,{timeout:15000});
  // 5. ⌘K "Review this workspace's changes".
  await page.keyboard.press(`${mod}+k`);
  const palette=page.getByRole('dialog',{name:'Command palette'});
@@ -116,6 +128,8 @@ try{
  await expect(reviewTabs()).toHaveCount(3);
  await expect(activeTab().filter({hasText:'Harden the handler'})).toHaveCount(1);
 
+ fixture.finishReview(fixture.reviewOf('alpha').runs.at(-1).id);
+ await expect(notice).toHaveCount(0,{timeout:15000});
  // 6. The chevron picks another reviewer for one run; the ⋯ menu holds Review too (it folds there in a slim panel).
  await review.getByLabel('Choose the reviewer',{exact:true}).click();
  await page.getByRole('button',{name:/^Review with Claude/}).click();
@@ -256,6 +270,8 @@ try{
  assert.deepEqual(pick(starts()[9]),{provider:'',profileId:'',focus:'',scope:'changes',compare:''});
  await expect(lastCard()).toContainText('Codex is reviewing changes');
  assert.notEqual(newest().reviewerSessionId,author.id);
+ fixture.finishReview(newest().id);
+ await expect(chat().getByRole('note',{name:'Review in progress'})).toHaveCount(0,{timeout:15000});
 
  await page.locator('.dv-groupview').filter({has:tabs().filter({hasText:'Harden the handler'})})
   .getByLabel(/^New tab in the .* group$/).first().click();

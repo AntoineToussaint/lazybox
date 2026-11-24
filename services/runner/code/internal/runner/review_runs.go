@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -581,6 +582,46 @@ func (b *Bench) startReview(ctx context.Context, req ReviewRequest, markStarted 
 	if req.Scope != reviews.ScopeChanges && req.Scope != reviews.ScopeTurn && req.Scope != reviews.ScopePR {
 		return nil, reviews.Run{}, errors.New(`the scope is "changes", "turn" or "pr"`)
 	}
+	// Reserve the target before opening a reviewer. Distinct windows have
+	// different request keys, and may both have read an empty review tray.
+	// PR requests may omit the member in a single-repository workspace.
+	type reviewTarget struct {
+		workspace, scope, subject string
+		turn                      int
+	}
+	target := func(scope, compare, member, conversation string, turn int) reviewTarget {
+		key := reviewTarget{workspace: workspace.ID, scope: scope}
+		switch scope {
+		case reviews.ScopePR:
+			if member == "" && len(workspace.Members) == 1 {
+				member = workspace.Members[0].Name
+			}
+			key.subject = member
+		case reviews.ScopeTurn:
+			key.subject, key.turn = conversation, turn
+		default:
+			key.subject = compare
+		}
+		return key
+	}
+	key := target(req.Scope, req.Compare, req.Member, conversationOf(source), req.Turn)
+	if _, starting := b.reviewStarting.LoadOrStore(key, true); starting {
+		return nil, reviews.Run{}, errors.New("a review is already starting for this scope")
+	}
+	defer b.reviewStarting.Delete(key)
+	current, err := b.Reviews.Load(workspace.ID)
+	if err != nil {
+		return nil, reviews.Run{}, err
+	}
+	for _, run := range current.Runs {
+		if !run.InProgress() || run.Scope != req.Scope {
+			continue
+		}
+		existing := target(run.Scope, run.Compare, run.Member, firstOf(run.SourceConversation, run.SourceSession), run.Turn)
+		if existing == key && b.ReviewRunView(run).InProgress() {
+			return nil, reviews.Run{}, fmt.Errorf("%s already has a review in progress for %s; open it in the Review tray", run.ReviewerLabel, run.ScopeLabel)
+		}
+	}
 	preset, err := reviews.TemplateFor(req.TemplateID)
 	if err != nil {
 		return nil, reviews.Run{}, err
@@ -736,6 +777,7 @@ func (b *Bench) startReview(ctx context.Context, req ReviewRequest, markStarted 
 	origin := &agent.Origin{Kind: agent.OriginReviewBrief, Summary: fmt.Sprintf("Asked %s to review %s's work", label, authorLabel), Detail: scope.label}
 	if err = b.sendLazyboxMessage(ctx, e, run.BriefOperation, brief, origin); err != nil {
 		run, _ = b.Reviews.UpdateRun(workspace.ID, run.ID, func(r *reviews.Run) error {
+			r.StopReason, r.Phase = reviews.StopError, reviews.PhaseDone
 			r.State, r.Detail = reviews.RunFailed, "The brief could not be sent to "+label+": "+err.Error()
 			return nil
 		})
@@ -1010,7 +1052,9 @@ func (b *Bench) ReviewRunView(run reviews.Run) reviews.Run {
 	}
 	e, err := b.Get(run.ReviewerSession)
 	if err != nil {
-		run.State, run.Detail = reviews.RunFailed, "The reviewer conversation is gone."
+		if errors.Is(err, os.ErrNotExist) {
+			run.State, run.Detail = reviews.RunFailed, "The reviewer conversation is gone."
+		}
 		return run
 	}
 	if latest, err := b.latest(e); err == nil {

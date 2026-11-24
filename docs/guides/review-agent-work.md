@@ -58,6 +58,8 @@ kept by the Runner, so every window sees them and they survive restarts.
 
 ## Let another agent review it
 
+While work is in review, a notice above the message box shows the scope, reviewer, and **View review**. You can keep typing. A workspace comparison or repository PR can have one active review at a time, even across windows. Turn reviews are scoped to the conversation and turn. Once the review loop ends or is cancelled, you can review that scope again.
+
 **Review** in the conversation's header — or **Review with Codex** in the
 Changes header — starts a second agent on the work, **read-only**. By default
 it is the other agent than the one that did the work: Codex reviews Claude's

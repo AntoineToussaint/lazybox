@@ -692,3 +692,59 @@ func TestVerificationRPCScopesRecipesAndCancelsProcesses(t *testing.T) {
 		}
 	}
 }
+
+func TestConcurrentReviewStartsShareOneActiveScope(t *testing.T) {
+	f := newReviewFixture(t)
+	type result struct {
+		response *pb.StartReviewResponse
+		err      error
+	}
+	results := make(chan result, 2)
+	for _, key := range []string{"from-chat", "from-changes"} {
+		go func() {
+			response, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, RequestKey: key})
+			results <- result{response, err}
+		}()
+	}
+	var id string
+	for range 2 {
+		r := <-results
+		if r.err != nil {
+			if !strings.Contains(r.err.Error(), "already") {
+				t.Fatal(r.err)
+			}
+			continue
+		}
+		if id != "" {
+			t.Fatal("two reviewers started")
+		}
+		id = r.response.Run.Id
+	}
+	if id == "" {
+		t.Fatal("neither reviewer started")
+	}
+	if _, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID}); err == nil || !strings.Contains(err.Error(), "in progress") {
+		t.Fatalf("active review was not reported: %v", err)
+	}
+	if _, err := f.client.CancelReview(f.owner, &pb.CancelReviewRequest{CollectionId: f.mine.Id, ReviewId: id}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMissingReviewerDoesNotPreventNewReview(t *testing.T) {
+	f := newReviewFixture(t)
+	_, err := f.bench.Reviews.CreateRun(f.mine.Id, reviews.Run{
+		ReviewerSession: "missing-reviewer", ReviewerLabel: "Codex",
+		SourceSession: f.conversation.ID, Scope: reviews.ScopeChanges,
+		State: reviews.RunRunning, Loop: reviews.LoopAsk, Phase: reviews.PhaseReviewing,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID}); err != nil {
+		t.Fatal(err)
+	}
+}

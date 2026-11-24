@@ -54,15 +54,13 @@ try{
  const chat=page.locator('section.panel-chat:visible');
  const start=async(label='Review with Codex')=>{const before=fixture.reviewOf('alpha').runs.length;await changes.getByRole('group',{name:'Review with another agent'}).getByRole('button',{name:label}).click();await expect.poll(()=>fixture.reviewOf('alpha').runs.length).toBe(before+1);return fixture.reviewOf('alpha').runs.at(-1);};
  const reviewRow=run=>tray.locator(`li[data-review="${run.id}"]`);
- // Filed findings are drafted in the author's message box ("Fix N findings in
- // <conversation>"); they count as sent when the person sends that message.
+ // Fix findings sends them directly to the selected conversation.
  const sendAccepted=async n=>{
+  const applies=()=>fixture.mutations.filter(m=>m.method==='Apply' && m.body.sessionId===author.id && m.body.message);
+  const before=applies().length;
   await tray.getByRole('button',{name:new RegExp(`^Fix ${n} finding${n===1?'':'s'} in `)}).click();
-  const box=chat.getByRole('textbox',{name:'Message',exact:true});
-  await expect(box).not.toHaveValue('');
-  const draft=await box.inputValue();
-  await box.press('Enter');await expect(box).toHaveValue('');
-  return draft;
+  await expect.poll(()=>applies().length).toBe(before+1);
+  return applies().at(-1).body.message.text;
  };
 
  // ---- Two rounds, ending clean ------------------------------------------
@@ -82,6 +80,7 @@ try{
  await expect(chat.getByRole('note').filter({hasText:'Codex asked Claude:'})).toContainText('Should Handle ever log?');
  await expect(chat.getByRole('note').filter({hasText:'Claude answered Codex:'})).toContainText('No: return the error.');
  await expect(row).toContainText('Round 1 of 3 · Claude is fixing',{timeout:15000});
+ await expect(chat.getByRole('note',{name:'Review in progress'})).toContainText('Fixes in progress');
  // The author's turn ends with changes: round 2 re-reviews only that turn.
  fixture.authorFixed(run.id,2);
  await expect(row).toContainText('Round 2 of 3 · re-reviewing the fix',{timeout:15000});

@@ -4,9 +4,9 @@ import type { ReviewRun, Session, StartReviewRequest } from '@lazybox/protocol';
 import { useRunner } from './RunnerContext';
 import { useRunnerSettings } from './RunnerSettings';
 import { errorText } from './PullRequestFlow';
-import { reviewerChoices, unavailableAgents, type ReviewerChoice } from './review-model';
+import { reviewInProgress, reviewerChoices, unavailableAgents, type ReviewerChoice } from './review-model';
 import { useProviderAvailability } from './useProviderAvailability';
-import { refreshWorkspaceReview } from './useWorkspaceReview';
+import { refreshWorkspaceReview, useWorkspaceReview } from './useWorkspaceReview';
 import { openRelatedConversation } from './conversation-requests';
 
 /**
@@ -118,9 +118,21 @@ export function useReviewLauncher(workspaceId: string, source?: Pick<Session, 'i
   const choices = useMemo(() => reviewerChoices(info?.profiles || [], authorProvider, { reviewerMode: review?.reviewerMode, reviewer: review?.reviewer, reviewerModel: review?.reviewerModel }, new Set(missing ? missing.split(',') : [])),
     [info?.profiles, authorProvider, review?.reviewerMode, review?.reviewer, review?.reviewerModel, missing]);
   const unavailable = !workspaceId ? 'Choose a workspace first' : !source ? 'No conversation in this workspace to review yet' : !choices.length ? 'No agent is available to review with' : '';
+  const runs = useWorkspaceReview(source ? workspaceId : '').review?.runs;
+  const activeFor = (scope: ReviewScope) => runs?.find(run => {
+    if (!reviewInProgress(run) || run.scope !== scope.scope) return false;
+    if (scope.scope === 'changes') return run.compare === (scope.compare || '');
+    if (scope.scope === 'pr') return run.member === scope.member;
+    return run.sourceSessionId === source?.id && run.turn === scope.turn;
+  });
   /** `focus`: what the reviewer should look at in particular (`/review <focus>`). */
   const start = async (scope: ReviewScope, choice: ReviewerChoice | undefined = choices[0], focus = '', templateId = '', requestKey = '') => {
     if (!source || !choice || busy || starting.current) return;
+    const active = activeFor(scope);
+    if (active && !requestKey) {
+      showReview({collectionId: workspaceId, reviewId: active.id});
+      return;
+    }
     starting.current = true; setBusy(choice.key); setError('');
     try {
       // The default reviewer is left to the Runner, which applies the setting the same way and
@@ -133,6 +145,6 @@ export function useReviewLauncher(workspaceId: string, source?: Pick<Session, 'i
     } catch (e) { setError(errorText(e)); }
     finally { starting.current = false; setBusy(''); }
   };
-  return { choices, start, busy, error, setError, unavailable };
+  return { choices, start, busy, error, setError, unavailable, activeFor };
 }
 export type ReviewLauncher = ReturnType<typeof useReviewLauncher>;

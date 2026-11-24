@@ -14,6 +14,7 @@ export function SnippetPicker({
   workspace,
   store,
   canSend,
+  activeReviewer,
   onClose,
   onCatalog,
   onInsert,
@@ -22,6 +23,7 @@ export function SnippetPicker({
   workspace?: string;
   store?: ViewStateStore;
   canSend: boolean;
+  activeReviewer?: string;
   onClose(): void;
   onCatalog(rows: Snippet[]): void;
   onInsert(text: string, key: string): void;
@@ -93,8 +95,9 @@ export function SnippetPicker({
       onClose();
     }
   };
+  const blockedReview = activeReviewer && selected && isReviewSnippet(selected.key, selected.origin);
   const send = async () => {
-    if (!selected || !canSend || busy) return;
+    if (!selected || !canSend || busy || blockedReview) return;
     setBusy(true);
     try {
       if (await onSend(selected.body, selected.key)) {
@@ -200,7 +203,7 @@ export function SnippetPicker({
       </div>
       <footer>
         <small>
-          {canSend
+          {blockedReview ? `${activeReviewer} already has these changes in review.` : canSend
             ? "Enter to send · Shift+Enter to insert"
             : "Insert into your existing draft, then send from the composer."}
         </small>
@@ -209,7 +212,7 @@ export function SnippetPicker({
         </button>
         <button
           className="primary"
-          disabled={!selected || !canSend || busy}
+          disabled={!selected || !canSend || busy || !!blockedReview}
           onClick={() => void send()}
         >
           {busy ? "Starting…" : selected && isReviewSnippet(selected.key, selected.origin) ? "Start review" : "Send snippet"}

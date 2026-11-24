@@ -169,6 +169,7 @@ test('a review the person cancelled or stopped says so, keeps its findings, and 
   const run = (fields: Record<string, unknown>) => create(ReviewRunSchema, { reviewerLabel: 'Codex', reviewerProvider: 'codex', sourceLabel: 'Claude', scopeLabel: 'Changes', scope: 'changes', loop: 'ask', round: 1, maxRounds: 3, phase: 'reviewing', state: 'running', ...fields });
   // Under way: running, or its loop waiting for the next round; never once it ended.
   assert.equal(reviewInProgress(run({})), true);
+  assert.equal(reviewInProgress(run({ state: 'failed', phase: 'reviewing' })), false);
   assert.equal(reviewInProgress(run({ state: 'done', phase: 'fixing' })), true);
   assert.equal(reviewInProgress(run({ state: 'done', phase: 'done', stopReason: 'clean' })), false);
   assert.equal(reviewInProgress(run({ state: 'cancelled', phase: 'done', stopReason: 'cancelled' })), false);

@@ -180,6 +180,7 @@ type Bench struct {
 	conversationCosts  sync.Map
 	verificationFlow   sync.Map
 	verificationLaunch sync.Map
+	reviewStarting     sync.Map
 	forkMu             sync.Mutex
 	pendingDeletions   *pendingDeletions
 	RepositoryCatalog  *repositorycatalog.Cache

@@ -4,7 +4,7 @@ import { writeFileSync } from 'node:fs';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { nativeOptions } from './options.js';
 import { SettingsWatch, asksBySettings, settingsNotInEffect } from './settings-effect.js';
-import { bundledClaude, capture, claudeVersion, fixtureFile, loadFixture, settingsCases, workspace } from './settings-capture.js';
+import { CAPTURE_TIMEOUT_MS, bundledClaude, capture, claudeVersion, fixtureFile, loadFixture, settingsCases, workspace } from './settings-capture.js';
 
 // What the bundled Claude Code prints for each case (settings-capture.ts).
 const real = loadFixture().warnings;
@@ -13,6 +13,8 @@ const warning = (content: string) => ({ type: 'system', subtype: 'informational'
 
 test('the warnings these tests read are what the bundled Claude Code prints', t => {
   const binary = bundledClaude();
+  // Bounded under the 30 s every unit test finishes in, the version query of an update included.
+  assert.ok((settingsCases.length + 1) * CAPTURE_TIMEOUT_MS < 30000, 'the captures could outlast 30 s');
   if (!binary) { t.skip(`no bundled Claude Code for ${process.platform}-${process.arch}`); return; }
   const now = Object.fromEntries(settingsCases.map(c => [c.name, capture(binary, c)]));
   if (process.env.LAZYBOX_UPDATE_FIXTURES === '1') writeFileSync(fixtureFile, JSON.stringify({ claudeCode: claudeVersion(binary), warnings: now }, null, 2) + '\n');

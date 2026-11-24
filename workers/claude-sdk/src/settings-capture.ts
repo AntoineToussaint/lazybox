@@ -24,6 +24,14 @@ export const settingsCases: SettingsCase[] = [
   { name: 'local file entry skipped (permissions)', settings: '{"permissions":{"ask":["Bash"]}}', file: 'settings.local.json', content: '{"permissions":{"allow":["Bash",3]}}' },
 ];
 
+/**
+ * How long one capture may take. spawnSync blocks the event loop, so no test
+ * timeout can cut a capture short: this bounds the drift test, six captures,
+ * under the 30 s every unit test must finish in. A capture that times out or
+ * cannot start fails the test; it is never a skip.
+ */
+export const CAPTURE_TIMEOUT_MS = 4000;
+
 /** Where a captured path to the scratch workspace stands in the fixture. */
 export const workspace = '<workspace>';
 export const fixtureFile = new URL('./testdata/settings-not-in-effect.json', import.meta.url);
@@ -44,7 +52,7 @@ export function bundledClaude(): string | undefined {
 
 /** Claude Code's version, as it reports it. */
 export function claudeVersion(binary: string): string {
-  return spawnSync(binary, ['--version'], { encoding: 'utf8', timeout: 60000, env: { PATH: process.env.PATH } }).stdout.trim();
+  return spawnSync(binary, ['--version'], { encoding: 'utf8', timeout: CAPTURE_TIMEOUT_MS, env: { PATH: process.env.PATH } }).stdout.trim();
 }
 
 /** What the binary prints for one case, with the scratch workspace written as <workspace>. */
@@ -54,8 +62,9 @@ export function capture(binary: string, c: SettingsCase): string {
     const repo = join(home, 'repo');
     mkdirSync(join(repo, '.claude'), { recursive: true });
     if (c.file) writeFileSync(join(repo, '.claude', c.file), c.content ?? '');
-    const run = spawnSync(binary, ['-p', 'hi', '--settings', c.settings], { cwd: repo, encoding: 'utf8', timeout: 60000, env: { PATH: process.env.PATH, HOME: home, CLAUDE_CONFIG_DIR: join(home, 'config') } });
-    if (run.error) throw run.error;
+    const run = spawnSync(binary, ['-p', 'hi', '--settings', c.settings], { cwd: repo, encoding: 'utf8', timeout: CAPTURE_TIMEOUT_MS, env: { PATH: process.env.PATH, HOME: home, CLAUDE_CONFIG_DIR: join(home, 'config') } });
+    if (run.error) throw new Error(`capturing "${c.name}" from ${binary}: ${run.error.message}`);
+    if (run.signal) throw new Error(`capturing "${c.name}" from ${binary}: ended by ${run.signal}`);
     return run.stderr.trim().split(realpathSync(repo)).join(workspace).split(repo).join(workspace);
   } finally {
     rmSync(home, { recursive: true, force: true });

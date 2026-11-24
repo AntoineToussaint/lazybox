@@ -1,4 +1,4 @@
-import { forkSession, query, createSdkMcpServer, tool, type McpServerConfig, type Query, type SDKUserMessage, type PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import { forkSession, getSessionMessages, query, createSdkMcpServer, tool, type McpServerConfig, type Query, type SDKUserMessage, type PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
@@ -16,6 +16,7 @@ import { generateTitle } from './title.js';
 import { ModelSwitch } from './model.js';
 import { messageContent } from './content.js';
 import { steerPriority, userMessage } from './steer.js';
+import { endOfTurn } from './fork.js';
 import { errorText } from './error-text.js';
 import { route, type Request } from './wire.js';
 import { SettingsWatch, asksBySettings } from './settings-effect.js';
@@ -89,8 +90,14 @@ async function open(options: any) {
   grants = restored.grants;
   droppedGrants = restored.dropped;
   if (options.forkThread) {
-    if (!options.forkAfterTurn) throw new Error("A Claude fork requires a completed message");
-    const fork = await forkSession(options.forkThread, { upToMessageId: options.forkAfterTurn });
+    // A turn recorded without its fork point (a worker from before they were
+    // recorded) names its last message instead: Claude's transcript says
+    // which entry that is (fork.ts).
+    const upTo = options.forkAfterTurn || (options.forkAfterMessage
+      ? endOfTurn(await getSessionMessages(String(options.forkThread), { dir: options.cwd }), String(options.forkAfterMessage))
+      : undefined);
+    if (!upTo) throw new Error(options.forkAfterMessage ? "Claude's transcript no longer holds the turn before this message" : "A Claude fork requires a completed message");
+    const fork = await forkSession(options.forkThread, { upToMessageId: upTo });
     options = { ...options, resume: fork.sessionId };
   }
   // After a fork, so the options name the forked session.

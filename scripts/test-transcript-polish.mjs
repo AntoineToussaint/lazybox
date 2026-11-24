@@ -198,6 +198,56 @@ try{
  await page.screenshot({path:'.cache/transcript-polish-events-narrow-light.png'});
 
 
+ // A message is edited where it stands (its menu or its Edit button; Escape and Cancel leave the conversation alone).
+ // Sending replaces it in the same conversation: no dialog, no fork, and what came after it is gone.
+ {
+  Object.assign(f.sessions[1],{provider:'claude',status:'ready',busy:false});
+  const beta=f.openEvents('beta-session');
+  [['operation_accepted',{text:'Draft the plan.',operationId:'b1'}],['turn_started',{}],['message_delta',{text:'The plan.'}],['turn_ended',{status:'completed',turnId:'b1-end'}],
+   ['operation_accepted',{text:'Now ship it.',operationId:'b2'}],['turn_started',{}],['message_delta',{text:'Shipped.'}],['turn_ended',{status:'completed',turnId:'b2-end'}]]
+   .forEach(([type,event],i)=>beta.push({type,...event},at(-9000+i*1000)));
+  const editPage=await browser.newPage({viewport:{width:1440,height:960}});
+  const editErrors=[];await collectPageErrors(editPage, editErrors);
+  await editPage.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=beta&session=beta-session#token=${f.token}`);
+  const chat=editPage.locator('.embedded-chat:visible').first();
+  const prompt=chat.locator('article.message.operation_accepted').filter({hasText:'Now ship it.'});
+  const cursor=await prompt.getAttribute('data-message-id');
+  const editor=chat.getByRole('textbox',{name:'Edit message'});
+  await prompt.click({button:'right'});
+  await editPage.getByRole('menuitem',{name:'Edit message'}).click();
+  await expect(editor).toHaveValue('Now ship it.');
+  await expect(editor).toBeFocused();
+  await editor.press('Escape');
+  await expect(editor).toHaveCount(0);
+  await prompt.getByRole('button',{name:'Edit message'}).click();
+  await editPage.screenshot({path:'.cache/transcript-polish-edit-message.png'});
+  await chat.getByRole('button',{name:'Cancel',exact:true}).click();
+  await expect(editor).toHaveCount(0);
+  assert.equal(f.mutations.filter(m=>m.method==='RewindSession').length,0);
+  await prompt.getByRole('button',{name:'Edit message'}).click();
+  await editor.fill('Run the tests first.');
+  await editor.press('Enter');
+  await expect.poll(()=>f.mutations.findLast(m=>m.method==='Apply')?.body?.message?.text).toBe('Run the tests first.');
+  const rewinds=f.mutations.filter(m=>m.method==='RewindSession');
+  assert.equal(rewinds.length,1);
+  assert.equal(rewinds[0].body.sessionId,'beta-session');
+  assert.equal(rewinds[0].body.beforePromptCursor,cursor);
+  const rewound=f.sessions.find(s=>s.previousExecutionId==='beta-session');
+  assert.equal(rewound.conversationId,f.sessions[1].conversationId||'beta-session');
+  assert.equal(f.mutations.findLast(m=>m.method==='Apply').body.sessionId,rewound.id);
+  assert.equal(f.sessions[1].closed,true);
+  assert.equal(f.mutations.filter(m=>m.method==='OpenSession').length,0,'editing a message opened another conversation');
+  await expect(editor).toHaveCount(0);
+  // The shorter conversation is read anew: the earlier turn stays, nothing of the replaced one, and no load error.
+  await expect(chat.locator('article.message.message_delta').filter({hasText:'The plan.'})).toBeVisible();
+  await expect(prompt).toHaveCount(0);
+  await expect(chat.locator('article.message.message_delta').filter({hasText:'Shipped.'})).toHaveCount(0);
+  await expect(editPage.getByText('Conversation could not be loaded')).toHaveCount(0);
+  await expect(editPage.getByRole('button',{name:'Open previous conversation'})).toHaveCount(0);
+  assert.deepEqual(editErrors,[]);
+  await editPage.close();
+ }
+
  // A fork leaves the live source running. Restart stops it and sends the revised prompt.
 
  Object.assign(f.sessions[0],{provider:'codex',profileId:'codex-default',providerReference:'source-thread',busy:true});

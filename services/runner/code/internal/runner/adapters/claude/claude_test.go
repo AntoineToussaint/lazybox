@@ -262,3 +262,46 @@ done
 		_ = session.Close()
 	}
 }
+
+// A fork names the source session and the entry it keeps through; the worker
+// answers with the new session. A worker that ignores the fork (one built
+// before forks) would write into the source session: the open fails instead.
+// A turn recorded without its entry names its last message instead.
+func TestOpenForksTheSourceSessionIntoASeparateOne(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	for _, tc := range []struct {
+		open               agent.Open
+		want               string
+		reference, failure string
+	}{
+		{agent.Open{ForkThread: "source", ForkAfterTurn: "entry"}, `*'"forkAfterTurn":"entry"'*'"forkThread":"source"'*`, "forked", ""},
+		{agent.Open{ForkThread: "source", ForkAfterTurn: "entry"}, `*'"forkAfterTurn":"entry"'*'"forkThread":"source"'*`, "source", "separate conversation"},
+		{agent.Open{ForkThread: "source", ForkAfterTurn: "entry"}, `*'"forkAfterTurn":"entry"'*'"forkThread":"source"'*`, "", "separate conversation"},
+		{agent.Open{ForkThread: "source", ForkAfterMessage: "msg_last"}, `*'"forkAfterMessage":"msg_last"'*'"forkAfterTurn":""'*'"forkThread":"source"'*`, "forked", ""},
+	} {
+		worker := filepath.Join(t.TempDir(), "worker.sh")
+		script := `read -r line
+case "$line" in
+  *'"method":"open"'` + tc.want + `) printf '%s\n' '{"id":"lazybox-1","result":{"reference":"` + tc.reference + `","features":[]}}' ;;
+  *) printf '%s\n' '{"id":"lazybox-1","error":{"message":"fork missing"}}' ;;
+esac
+while IFS= read -r line; do :; done
+`
+		if err := os.WriteFile(worker, []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+		tc.open.Cwd = t.TempDir()
+		session, err := Adapter{Node: "/bin/sh", Worker: worker}.Open(ctx, tc.open)
+		if tc.failure != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.failure) {
+				t.Fatalf("worker answered %q: %v", tc.reference, err)
+			}
+			continue
+		}
+		if err != nil || session.Reference() != "forked" {
+			t.Fatalf("fork %+v not opened: %v", tc.open, err)
+		}
+		_ = session.Close()
+	}
+}

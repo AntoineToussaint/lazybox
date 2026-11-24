@@ -24,9 +24,27 @@ type Adapter struct {
 	Durable json.RawMessage
 	// Titles names conversations (agent.Titler); nil: sessions cannot.
 	Titles func(description string) (string, error)
+	// Fail, when set, is what Open returns instead of a session; Refused is
+	// what it was asked to open.
+	Fail    error
+	Refused agent.Open
+	// Gate, when set, holds every Open until it is closed: a provider that
+	// takes its time to start.
+	Gate chan struct{}
 }
 
 func (a *Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) {
+	if a.Gate != nil {
+		select {
+		case <-a.Gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if a.Fail != nil {
+		a.Refused = o
+		return nil, a.Fail
+	}
 	a.Session = &Session{Events: make(chan agent.Event, 128), Applied: make(chan agent.Operation, 128), Ref: o.Resume, Open: o, Steer: a.Steer, LivePermission: a.LivePermission, StopAgent: a.StopAgent, LiveModel: a.LiveModel, Titles: a.Titles, detached: make(chan struct{})}
 	if a.Durable != nil {
 		a.Session.State = a.Durable

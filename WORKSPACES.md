@@ -977,9 +977,25 @@ commit of each new branch, including any uncommitted files it captured.
 Ignored files are outside that snapshot. The Runner requires each recorded
 repository snapshot to be available and complete. **Use current workspace
 files** shares the live working directory with the source conversation.
-Codex requires bounded thread forks. Claude uses the saved native assistant message at the end of a completed turn. Older Claude turns without this identifier cannot supply that boundary. Turn
-boundaries from a different native thread and retry prompts with attachments
+Codex requires bounded thread forks. Claude uses the saved native assistant message at the end of a completed turn. For an older Claude turn recorded without it, the worker finds that message in Claude's own transcript by the identifier of the turn's last API message, which the turn's usage records carry; a turn Claude has since compacted out of its session cannot supply the boundary. Turn
+boundaries of another provider or account and retry prompts with attachments
 are currently unavailable.
+
+**Edit** on one of your messages (or **Edit message** in its menu) changes it
+in the same conversation instead of starting another one: the message becomes
+a text box where it stands, Enter sends and Escape gives up. Sending stops the
+agent and cancels the commands it was running, removes what came after the
+message from the conversation, and continues from the provider's session as it
+was just before the message, with the revised text as the next message. The
+conversation keeps its tab, title and place. It is cut at the same boundary as
+a restart, in whichever provider session recorded the turn before the message,
+so a message can be edited again and so can any earlier one. Workspace files
+are not changed; revert them first from the turn's marker if they should be.
+The replaced messages are no longer shown: they stay in the Runner's journal
+and in the provider's session. If the provider cannot start from that point,
+nothing is replaced: the conversation is as it was, stopped, and resumes like
+any other. A message sent while the agent was working has no **Edit**, since
+it is recorded inside the turn it waited for.
 
 Each conversation keeps its latest 100 turns and 20 reverts; older ones are
 pruned with their refs (`codeCheckpoints` in the Runner configuration changes

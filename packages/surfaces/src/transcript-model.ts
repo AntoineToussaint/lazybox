@@ -32,6 +32,8 @@ export type TranscriptMessage = { id: string; type: string; text: string; turnId
   detail?: string;
   /** A queued message given to the agent inside its running turn (Steer), shown where it was. */
   steered?: boolean;
+  /** Sent while the agent was working: recorded inside that turn, though it started the next one. */
+  waited?: boolean;
   delegationRequested?: boolean;
   terminalHandoff?: TerminalHandoff };
 
@@ -157,7 +159,7 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
    */
   const accept = (message: TranscriptMessage, held = false) => {
     const id = message.operationId;
-    if (id && (held || next.turnRunning || Object.keys(queued()).length)) (pending ??= { ...state.pending })[id] = message;
+    if (id && (held || next.turnRunning || Object.keys(queued()).length)) (pending ??= { ...state.pending })[id] = { ...message, waited: true };
     else place(message);
   };
   for (const record of fresh) {
@@ -602,6 +604,16 @@ function boundedActivity(record:JournalEvent):JournalEvent {
  let data=new TextEncoder().encode(JSON.stringify(limit(raw)));
  if(data.length>32768){const item=raw.item;raw=item?{item:{id:item.id,type:item.type,tool:item.tool,status:item.status,exitCode:item.exitCode,result:'[Large payload omitted]'}}:{type:raw.type,id:raw.id,tool_use_id:raw.tool_use_id,name:raw.name,status:raw.status,is_error:raw.is_error,output:raw.output===undefined?undefined:'[Large payload omitted]',input:'[Large payload omitted]',content:'[Large payload omitted]'};data=new TextEncoder().encode(JSON.stringify(raw));}
  return {...record,event:{...event,providerDataJson:data}};
+}
+
+/**
+ * A message of the person's own that can be edited in place (RewindSession):
+ * one a restart can start from, recorded where its turn starts. One sent while
+ * the agent was working is recorded inside the turn it waited for, so the
+ * conversation cannot be cut just before it.
+ */
+export function canEditPrompt(message: TranscriptMessage): boolean {
+  return canRestartPrompt(message) && !message.waited;
 }
 
 export function canRestartPrompt(message: TranscriptMessage): boolean {

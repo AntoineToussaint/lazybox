@@ -150,6 +150,13 @@ service RunnerService {
   // model, for an agent whose running worker cannot switch model live: it is
   // ended between turns and the same provider conversation resumes.
   rpc RestartWithModel(RestartWithModelRequest) returns (SessionResponse);
+  // Owner only. Edits one of the person's messages: replaces the conversation
+  // from that message on, in place. The agent is stopped, and a new one
+  // continues the same conversation from the provider's session as it was
+  // just before the message; the caller then sends the revised message to the
+  // session returned. The replaced messages leave the conversation's
+  // timeline. Workspace files are not changed.
+  rpc RewindSession(RewindSessionRequest) returns (SessionResponse);
   // Owner only. "Give Claude the browser" (BROWSER.md): turns the agent
   // browser back on for the conversation's workspace if the person turned it
   // off there, and, for an agent started without the browser tools, ends it
@@ -1338,6 +1345,11 @@ message RestartWithPermissionRequest {
 message GiveBrowserRequest {
   string session_id = 1;
 }
+message RewindSessionRequest {
+  string session_id = 1;
+  // Transcript cursor of the person's message to replace.
+  uint64 before_prompt_cursor = 2;
+}
 message RestartWithModelRequest {
   string effort = 3;
   string session_id = 1;
@@ -1474,6 +1486,11 @@ message Session {
   // What kind of agent this is, as the Runner defines it from its purpose
   // (agent/types.go): where it is shown, what reaches the inbox, how it ends.
   AgentType agent_type = 46;
+  // Set on an attempt that replaced the conversation from one of the person's
+  // messages on (RewindSession): that message's cursor in the timeline of the
+  // attempts before it. The timeline of this attempt is shorter than its
+  // predecessor's from there, so a reader must not keep what it read past it.
+  uint64 cut_cursor = 47;
 }
 // AgentType is one kind of agent: a coding agent, a reviewer, an artifact
 // companion, an Ask Lazybox assistant. Clients read these instead of

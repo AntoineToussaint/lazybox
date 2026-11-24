@@ -22,3 +22,18 @@
 .message-byline select,.session-detail-button{color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
 .message-byline select{width:auto;background:var(--surface-active);border:0;padding:2px}
 .session-detail-button{display:inline-flex;align-items:center;gap:4px}
+/* Edit, on the message it replaces: quiet until the message is pointed at. */
+.prompt-edit{display:inline-flex;align-items:center;gap:4px;padding:2px 6px;border:0;background:transparent;color:var(--text-muted);font-size:calc(11px * var(--text-scale));opacity:.55;transition:opacity .12s}
+.message:hover .prompt-edit,.message:focus-within .prompt-edit{opacity:1}
+.prompt-edit:hover,.prompt-edit:focus-visible{color:var(--text);background:var(--surface-active)}
+@media (hover:none){.prompt-edit{opacity:1}}
+@media (prefers-reduced-motion:reduce){.prompt-edit{transition:none}}
+/* A message being edited in place: the bubble widens to hold the editor. */
+.message.operation_accepted:has(.prompt-editor){width:100%}
+.prompt-editor{display:grid;gap:6px;margin-top:4px}
+.prompt-editor textarea{width:100%;box-sizing:border-box;resize:vertical;font:inherit}
+.prompt-editor-actions{display:flex;align-items:center;gap:8px}
+.prompt-editor-actions small{flex:1;min-width:0;color:var(--text-muted);font-size:calc(11px * var(--text-scale))}
+.prompt-editor-actions .primary{background:var(--accent-solid);border-color:var(--accent-solid);color:var(--on-accent-solid)}
+.prompt-editor-actions .primary:hover:not(:disabled){background:var(--accent-solid-hover)}
+.prompt-editor-error{margin:0;color:var(--danger,var(--warn));font-size:calc(12px * var(--text-scale));overflow-wrap:anywhere}

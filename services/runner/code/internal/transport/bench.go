@@ -131,6 +131,7 @@ func wireSession(e *runner.Execution) *pb.Session {
 	w.ConversationId = e.Saved.ConversationID
 	w.AgentType = wireAgentType(e.Purpose)
 	w.ForkedFromSessionId, w.ForkedFromCursor = e.Saved.ForkedFrom, e.Saved.ForkCursor
+	w.CutCursor = e.Saved.Cut
 	w.Permission, w.Workflow = e.Options.Permission, e.Options.Workflow
 	w.BehaviorProfile = e.Options.BehaviorProfile
 	w.Effort = e.Options.Effort
@@ -576,8 +577,15 @@ type queueRuntime interface {
 	DeliverQueued(ctx context.Context, operationID, how string) (agent.Receipt, error)
 }
 
+// errStarting answers a read of an attempt whose agent has not started yet:
+// not final, so a reader tries again and then follows the running agent.
+var errStarting = errors.New("the conversation is starting; try again")
+
 func (s *Service) WatchEvents(r *pb.WatchEventsRequest, stream grpc.ServerStreamingServer[pb.JournalEvent]) error {
 	ctx := stream.Context()
+	if s.Bench.Starting(r.SessionId) {
+		return grpcError(codes.Unavailable, errStarting)
+	}
 	e, err := s.Bench.Get(r.SessionId)
 	if err != nil {
 		return rpcError(err)
@@ -706,6 +714,9 @@ func journalEvent(record journal.Record, retained uint64) (*pb.JournalEvent, err
 const tailBytes, maxTailBytes = 1 << 20, 8 << 20
 
 func (s *Service) ReadSessionTail(ctx context.Context, r *pb.ReadSessionTailRequest) (*pb.ReadSessionTailResponse, error) {
+	if s.Bench.Starting(r.SessionId) {
+		return nil, grpcError(codes.Unavailable, errStarting)
+	}
 	e, err := s.Bench.Get(r.SessionId)
 	if err != nil {
 		return nil, rpcError(err)
@@ -1112,7 +1123,7 @@ func unreadableSession(r sessionstore.Record, err error) *pb.Session {
 	if title == "" {
 		title = r.Title
 	}
-	return &pb.Session{AgentType: wireAgentType(r.Purpose), Id: r.ID, ConversationId: r.ConversationID, ProfileId: r.ProfileID, Provider: r.Provider, PreviousExecutionId: r.Previous, WorkId: r.WorkID, CollectionId: r.CollectionID, WorkingDirectory: r.Cwd, Purpose: r.Purpose, Title: title, Historical: true, Closed: true, Status: string(agent.Unknown), Fault: "conversation unreadable: " + err.Error(), CreatedAtUnixMillis: r.CreatedAt.UnixMilli(), PinnedAtUnixMillis: r.PinnedAt, ArchivedAtUnixMillis: r.ArchivedAt}
+	return &pb.Session{AgentType: wireAgentType(r.Purpose), Id: r.ID, ConversationId: r.ConversationID, ProfileId: r.ProfileID, Provider: r.Provider, PreviousExecutionId: r.Previous, CutCursor: r.Cut, WorkId: r.WorkID, CollectionId: r.CollectionID, WorkingDirectory: r.Cwd, Purpose: r.Purpose, Title: title, Historical: true, Closed: true, Status: string(agent.Unknown), Fault: "conversation unreadable: " + err.Error(), CreatedAtUnixMillis: r.CreatedAt.UnixMilli(), PinnedAtUnixMillis: r.PinnedAt, ArchivedAtUnixMillis: r.ArchivedAt}
 }
 func (s *Service) RestartWithPermission(ctx context.Context, r *pb.RestartWithPermissionRequest) (*pb.SessionResponse, error) {
 	e, err := s.Bench.Get(r.SessionId)
@@ -1131,6 +1142,13 @@ func (s *Service) RestartWithModel(ctx context.Context, r *pb.RestartWithModelRe
 		return nil, rpcError(err)
 	}
 	next, err := s.Bench.RestartWithModelAndEffort(ctx, e, r.Model, r.Effort)
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	return s.sessionResponse(ctx, next)
+}
+func (s *Service) RewindSession(ctx context.Context, r *pb.RewindSessionRequest) (*pb.SessionResponse, error) {
+	next, err := s.Bench.RewindConversation(ctx, r.SessionId, r.BeforePromptCursor)
 	if err != nil {
 		return nil, rpcError(err)
 	}
@@ -1189,8 +1207,12 @@ func (s *Service) sessionView(ctx context.Context, e *runner.Execution) (*pb.Ses
 			view.ModelReported = true
 		}
 	}
+	// A successor is announced once its agent has started: a window that
+	// moved to it earlier would read an attempt nothing is writing yet.
 	if next, err := s.Bench.History.Successor(ctx, e.ID); err == nil {
-		view.SuccessorExecutionId = next.ID
+		if !s.Bench.Starting(next.ID) {
+			view.SuccessorExecutionId = next.ID
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, rpcError(err)
 	}

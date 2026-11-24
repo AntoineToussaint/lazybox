@@ -271,6 +271,9 @@ const (
 	// RunnerServiceRestartWithModelProcedure is the fully-qualified name of the RunnerService's
 	// RestartWithModel RPC.
 	RunnerServiceRestartWithModelProcedure = "/lazybox.bench.v1.RunnerService/RestartWithModel"
+	// RunnerServiceRewindSessionProcedure is the fully-qualified name of the RunnerService's
+	// RewindSession RPC.
+	RunnerServiceRewindSessionProcedure = "/lazybox.bench.v1.RunnerService/RewindSession"
 	// RunnerServiceGiveBrowserProcedure is the fully-qualified name of the RunnerService's GiveBrowser
 	// RPC.
 	RunnerServiceGiveBrowserProcedure = "/lazybox.bench.v1.RunnerService/GiveBrowser"
@@ -886,6 +889,13 @@ type RunnerServiceClient interface {
 	// model, for an agent whose running worker cannot switch model live: it is
 	// ended between turns and the same provider conversation resumes.
 	RestartWithModel(context.Context, *connect.Request[gen.RestartWithModelRequest]) (*connect.Response[gen.SessionResponse], error)
+	// Owner only. Edits one of the person's messages: replaces the conversation
+	// from that message on, in place. The agent is stopped, and a new one
+	// continues the same conversation from the provider's session as it was
+	// just before the message; the caller then sends the revised message to the
+	// session returned. The replaced messages leave the conversation's
+	// timeline. Workspace files are not changed.
+	RewindSession(context.Context, *connect.Request[gen.RewindSessionRequest]) (*connect.Response[gen.SessionResponse], error)
 	// Owner only. "Give Claude the browser" (BROWSER.md): turns the agent
 	// browser back on for the conversation's workspace if the person turned it
 	// off there, and, for an agent started without the browser tools, ends it
@@ -1784,6 +1794,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceRestartWithModelProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("RestartWithModel")),
+			connect.WithClientOptions(opts...),
+		),
+		rewindSession: connect.NewClient[gen.RewindSessionRequest, gen.SessionResponse](
+			httpClient,
+			baseURL+RunnerServiceRewindSessionProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("RewindSession")),
 			connect.WithClientOptions(opts...),
 		),
 		giveBrowser: connect.NewClient[gen.GiveBrowserRequest, gen.SessionResponse](
@@ -2813,6 +2829,7 @@ type runnerServiceClient struct {
 	resumeSession                *connect.Client[gen.ResumeSessionRequest, gen.SessionResponse]
 	restartWithPermission        *connect.Client[gen.RestartWithPermissionRequest, gen.SessionResponse]
 	restartWithModel             *connect.Client[gen.RestartWithModelRequest, gen.SessionResponse]
+	rewindSession                *connect.Client[gen.RewindSessionRequest, gen.SessionResponse]
 	giveBrowser                  *connect.Client[gen.GiveBrowserRequest, gen.SessionResponse]
 	switchSubscription           *connect.Client[gen.SwitchSubscriptionRequest, gen.SessionResponse]
 	setSessionRotation           *connect.Client[gen.SetSessionRotationRequest, gen.SessionResponse]
@@ -3370,6 +3387,11 @@ func (c *runnerServiceClient) RestartWithPermission(ctx context.Context, req *co
 // RestartWithModel calls lazybox.bench.v1.RunnerService.RestartWithModel.
 func (c *runnerServiceClient) RestartWithModel(ctx context.Context, req *connect.Request[gen.RestartWithModelRequest]) (*connect.Response[gen.SessionResponse], error) {
 	return c.restartWithModel.CallUnary(ctx, req)
+}
+
+// RewindSession calls lazybox.bench.v1.RunnerService.RewindSession.
+func (c *runnerServiceClient) RewindSession(ctx context.Context, req *connect.Request[gen.RewindSessionRequest]) (*connect.Response[gen.SessionResponse], error) {
+	return c.rewindSession.CallUnary(ctx, req)
 }
 
 // GiveBrowser calls lazybox.bench.v1.RunnerService.GiveBrowser.
@@ -4305,6 +4327,13 @@ type RunnerServiceHandler interface {
 	// model, for an agent whose running worker cannot switch model live: it is
 	// ended between turns and the same provider conversation resumes.
 	RestartWithModel(context.Context, *connect.Request[gen.RestartWithModelRequest]) (*connect.Response[gen.SessionResponse], error)
+	// Owner only. Edits one of the person's messages: replaces the conversation
+	// from that message on, in place. The agent is stopped, and a new one
+	// continues the same conversation from the provider's session as it was
+	// just before the message; the caller then sends the revised message to the
+	// session returned. The replaced messages leave the conversation's
+	// timeline. Workspace files are not changed.
+	RewindSession(context.Context, *connect.Request[gen.RewindSessionRequest]) (*connect.Response[gen.SessionResponse], error)
 	// Owner only. "Give Claude the browser" (BROWSER.md): turns the agent
 	// browser back on for the conversation's workspace if the person turned it
 	// off there, and, for an agent started without the browser tools, ends it
@@ -5199,6 +5228,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceRestartWithModelProcedure,
 		svc.RestartWithModel,
 		connect.WithSchema(runnerServiceMethods.ByName("RestartWithModel")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceRewindSessionHandler := connect.NewUnaryHandler(
+		RunnerServiceRewindSessionProcedure,
+		svc.RewindSession,
+		connect.WithSchema(runnerServiceMethods.ByName("RewindSession")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceGiveBrowserHandler := connect.NewUnaryHandler(
@@ -6305,6 +6340,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceRestartWithPermissionHandler.ServeHTTP(w, r)
 		case RunnerServiceRestartWithModelProcedure:
 			runnerServiceRestartWithModelHandler.ServeHTTP(w, r)
+		case RunnerServiceRewindSessionProcedure:
+			runnerServiceRewindSessionHandler.ServeHTTP(w, r)
 		case RunnerServiceGiveBrowserProcedure:
 			runnerServiceGiveBrowserHandler.ServeHTTP(w, r)
 		case RunnerServiceSwitchSubscriptionProcedure:
@@ -6946,6 +6983,10 @@ func (UnimplementedRunnerServiceHandler) RestartWithPermission(context.Context, 
 
 func (UnimplementedRunnerServiceHandler) RestartWithModel(context.Context, *connect.Request[gen.RestartWithModelRequest]) (*connect.Response[gen.SessionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.RestartWithModel is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) RewindSession(context.Context, *connect.Request[gen.RewindSessionRequest]) (*connect.Response[gen.SessionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.RewindSession is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) GiveBrowser(context.Context, *connect.Request[gen.GiveBrowserRequest]) (*connect.Response[gen.SessionResponse], error) {

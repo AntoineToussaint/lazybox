@@ -93,6 +93,8 @@ test('successor keeps transcript identity and cursor, unrelated executions remai
  const old=conversationReader(api,'old');const stop=old.subscribe(()=>{});await new Promise(resolve=>setTimeout(resolve,5));stop();old.view.scrollTop=120;
  const next=continueConversation(api,'old',create(SessionSchema,{id:'next',previousExecutionId:'old'}));assert.equal(next.identity,old.identity);assert.equal(next.snapshot.messages,old.snapshot.messages);assert.equal(next.view.scrollTop,120);const end=next.subscribe(()=>{});await new Promise(resolve=>setTimeout(resolve,5));end();assert.deepEqual(calls,[{id:'old',after:0n},{id:'next',after:1n}]);
  const unrelated=continueConversation(api,'old',create(SessionSchema,{id:'unrelated'}));assert.equal(unrelated.snapshot.cursor,0n);assert.equal(unrelated.identity,'unrelated');
+ // A successor that replaced the conversation from an edited message on has a shorter timeline: the same conversation, read from its start.
+ const rewound=continueConversation(api,'old',create(SessionSchema,{id:'rewound',previousExecutionId:'old',cutCursor:1n}));assert.equal(rewound.identity,old.identity);assert.equal(rewound.snapshot.cursor,0n);assert.equal(rewound.snapshot.messages.length,0);
 });
 
 test('runner restarts surface what they leave uncertain, and only that',()=>{
@@ -286,6 +288,7 @@ test('a turn Send now stopped is one quiet line; a raw provider diagnostic is ne
 // shows a message once, where it reached the agent; the strip shows it while
 // it waits.
 import type {Transcript} from '../packages/surfaces/src/transcript-model.ts';
+import {canEditPrompt,canRestartPrompt} from '../packages/surfaces/src/transcript-model.ts';
 const q={
  accepted:(operationId:string,text:string)=>({type:'operation_accepted',operationId,text}),
  receipt:(operationId:string,delivery='submitted',status='')=>({type:'receipt',status,receipt:{operationId,delivery}}),
@@ -442,4 +445,12 @@ test('the composer can distinguish a reported native permission from the selecte
   }));
   assert.equal(state.reportedPermission, 'YOLO');
   assert.equal(state.messages.length, 0);
+});
+
+// Editing a message in place cuts the conversation at the message's own record.
+// One sent while the agent was working is recorded inside the turn it waited
+// for, so it can be restarted from (in a conversation of its own) but not edited.
+test('a message that waited for a running turn is not offered Edit; the others are',()=>{
+ const messages=foldAll(queuedMidTurn).messages.filter(m=>m.type==='operation_accepted');
+ assert.deepEqual(messages.map(m=>[m.operationId,canEditPrompt(m),canRestartPrompt(m)]),[['first',true,true],['focus',false,true]]);
 });

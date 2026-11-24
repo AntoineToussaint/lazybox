@@ -1,7 +1,7 @@
-import { canRestartPrompt } from './transcript-model';
+import { canEditPrompt, canRestartPrompt } from './transcript-model';
 import { ActivityTime, exactTime, localDay, validActivityTime } from './ActivityTime';
 import type { OpenModifiers } from './file-links';
-import { Fragment, memo, type ReactNode, useContext, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, type ReactNode, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { HandoffMessage } from './ConversationHandoff';
 import { contextMenu, type ContextMenuContext } from './ContextMenu';
 import type { MenuItem } from './context-menu-model';
@@ -64,7 +64,7 @@ function PersonText({ text, quoted, onOpenFile }: { text: string; quoted: boolea
 }
 
 type MessageMenu = (context: ContextMenuContext<MessageMenuDetail>) => MenuItem[];
-const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile, nameFor = ownName, sessionId = '', menu, turn, turnControl, alwaysShowTime }: { message: TranscriptMessage; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; nameFor?(id: string): string; sessionId?: string; menu?: MessageMenu; turnControl?: ReactNode; alwaysShowTime?: boolean; /** Quiet: every tool call of the turn this run of calls opens. */ turn?: ToolEntry[] }) {
+const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile, nameFor = ownName, sessionId = '', menu, turn, turnControl, editor, alwaysShowTime }: { message: TranscriptMessage; /** Stands in for the message's text while the person edits it. */ editor?: ReactNode; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; nameFor?(id: string): string; sessionId?: string; menu?: MessageMenu; turnControl?: ReactNode; alwaysShowTime?: boolean; /** Quiet: every tool call of the turn this run of calls opens. */ turn?: ToolEntry[] }) {
   if (m.type === 'switched' && m.switched) return <div className="subscription-switched" role="note"><span>{switchedLine(m.switched, nameFor)}</span></div>;
   if (m.type === 'subagent' && m.agentId) return <div className="subagent-anchor" data-message-id={m.id}><SubagentCard id={m.agentId}/></div>;
   if (m.type === 'tools') return m.tools ? <ToolLines entries={m.tools} turn={turn}/> : null;
@@ -106,7 +106,7 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
         {reply && at !== undefined && <ActivityTime at={at} className="message-time"/>}
       </div>}
     {/* Only an agent's own words offer to run their commands. */}
-    {m.type === 'message_delta' ? <RunMessageContext.Provider value={m}><RichContent text={m.text} onOpenFile={onOpenFile}/><InlineRuns messageId={m.id}/></RunMessageContext.Provider> : <PersonText text={m.text} quoted={m.type === 'operation_accepted'} onOpenFile={onOpenFile}/>}
+    {editor ? editor : m.type === 'message_delta' ? <RunMessageContext.Provider value={m}><RichContent text={m.text} onOpenFile={onOpenFile}/><InlineRuns messageId={m.id}/></RunMessageContext.Provider> : <PersonText text={m.text} quoted={m.type === 'operation_accepted'} onOpenFile={onOpenFile}/>}
     {m.files?.length ? <SentAttachments files={m.files}/> : null}
     {/* What the provider said, for whoever reports it: never the line itself. */}
     {m.type === 'failure' && m.detail ? <details className="failure-detail"><summary>Details</summary><pre>{m.detail}</pre></details> : null}
@@ -115,24 +115,61 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
 });
 
 /**
+ * One of the person's messages being edited, where it stands. Sending
+ * replaces it and everything after it (AgentWindow `editMessage`); Enter
+ * sends, Shift+Enter breaks the line, Escape gives up.
+ */
+function PromptEditor({ text, onCancel, onSubmit }: { text: string; onCancel(): void; onSubmit(text: string): Promise<void> }) {
+  const [draft, setDraft] = useState(text);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  // The caret starts after the text, once.
+  const field = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { const area = field.current; if (area) { area.focus(); area.setSelectionRange(area.value.length, area.value.length); } }, []);
+  const submit = async () => {
+    if (busy || !draft.trim()) return;
+    setBusy(true); setError('');
+    try { await onSubmit(draft); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); setBusy(false); }
+  };
+  return <form className="prompt-editor" onSubmit={event => { event.preventDefault(); void submit(); }}>
+    <textarea aria-label="Edit message" ref={field} disabled={busy} value={draft} rows={Math.min(12, Math.max(2, draft.split('\n').length))}
+      onChange={event => setDraft(event.target.value)}
+      onKeyDown={event => {
+        if (event.key === 'Escape') { event.stopPropagation(); if (!busy) onCancel(); }
+        else if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit(); }
+      }}/>
+    {error && <p className="prompt-editor-error" role="alert">{error}</p>}
+    <div className="prompt-editor-actions">
+      <small>Sending replaces this message and removes what came after it from the conversation. Files are not changed.</small>
+      <button type="button" disabled={busy} onClick={onCancel}>Cancel</button>
+      <button type="submit" className="primary" disabled={busy || !draft.trim()}>{busy ? 'Sending…' : 'Send'}</button>
+    </div>
+  </form>;
+}
+
+/**
  * The latest `visible` messages of a conversation. Only that tail is mounted:
  * opening a long conversation renders what is on screen, and earlier history
  * is added as the reader scrolls toward it. A render of the window that hosts
  * it (a keystroke in the composer) does not touch the rows.
  */
-export const MessageList = memo(function MessageList({ messages, visible, agentName, onOpenFile, onShowEarlier, nameFor, checkpoints, sessionId, conversationId, onReveal, onHandoff, onBranch, detail = 'verbose', loadingEarlier = false, alwaysShowTime }: { messages: TranscriptMessage[]; visible: number; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; onShowEarlier(): void; /** A subscription's name by profile ID, for switch lines. */ nameFor?(id: string): string; checkpoints?: CheckpointScope; /** The conversation, for Quote in reply. */ sessionId?: string; conversationId: string; /** Scroll a message into view, mounting earlier history when needed. */ onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; onBranch?(message: TranscriptMessage, sideQuestion?: boolean): void; /** How much tool activity to show. */ detail?: ActivityDetail; /** Only the latest turns are in: the earlier history is being read (transcript `partial`). */ loadingEarlier?: boolean; alwaysShowTime?: boolean }) {
+export const MessageList = memo(function MessageList({ messages, visible, agentName, onOpenFile, onShowEarlier, nameFor, checkpoints, sessionId, conversationId, onReveal, onHandoff, onBranch, onEdit, detail = 'verbose', loadingEarlier = false, alwaysShowTime }: { messages: TranscriptMessage[]; visible: number; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; onShowEarlier(): void; /** A subscription's name by profile ID, for switch lines. */ nameFor?(id: string): string; checkpoints?: CheckpointScope; /** The conversation, for Quote in reply. */ sessionId?: string; conversationId: string; /** Scroll a message into view, mounting earlier history when needed. */ onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; onBranch?(message: TranscriptMessage, sideQuestion?: boolean): void; /** Replace one of the person's messages, and the conversation after it, with a revised one. */ onEdit?(message: TranscriptMessage, text: string): Promise<void>; /** How much tool activity to show. */ detail?: ActivityDetail; /** Only the latest turns are in: the earlier history is being read (transcript `partial`). */ loadingEarlier?: boolean; alwaysShowTime?: boolean }) {
   const hidden = Math.max(0, messages.length - visible);
   const checkpoint = useCheckpointUI(messages, checkpoints);
   // One stable menu for every row, so a new message does not re-render the others.
-  const latest = useRef({ messages, checkpoint, onReveal, onHandoff, onBranch });
-  latest.current = { messages, checkpoint, onReveal, onHandoff, onBranch };
+  // The message being edited in place, by id.
+  const [editing, setEditing] = useState('');
+  const latest = useRef({ messages, checkpoint, onReveal, onHandoff, onBranch, onEdit });
+  latest.current = { messages, checkpoint, onReveal, onHandoff, onBranch, onEdit };
   const [menu] = useState<MessageMenu>(() => (context: ContextMenuContext<MessageMenuDetail>) => {
-    const { messages, checkpoint, onReveal, onHandoff, onBranch } = latest.current;
+    const { messages, checkpoint, onReveal, onHandoff, onBranch, onEdit } = latest.current;
     const { message, role } = context.detail;
     const id = message.id;
     const retry = role === 'user' && canRestartPrompt(message);
     const fork = role === 'agent' && !!message.turnId;
     const actions = checkpoint.items(id);
+    if (onEdit && role === 'user' && canEditPrompt(message)) actions.push({ label: 'Edit message', run: () => setEditing(id) });
     if (onBranch && (retry || fork)) actions.push({
       label: retry ? 'Edit and restart here…' : 'Fork after this turn…',
       run: () => onBranch(message),
@@ -175,7 +212,10 @@ export const MessageList = memo(function MessageList({ messages, visible, agentN
       <option value="hidden">Hide response</option>
     </select>;
     if (mode === 'hidden') return <Fragment key={m.id}>{checkpoint.marker(m.id)}</Fragment>;
-    const content = <MessageRow turnControl={<>{control}{onBranch && canRestartPrompt(m) && <button type="button" className="text-button" onClick={() => onBranch(m)}>Restart from here…</button>}</>} message={m} agentName={agentName} onOpenFile={onOpenFile} nameFor={nameFor} sessionId={sessionId} menu={menu} turn={turns?.get(m.id)} alwaysShowTime={alwaysShowTime}/>;
+    // Editing happens where the message is; a restart starts a conversation of its own from it.
+    const edit = onEdit && canEditPrompt(m) && editing !== m.id && <button type="button" className="prompt-edit" aria-label="Edit message" title="Edit this message and continue the conversation from here" onClick={() => setEditing(m.id)}><Icon name="pencil" size={11}/>Edit</button>;
+    const editor = onEdit && editing === m.id && canEditPrompt(m) ? <PromptEditor text={m.text} onCancel={() => setEditing('')} onSubmit={async text => { await onEdit(m, text); setEditing(''); }}/> : undefined;
+    const content = <MessageRow editor={editor} turnControl={<>{control}{edit}{onBranch && canRestartPrompt(m) && <button type="button" className="text-button" onClick={() => onBranch(m)}>Restart from here…</button>}</>} message={m} agentName={agentName} onOpenFile={onOpenFile} nameFor={nameFor} sessionId={sessionId} menu={menu} turn={turns?.get(m.id)} alwaysShowTime={alwaysShowTime}/>;
     return <Fragment key={m.id}>{mode && m.type === 'tools'
       ? <ToolLineContext.Provider value={{ ...scope, detail: mode }}>{content}</ToolLineContext.Provider>
       : content}{checkpoint.marker(m.id)}</Fragment>;

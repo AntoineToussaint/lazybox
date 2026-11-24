@@ -117,6 +117,55 @@ func (b *Bench) restore(r sessionstore.Record) (*Execution, error) {
 // It is the fallback for executions Adopt could not re-attach (a reboot, an
 // incompatible host). Unclean shutdown still requires explicit reconciliation.
 func (b *Bench) Resume(ctx context.Context, id string, processesStopped bool) (*Execution, error) {
+	return b.succeed(ctx, id, processesStopped, nil)
+}
+
+// errConversationMoved: the attempt already has a successor other than the one asked for.
+var errConversationMoved = errors.New("the conversation has moved on; reload it and edit the message again")
+
+// continuable checks that e's conversation can go on in a successor, and
+// returns what that successor starts from: the attempt's record as saved
+// (the engine may have observed a later account or reference) and its
+// account profile. Nothing is stopped or started.
+func (b *Bench) continuable(ctx context.Context, e *Execution) (sessionstore.Record, accounts.Profile, error) {
+	var profile accounts.Profile
+	if e.Saved.ResumeBlocked != "" {
+		return sessionstore.Record{}, profile, errors.New(e.Saved.ResumeBlocked)
+	}
+	state := e.Engine.Snapshot()
+	saved, err := b.History.Get(ctx, e.ID)
+	if err != nil {
+		return saved, profile, err
+	}
+	for _, p := range b.Profiles() {
+		if p.ID == state.Profile {
+			profile = p
+		}
+	}
+	if profile.ID == "" || profile.Provider != saved.Provider {
+		return saved, profile, errors.New("original account profile is unavailable")
+	}
+	if !sameAccount(profile, saved.ProfileBindings[state.Profile]) {
+		return saved, profile, errors.New("saved account configuration changed; reconcile before resuming")
+	}
+	if saved.Options.Gateway != nil && saved.GatewayID != "metered" {
+		found := false
+		for _, g := range b.Config.Gateways {
+			if g.ID == saved.GatewayID && g.Provider == saved.Provider && g.Gateway == *saved.Options.Gateway {
+				found = true
+			}
+		}
+		if !found {
+			return saved, profile, errors.New("saved gateway configuration changed or is unavailable")
+		}
+	}
+	return saved, profile, nil
+}
+
+// succeed starts id's successor: the same provider conversation resumed, or,
+// with rewind, a fork of it that replaces the conversation from one of the
+// person's messages on (RewindConversation).
+func (b *Bench) succeed(ctx context.Context, id string, processesStopped bool, rewind *conversationFork) (*Execution, error) {
 	e, err := b.Get(id)
 	if err != nil {
 		return nil, err
@@ -124,6 +173,10 @@ func (b *Bench) Resume(ctx context.Context, id string, processesStopped bool) (*
 	e.Continuation.Lock()
 	defer e.Continuation.Unlock()
 	if successor, err := b.History.Successor(ctx, id); err == nil {
+		// A resume that won the race is not the rewind that was asked for.
+		if rewind != nil && successor.Cut != rewind.cut {
+			return nil, errConversationMoved
+		}
 		return b.Get(successor.ID)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -160,39 +213,21 @@ func (b *Bench) Resume(ctx context.Context, id string, processesStopped bool) (*
 			return nil, errors.New("finish or cancel owned commands before resuming")
 		}
 	}
-	if state.Reference == "" || !state.Capabilities.Resume {
+	if rewind == nil && (state.Reference == "" || !state.Capabilities.Resume) {
 		return nil, errors.New("provider conversation reference is unavailable; start a new conversation")
 	}
-	// Reload metadata because the engine may have observed a later account/ref.
-	saved, err := b.History.Get(ctx, id)
+	saved, profile, err := b.continuable(ctx, e)
 	if err != nil {
 		return nil, err
 	}
-	var profile accounts.Profile
-	for _, p := range b.Profiles() {
-		if p.ID == state.Profile {
-			profile = p
-		}
-	}
-	if profile.ID == "" || profile.Provider != saved.Provider {
-		return nil, errors.New("original account profile is unavailable")
-	}
-	if !sameAccount(profile, saved.ProfileBindings[state.Profile]) {
-		return nil, errors.New("saved account configuration changed; reconcile before resuming")
-	}
-	if saved.Options.Gateway != nil && saved.GatewayID != "metered" {
-		found := false
-		for _, g := range b.Config.Gateways {
-			if g.ID == saved.GatewayID && g.Provider == saved.Provider && g.Gateway == *saved.Options.Gateway {
-				found = true
-			}
-		}
-		if !found {
-			return nil, errors.New("saved gateway configuration changed or is unavailable")
-		}
-	}
 	// Collection ownership reconciliation remains with its manager. No forceful
 	// lease takeover is implied by a resume request.
+	if rewind != nil {
+		// The messages the lost agent never received came after the one being
+		// replaced: they are not handed over.
+		rewind.provider, rewind.profileBinding = saved.Provider, saved.ProfileBindings[state.Profile]
+		return b.open(profile.ID, saved.Cwd, "", saved.Options, saved.GatewayID, saved.WorkID, id, saved.CollectionID, saved.Purpose, saved.Context, false, *rewind)
+	}
 	next, err := b.open(profile.ID, saved.Cwd, state.Reference, saved.Options, saved.GatewayID, saved.WorkID, id, saved.CollectionID, saved.Purpose, saved.Context, false)
 	if err != nil {
 		return nil, err

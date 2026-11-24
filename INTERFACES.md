@@ -234,6 +234,21 @@ Include the selected account profile reference and its verified isolation mode i
 
 `AgentOperation` is a closed, typed union of message/start-turn, steer-active-turn, interrupt-turn, stop-one-sub-agent, answer-question, and decide-approval. Stopping a sub-agent names the Lazybox agent id; the engine resolves its native id from agent state and refuses one that has finished, and it is offered only where `Capabilities.stop_agent` says the provider can (Claude through the SDK's `stopTask`; not Codex). Switching the model (`ApplyRequest.model`) names one model token (an alias or an id) for the following turns and is offered where `Capabilities.live_model` says so (Claude through the SDK's `setModel` on a worker that reports the `model` feature; Codex as the `model` override of the next `turn/start`); otherwise `RestartWithModel` ends the agent between turns and resumes the same provider conversation with that model, as `RestartWithPermission` does for a permission mode. Both, like a permission change, are the owner's: a device's or an agent's credential cannot call them. The Runner records `model_changed` and `permission_changed` (text: the new value; status `live` or `restart`) in the conversation's journal, and the Claude worker records `command_catalog` (the agent's own slash commands with descriptions and argument hints, and its models) and `compacted` (trigger, tokens before and after). It is not an arbitrary method name plus an unvalidated JSON blob. Queueing follow-ups is an engine operation: the engine dispatches them at the permitted boundary rather than assuming each provider queues identically.
 
+`RewindSession` edits one of the person's messages in place. It is the owner's
+alone. The Runner stops the agent and starts the conversation's next attempt on
+a fork of the provider's session that ends before the message (the same
+boundary and fork as a restart in a conversation of its own,
+[PROMPT_RESTART.md](PROMPT_RESTART.md)), and the client sends the revised
+text to that attempt. The attempt records the
+message's cursor as its cut: the conversation's timeline reads the earlier
+attempts only up to it, so the replaced records leave the timeline without
+being deleted from their journals, and `Session.cut_cursor` tells a reader not
+to keep what it read past it. A turn is a boundary in whichever native session
+recorded it, so an edited message can be edited again. An attempt is announced
+as its predecessor's successor, and can be read, only once its agent has
+started: before that nothing writes its journal, and a reader would take it
+for a conversation that ended.
+
 While a permissions restart is pending, the client retains its confirmation as
 **Restarting…**, disables repeated confirmation and the old composer, and returns
 keyboard focus only after adopting the replacement session. A rejected request

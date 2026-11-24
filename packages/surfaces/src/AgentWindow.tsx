@@ -666,6 +666,26 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     setSession(undefined); setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
     setSessionID(opened.session.id); onSessionChange?.(opened.session.id); refresh();
   };
+  // Edit a message in place: the Runner stops the agent and continues the
+  // same conversation from just before the message; the revised text is then
+  // sent as that conversation's next message.
+  const editMessage = async (message: TranscriptMessage, text: string) => {
+    const rewound = await api.rewindSession({ sessionId: sessionID, beforePromptCursor: BigInt(message.id) }, { timeoutMs: 90_000 });
+    const next = rewound.session;
+    if (!next) throw new Error('Runner did not return the conversation');
+    setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
+    adopt(next);
+    // The conversation is already cut: a message that cannot be sent goes to
+    // the window's error, not back to an editor of a message that is gone.
+    // Its text is in the prompt history either way, so it can be recalled.
+    savePrompt(viewState, text, next.conversationId || next.id);
+    try {
+      const receipt = await api.apply({ sessionId: next.id, operationId: crypto.randomUUID(), operation: { case: 'message', value: { text, attachments: [] } } });
+      if (receipt.error || receipt.delivery === 'failed') throw new Error(receipt.error || 'The Runner could not deliver this message.');
+    } catch (error) {
+      setError(`The conversation was rewound, but your edited message was not sent (recall it from the prompt history): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
   const openLinkedConversation = async (id: string, cursor: bigint) => {
     try {
       const { session: source } = await api.getSession({ sessionId: id });
@@ -801,7 +821,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             onContinueTurn={canCompose && continuesAfterError && !session?.busy && !sending && !uncertainSend && !message && !files.length && !missingFiles.length
               ? () => send(undefined, 'Continue from where the turn stopped. Check the existing commands and their results first, then finish the remaining work. Avoid repeating operations that already ran.')
               : undefined}
-            onBranch={canBranch ? selectBranch : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
+            onBranch={canBranch ? selectBranch : undefined} onEdit={canBranch ? editMessage : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             enableFullAccess={session?.capabilities?.livePermission && !session.closed && session.permission !== 'yolo' && !assistant ? requestId => changePermission('yolo', requestId) : undefined}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
             subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onOpenContinuation={id => void openLinkedConversation(id, 0n)} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>

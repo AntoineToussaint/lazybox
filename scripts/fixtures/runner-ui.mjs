@@ -1025,7 +1025,14 @@ actions:
         mutations.push({ method, body });
         const session = { id: `assistant-${sessions.length}`, collectionId:body.collectionId||'', profileId: body.profileId, purpose: body.purpose, status: 'ready', capabilities: { images: true }, pending: [] }; sessions.push(session); return json({ session });
       }
-      // Like the Runner: the agent ends between turns and the conversation continues in a new one with that model.
+      // Like the Runner: the agent is stopped and the same conversation continues in a new one, its timeline ending before the edited message.
+      case 'RewindSession': {
+        mutations.push({method,body});const old=sessions.find(s=>s.id===body.sessionId);if(!old)return error('not_found','Fixture session not found');
+        const kept=(eventStreams.get(old.id)?.events||[]).filter(record=>BigInt(record.cursor)<BigInt(body.beforePromptCursor));
+        const next={...old,id:`${old.id}-rewound-${sessions.length}`,conversationId:old.conversationId||old.id,previousExecutionId:old.id,cutCursor:String(body.beforePromptCursor),busy:false,closed:false};sessions.push(next);old.closed=true;old.busy=false;
+        const channel=openEvents(next.id);for(const record of kept)channel.push({...record.event,...(record.receipt?{receipt:record.receipt}:{})},record.capturedAt);
+        return json({session:next});
+      }
       case 'RestartWithModel': case 'RestartWithPermission': {
         mutations.push({method,body});const old=sessions.find(s=>s.id===body.sessionId);if(!old)return error('not_found','Fixture session not found');
         if(old.busy)return error('failed_precondition','wait for the agent to finish its turn, or interrupt it, before restarting it');

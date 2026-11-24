@@ -16,6 +16,11 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/journal"
 )
 
+// sameSession accepts the turns of one provider session.
+func sameSession(thread string) func(uint64, string) bool {
+	return func(_ uint64, session string) bool { return session == thread }
+}
+
 func TestForkBoundaryExcludesLaterAndQueuedPrompts(t *testing.T) {
 	spool, err := journal.Open(filepath.Join(t.TempDir(), "events"), 1<<20)
 	if err != nil {
@@ -47,7 +52,7 @@ func TestForkBoundaryExcludesLaterAndQueuedPrompts(t *testing.T) {
 		}
 	}
 	timeline := &Timeline{chain: []*Execution{{spool: spool, Engine: &archivedRuntime{spool: spool}}}}
-	after, err := readForkBoundary(context.Background(), timeline, "thread", "one", 0)
+	after, err := readForkBoundary(context.Background(), timeline, sameSession("thread"), "one", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +60,7 @@ func TestForkBoundaryExcludesLaterAndQueuedPrompts(t *testing.T) {
 		after.history[0].Text != "first prompt" || after.history[1].Text != "first reply" {
 		t.Fatalf("unexpected fork: %+v", after)
 	}
-	retry, err := readForkBoundary(context.Background(), timeline, "thread", "", 9)
+	retry, err := readForkBoundary(context.Background(), timeline, sameSession("thread"), "", 9)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,14 +68,14 @@ func TestForkBoundaryExcludesLaterAndQueuedPrompts(t *testing.T) {
 		retry.history[3].Text != "queued while one was running" || retry.history[4].Text != "second reply" {
 		t.Fatalf("unexpected retry: %+v", retry)
 	}
-	first, err := readForkBoundary(context.Background(), timeline, "thread", "", 1)
+	first, err := readForkBoundary(context.Background(), timeline, sameSession("thread"), "", 1)
 	if err != nil || first.thread != "" || len(first.history) != 0 || first.operation != "first" {
 		t.Fatalf("unexpected first retry: %+v, %v", first, err)
 	}
-	if _, err := readForkBoundary(context.Background(), timeline, "thread", "", 3); err == nil {
+	if _, err := readForkBoundary(context.Background(), timeline, sameSession("thread"), "", 3); err == nil {
 		t.Fatal("accepted an in-turn prompt as an edit boundary")
 	}
-	if _, err := readForkBoundary(context.Background(), timeline, "different", "one", 0); err == nil {
+	if _, err := readForkBoundary(context.Background(), timeline, sameSession("different"), "one", 0); err == nil {
 		t.Fatal("accepted a turn from a different native thread")
 	}
 }

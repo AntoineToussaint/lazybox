@@ -18,6 +18,25 @@ type conversationFork struct {
 	thread, turn, operation              string
 	cursor                               uint64
 	history                              []agent.Event
+	// message stands in for turn when the turn was recorded without a native
+	// id: the provider's id of its last message (agent.Open.ForkAfterMessage).
+	message string
+	// cut: the fork replaces its source conversation from this cursor on, as
+	// the source's successor (RewindConversation), instead of starting a
+	// conversation of its own with a copy of the history.
+	cut uint64
+}
+
+// recordedBy says which turns of e's conversation a fork can be cut after:
+// those of a provider session of e's provider and account, each in the
+// session that recorded it. After an edit in place (RewindConversation) that
+// is not always the conversation's current session.
+func recordedBy(e *Execution, timeline *Timeline) func(cursor uint64, session string) bool {
+	profile := e.Engine.Snapshot().Profile
+	return func(cursor uint64, session string) bool {
+		recorded := timeline.attempt(cursor)
+		return session != "" && recorded != nil && recorded.Saved.Provider == e.Saved.Provider && recorded.Engine.Snapshot().Profile == profile
+	}
 }
 
 func conversationForkID(source, after string, before uint64, checkpointFiles bool, requestKey string) string {
@@ -165,7 +184,7 @@ func (b *Bench) forkCheckpointWorkspace(ctx context.Context, e *Execution, key, 
 var errInheritedBoundary = errors.New("the selected prompt starts immediately after inherited history")
 
 func (b *Bench) forkBoundary(ctx context.Context, e *Execution, timeline *Timeline, after string, before uint64, visited map[string]bool) (conversationFork, error) {
-	fork, err := readForkBoundary(ctx, timeline, e.Engine.Snapshot().Reference, after, before)
+	fork, err := readForkBoundary(ctx, timeline, recordedBy(e, timeline), after, before)
 	if !errors.Is(err, errInheritedBoundary) {
 		return fork, err
 	}
@@ -218,9 +237,15 @@ func (b *Bench) forkBoundary(ctx context.Context, e *Execution, timeline *Timeli
 	return fork, nil
 }
 
-func readForkBoundary(ctx context.Context, timeline *Timeline, thread, after string, before uint64) (conversationFork, error) {
+// readForkBoundary reads the history a fork keeps and the provider turn it is
+// cut after. native says whether the turn that ended at a cursor, in a
+// provider session, is one a fork can be cut after (recordedBy).
+func readForkBoundary(ctx context.Context, timeline *Timeline, native func(cursor uint64, session string) bool, after string, before uint64) (conversationFork, error) {
 	var fork conversationFork
 	var lastCompleted agent.Event
+	// The provider's id of the running turn's latest message, and of the last
+	// completed turn's last one: where a turn recorded without a native id ended.
+	var message, lastMessage string
 	var replyCursor uint64
 	var historyLength, turnStartIndex int
 	var acknowledged string
@@ -258,8 +283,11 @@ func readForkBoundary(ctx context.Context, timeline *Timeline, thread, after str
 			if prompt.ImageCount > 0 || len(prompt.Data.Files) > 0 {
 				return fork, errors.New("edit and retry requires a prompt without attachments")
 			}
-			if lastCompleted.SessionID == thread {
-				fork.thread, fork.turn = thread, lastCompleted.TurnID
+			if lastCompleted.SessionID != "" {
+				fork.thread, fork.turn = lastCompleted.SessionID, lastCompleted.TurnID
+				if fork.turn == "" {
+					fork.message = lastMessage
+				}
 			}
 			if unknownHistory {
 				fork.cursor, fork.operation = cursor, event.OperationID
@@ -308,6 +336,15 @@ func readForkBoundary(ctx context.Context, timeline *Timeline, thread, after str
 				replyCursor = cursor
 			}
 			fork.history = append(fork.history, agent.Event{Type: event.Type, Text: event.Text})
+		case "usage":
+			var usage struct {
+				Data struct {
+					RequestID string `json:"requestId"`
+				} `json:"data"`
+			}
+			if json.Unmarshal(record.Value, &usage) == nil && usage.Data.RequestID != "" {
+				message = usage.Data.RequestID
+			}
 		case "turn_started":
 			localTurn, active = true, true
 		case "turn_ended":
@@ -325,14 +362,18 @@ func readForkBoundary(ctx context.Context, timeline *Timeline, thread, after str
 			laterTurn = false
 			fork.history = append(fork.history, agent.Event{Type: event.Type, Status: event.Status})
 			turnStartIndex, acknowledged = len(fork.history), ""
-			unknownHistory = event.SessionID != thread || event.Status != "completed" || event.TurnID == ""
+			ended := message
+			message = ""
+			// A turn recorded without its native id is still a boundary when it
+			// names its last message: the adapter finds where it ended.
+			unknownHistory = !native(cursor, event.SessionID) || event.Status != "completed" || (event.TurnID == "" && ended == "")
 			if unknownHistory {
 				continue
 			}
-			lastCompleted = event
+			lastCompleted, lastMessage = event, ended
 			historyLength = len(fork.history)
-			if after == event.TurnID {
-				fork.thread, fork.turn, fork.cursor, fork.operation = thread, after, replyCursor, operation
+			if after != "" && after == event.TurnID {
+				fork.thread, fork.turn, fork.cursor, fork.operation = event.SessionID, after, replyCursor, operation
 				return fork, nil
 			}
 		}

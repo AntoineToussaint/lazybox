@@ -175,14 +175,18 @@ export function conversationReader(api:RunnerClient,id:string){
 
 export function forgetConversation(api:RunnerClient,id:string){caches.get(owner(api))?.delete(id);}
 
-/** A successor extends the same contiguous Runner timeline; retain its rendered prefix. */
+/**
+ * A successor extends the same contiguous Runner timeline; retain its rendered
+ * prefix. Not one that replaced the conversation from an edited message on
+ * (Session.cutCursor): its timeline is shorter from there, so it is read anew.
+ */
 export function continueConversation(api:RunnerClient,previousId:string,session:Session){
  const next=conversationReader(api,session.id);
  if(session.previousExecutionId!==previousId)return next;
  const previous=conversationReader(api,previousId);
  next.identity=previous.identity;
  // Only a whole conversation is a prefix: a preview of its latest turns is not.
- if(!next.active&&!previous.snapshot.partial&&next.snapshot.cursor<previous.snapshot.cursor){
+ if(!session.cutCursor&&!next.active&&!previous.snapshot.partial&&next.snapshot.cursor<previous.snapshot.cursor){
   next.snapshot={...previous.snapshot,status:'Connecting',error:'',loading:false};
   next.view={...previous.view};
  }

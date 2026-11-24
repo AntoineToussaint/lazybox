@@ -56,6 +56,10 @@ type Open struct {
 	// Grants are the conversation's "always allow" choices so far: a new
 	// process of the provider starts holding them (Grant).
 	Grants []Grant
+	// ForkAfterMessage stands in for ForkAfterTurn when the turn was recorded
+	// without a native id: the provider's id of the turn's last message, for
+	// an adapter that can find where that turn ended in the native history.
+	ForkAfterMessage string
 }
 
 // Hosting selects session hosts under Root. A non-nil Attach re-attaches to

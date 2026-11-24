@@ -29,7 +29,7 @@ type Transcript = ReturnType<typeof useTranscript>;
  * the agent's pending requests (and a subscription limit) in the scrolling pane, and a way back to the
  * latest message once the reader scrolled away from it.
  */
-export function MessageArea({ api, session, sessionID, transcript, scroll, spoken, agentName, limited, onContinueTurn, nameFor, onOpenFile, onError, onHandoff, onOpenHandoff, onBranch, subscription, enableFullAccess, detail = 'quiet', alwaysShowTime }: {
+export function MessageArea({ api, session, sessionID, transcript, scroll, spoken, agentName, limited, onContinueTurn, nameFor, onOpenFile, onError, onHandoff, onOpenHandoff, onBranch, onEdit, subscription, enableFullAccess, detail = 'quiet', alwaysShowTime }: {
   api: RunnerClient;
   alwaysShowTime?: boolean;
   session?: Session;
@@ -49,6 +49,8 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
   onHandoff?(message: HandoffMessage): void;
   enableFullAccess?(exitPlanRequestId?: string): Promise<boolean>;
   onBranch?(message: TranscriptMessage, sideQuestion?: boolean): void;
+  /** Replace one of the person's messages, and the conversation after it, with a revised one. */
+  onEdit?(message: TranscriptMessage, text: string): Promise<void>;
   onOpenHandoff?: OpenHandoffConversation;
   /** The subscription limit card and switch dialog, after the requests. */
   subscription?: ReactNode;
@@ -93,7 +95,7 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
         <div className="messages-content" ref={scroll.contentRef}>
           {transcript.loading && !conversation.length && <ConversationLoading replay={transcript.replay}/>}
           {!transcript.loading && !transcript.error && !spoken && <EmptyConversation agentName={agentName}/>}
-          <MessageScopeProvider scope={artifactScope}><ToolLineContext.Provider value={toolScope}><ConversationSourceContext.Provider value={onOpenHandoff && handoffWorkspace ? openSource : undefined}><MessageList conversationId={session?.conversationId || sessionID} key={session?.conversationId || sessionID} messages={spoken ? conversation : []} visible={scroll.visibleMessages} agentName={agentName} onOpenFile={onOpenFile} onShowEarlier={scroll.showEarlier} nameFor={nameFor} checkpoints={checkpoints} sessionId={sessionID} onReveal={scroll.revealMessage} onHandoff={onHandoff} onBranch={onBranch} detail={detail} alwaysShowTime={alwaysShowTime} loadingEarlier={transcript.partial}/></ConversationSourceContext.Provider></ToolLineContext.Provider></MessageScopeProvider>
+          <MessageScopeProvider scope={artifactScope}><ToolLineContext.Provider value={toolScope}><ConversationSourceContext.Provider value={onOpenHandoff && handoffWorkspace ? openSource : undefined}><MessageList conversationId={session?.conversationId || sessionID} key={session?.conversationId || sessionID} messages={spoken ? conversation : []} visible={scroll.visibleMessages} agentName={agentName} onOpenFile={onOpenFile} onShowEarlier={scroll.showEarlier} nameFor={nameFor} checkpoints={checkpoints} sessionId={sessionID} onReveal={scroll.revealMessage} onHandoff={onHandoff} onBranch={onBranch} onEdit={onEdit} detail={detail} alwaysShowTime={alwaysShowTime} loadingEarlier={transcript.partial}/></ConversationSourceContext.Provider></ToolLineContext.Provider></MessageScopeProvider>
           {session?.fault && !limited && <FaultBanner key={JSON.stringify([sessionID, session.fault, conversation.findLast(message => message.type === 'failure')?.id])} onContinueTurn={onContinueTurn} api={api} session={session} sessionID={sessionID} onError={onError}/>}
           <PendingRequests enableFullAccess={enableFullAccess} api={api} session={session} sessionID={sessionID} agentName={agentName} onError={onError}/>
           {subscription}

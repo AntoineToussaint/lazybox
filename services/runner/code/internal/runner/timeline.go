@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"regexp"
 	"strings"
 
@@ -57,6 +58,32 @@ func lazyboxOperation(id string) bool {
 // conversation up again for each record.
 type Timeline struct {
 	chain []*Execution // oldest first
+	// caps bounds the records read from each attempt, parallel to chain. An
+	// attempt that replaced the conversation from one of the person's
+	// messages on (sessionstore.Record.Cut) hides what its predecessors
+	// recorded from that cursor: the timeline is then the conversation as it
+	// stands, and the replaced records stay in their journals.
+	caps []uint64
+}
+
+// count is the number of records the timeline reads from attempt i.
+func (t *Timeline) count(i int) uint64 {
+	count := t.chain[i].spool.Count()
+	if i < len(t.caps) {
+		count = min(count, t.caps[i])
+	}
+	return count
+}
+
+// attempt is the attempt that recorded the record at cursor; nil when none did.
+func (t *Timeline) attempt(cursor uint64) *Execution {
+	var offset uint64
+	for i, e := range t.chain {
+		if offset += t.count(i); cursor <= offset {
+			return e
+		}
+	}
+	return nil
 }
 
 // OpenTimeline resolves id's lineage for reading its timeline.
@@ -65,9 +92,21 @@ func (b *Bench) OpenTimeline(id string) (*Timeline, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &Timeline{chain: make([]*Execution, len(chain))}
+	t := &Timeline{chain: make([]*Execution, len(chain)), caps: make([]uint64, len(chain))}
 	for i, e := range chain {
 		t.chain[len(chain)-1-i] = e
+	}
+	for i, e := range t.chain {
+		t.caps[i] = math.MaxUint64
+		if cut := e.Saved.Cut; cut > 0 {
+			// The cursor counts what was visible when the cut was made, so
+			// earlier cuts are already applied.
+			kept := cut - 1
+			for earlier := 0; earlier < i; earlier++ {
+				t.caps[earlier] = min(t.count(earlier), kept)
+				kept -= t.caps[earlier]
+			}
+		}
 	}
 	return t, nil
 }
@@ -75,8 +114,8 @@ func (b *Bench) OpenTimeline(id string) (*Timeline, error) {
 // Retained is the last cursor of the timeline.
 func (t *Timeline) Retained() uint64 {
 	var total uint64
-	for _, e := range t.chain {
-		total += e.spool.Count()
+	for i := range t.chain {
+		total += t.count(i)
 	}
 	return total
 }
@@ -86,7 +125,7 @@ func (t *Timeline) Retained() uint64 {
 func (t *Timeline) Next(ctx context.Context, cursor uint64) (journal.Record, error) {
 	var offset uint64
 	for i, e := range t.chain {
-		count := e.spool.Count()
+		count := t.count(i)
 		if cursor < offset+count || i == len(t.chain)-1 {
 			if cursor < offset {
 				return journal.Record{}, journal.ErrCursor
@@ -110,8 +149,8 @@ func (t *Timeline) Next(ctx context.Context, cursor uint64) (journal.Record, err
 // last cursor when it was read.
 func (t *Timeline) Page(before uint64, turns int, maxBytes int64) (records []journal.Record, start, retained uint64, err error) {
 	counts := make([]uint64, len(t.chain))
-	for i, e := range t.chain {
-		counts[i] = e.spool.Count()
+	for i := range t.chain {
+		counts[i] = t.count(i)
 		retained += counts[i]
 	}
 	end := retained

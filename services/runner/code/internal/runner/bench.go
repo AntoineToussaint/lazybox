@@ -585,8 +585,21 @@ func (b *Bench) Get(id string) (*Execution, error) {
 	if err != nil {
 		return nil, err
 	}
-	b.archives[id] = e
+	// An attempt whose agent is still starting is no ended conversation: its
+	// stand-in is not kept, and readers are told to come back (Starting).
+	if !b.pending[id] {
+		b.archives[id] = e
+	}
 	return e, nil
+}
+
+// Starting reports whether the attempt's record exists while its agent has
+// not started yet. Its journal is not being written by an engine: read as it
+// is, it would look like a conversation that ended.
+func (b *Bench) Starting(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.pending[id]
 }
 func (b *Bench) List() []*Execution {
 	b.mu.Lock()
@@ -945,7 +958,10 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 		}
 	}
 	var inherited []agent.Event
-	if len(fork) > 0 {
+	if len(fork) > 0 && fork[0].cut > 0 {
+		// The earlier attempts' journals are the history, read up to the cut.
+		record.Cut = fork[0].cut
+	} else if len(fork) > 0 {
 		record.ForkedFrom = fork[0].source
 		record.ForkCursor = fork[0].cursor
 		record.ForkThread, record.ForkTurn = fork[0].thread, fork[0].turn
@@ -960,6 +976,7 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 	if len(fork) > 0 {
 		open.ForkThread = fork[0].thread
 		open.ForkAfterTurn = fork[0].turn
+		open.ForkAfterMessage = fork[0].message
 	}
 	if parent != nil && profile == parent.Snapshot.Profile {
 		open.ProviderSettings = parent.ProviderSettings
@@ -975,7 +992,16 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 		snapshot.Closed = true
 		snapshot.Fault = "provider startup failed"
 		snapshot.Status = agent.Failed
+		if record.Cut > 0 {
+			// The fork that would have replaced the conversation never started:
+			// nothing is cut, and this attempt is a failed resume of the
+			// conversation as it was, which can be resumed like any other.
+			snapshot.Reference = parent.Snapshot.Reference
+		}
 		saveErr := b.History.SaveState(context.Background(), id, snapshot, record.ProviderSettings)
+		if record.Cut > 0 {
+			saveErr = errors.Join(saveErr, b.History.Amend(context.Background(), id, func(r *sessionstore.Record) { r.Cut = 0 }))
+		}
 		spool.Dispose()
 		return nil, errors.Join(err, saveErr)
 	}

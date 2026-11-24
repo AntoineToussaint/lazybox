@@ -100,6 +100,7 @@ const (
 	RunnerService_ResumeSession_FullMethodName                = "/lazybox.bench.v1.RunnerService/ResumeSession"
 	RunnerService_RestartWithPermission_FullMethodName        = "/lazybox.bench.v1.RunnerService/RestartWithPermission"
 	RunnerService_RestartWithModel_FullMethodName             = "/lazybox.bench.v1.RunnerService/RestartWithModel"
+	RunnerService_RewindSession_FullMethodName                = "/lazybox.bench.v1.RunnerService/RewindSession"
 	RunnerService_GiveBrowser_FullMethodName                  = "/lazybox.bench.v1.RunnerService/GiveBrowser"
 	RunnerService_SwitchSubscription_FullMethodName           = "/lazybox.bench.v1.RunnerService/SwitchSubscription"
 	RunnerService_SetSessionRotation_FullMethodName           = "/lazybox.bench.v1.RunnerService/SetSessionRotation"
@@ -409,6 +410,13 @@ type RunnerServiceClient interface {
 	// model, for an agent whose running worker cannot switch model live: it is
 	// ended between turns and the same provider conversation resumes.
 	RestartWithModel(ctx context.Context, in *RestartWithModelRequest, opts ...grpc.CallOption) (*SessionResponse, error)
+	// Owner only. Edits one of the person's messages: replaces the conversation
+	// from that message on, in place. The agent is stopped, and a new one
+	// continues the same conversation from the provider's session as it was
+	// just before the message; the caller then sends the revised message to the
+	// session returned. The replaced messages leave the conversation's
+	// timeline. Workspace files are not changed.
+	RewindSession(ctx context.Context, in *RewindSessionRequest, opts ...grpc.CallOption) (*SessionResponse, error)
 	// Owner only. "Give Claude the browser" (BROWSER.md): turns the agent
 	// browser back on for the conversation's workspace if the person turned it
 	// off there, and, for an agent started without the browser tools, ends it
@@ -1629,6 +1637,16 @@ func (c *runnerServiceClient) RestartWithModel(ctx context.Context, in *RestartW
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SessionResponse)
 	err := c.cc.Invoke(ctx, RunnerService_RestartWithModel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) RewindSession(ctx context.Context, in *RewindSessionRequest, opts ...grpc.CallOption) (*SessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SessionResponse)
+	err := c.cc.Invoke(ctx, RunnerService_RewindSession_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3400,6 +3418,13 @@ type RunnerServiceServer interface {
 	// model, for an agent whose running worker cannot switch model live: it is
 	// ended between turns and the same provider conversation resumes.
 	RestartWithModel(context.Context, *RestartWithModelRequest) (*SessionResponse, error)
+	// Owner only. Edits one of the person's messages: replaces the conversation
+	// from that message on, in place. The agent is stopped, and a new one
+	// continues the same conversation from the provider's session as it was
+	// just before the message; the caller then sends the revised message to the
+	// session returned. The replaced messages leave the conversation's
+	// timeline. Workspace files are not changed.
+	RewindSession(context.Context, *RewindSessionRequest) (*SessionResponse, error)
 	// Owner only. "Give Claude the browser" (BROWSER.md): turns the agent
 	// browser back on for the conversation's workspace if the person turned it
 	// off there, and, for an agent started without the browser tools, ends it
@@ -4056,6 +4081,9 @@ func (UnimplementedRunnerServiceServer) RestartWithPermission(context.Context, *
 }
 func (UnimplementedRunnerServiceServer) RestartWithModel(context.Context, *RestartWithModelRequest) (*SessionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RestartWithModel not implemented")
+}
+func (UnimplementedRunnerServiceServer) RewindSession(context.Context, *RewindSessionRequest) (*SessionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RewindSession not implemented")
 }
 func (UnimplementedRunnerServiceServer) GiveBrowser(context.Context, *GiveBrowserRequest) (*SessionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GiveBrowser not implemented")
@@ -5978,6 +6006,24 @@ func _RunnerService_RestartWithModel_Handler(srv interface{}, ctx context.Contex
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).RestartWithModel(ctx, req.(*RestartWithModelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_RewindSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RewindSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).RewindSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_RewindSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).RewindSession(ctx, req.(*RewindSessionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -9095,6 +9141,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RestartWithModel",
 			Handler:    _RunnerService_RestartWithModel_Handler,
+		},
+		{
+			MethodName: "RewindSession",
+			Handler:    _RunnerService_RewindSession_Handler,
 		},
 		{
 			MethodName: "GiveBrowser",

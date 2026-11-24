@@ -54,6 +54,10 @@ type Record struct {
 	// the conversation on read, never stored in an attempt.
 	PinnedAt   int64 `json:",omitempty"`
 	ArchivedAt int64 `json:",omitempty"`
+	// Cut: this attempt replaced the conversation from one of the person's
+	// messages on (an edit in place). It is that message's cursor in the
+	// timeline of the attempts before this one, which is read only up to it.
+	Cut uint64 `json:",omitempty"`
 }
 
 // Store commits the identity before provider startup and the observed state

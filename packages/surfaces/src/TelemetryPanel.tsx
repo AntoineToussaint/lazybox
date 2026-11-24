@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import type { ContextSnapshot, TelemetryReport } from '@lazybox/protocol';
 import {useRunner} from './RunnerContext';
 import type { TranscriptMessage } from './transcript-model';
+import { activeSubagent, mergedStatus } from './subagent-model';
+import { useSubagentView, useSubagentIndex, usePresentation } from './subagent-view';
 import { describeToolBrief } from './tool-lines';
 import './telemetry.css';
 import { contextLevel, dollars, percentLabel, unpricedHelp, unpricedLine, usageBreakdown, type UsageBreakdown } from './usage-model';
@@ -171,7 +173,21 @@ export function TelemetryPanel({workspaceId,executionId,conversationId,messages,
    });};
   window.addEventListener(USAGE_EVENT,listener);return()=>window.removeEventListener(USAGE_EVENT,listener);
  },[compact,executionId]);
- const groups=report?.groups||[],contexts=(report?.contexts||[]).filter((context,index,all)=>!conversationId||all.findIndex(value=>value.agent===context.agent)===index);
+ const view=useSubagentView(), index=useSubagentIndex(view);
+ usePresentation(view);
+ const liveAgents=new Set<string>();
+ if(view && compact) for(const id of index.order){
+  const agent=index.byId[id];
+  if(agent.kind==='agent' && activeSubagent(mergedStatus(agent,view.runner))){
+   // Metering sees the native id before rotation adds its attempt prefix.
+   liveAgents.add(agent.runnerId.replace(/^attempt-\d+:/,''));
+  }
+ }
+ const groups=report?.groups||[];
+ const contexts=(report?.contexts||[]).filter(c=>!compact || c.agent==='root' ||
+  (c.scope?.execution===executionId && liveAgents.has(c.agent)))
+  .filter((context,index,all)=>!conversationId||all.findIndex(value=>value.agent===context.agent)===index);
+ if(compact) contexts.sort((a,b)=>Number(b.agent==='root')-Number(a.agent==='root'));
  const root=contexts.find(c=>c.agent==='root'),percent=percentage(root?.used,root?.capacity),tokensLabel=root?.used===undefined?undefined:`${short(root.used)} tokens`;
  // The header's chip is the one reader of a conversation's usage: the message box shows what it read.
  useEffect(()=>{if(compact&&executionId)publishContext(executionId,{percent,tokensLabel,popover:id});},[compact,executionId,percent,tokensLabel,id]);

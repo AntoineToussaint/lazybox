@@ -9,7 +9,7 @@
     "@lazybox/platform": "0.0.0",
     "@lazybox/surfaces": "0.0.0",
     "@tauri-apps/api": "2.12.5",
-    "@tauri-apps/plugin-http": "2.8.3",
+    "@tauri-apps/plugin-http": "2.9.0",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },

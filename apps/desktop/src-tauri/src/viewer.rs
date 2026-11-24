@@ -98,8 +98,7 @@ pub fn navigation(url: &Url) -> Navigation {
 pub fn label(owner: &str, id: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(format!("{owner}\0{id}").as_bytes());
-    let hex: String = digest[..12].iter().map(|b| format!("{b:02x}")).collect();
-    format!("{VIEWER_PREFIX}{hex}")
+    format!("{VIEWER_PREFIX}{}", crate::host::hex(&digest[..12]))
 }
 
 /// The app webview asking: never a viewer.

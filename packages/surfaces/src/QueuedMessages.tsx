@@ -58,7 +58,7 @@ export type QueuedDelivery = {
 };
 /** How long Send now or Steer may say it is at work before the strip gives the buttons back to try again. */
 export const DELIVERY_TIMEOUT_MS = 20_000;
-export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: readonly { operationId: string }[] | undefined): QueuedDelivery {
+export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: readonly { operationId: string; editing?: boolean }[] | undefined): QueuedDelivery {
   const [working, setWorking] = useState<QueuedDelivery['working']>();
   const [error, setError] = useState<{ id: string; text: string }>();
   // A message that left the queue takes its confirmation, progress and error with it.
@@ -68,6 +68,16 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
     if (working && !present.has(working.id)) setWorking(undefined);
     if (error && !present.has(error.id)) setError(undefined);
   }, [ids]);
+  // Editing supersedes a Send now or Steer still at work on the message: the
+  // Runner holds it, so it stays queued, and the timeout below must not call
+  // that a step that would not stop. Edit in this window says so at once
+  // (`edit` below); a poll says so for an edit from another window.
+  const editing = (queued || []).flatMap(message => message.editing ? [message.operationId] : []).join('\0');
+  const superseded = (id: string) => {
+    setWorking(current => current?.id === id ? undefined : current);
+    setError(current => current?.id === id ? undefined : current);
+  };
+  useEffect(() => { for (const id of editing ? editing.split('\0') : []) superseded(id); }, [editing]);
   useEffect(() => { setWorking(undefined); setError(undefined); }, [sessionID]);
   // An interrupt that never takes (the agent ignores it, the Runner restarted
   // meanwhile) must not leave "Stopping the current step…" for good: the
@@ -95,6 +105,7 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
   };
   const edit: QueuedDelivery['edit'] = async (operationId, how, editId, text = '') => {
     const receipt = await api.apply({ sessionId: sessionID, operationId: crypto.randomUUID(), operation: { case: 'deliverQueued', value: { operationId, how, editId, text } } }, { timeoutMs: DELIVERY_TIMEOUT_MS });
+    if (how === 'edit') superseded(operationId);
     return receipt.queuedText;
   };
   return { working, error, deliver, edit };

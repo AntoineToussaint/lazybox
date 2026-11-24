@@ -35,7 +35,9 @@ it did.
   **Edit**, in the message's row of buttons right before Send now, pauses
   delivery before the editor opens below the message. The message keeps its place
   and attachments, even if the current turn ends. **Save** releases the
-  revised message. **Cancel edit** releases the original. If you reload the
+  revised message. **Cancel edit** releases the original. Edit also works
+  while a Send now waits for the step to stop: the edit takes over, and the
+  message waits until you save or cancel. If you reload the
   tab while editing, choose **Resume edit** to continue.
 
   A queued message is in one place at a time: above the message box while it

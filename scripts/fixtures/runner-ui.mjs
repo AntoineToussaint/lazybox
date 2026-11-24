@@ -1279,6 +1279,12 @@ actions:
           }
           if(how==='steer'&&!session.capabilities?.steer)return error('unimplemented','operation unsupported by adapter');
           if(!session.busy)return error('failed_precondition','no active turn');
+          // An agent slow to stop (a test opts in with session.sendNowWaits): like the Runner,
+          // Send now interrupts and moves the message first in line, where it waits for the turn to end.
+          if(how==='now'&&session.sendNowWaits){
+            queue.unshift(...queue.splice(index,1));session.interrupted=(session.interrupted||0)+1;
+            return json({operationId:body.operationId,delivery:'accepted'});
+          }
           queue.splice(index,1);session.queued=Math.max(0,(session.queued||1)-1);
           const ch=eventStreams.get(session.id);
           if(how==='now'){

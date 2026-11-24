@@ -153,8 +153,9 @@ try {
   assert.equal(await css('text-scale'), String(14 / 13));
   await page.screenshot({ path: '.cache/appearance-settings-changed.png', fullPage: true });
 
-  // Kept across a reload; the conversation reads with the new chat text.
-  await page.goto(`${base}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
+  // Kept across a reload; the conversation reads with the new chat text. (Going to the first URL again
+  // would not reload: the app took #token= out of the address bar, so it only changes the fragment.)
+  await page.reload();
   await page.getByRole('button', { name: 'Work', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Parser fix' })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'solarized-light');

@@ -200,7 +200,9 @@ try{
  await authorBox.fill('');
 
  // 9b. The message box: `/review claude` (and `/review` alone is the default reviewer).
- await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}#token=${fixture.token}`);
+ // A fresh load of the author's conversation. This tab already signed in, and the app took #token= out
+ // of the address bar: the plain URL loads the page (the same URL with #token= would only change the fragment).
+ await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}`);
  const message=page.locator('section.panel-chat').getByRole('textbox',{name:'Message',exact:true});
  await message.click();await page.keyboard.type('/review cla');
  await expect(page.getByRole('option',{name:/Review with Claude/})).toBeVisible();
@@ -245,7 +247,7 @@ try{
  await page.screenshot({path:'.cache/agent-review-settings.png'});
 
  assert.deepEqual(errors,[]);
- await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}#token=${fixture.token}`);
+ await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}`);
  await page.getByRole('navigation',{name:'Pages'}).getByRole('button',{name:'Work',exact:true}).click();
  await page.getByRole('button',{name:'Snippets',exact:true}).click();
  const picker=page.getByRole('dialog',{name:'Snippets',exact:true});

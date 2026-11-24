@@ -132,7 +132,7 @@ func (e *Engine) detach() error {
 	if err = e.provider.(agent.Detacher).Detach(); err != nil {
 		e.mu.Lock()
 		e.detaching = false
-		e.lostStreamLocked(fmt.Errorf("detaching failed: %w", err))
+		e.lostStreamLocked(fmt.Errorf("detaching failed: %w", err), false)
 		e.mu.Unlock()
 		return err
 	}
@@ -145,12 +145,16 @@ func (e *Engine) detach() error {
 // reading the agent while it detached (it records nothing then): the agent
 // still runs, unsupervised. That is a lost stream (agent.TransportFault),
 // which Resume settles by re-attaching; never a conversation that silently
-// stops hearing its agent.
-func (e *Engine) lostStreamLocked(cause error) {
-	select {
-	case <-e.done:
-	default:
-		return // Still reading the agent.
+// stops hearing its agent. ending says the caller is the loop itself,
+// ending; otherwise a loop that has not ended is still reading (or will
+// decide, under this lock, that it is not: receive).
+func (e *Engine) lostStreamLocked(cause error, ending bool) {
+	if !ending {
+		select {
+		case <-e.done:
+		default:
+			return // Still reading the agent.
+		}
 	}
 	if e.state.Closed || e.state.Fault != "" {
 		return

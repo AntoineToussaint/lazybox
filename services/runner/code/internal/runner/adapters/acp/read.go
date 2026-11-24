@@ -88,13 +88,17 @@ func (s *session) answered(m jsonl.Message, emit func(agent.Event)) bool {
 	switch {
 	case s.state.Prompt != nil && string(m.ID) == string(s.state.Prompt):
 		turn = s.state.Turn
-	case s.state.Prompt == nil && s.state.Next != nil && string(m.ID) == string(s.state.Next):
-		// The previous Runner wrote this prompt and died before it recorded
-		// so: the reply still ends the turn the journal says is running.
+	case !s.orphan(m.ID):
+		s.mu.Unlock()
+		return false
+	case s.state.Prompt == nil:
+		// A previous Runner wrote this prompt and died before it recorded
+		// so: the reply still ends the turn the journal may say is running.
 		s.state.Turns++
 		turn = fmt.Sprintf("turn-%d", s.state.Turns)
-		s.state.Next = s.p.NewID()
 	default:
+		// An orphaned prompt ended while one of this Runner's runs: that
+		// turn goes on, and the requests open are its own.
 		s.mu.Unlock()
 		return false
 	}
@@ -114,6 +118,18 @@ func (s *session) answered(m jsonl.Message, emit func(agent.Event)) bool {
 		emit(ev)
 	}
 	return true
+}
+
+// orphan reports whether id is an orphaned prompt's (durable.Orphans), and
+// forgets it: a prompt is answered once. s.mu is held.
+func (s *session) orphan(id json.RawMessage) bool {
+	for i, o := range s.state.Orphans {
+		if string(o) == string(id) {
+			s.state.Orphans = append(s.state.Orphans[:i:i], s.state.Orphans[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // turnEnd is the end of a turn as events: why it stopped, and a failure

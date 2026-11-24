@@ -402,6 +402,100 @@ func TestADetachThatFailsAfterTheLoopStoppedIsALostStream(t *testing.T) {
 	}
 }
 
+// The narrowest form of the same: the loop decided to end (detaching refused
+// its record) and the failed detach ran before the loop closed done. The
+// loop decides why it ends under the lock it ends in, so the conversation
+// still says its stream is lost.
+func TestADetachFailingWhileTheLoopEndsIsALostStream(t *testing.T) {
+	e, native, _, _ := durableEngine(t)
+	deciding, detached := make(chan struct{}), make(chan struct{})
+	e.receiveEnding = func() {
+		close(deciding)
+		<-detached // the failed detach has finished
+	}
+	native.BeforeDetach = func() error {
+		native.Events <- agent.Event{Type: "message_delta", Text: "late", Cursor: 9}
+		<-deciding
+		return errors.New("host did not answer")
+	}
+	if err := e.Detach(); err == nil {
+		t.Fatal("setup: detach did not fail")
+	}
+	close(detached)
+	for end := time.Now().Add(5 * time.Second); e.Streaming(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("the loop never ended")
+		}
+	}
+	if s := e.Snapshot(); !agent.TransportFault(s.Fault) {
+		t.Fatalf("a supervisor that stopped reading says nothing: fault %q", s.Fault)
+	}
+}
+
+// A refused message does not take what is queued behind it down with it:
+// those messages stay queued (the next message, or a turn's end, sends them),
+// where they used to be dispatched at once and refused in a burst.
+func TestARefusalKeepsTheQueueBehindIt(t *testing.T) {
+	e, native := bench(t, false)
+	ctx := contextFor(t)
+	if _, err := e.Apply(ctx, agent.Operation{ID: "first", Kind: agent.Message, Text: "build it"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = applied(t, native)
+	native.Events <- agent.Event{Type: "turn_started"}
+	await(t, e, "turn_started")
+	for _, id := range []string{"second", "third", "fourth"} {
+		if _, err := e.Apply(ctx, agent.Operation{ID: id, Kind: agent.Message, Text: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	released := make(chan struct{})
+	close(released)
+	native.Hold(agent.Message, released, agent.Rejected(errors.New("refused")))
+	native.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	if r := awaitReceipt(t, e, "second"); r.Receipt.Delivery != "failed" {
+		t.Fatalf("setup: %+v", r)
+	}
+	time.Sleep(100 * time.Millisecond) // a burst would have been dispatched by now
+	if s := e.Snapshot(); s.Queued != 2 {
+		t.Fatalf("after a refusal %d messages are queued, want 2: %+v", s.Queued, s.QueuedMessages)
+	}
+	// The person's next message continues, after what waited, in order.
+	native.Hold(agent.Message, released, nil)
+	if _, err := e.Apply(ctx, agent.Operation{ID: "fifth", Kind: agent.Message, Text: "fifth"}); err != nil {
+		t.Fatal(err)
+	}
+	if op := applied(t, native); op.ID != "third" {
+		t.Fatalf("delivered %q first, want the oldest queued", op.ID)
+	}
+}
+
+// The adapter knows the agent is in a turn the engine did not (one a previous
+// Runner started): the message is not sent, failed or lost. It waits first in
+// line, the conversation is busy (Stop works), and it goes when that turn ends.
+func TestAMessageForAnAgentStillInATurnWaitsForIt(t *testing.T) {
+	e, native := bench(t, false)
+	ctx := contextFor(t)
+	released := make(chan struct{})
+	close(released)
+	native.Hold(agent.Message, released, agent.ErrTurnRunning)
+	if _, err := e.Apply(ctx, agent.Operation{ID: "first", Kind: agent.Message, Text: "build it"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the message waits for the running turn", func() bool {
+		s := e.Snapshot()
+		return s.Busy && s.Queued == 1 && s.Fault == ""
+	})
+	if receipts := journaled(t, e, "receipt"); len(receipts) != 0 {
+		t.Fatalf("a message that was not sent has a receipt: %+v", receipts)
+	}
+	native.Hold(agent.Message, released, nil)
+	native.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	if op := applied(t, native); op.ID != "first" {
+		t.Fatalf("delivered %q", op.ID)
+	}
+}
+
 // Adoption reads nothing until Start: the Runner installs its turn hooks
 // first, so a turn the agent ends at once still gets its checkpoint.
 func TestAdoptedTurnEndedAtOnceReachesTheTurnHooks(t *testing.T) {

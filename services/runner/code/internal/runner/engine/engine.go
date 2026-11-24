@@ -123,6 +123,10 @@ type Engine struct {
 	// refuseWrites stands in for a disk that refuses the journal's writes,
 	// for tests only; nil in the Runner.
 	refuseWrites func() error
+	// receiveEnding runs as the receive loop decides to end because it could
+	// not record an event, before it takes the lock it ends under; for tests
+	// only (a detach failing in that instant), nil in the Runner.
+	receiveEnding func()
 }
 
 // TurnHooks observe the main agent's turns, for code checkpoints.
@@ -728,6 +732,7 @@ func (e *Engine) dispatch() {
 	}
 	op := e.queue[0]
 	e.queue = e.queue[1:]
+	queuedAt := e.queuedAt[op.ID]
 	delete(e.queuedAt, op.ID)
 	e.persistDurableLocked()
 	e.state.Busy = true
@@ -753,6 +758,23 @@ func (e *Engine) dispatch() {
 		e.mu.Unlock()
 		return
 	}
+	if errors.Is(err, agent.ErrTurnRunning) {
+		// Not sent: the agent is in a turn this engine did not start. The
+		// message keeps its place, first in line, and goes when that turn
+		// ends (its turn_ended dispatches); the conversation is busy until
+		// then, so Stop can end that turn. Nothing is lost or failed.
+		e.queue = append([]agent.Operation{op}, e.queue...)
+		if !queuedAt.IsZero() {
+			if e.queuedAt == nil {
+				e.queuedAt = map[string]time.Time{}
+			}
+			e.queuedAt[op.ID] = queuedAt
+		}
+		e.turnOp = ""
+		e.persistDurableLocked()
+		e.mu.Unlock()
+		return
+	}
 	e.setReceiptLocked(op.ID, r)
 	e.appendLocked(map[string]any{"type": "receipt", "receipt": r})
 	if err != nil {
@@ -766,11 +788,10 @@ func (e *Engine) dispatch() {
 			e.observe(agent.Event{Type: "failure", Status: "delivery_failed"})
 		}
 	}
+	// What is queued behind a refused message stays queued: it goes with the
+	// person's next message, or when a turn ends, never in a burst that a
+	// refusal that persists would answer the same way.
 	e.mu.Unlock()
-	if err != nil && errors.Is(err, agent.ErrRejected) {
-		// Refused, not lost: what is queued behind it goes next.
-		go e.dispatch()
-	}
 }
 
 // deliveryFault is the fault of a message the provider did not take. A
@@ -990,11 +1011,20 @@ func (e *Engine) receive() {
 		}
 		e.mu.Unlock()
 		if !ok && !(retry && e.recordAgain(ev)) {
+			if e.receiveEnding != nil {
+				e.receiveEnding()
+			}
+			// Why the loop ends is decided under the lock it ends in. Still
+			// detaching: the next Runner reads the agent, and a detach that
+			// fails after this finds the loop over (lostStreamLocked). No
+			// longer detaching (it failed meanwhile, and found the loop still
+			// running): the agent runs unread, which is a lost stream. Any
+			// other end already said why (a capture fault, the conversation
+			// closed, the engine stopped).
 			e.mu.Lock()
-			// Detaching hands the agent to the next Runner; if that fails
-			// after this, detach says the stream is lost (lostStreamLocked).
-			// Any other end of the loop already said why (a capture fault, the
-			// conversation closed).
+			if !e.detaching && !e.state.Closed && e.ctx.Err() == nil && e.state.Fault == "" {
+				e.lostStreamLocked(errors.New("the Runner stopped reading the agent while detaching, and detaching failed"), true)
+			}
 			close(e.done)
 			e.mu.Unlock()
 			return

@@ -201,16 +201,23 @@ notices in the conversation.
   not remembered: the engine keeps supervising, and the next Resume tries
   again. If its receive loop stopped reading while it detached, the failed
   Detach leaves a transport fault, never a conversation that silently stops
-  hearing its agent.
-- A message the provider refused outright (a JSON-RPC error, a Codex reply
-  that names no turn, `agent.ErrRejected`) is a turn's failure
-  (`delivery_rejected`): nothing is in flight, and the next message (or one
-  queued behind it) continues the conversation. Only a delivery whose outcome
-  is unknown (the write or the connection failed) faults it with "provider
-  delivery failed", and that never replaces a lost-stream fault said
-  meanwhile, which Resume settles. No second agent is
+  hearing its agent: the receive loop decides why it ends under the lock the
+  failed Detach takes, so one of the two always says so. No second agent is
   started. If the host is gone, or cannot be adopted (it is stopped), the
   conversation ends as interrupted and resumes natively.
+- A message the provider refused outright (a JSON-RPC error, a Codex reply
+  that names no turn, `agent.ErrRejected`) is a turn's failure
+  (`delivery_rejected`): nothing is in flight, and the person's next message
+  continues the conversation. Messages queued behind it stay queued, in order,
+  and go first then (or when a turn ends): never dispatched in a burst that a
+  refusal that persists would refuse the same way. A message the adapter did
+  not send because the agent is still in a turn the engine did not know of
+  (`agent.ErrTurnRunning`) is neither failed nor lost: it stays first in line,
+  the conversation counts as busy (Stop ends that turn), and it goes when that
+  turn ends. Only a delivery whose outcome is unknown (the write or the
+  connection failed) faults the conversation with "provider delivery failed",
+  and that never replaces a lost-stream fault said meanwhile, which Resume
+  settles.
 - The Runner's own writes (the journal, the saved snapshot, metering, account
   state) can fail while the agent is fine: a full disk. That never ends the
   supervision of a live agent. The failure is said once in the conversation

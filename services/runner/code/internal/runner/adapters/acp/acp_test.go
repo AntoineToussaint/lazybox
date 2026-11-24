@@ -708,6 +708,58 @@ func TestATurnWhosePromptWasNotRecordedStillEnds(t *testing.T) {
 	}
 }
 
+// The same crash, and the adopting Runner, which knows of no running turn,
+// sends a message at once. Its prompt gets an id of its own, never the one
+// the orphaned prompt may be running under; each reply ends its own turn.
+func TestAPromptAfterAnOrphanedOneHasItsOwnID(t *testing.T) {
+	t.Setenv("ACP_FAKE_SLOW_MS", "800")
+	root := fixtureRoot(t)
+	cwd := workspace(t)
+	a := Adapter{Agent: fakeAgent(t)}
+	first, err := a.Open(context.Background(), agent.Open{Cwd: cwd, Permission: "ask", Host: &agent.Hosting{Root: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := first.(agent.Durable).DurableState()
+	var saved durable
+	if err = json.Unmarshal(before, &saved); err != nil || saved.Next == nil {
+		t.Fatalf("setup: no reserved prompt id in %s", before)
+	}
+	if _, err = first.Apply(context.Background(), agent.Operation{ID: "slow", Kind: agent.Message, Text: "slow"}); err != nil {
+		t.Fatal(err)
+	}
+	seen := until(t, first, typed("message_delta"))
+	commitAll(first, seen)
+	if err = first.(agent.Detacher).Detach(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := a.Open(context.Background(), agent.Open{Cwd: cwd, Permission: "ask", Host: &agent.Hosting{Root: root, Attach: &agent.Attachment{State: before, Reference: "fake-session-1", Cursor: seen[len(seen)-1].Cursor}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if _, err = again.Apply(context.Background(), agent.Operation{ID: "hello", Kind: agent.Message, Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	s := again.(*session)
+	s.mu.Lock()
+	prompt := string(s.state.Prompt)
+	s.mu.Unlock()
+	if prompt == string(saved.Next) {
+		t.Fatalf("the new prompt reused the orphaned prompt's id %s", prompt)
+	}
+	hello := until(t, again, typed("turn_ended"))
+	if text(hello) != "Hello from the fake ACP agent." {
+		t.Fatalf("the new turn: %s", summary(hello))
+	}
+	commitAll(again, hello)
+	// The orphaned prompt's reply still ends its own turn.
+	orphan := until(t, again, typed("turn_ended"))
+	if end := orphan[len(orphan)-1]; end.Status != "completed" || end.TurnID == hello[len(hello)-1].TurnID {
+		t.Fatalf("the orphaned turn: %s", summary(orphan))
+	}
+}
+
 // A permission request the agent stopped waiting on (its turn ended) is
 // over: the conversation is told, and the host forgets it, so no later
 // Runner shows it again as a phantom approval.

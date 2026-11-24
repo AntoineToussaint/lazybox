@@ -226,8 +226,13 @@ jobs:
       # The container's user does not own the checkout; git refuses to read it
       # until told it is safe. docs-links.test.ts and check-private.mjs read it.
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      # The image supplies headless Chromium and its system libraries.
+      # The image supplies headless Chromium and its system libraries. It is
+      # chosen by @playwright/test's version; the browser service launches the
+      # build its own playwright-core pins. `make check-workspaces` installs that
+      # build first (`make browser`); the image has no make, so this runs the
+      # same script, which is a no-op when the image already holds it.
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run install:browser
       - run: npm run check:client
       # Starts the real bundled Claude Code, so it is not a unit test: its own
       # step and deadline (the claude-settings gate).

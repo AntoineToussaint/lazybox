@@ -48,6 +48,20 @@ test('every unit test suite here runs with a 30 s deadline per test', () => {
   assert.match(makefile, /^check-desktop:[^\n]*\n(\t[^\n]*\n)*\t\$\(NEXTEST\) --manifest-path apps\/desktop\/src-tauri\/Cargo\.toml\n\t\$\(NEXTEST\) --manifest-path tools\/lazybox-snippets\/Cargo\.toml$/m);
 });
 
+// The browser service's tests launch the agent browser's Chromium; a fresh
+// checkout has none, so what runs them installs it first.
+test('make check and CI install the agent browser before the browser service tests', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const plan = spawnSync('make', ['-n', '-C', root, 'check-workspaces'], { encoding: 'utf8' });
+  assert.equal(plan.status, 0, plan.stderr);
+  const install = plan.stdout.indexOf('npm run --silent install:browser'), tests = plan.stdout.indexOf('npm run check:client');
+  assert.ok(install >= 0 && install < tests, `make check-workspaces runs:\n${plan.stdout}`);
+  const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
+  const job = ci.slice(ci.indexOf('\n  typescript:'));
+  const ciInstall = job.indexOf('- run: npm run install:browser'), ciTests = job.indexOf('- run: npm run check:client');
+  assert.ok(ciInstall >= 0 && ciInstall < ciTests, 'CI\'s typescript job installs the agent browser before npm run check:client');
+});
+
 test('a unit test without its per-test deadline fails admission, wherever it is started', async t => {
   assert.deepEqual(scriptViolations({ 'test:a': 'node --import tsx --test --test-timeout=30000 a.test.ts', 'test:ui': 'node scripts/test-ui.mjs' }), []);
   assert.match(scriptViolations({ 'test:a': 'npm run build && node --import tsx --test a.test.ts' })[0], /test:a: node --test without --test-timeout=30000/);

@@ -28,10 +28,11 @@ help:
 
 # The agent browser's Chromium (BROWSER.md): Playwright's own headless build,
 # in Playwright's cache, matched to the pinned playwright-core. Never the
-# person's Chrome or its profile.
+# person's Chrome or its profile. Once installed it downloads nothing again:
+# Playwright finds the build in its cache and returns in about a second.
 .PHONY: browser
 browser: deps
-	node_modules/.bin/playwright-core install --only-shell --no-remove chromium
+	npm run --silent install:browser
 
 deps: node_modules/.package-lock.json
 node_modules/.package-lock.json: package.json package-lock.json $(WORKSPACE_MANIFESTS)
@@ -49,7 +50,9 @@ check-generated: deps
 
 check-go:
 	cd $(GO_ROOT) && go vet ./...
-check-workspaces: deps
+# The browser service's tests (npm run test:browser-service) launch the agent
+# browser's Chromium; `browser` installs it once and is a quick check after.
+check-workspaces: deps browser
 	npm run check:client
 build: build-go build-worker build-web
 build-go:

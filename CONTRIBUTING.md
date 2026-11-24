@@ -56,7 +56,7 @@ npm run test:client               # the client's pure models (node --test)
 make test                         # the Runner's Go tests
 make test-environments            # launcher, release and install scripts
 npm run test:updates              # one UI suite (Playwright); npm run lists them all
-make check                        # format, vet, typecheck, generated code, Go and client tests
+make check                        # format, vet, typecheck, generated code, Go and client tests (installs the agent browser once)
 make check-desktop                # the Tauri crate: fmt, tests (nextest), clippy
 make check-release                # the full release catalog, every UI suite included
 npm run docs:check                # build the docs site and check its links

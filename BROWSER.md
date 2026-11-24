@@ -163,9 +163,11 @@ screencast frames drawn on a canvas.
   policy is tested against a fake service, and one Go test drives the real
   service end to end.
 
-`make browser` installs the Chromium build matched to the pinned
-`playwright-core` into Playwright's own cache. Without it, opening the browser
-fails with that instruction, in the panel and to the agent.
+`make browser` (`npm run install:browser`) installs the Chromium build matched
+to the pinned `playwright-core` into Playwright's own cache, and downloads
+nothing once it is there. Without it, opening the browser fails with that
+instruction, in the panel, to the agent and in the service's tests. `make
+check` runs it before those tests; CI's typescript job runs the script.
 
 ## Lifetime and ownership
 

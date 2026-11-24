@@ -257,3 +257,39 @@ func replay(t *testing.T, j *Journal) []string {
 	}
 	return out
 }
+
+// A reserve keeps the end of the budget for the records that close a journal:
+// ordinary appends stop short of it, reserved ones may use it, and reopening
+// with the same reserve reads what is there.
+func TestReserveKeepsRoomForTheLastRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "command")
+	const limit, reserve = 4096, 1024
+	j, err := Open(path, limit, Reserve(reserve))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler := strings.Repeat("x", 200)
+	for {
+		if _, err = j.Append(filler); err != nil {
+			break
+		}
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil || !errors.Is(err, ErrFull) || info.Size() > limit-reserve {
+		t.Fatalf("ordinary appends reached into the reserve: %v %v %v", info, statErr, err)
+	}
+	if _, err = j.AppendReserved(strings.Repeat("y", 700)); err != nil {
+		t.Fatalf("the reserve did not take a closing record: %v", err)
+	}
+	if _, err = j.AppendReserved(strings.Repeat("z", 1024)); !errors.Is(err, ErrFull) {
+		t.Fatalf("a reserved append went past the budget: %v", err)
+	}
+	_ = j.Close()
+	if j, err = Open(path, limit, Reserve(reserve)); err != nil {
+		t.Fatalf("a journal whose reserve is used does not reopen: %v", err)
+	}
+	_ = j.Close()
+	if _, err = Open(path, limit, Reserve(limit)); err == nil {
+		t.Fatal("a reserve as large as the budget was accepted")
+	}
+}

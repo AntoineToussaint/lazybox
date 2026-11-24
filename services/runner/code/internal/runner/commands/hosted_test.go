@@ -381,6 +381,78 @@ func TestCommandAdoptedElsewhereEndsHereWithoutStopping(t *testing.T) {
 	}
 }
 
+// A command whose output fills its journal is stopped, and how it ended is
+// still recorded: the completion has room kept for it. Before, the completion
+// did not fit, yet the host was released, so the next Runner found neither the
+// outcome nor the host and called it unknown.
+func TestACommandThatFillsItsJournalKeepsItsCompletion(t *testing.T) {
+	f := newHosted(t)
+	const budget = 8 << 10
+	m, err := NewHosted(f.dir, budget, 0, f.hosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := m.Start(Spec{SessionID: "s", Title: "flood", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", "while :; do echo x; sleep 0.01; done"}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := finished(t, c)
+	if !strings.Contains(state.Error, "capture failed") || state.Signal == "" {
+		t.Fatalf("a command that filled its journal: %+v", state)
+	}
+	waitFor(t, "the finished command's host stayed", func() bool { ids, _ := sessionhost.Hosts(f.hosts); return len(ids) == 0 })
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	next, err := NewHosted(f.dir, budget, 0, f.hosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	reopened, err := next.Get(state.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Status(); !got.Done || got.Error != state.Error || got.Signal != state.Signal {
+		t.Fatalf("the completion was lost: recorded %+v, was %+v", got, state)
+	}
+}
+
+// A host is released only once its command's completion is recorded. One
+// whose completion could not be written keeps the exit, and the next Runner
+// records it.
+func TestAnUnrecordedCompletionLeavesTheExitWithTheHost(t *testing.T) {
+	f := newHosted(t)
+	m := f.open(t)
+	quiet := `printf before; while [ ! -e "` + f.gate + `" ]; do sleep 0.02; done; exit 4`
+	c, err := m.Start(Spec{SessionID: "s", Title: "build", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", quiet}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "first output never recorded", func() bool { return c.Status().Offset > 0 })
+	// The journal takes nothing more (a failing disk, say).
+	_ = c.spool.Close()
+	if err = os.WriteFile(f.gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if state := finished(t, c); !strings.Contains(state.Error, "capture") {
+		t.Fatalf("an unrecorded completion: %+v", state)
+	}
+	if ids, _ := sessionhost.Hosts(f.hosts); len(ids) != 1 {
+		t.Fatal("the host was released although the exit was not recorded")
+	}
+	_ = m.Close()
+	next := f.open(t)
+	defer next.Close()
+	adopted, err := next.Get(c.Status().ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := finished(t, adopted); state.ExitCode == nil || *state.ExitCode != 4 {
+		t.Fatalf("the next Runner did not collect the exit: %+v", state)
+	}
+}
+
 func TestUpgradeStopsUnisolatedVerification(t *testing.T) {
 	f := newHosted(t)
 	m := f.open(t)

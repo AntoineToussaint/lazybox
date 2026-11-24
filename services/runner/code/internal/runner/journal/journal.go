@@ -61,8 +61,10 @@ type Journal struct {
 	rollover  bool
 	salvage   bool
 	total     int64 // with Rollover, the budget of every segment together; 0: none
-	notify    chan struct{}
-	closed    bool
+	// reserve is the end of the budget only AppendReserved may use.
+	reserve int64
+	notify  chan struct{}
+	closed  bool
 	// broken is a write that could not be undone: nothing more is appended.
 	broken error
 	// damage is why a read-only open stopped before the end of the journal.
@@ -88,6 +90,14 @@ func Marking(mark func(json.RawMessage) bool) Option {
 // bounds every segment together (0: no bound); an append past it is ErrFull.
 func Rollover(total int64) Option {
 	return func(j *Journal) { j.rollover, j.total = true, total }
+}
+
+// Reserve keeps the last n bytes of the journal's budget (its total with
+// Rollover) for AppendReserved: an ordinary Append that would reach into them
+// is ErrFull. The records that close a journal, such as a command's
+// completion, then still fit once its output has filled it.
+func Reserve(n int64) Option {
+	return func(j *Journal) { j.reserve = n }
 }
 
 // Salvage makes OpenExisting read a journal with a damaged record up to it,
@@ -126,6 +136,9 @@ func open(path string, limit int64, readonly bool, options []Option) (*Journal, 
 	}
 	if j.rollover && j.total != 0 && j.total < limit {
 		return nil, errors.New("a journal's total budget must be at least its segment budget")
+	}
+	if budget := j.budget(); j.reserve < 0 || (j.reserve > 0 && j.reserve >= budget) {
+		return nil, errors.New("a journal's reserve must be less than its budget")
 	}
 	paths := []string{path}
 	if j.rollover {
@@ -251,7 +264,22 @@ func tear(f *os.File, path string, at int64, partial []byte) error {
 	return f.Sync()
 }
 
-func (j *Journal) Append(value any) (Record, error) {
+// budget is what bounds the journal as a whole: its total with Rollover (0 is
+// none), its limit otherwise.
+func (j *Journal) budget() int64 {
+	if j.rollover {
+		return j.total
+	}
+	return j.limit
+}
+
+// Append records value, leaving the reserve (Reserve) untouched.
+func (j *Journal) Append(value any) (Record, error) { return j.append(value, false) }
+
+// AppendReserved records value, using the reserve if it must.
+func (j *Journal) AppendReserved(value any) (Record, error) { return j.append(value, true) }
+
+func (j *Journal) append(value any, reserved bool) (Record, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.closed {
@@ -277,12 +305,16 @@ func (j *Journal) Append(value any) (Record, error) {
 	}
 	b = append(b, '\n')
 	n := int64(len(b))
+	available := j.budget()
+	if !reserved {
+		available -= j.reserve
+	}
 	if !j.rollover {
-		if j.size+n > j.limit {
+		if j.size+n > available {
 			return Record{}, ErrFull
 		}
 	} else {
-		if j.total > 0 && j.size+n > j.total {
+		if j.total > 0 && j.size+n > available {
 			return Record{}, fmt.Errorf("%w: the journal holds its %d-byte total budget", ErrFull, j.total)
 		}
 		// A record larger than a segment's budget gets a segment of its own:

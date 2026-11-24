@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -283,7 +284,7 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 		}
 		if !state.Done && host != "" {
 			spool.Dispose()
-			if spool, err = journal.Open(filepath.Join(dir, entry.Name()), perCommandBudget); err != nil {
+			if spool, err = m.openSpool(filepath.Join(dir, entry.Name()), state); err != nil {
 				m.Detach()
 				return nil, err
 			}
@@ -296,7 +297,7 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 			// A `lazybox run` that follows the Runner keeps publishing after
 			// the restart; if it stopped too, watchFollowers ends the pipe.
 			spool.Dispose()
-			if spool, err = journal.Open(filepath.Join(dir, entry.Name()), perCommandBudget); err != nil {
+			if spool, err = m.openSpool(filepath.Join(dir, entry.Name()), state); err != nil {
 				m.Detach()
 				return nil, err
 			}
@@ -370,6 +371,30 @@ func (m *Manager) watchFollowers(silence time.Duration, idleLimits struct{ Never
 }
 
 func ID() string { return rand.Text() }
+
+// maxErrorText bounds the error a completion records, so it fits the reserve.
+const maxErrorText = 4 << 10
+
+// reserveFor is the part of a command's journal budget kept for what ends
+// it (journal.Reserve): its stop and background requests and its completion,
+// which repeats its status, with an exit, an error and, for a pipe, a report.
+// Output that fills the journal then still leaves room to record how the
+// command ended. At most a quarter of the budget.
+func reserveFor(limit int64, state Status) int64 {
+	completion, _ := json.Marshal(Output{Type: "completed", Offset: math.MaxUint64, Status: ptr(state)})
+	record, _ := json.Marshal(journal.Record{Sequence: math.MaxUint64, Time: time.Now(), Value: completion})
+	reserve := int64(len(record)) + maxErrorText + 4<<10
+	if state.Mode == "pipe" {
+		// The compact view, escaped (MaxAgentView), and the rest of a report.
+		reserve += 2*MaxAgentView + 4<<10
+	}
+	return min(reserve, limit/4)
+}
+
+// openSpool opens a command's journal at path for writing, with its reserve.
+func (m *Manager) openSpool(path string, state Status) (*journal.Journal, error) {
+	return journal.Open(path, m.limit, journal.Reserve(reserveFor(m.limit, state)))
+}
 
 func (m *Manager) Register(spec Spec) (*Command, error) { return m.register(spec, nil) }
 
@@ -446,14 +471,16 @@ func (m *Manager) register(spec Spec, host *sessionhost.Client) (*Command, error
 		return nil, err
 	}
 	id := ID()
-	spool, err := journal.Open(filepath.Join(m.dir, id+".jsonl"), m.limit)
+	status := Status{ID: id, Spec: spec, Mode: "pipe", StartedAt: time.Now().UnixMilli()}
+	if len(spec.Argv) > 0 {
+		status.Mode = "managed"
+	}
+	spool, err := m.openSpool(filepath.Join(m.dir, id+".jsonl"), status)
 	if err != nil {
 		return nil, err
 	}
-	c := &Command{spool: spool, finished: make(chan struct{}), status: Status{ID: id, Spec: spec, Mode: "pipe", StartedAt: time.Now().UnixMilli()}, hostRoot: m.hostRoot, hostBackend: m.backend, wake: make(chan struct{})}
-	if len(spec.Argv) > 0 {
-		c.status.Mode = "managed"
-	} else {
+	c := &Command{spool: spool, finished: make(chan struct{}), status: status, hostRoot: m.hostRoot, hostBackend: m.backend, wake: make(chan struct{})}
+	if status.Mode == "pipe" {
 		c.lastPublished = time.Now()
 	}
 	if host != nil {
@@ -575,9 +602,11 @@ func (c *Command) complete(exit *int, signal string, cause error, report *Report
 	c.completeThen(exit, signal, cause, report, nil)
 }
 
-// completeThen runs recorded, if any, once the completion is in the journal
-// and before waiters see the command done.
-func (c *Command) completeThen(exit *int, signal string, cause error, report *Report, recorded func()) {
+// completeThen runs recorded, if any, once the completion was appended to
+// the journal (written says whether it is there), before waiters see the
+// command done. The completion uses the journal's reserve: output that filled
+// the journal does not keep it from being recorded.
+func (c *Command) completeThen(exit *int, signal string, cause error, report *Report, recorded func(written bool)) {
 	c.once.Do(func() {
 		c.mu.Lock()
 		c.status.Done = true
@@ -587,13 +616,17 @@ func (c *Command) completeThen(exit *int, signal string, cause error, report *Re
 		if cause != nil {
 			c.status.Error = cause.Error()
 		}
-		if _, err := c.spool.Append(Output{Type: "completed", Offset: c.status.Offset, Status: ptr(c.status)}); err != nil && c.status.Error == "" {
+		if len(c.status.Error) > maxErrorText {
+			c.status.Error = strings.ToValidUTF8(c.status.Error[:maxErrorText], "") + "…"
+		}
+		_, err := c.spool.AppendReserved(Output{Type: "completed", Offset: c.status.Offset, Status: ptr(c.status)})
+		if err != nil && c.status.Error == "" {
 			c.status.Error = "capture completion failed: " + err.Error()
 		}
 		c.mu.Unlock()
 		_ = c.spool.Close()
 		if recorded != nil {
-			recorded()
+			recorded(err == nil)
 		}
 		close(c.finished)
 	})
@@ -943,16 +976,22 @@ func (c *Command) follow(host *sessionhost.Client) {
 				// exits on its own once released, a moment later; its record goes
 				// first, so that once the command is done no inventory, stop or
 				// orphan sweep finds the host still listed.
-				retired := false
-				retire := func() {
+				settled := false
+				retire := func(written bool) {
+					settled = true
+					if !written {
+						// Not recorded: the host keeps the exit, and the next
+						// Runner, adopting the command, collects it again.
+						_ = host.Detach()
+						return
+					}
 					_ = host.Release()
 					_ = host.Detach()
 					_ = c.hostBackend.Forget(c.hostRoot, host.ID())
-					retired = true
 				}
 				c.completeThen(exitCode(processguard.Outcome(exit.Outcome)), exit.Outcome.Signal, cause, nil, retire)
-				if !retired {
-					retire() // Completed earlier on another path.
+				if !settled {
+					retire(true) // Completed earlier on another path.
 				}
 				return
 			}

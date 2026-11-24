@@ -5,7 +5,7 @@
 // density and motion live and keeps them across a reload; a user theme file
 // in the Runner's themes folder is listed, applied, hot reloaded when edited,
 // and its mistakes are shown in Settings. Fixture only: no provider.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

@@ -1,20 +1,25 @@
 # Lazybox V2 release: an installable macOS app (RELEASING.md).
 #
 # On a `v2-v<x.y.z>` tag:
-#   1. gates    — the V2 CI jobs (v2.yml): the release gate catalog, as on every PR.
+#   1. gates    — the CI jobs (ci.yml, full profile): the release gate catalog.
 #   2. build    — `make release VERSION=<x.y.z>` on macOS: Runner, CLI,
 #                 Claude worker and pinned Node inside Lazybox.app; the DMG;
 #                 the updater archive and its signature; latest.json; the cask;
-#                 release notes from CHANGELOG.md; the Linux Runner and CLI
-#                 tarballs (x64, arm64) with their .sha256; SHA256SUMS. Then a
-#                 smoke test of the built Runner and CLI.
-#   3. publish  — a GitHub release for the tag (never marked Latest, so V1's
-#                 cargo-dist releases stay the repository's latest), latest.json
-#                 on the rolling `v2-updates` release every installed app polls,
-#                 and Casks/lazybox-v2.rb in the AntoineToussaint/homebrew-lazybox
-#                 tap (V1's formula and cask are not touched).
+#                 the Linux formula; release notes from CHANGELOG.md; the Linux
+#                 Runner and CLI tarballs (x64, arm64) with their .sha256;
+#                 SHA256SUMS. Then a smoke test of the built Runner and CLI.
+#   2b. brew-install — the rendered cask and formula installed and removed on
+#                 clean macOS, Linux x64 and Linux ARM64 runners.
+#   3. publish  — a GitHub release for the tag with every artifact (never
+#                 marked Latest). A stable version (no `-suffix`) also updates
+#                 latest.json on the rolling `v2-updates` release every
+#                 installed app polls, and pushes Casks/lazybox-v2.rb and the
+#                 lazybox-runner formula to the AntoineToussaint/homebrew-lazybox
+#                 tap (beside V1's `lazybox` formula, which it leaves alone).
+#                 A prerelease (`v2-v0.1.0-pre.1`) is the GitHub release only.
 #
-# Signing follows the secrets that exist (V1's names, docs/desktop-release-signing.md):
+# Signing follows the secrets that exist (the names V1 used, so one set signs
+# both; lazybox-v1's docs/desktop-release-signing.md is the runbook):
 #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY  → Developer ID signing
 #   + APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID (or APPLE_API_KEY, APPLE_API_ISSUER,
 #     APPLE_API_KEY_P8 base64)                                            → notarization + stapling
@@ -146,16 +151,23 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # Pinned to a commit of the `stable` branch, which defaults its toolchain
+      # from the branch name; say it here so a bump to another commit (a
+      # Dependabot update, a tag) still installs stable.
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: apps/desktop/src-tauri -> ../../../.cache/release/target
 
       # V1's import step (release-desktop.yml): a temporary keychain holding
       # only the Developer ID certificate, removed with the runner.
+      # Third-party actions in this job, which holds the signing secrets, are
+      # pinned to a commit (the version in the comment), never a movable tag.
       - name: Import the Developer ID certificate
         if: ${{ env.HAS_CERT == 'true' }}
-        uses: apple-actions/import-codesign-certs@v7
+        uses: apple-actions/import-codesign-certs@288b8ec97b82c66b6f2a6baaf7acc8dfbcbe331c # v7.2.0
         with:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

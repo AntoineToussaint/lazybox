@@ -212,13 +212,15 @@ verified and released separately. Do not mark L1/L2 or the phone journey complet
 
 ## What not to rebuild
 
-Source entry points for the findings:
+Source entry points for the findings. The staged source was a local candidate under
+`.cache/implementation/coordination-2026-11-03/source/`, never committed; its
+paths below are relative to it and are not links.
 
 | Area | Main source | Staged source where applicable |
 | --- | --- | --- |
-| Authority | [RPC interceptor](../../services/runner/code/internal/transport/auth.go), [Runner bootstrap](../../services/runner/code/work.go) | [Workflow transport](../../.cache/implementation/coordination-2026-11-03/source/services/runner/code/internal/transport/workflow.go) |
-| Assignment and result | [Runner lifecycle](../../services/runner/code/internal/runner/bench.go) | [Transitions](../../.cache/implementation/coordination-2026-11-03/source/services/runner/code/internal/runner/workflows/store.go), [launch](../../.cache/implementation/coordination-2026-11-03/source/services/runner/code/internal/runner/workflow.go), [review](../../.cache/implementation/coordination-2026-11-03/source/services/runner/code/internal/runner/workflow_review.go) |
-| Process cleanup | Main lacks lifetime guard | [Guard](../../.cache/implementation/coordination-2026-11-03/source/services/runner/code/internal/processguard/guard.go) |
+| Authority | [RPC interceptor](../../services/runner/code/internal/transport/auth.go), [Runner bootstrap](../../services/runner/code/work.go) | Workflow transport (`services/runner/code/internal/transport/workflow.go`) |
+| Assignment and result | [Runner lifecycle](../../services/runner/code/internal/runner/bench.go) | Transitions (`services/runner/code/internal/runner/workflows/store.go`), launch (`services/runner/code/internal/runner/workflow.go`), review (`services/runner/code/internal/runner/workflow_review.go`) |
+| Process cleanup | Main lacks lifetime guard | Guard (`services/runner/code/internal/processguard/guard.go`) |
 | Source review | [Changes surface](../../packages/surfaces/src/ChangesPanel.tsx), [RPC](../../services/runner/code/internal/transport/changes.go) | Same uncommitted diff boundary |
 | Continuity and device composition | [Reader](../../packages/surfaces/src/transcript-cache.ts), [client core](../../packages/client-core/src/index.ts), [host](../../packages/platform/src/index.ts), [workspace CSS](../../packages/surfaces/src/workspace.css) | Workflow panel is an additional desktop surface |
 | Release coverage | [Staging](../../scripts/environments.mjs), [gates](../../Makefile) | Candidate manifest is not release admission |

@@ -1,0 +1,21 @@
+name: Feature request
+description: Something Lazybox should do, or do differently.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do and what gets in the way. Lead with the problem, not the feature you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How you imagine it working, if you have an idea.
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today
+      description: Your workaround, if any, and how often you hit this.

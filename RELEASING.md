@@ -6,11 +6,11 @@ as a disk image and a Homebrew cask, and updating itself from a signed feed.
 It also carries the Runner and the CLI for Linux (x64 and arm64), as
 checksummed tarballs, for a Runner on another machine
 ([REMOTE_RUNNERS.md](REMOTE_RUNNERS.md)); there is no Linux desktop app.
-What people do with it is in [INSTALL.md](INSTALL.md).
+What people do with it is in [docs/install.md](docs/install.md).
 
 | | |
 | --- | --- |
-| Tag | `v2-v<x.y.z>` (a namespace of its own: V1's `v0.1.21`-style tags and its cargo-dist workflows never see it) |
+| Tag | `v2-v<x.y.z>` (a prefix from the monorepo V2 was developed in, where it kept V2's tags apart from V1's `v0.1.21`-style tags; [below](#what-v2-reuses-from-v1)) |
 | Workflow | [`.github/workflows/release.yml`](.github/workflows/release.yml) |
 | Local equivalent | `make release VERSION=x.y.z` → `dist/<x.y.z>/` beside the Makefile |
 | Notes | [`CHANGELOG.md`](CHANGELOG.md), also the app's What's new |
@@ -187,7 +187,7 @@ in the release title (*Lazybox 0.2.0 (unsigned)*).
 
 | Secrets present | Result |
 | --- | --- |
-| none | Ad-hoc signed. macOS asks people to confirm before the first launch ([INSTALL.md](INSTALL.md#unsigned-builds)). |
+| none | Ad-hoc signed. macOS asks people to confirm before the first launch ([docs/install.md](docs/install.md#unsigned-builds)). |
 | `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` | Developer ID with the hardened runtime: the CLI and Runner (`codesign --options runtime --timestamp`), the app by Tauri, the disk image. |
 | + `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | Also notarized and stapled: the app (by Tauri), then the disk image (`notarytool`, `stapler`). The build fails unless `stapler validate` and `spctl --assess` accept them. |
 | or + `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_KEY_P8` | The same, with an App Store Connect API key instead of an Apple ID (`APPLE_API_KEY_P8` is the `.p8` file, base64). |
@@ -315,10 +315,9 @@ locally needs (`release.json` records `"updaterKey": "test"`).
 3. Optional, for a signed release: the `APPLE_*` secrets (above). Without
    them the first release ships unsigned and says so.
 4. Check `HOMEBREW_TAP_TOKEN` can push to `AntoineToussaint/homebrew-lazybox`.
-5. Make sure the repository the release lives in is **public**, or that the
-   people installing can reach it: the disk image, the cask URL and the
-   updater's `latest.json` are plain HTTPS downloads from GitHub releases,
-   which a private repository does not serve to anyone signed out.
+5. Keep the repository **public** (it is): the disk image, the cask URL and
+   the updater's `latest.json` are plain HTTPS downloads from GitHub
+   releases, which a private repository does not serve to anyone signed out.
 6. Date the release's section of the changelog (`0.1.0-pre.1` for the first
    prerelease: one curated section, its items under `### Group` headings),
    fold into it any dated sections merged above it since (the build refuses
@@ -347,8 +346,9 @@ locally needs (`release.json` records `"updaterKey": "test"`).
      box. Until Pages is enabled the workflow's deploy job fails and nothing
      is published; to never publish, leave Pages off or disable the workflow.
 10. On a clean Mac: install from the disk image, check the first run, `lazybox
-    doctor`, then `brew install --cask AntoineToussaint/lazybox/lazybox-v2`
-    on another. Install the next release over it to see the update flow.
+    doctor`, then (a stable release only: a prerelease does not reach the
+    tap) `brew install --cask AntoineToussaint/lazybox/lazybox-v2` on
+    another. Install the next stable release over it to see the update flow.
 
 ## Verification
 
@@ -379,10 +379,10 @@ locally needs (`release.json` records `"updaterKey": "test"`).
   artifact, publish from Linux; a manual run against an existing tag is a dry
   run.
 - **The tap and its publisher**: the cask goes to the same
-  `AntoineToussaint/homebrew-lazybox` tap as V1's `lazybox` formula and
-  `lazybox-desktop` cask, through V1's tested `scripts/publish-desktop-cask.sh`,
-  copied with its regression test to `scripts/release/publish-cask.sh` so the
-  standalone V2 repository carries it (its commit names the cask it publishes;
+  `AntoineToussaint/homebrew-lazybox` tap as V1's `lazybox` formula (today
+  the only package there), through V1's tested `scripts/publish-desktop-cask.sh`,
+  copied with its regression test to `scripts/release/publish-cask.sh` so
+  this repository carries it (its commit names the cask it publishes;
   `make test-environments` runs the test). The template follows
   V1's `lazybox-desktop.rb.tmpl` (`__VERSION__`/`__SHA256__`, `verified:`).
 - **Release notes conventions**: a curated changelog, newest first, versions
@@ -391,11 +391,12 @@ locally needs (`release.json` records `"updaterKey": "test"`).
 - **Artifact naming and checksums**: `<Product>_<version>_<arch>.dmg` and a
   SHA-256 per artifact, as V1's DMG job writes.
 
-In this repository, V1's release is unchanged except that `release.yml` and
-`release-desktop.yml` now ignore `v2-v*` tags: their pattern
-`**[0-9]+.[0-9]+.[0-9]+*` matches `v2-v0.1.0`, and cargo-dist would otherwise
-have tried to release V1 under a V2 tag. The standalone repository
-(`make export-repo`) gets this workflow as `.github/workflows/release.yml`.
+V1's own release workflows (cargo-dist's `release.yml` and
+`release-desktop.yml`) stay in
+[lazybox-v1](https://github.com/AntoineToussaint/lazybox-v1); this repository
+has only the workflow above. The `v2-v` tag prefix dates from when both lived
+in one repository, where V1's `**[0-9]+.[0-9]+.[0-9]+*` tag pattern had to be
+kept away from V2's tags.
 
 ## Not done
 
@@ -411,9 +412,10 @@ have tried to release V1 under a V2 tag. The standalone repository
   then reports one version for app, CLI and Runner, and an agent that was
   mid-turn finishes its turn in the same process. Also check a feed whose
   archive is signed with another key is refused with the signature message.
-- The repository is private: signed out, GitHub answers the feed with 404, so
-  installed apps say *No update information is published* until it is public
-  (First release checklist, step 5).
+- No stable release has been published, so the `v2-updates` feed does not
+  exist yet: GitHub answers it with 404 and installed apps say *No update
+  information is published* until the first stable tag creates it.
+  Prereleases never write it.
 
 ## Persistent Linux Runner image
 

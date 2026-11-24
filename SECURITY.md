@@ -9,12 +9,15 @@ maintained release branches.
 
 Please do not open a public issue for a suspected vulnerability involving
 credentials, command execution, the Runner's RPC or device gateway, phone
-pairing, workspace or worktree isolation, or terminal output. Use GitHub's
-private security-advisory form:
+pairing, workspace or worktree isolation, or terminal output. Report it
+privately, either way:
 
-<https://github.com/AntoineToussaint/lazybox/security/advisories/new>
-
-or email [toussaint.antoine@gmail.com](mailto:toussaint.antoine@gmail.com).
+- GitHub's private security-advisory form,
+  <https://github.com/AntoineToussaint/lazybox/security/advisories/new>, when
+  the repository has private reporting turned on;
+- or, always, email
+  [toussaint.antoine@gmail.com](mailto:toussaint.antoine@gmail.com). Use it
+  if the form is unavailable or you prefer email.
 
 Include the affected commit, platform, reproduction steps, expected impact,
 and any suggested mitigation. Do not include real provider tokens, account

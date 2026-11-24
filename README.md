@@ -5,10 +5,10 @@ place you check their work before it lands.** Run Claude Code and Codex side
 by side, see what each one actually did, and keep them running when you close
 the window or restart Lazybox.
 
-> **Status: early preview, for a few testers.** Lazybox installs from this
-> repository with one command. Expect rough edges, and please
-> [tell us about them](#feedback). What to try first: the
-> [testers' guide](docs/testers.md).
+> **Status: early preview.** No release is published yet: Lazybox installs
+> from this repository with one command ([below](#install-from-source)).
+> Expect rough edges, and please [tell us about them](#feedback). What to try
+> first, and what not to rely on yet: the [testers' guide](docs/testers.md).
 
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/images/hero-light.webp">
@@ -88,7 +88,11 @@ of your own · [missions](docs/guides/missions.md) and
   ([guide](docs/guides/other-agents.md)); Claude Code and Codex are the agents
   Lazybox is tested with.
 - **Builds from source update with `make update`**, not in the app, and are signed
-  for your Mac only.
+  for your Mac only. A disk image, Homebrew and in-app updates come with
+  published releases ([Install](docs/install.md#install-a-published-release)).
+- **The `lazybox` Homebrew formula is not this app.** It installs
+  [V1](https://github.com/AntoineToussaint/lazybox-v1), the older terminal
+  inbox.
 - More in the testers' guide: [what not to rely on yet](docs/testers.md#what-not-to-rely-on-yet).
 
 ## Documentation

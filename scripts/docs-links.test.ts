@@ -1,20 +1,39 @@
-// Every relative link and anchor in README.md and docs resolves: the
-// file exists, and a #fragment names a heading of that file as GitHub
-// anchors it. External links (http, mailto) are not fetched.
+// Every relative link and anchor in the repository's Markdown resolves: the
+// target is a file or folder of the repository (tracked, or new and not
+// ignored, so a link into .cache/ or a local build fails), and a #fragment
+// names a heading of that file as GitHub anchors it. External links (http,
+// mailto) are not fetched.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { includeSource } from './environments.mjs';
 
-const v2 = fileURLToPath(new URL('..', import.meta.url));
+const root = fileURLToPath(new URL('..', import.meta.url));
 
-function markdownFiles(folder: string): string[] {
-  return readdirSync(folder).flatMap(name => {
-    const path = join(folder, name);
-    return statSync(path).isDirectory() ? markdownFiles(path) : name.endsWith('.md') ? [path] : [];
+/** Every file below `folder` a source snapshot copies (environments.mjs `includeSource`). */
+function sourceFiles(folder = ''): string[] {
+  return readdirSync(join(root, folder), { withFileTypes: true }).flatMap(entry => {
+    const path = folder ? `${folder}/${entry.name}` : entry.name;
+    if (!includeSource(path)) return [];
+    return entry.isDirectory() ? sourceFiles(path) : entry.isFile() ? [path] : [];
   });
 }
+
+/** The repository's files: tracked, plus new ones git does not ignore. A staged
+ *  source snapshot has no .git; there, the files it copied. */
+const files = existsSync(join(root, '.git'))
+  ? execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd: root, encoding: 'utf8' })
+    .split('\0').filter(path => path && existsSync(join(root, path)))
+  : sourceFiles();
+const known = new Set(files);
+const folders = new Set(files.flatMap(path => {
+  const parts = path.split('/');
+  return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join('/'));
+}));
+const inRepository = (path: string) => path === '.' || known.has(path) || folders.has(path.replace(/\/$/, ''));
 
 /** The text with fenced code blocks and inline code blanked, so links inside them are not links. */
 function prose(text: string): string {
@@ -50,32 +69,32 @@ function links(markdown: string): { target: string; line: number }[] {
   return out;
 }
 
-const pages = [join(v2, 'README.md'), ...markdownFiles(join(v2, 'docs'))];
+const pages = files.filter(path => path.endsWith('.md'));
 
 test('the docs exist', () => {
-  for (const page of ['README.md', 'docs/README.md', 'docs/getting-started.md', 'docs/reference/keyboard-shortcuts.md', 'docs/internal/README.md']) assert.ok(existsSync(join(v2, page)), page);
+  for (const page of ['README.md', 'docs/README.md', 'docs/getting-started.md', 'docs/reference/keyboard-shortcuts.md', 'docs/internal/README.md']) assert.ok(known.has(page), page);
 });
 
-test('every relative link and anchor in README.md and docs resolves', () => {
+test('every relative link and anchor in the repository\'s Markdown resolves', () => {
   const problems: string[] = [];
   const anchorCache = new Map<string, Set<string>>();
-  const anchorsOf = (path: string) => { if (!anchorCache.has(path)) anchorCache.set(path, anchors(readFileSync(path, 'utf8'))); return anchorCache.get(path)!; };
+  const anchorsOf = (path: string) => { if (!anchorCache.has(path)) anchorCache.set(path, anchors(readFileSync(join(root, path), 'utf8'))); return anchorCache.get(path)!; };
   for (const page of pages) {
-    const markdown = readFileSync(page, 'utf8');
+    const markdown = readFileSync(join(root, page), 'utf8');
     for (const { target, line } of links(markdown)) {
-      if (/^[a-z][a-z0-9+.-]*:/i.test(target)) continue;
-      const where = `${relative(v2, page)}:${line} → ${target}`;
+      // A scheme (https:, mailto:) is external; a leading / is a route of the docs site.
+      if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith('/')) continue;
+      // `#lazybox-…` is an in-app action the chat renders as a button
+      // (RichContent.tsx), written in the assistant's prompts; not an anchor.
+      if (target.startsWith('#lazybox-')) continue;
+      const where = `${page}:${line} → ${target}`;
       const [pathPart, fragment] = target.split('#', 2) as [string, string | undefined];
-      const file = pathPart ? resolve(dirname(page), decodeURIComponent(pathPart)) : page;
-      // A link that leaves v2/ points into the monorepo root. A frozen release source (and the new
-      // repository) has no parent: scripts/export-repo.mjs rewrites such links to its root files or to
-      // the pinned V1 repository, so there they count as resolved when the monorepo is absent.
-      const outside = relative(v2, file).startsWith('..');
-      if (outside && !existsSync(file) && !existsSync(join(v2, '..', 'v2'))) continue;
-      if (!existsSync(file)) { problems.push(`${where}: no such file`); continue; }
+      const file = pathPart ? posix.normalize(posix.join(posix.dirname(page), decodeURIComponent(pathPart))) : page;
+      if (file.startsWith('../')) { problems.push(`${where}: leaves the repository`); continue; }
+      if (!inRepository(file)) { problems.push(`${where}: no such file in the repository`); continue; }
       if (fragment === undefined || fragment === '') continue;
       if (!file.endsWith('.md')) { problems.push(`${where}: an anchor into a file that is not Markdown`); continue; }
-      if (!anchorsOf(file).has(decodeURIComponent(fragment).toLowerCase())) problems.push(`${where}: no heading "#${fragment}" in ${relative(v2, file)}`);
+      if (!anchorsOf(file).has(decodeURIComponent(fragment).toLowerCase())) problems.push(`${where}: no heading "#${fragment}" in ${file}`);
     }
   }
   assert.deepEqual(problems, []);

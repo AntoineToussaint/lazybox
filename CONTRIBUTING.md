@@ -14,9 +14,10 @@ Rust per `rust-toolchain.toml`), plus:
 - the [Codefly](https://github.com/codefly-dev/cli) CLI, which builds and
   supervises the Runner in Dev and Working and generates its service code;
 - `tmux`, for the session-host tests (`brew install tmux`);
-- access to [lazybox-v1](https://github.com/AntoineToussaint/lazybox-v1),
-  which Dev and Working build the snippet helper (`tools/lazybox-snippets`)
-  from.
+- network access on the first `make dev`: Dev and Working build the snippet
+  helper (`tools/lazybox-snippets`), and Cargo fetches the library it links
+  from the public [lazybox-v1](https://github.com/AntoineToussaint/lazybox-v1)
+  at a pinned revision.
 
 ```sh
 make deps            # locked npm dependencies (npm ci); again after package-lock.json changes
@@ -69,7 +70,8 @@ and a `test:` script that is not fails the catalog. Run a few by name with
   messages and pull request titles: `feat: …`, `fix: …`, `docs: …`,
   `chore: …`, `test: …`. Say what a person can now do, not which files moved.
 - The pull request says what you verified and how, and what you could not
-  (no provider login, no phone, a gate you skipped).
+  (no provider login, no phone, a gate you skipped); its template asks for
+  each, and whether each change is a fix or a hack ([AGENTS.md](AGENTS.md)).
 - Generated code is never edited by hand: change
   `services/runner/proto/api.proto` and run `make generate`. Wire changes stay
   compatible with `contracts/runner-v1.binpb` unless [DECISIONS.md](DECISIONS.md)

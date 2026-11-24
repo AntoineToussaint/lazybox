@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security problem privately
+    url: https://github.com/AntoineToussaint/lazybox/blob/main/SECURITY.md#reporting-a-vulnerability
+    about: Never in a public issue. Email toussaint.antoine@gmail.com, or use GitHub's private advisory form when it is on for this repository.
+  - name: Support and what to include
+    url: https://github.com/AntoineToussaint/lazybox/blob/main/SUPPORT.md
+    about: Where to ask, and what makes a report useful.

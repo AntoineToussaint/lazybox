@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 // Checks that what the front-door documents tell a person to run, and link
-// to, exists in the repository they cloned (the standalone repository that
-// scripts/export-repo.mjs writes):
+// to, exists in the repository they cloned:
 //
 //   node scripts/export-check.mjs [repository root]     default: this repository
 //
 // In README.md, CONTRIBUTING.md, SUPPORT.md, SECURITY.md and the install and
 // testers' pages:
 //   - `make <target>` names a target of the Makefile, and nothing says
-//     `make -C v2` (the monorepo's spelling);
+//     `make -C v2` (how the private monorepo this repository came from ran it);
 //   - `npm run <script>` names a script of package.json;
 //   - `node <file>` names a file;
 //   - a repository path in a code span (`scripts/release-gates.json`) exists;
 //   - a relative link or image exists, and its #fragment names a heading;
 //   - a link to a file of this repository on GitHub names a file that exists.
 //
-// export-repo.mjs runs it on every export; the standalone repository's CI
-// runs it too. It reads files only: nothing is built or run.
+// CI runs it on every pull request (.github/workflows/ci.yml); every
+// relative link of every Markdown file is also checked by
+// scripts/docs-links.test.ts. It reads files only: nothing is built or run.
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';

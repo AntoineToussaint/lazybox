@@ -34,9 +34,10 @@ uninstalling — is in [Install](install.md#install-from-source).
 
 Once releases are published on the
 [releases page](https://github.com/AntoineToussaint/lazybox/releases), you can
-install the disk image instead, and updates arrive in the app
-([Install](install.md#install)). To work on Lazybox itself, see
-[Build from source](#build-from-source) below.
+install the disk image instead; from the first stable release, Homebrew too,
+and updates arrive in the app
+([Install a published release](install.md#install-a-published-release)). To
+work on Lazybox itself, see [Build from source](#build-from-source) below.
 
 ## Build from source
 

@@ -8,15 +8,51 @@ import type { StreamEnd } from './stream.js';
  * load or were skipped: a system `informational` message at level `warning`,
  * tagged `settings_not_in_effect`, whose content lists the files and entries
  * (or, where the transport keeps messages, says so in general). The settings
- * the worker passes (`settings`, shown as "SDK inline settings") are among
- * those it may reject.
+ * the worker passes (`settings`) are among those it may reject; Claude names
+ * them "SDK inline settings".
  *
- * Lazybox's "ask" permission and the help assistant rest on the worker's own
- * `ask` rules (options.ts): without them a saved allow rule or Claude's
- * read-only auto-allow would run a command nobody approved. So such a session
- * stops instead of continuing silently; any other session reports the warning
- * as a failure the person sees, and goes on.
+ * Nothing should stop an agent from working, but approvals must never turn
+ * off silently. Lazybox's "ask" permission and the help assistant rest on the
+ * worker's own `ask` rules (options.ts): without them a saved allow rule or
+ * Claude's read-only auto-allow would run a command nobody approved. So such a
+ * session stops only when Claude rejected Lazybox's own permission settings
+ * (or did not say which settings it rejected); when it rejected only the
+ * person's settings files, or Lazybox's other settings, the warning shows in
+ * the conversation, naming them, and the agent goes on.
  */
+/** Claude's name for the settings the SDK passes inline: the worker's own. */
+export const inlineSettingsName = 'SDK inline settings';
+// The headings of the lists in Claude Code 2.1.330's warning.
+const NOT_LOADED = 'These settings did not load';
+const SKIPPED = 'These settings entries were skipped';
+const NOT_USED = 'These settings files are not used';
+
+/**
+ * Whether the warning says Lazybox's own permission settings are not in
+ * effect: its inline settings did not load at all, or an entry under
+ * `permissions` (or one with no path) was skipped. A warning that lists
+ * nothing (Claude's general wording) cannot rule that out, so it counts.
+ */
+export function rejectsLazyboxPermissions(warning: string): boolean {
+  let section: 'not_loaded' | 'skipped' | 'other' | undefined;
+  let listed = false;
+  for (const line of warning.split('\n')) {
+    if (line.startsWith(NOT_LOADED)) { section = 'not_loaded'; listed = true; continue; }
+    if (line.startsWith(SKIPPED)) { section = 'skipped'; listed = true; continue; }
+    if (line.startsWith(NOT_USED)) { section = 'other'; listed = true; continue; }
+    if (!line.startsWith('  ')) { section = undefined; continue; }
+    if (section !== 'not_loaded' && section !== 'skipped') continue;
+    // "  SDK inline settings (permissions.ask[0]): …", or "  … and 3 more in SDK inline settings".
+    const entry = line.trim();
+    const more = entry.match(/^… and \d+ more in (.+)$/);
+    const name = more ? more[1] : entry.replace(/( \(.*\))?: .*$/, '');
+    if (name !== inlineSettingsName) continue;
+    if (section === 'not_loaded' || more) return true;
+    const path = entry.match(/^[^(]*\((.*?)\): /)?.[1] ?? '';
+    if (path === '' || path === 'permissions' || path.startsWith('permissions.') || path.startsWith('permissions[')) return true;
+  }
+  return !listed;
+}
 export const settingsNotInEffectTag = 'settings_not_in_effect';
 
 /** The warning's words, when the message is Claude's report of settings not in effect. */
@@ -36,12 +72,15 @@ export function asksBySettings(options: Pick<Options, 'settings'>): boolean {
 /**
  * What the worker does with the warning: end the session (`end`, reported as
  * `sdk_error`, as when its SDK stream fails: nothing takes the next message,
- * and Resume starts Claude again, which checks its settings again), or report
- * it and go on (`report`, a provider error).
+ * and Resume starts Claude again, which checks its settings again) when its
+ * approvals rest on Lazybox's permission settings and those are not in
+ * effect; otherwise report it, naming what did not load, and go on
+ * (`report`, a provider error).
  */
 export function settingsFailure(warning: string, asks: boolean): { end: StreamEnd } | { report: { type: 'failure'; status: 'provider_error'; text: string } } {
-  if (asks) return { end: { type: 'failure', status: 'sdk_error', text: `Claude did not apply some settings, and this conversation's approvals rely on Lazybox's own, so it stopped rather than run a command without asking you. Claude said: ${warning}` } };
-  return { report: { type: 'failure', status: 'provider_error', text: `Claude did not apply some settings: ${warning}` } };
+  if (asks && rejectsLazyboxPermissions(warning)) return { end: { type: 'failure', status: 'sdk_error', text: `Claude did not apply Lazybox's approval settings, which this conversation relies on, so it stopped rather than run a command without asking you. Claude said: ${warning}` } };
+  const still = asks ? ' Lazybox\'s approval settings are in effect, and the agent goes on.' : '';
+  return { report: { type: 'failure', status: 'provider_error', text: `Claude did not apply some settings.${still} Claude said: ${warning}` } };
 }
 
 /** Watches the SDK stream for the warning and applies settingsFailure. */

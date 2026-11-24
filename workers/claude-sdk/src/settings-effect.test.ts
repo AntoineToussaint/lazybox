@@ -37,6 +37,46 @@ test('a session whose approvals rest on the worker’s settings stops when Claud
   assert.equal(stopped, 1);
 });
 
+// Claude Code 2.1.330's lists: a heading, then "  <source>[ (<path>)]: <message>" lines, then a closing line.
+const notLoaded = (...lines: string[]) => ['These settings did not load, so nothing in them is in effect, including hooks, permission rules and sandbox settings, though environment variables they already set can stay:', ...lines, 'Fix each problem listed, then start Claude Code again. For settings sent with applyFlagSettings, shown as SDK inline settings, send them again instead.'].join('\n');
+const skipped = (...lines: string[]) => ['These settings entries were skipped; the rest of each source is in effect:', ...lines, 'Fix each problem listed, then start Claude Code again.'].join('\n');
+const userFile = '  /work/repo/.claude/settings.json: Invalid JSON';
+
+test('only Lazybox’s own permission settings, or an unknown source, stop an ask session', () => {
+  for (const [what, content] of [
+    ['the inline settings did not load', notLoaded('  SDK inline settings: Invalid JSON')],
+    ['an inline ask rule was skipped', skipped('  SDK inline settings (permissions.ask[2]): Unknown tool')],
+    ['the inline permissions were skipped', skipped(userFile.replace(': Invalid JSON', ' (hooks): x'), '  SDK inline settings (permissions): Expected object')],
+    ['more inline entries than listed', skipped('  … and 4 more in SDK inline settings')],
+    ['Claude did not say which settings', 'Some settings did not load or were skipped, so they are not in effect, though environment variables they already set can stay. These may include hooks, permission rules and sandbox settings. Check the settings this app passes and the settings files Claude Code loads, then start Claude Code again.'],
+  ] as const) {
+    let stopped = 0;
+    const watch = new SettingsWatch(true, () => { stopped++; }, () => assert.fail(`${what}: reported instead of stopped`));
+    assert.equal(watch.pass(warning(content)), false, what);
+    assert.equal(stopped, 1, what);
+    assert.equal(watch.end?.status, 'sdk_error', what);
+  }
+});
+
+test('an ask session goes on, with a warning naming the file, when only other settings were rejected', () => {
+  for (const [what, content, named] of [
+    ['the person’s settings file did not load', notLoaded(userFile), '/work/repo/.claude/settings.json'],
+    ['an inline setting that is not a permission was skipped', skipped('  SDK inline settings (disableClaudeAiConnectors): Expected boolean'), 'disableClaudeAiConnectors'],
+    ['a settings file in a connector-downloads folder', 'These settings files are not used: they are in a connector-downloads folder, where Claude Code saves files from claude.ai connectors:\n  /Users/me/Downloads/claude/settings.json', '/Users/me/Downloads/claude/settings.json'],
+  ] as const) {
+    let stopped = 0;
+    const reported: { status: string; text: string }[] = [];
+    const watch = new SettingsWatch(true, () => { stopped++; }, f => reported.push(f));
+    assert.equal(watch.pass(warning(content)), true, what);
+    assert.equal(stopped, 0, what);
+    assert.equal(watch.end, undefined, what);
+    assert.equal(reported.length, 1, what);
+    assert.equal(reported[0].status, 'provider_error', what);
+    assert.ok(reported[0].text.includes(named), `${what}: names ${named}`);
+    assert.match(reported[0].text, /approval settings are in effect/, what);
+  }
+});
+
 test('any other session reports the warning as a failure and goes on', () => {
   let stopped = 0;
   const reported: { status: string; text: string }[] = [];

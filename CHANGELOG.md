@@ -233,7 +233,7 @@ leave out.
 
 - **Text after -- stays text** In every lazybox command, each word after `--` is an argument even when it looks like an option: `lazybox send review -- try -runner=x` sends that text and never switches the Runner, and `lazybox review verify … -- go test -run X` keeps the command's own options.
 - **Ask asks for every command** With Ask, Claude asks before each Monitor and PowerShell command too, not only Bash, so a saved rule or Claude's own read-only judgement cannot run one unasked, and neither offers "every request" as an always-allow.
-- **Ask never runs without its rules** If Claude did not apply the settings Ask relies on, the conversation stops and says what did not load instead of running commands unasked; in other modes Claude's warning shows in the conversation.
+- **Ask never runs without its rules** If Claude did not apply Lazybox's own approval settings, a conversation in Ask stops and says what did not load instead of running commands unasked. When Claude rejected only your own settings files, or in other modes, its warning shows in the conversation, naming the file, and the agent goes on.
 - **Always allowed lists what still applies** An earlier "every Monitor request" that Claude no longer honours leaves the session menu instead of showing as allowed.
 - **No credential in the address bar** The browser build takes the Runner's credential out of the address bar and history as soon as it reads it.
 - **On this Mac only** The Runner answers only on loopback, to a credential in a file only you can read.

@@ -5,7 +5,7 @@ import { browserRequestSummary } from './browser-model';
 import { startRequestSummary } from './conversation-request-model';
 import { questionsOf } from './request-model';
 import { providerData } from '@lazybox/client-core';
-import { accountLabel, awaitingFirstMessage } from './agent-status';
+import { accountLabel, awaitingFirstMessage, runningChild } from './agent-status';
 import { backAt, isLimitState } from './subscription-model';
 
 /**
@@ -128,7 +128,7 @@ export function deriveAttention(session: Session, seenAt = 0): Attention {
     const restart = !fault && session.status !== 'failed';
     return { ...base, state: 'failed', unread: at > seenAt, reason: restart ? 'Interrupted' : isLimitState(session.fault) && !session.closed ? 'Limit reached' : 'Failed', line: restart ? 'The Runner stopped during this turn and could not re-attach' : faultSummary(session) };
   }
-  if (!session.closed && !awaitingFirstMessage(session) && (session.busy || session.queued > 0 || ['running', 'starting', 'switching_profile'].includes(session.status))) {
+  if (!session.closed && !awaitingFirstMessage(session) && (session.busy || session.queued > 0 || session.agents.some(runningChild) || ['running', 'starting', 'switching_profile'].includes(session.status))) {
     return { ...base, state: 'working', unread: false, reason: session.status === 'switching_profile' ? 'Switching subscription' : 'Working', line: message };
   }
   if (ended > seenAt && ended > 0) {

@@ -1,3 +1,4 @@
+import { runningChild } from './agent-status';
 import type { Collection, HostedProcess, ItemLink, LineChanges, Profile, RepositoryGitSummary, Session, TelemetryReport, WorkspaceAction, WorkspaceGitSummary } from '@lazybox/protocol';
 import { activityAt, conversationKey } from './attention';
 import { conversationDetails, conversationName } from './conversation-model';
@@ -158,7 +159,7 @@ const agentRank: Record<AgentState, number> = { 'needs-you': 0, failed: 1, worki
 export function agentState(session: Session): AgentState {
   if (!session.closed && (session.pending.length || session.status === 'waiting_approval' || session.status === 'waiting_input')) return 'needs-you';
   if (session.fault) return 'failed';
-  if (!session.closed && (session.busy || session.status === 'running' || session.status === 'starting')) return 'working';
+  if (!session.closed && (session.busy || session.agents.some(runningChild) || session.status === 'running' || session.status === 'starting')) return 'working';
   return 'done';
 }
 

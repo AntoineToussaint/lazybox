@@ -1,5 +1,5 @@
 import type { JournalEvent, Session } from '@lazybox/protocol';
-import { awaitingFirstMessage, statusLabel } from './agent-status';
+import { awaitingFirstMessage, runningChild, statusLabel } from './agent-status';
 import { limitStatus } from './subscription-model';
 
 /**
@@ -126,7 +126,7 @@ export function liveStatus(session: Session | undefined, now: number, events?: r
   if (awaitingFirstMessage(session)) return fixed('idle', 'Ready');
   const root = session.agents.find(agent => agent.id === 'root');
   // A background shell command (Claude's run_in_background) is not a sub-agent.
-  const working = session.agents.filter(agent => agent.id !== 'root' && ['running', 'starting'].includes(agent.status));
+  const working = session.agents.filter(runningChild);
   const commands = working.filter(agent => agent.kind === 'local_bash').length, children = working.length - commands;
   // The journal is fresher than the polled session: a turn it saw end is over.
   const ended = !!events && turnEndedInJournal(events);

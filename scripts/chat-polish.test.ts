@@ -170,3 +170,16 @@ test('snippet search ranks names above metadata, and only searches bodies on req
   assert.deepEqual(find('rify inspect'), []);
   assert.deepEqual(find('body: deepclarify'), ['clarify']);
 });
+
+test('a Claude child keeps the conversation spinner after the root turn ends', () => {
+  const root = { id: 'root', status: 'done', ended: 3000 };
+  const child = { id: 'reviewer', status: 'running' };
+  const active = session({ provider: 'claude', status: 'ready', agents: [root, child] });
+  assert.equal(sessionStatus(active), 'Running in the background');
+  assert.equal(deriveAttention(active).state, 'working', 'an unread review dot would replace the spinner');
+  assert.equal(liveStatus(active, 4000).tone, 'busy');
+  assert.equal(liveStatus(session({ provider: 'claude', agents: [child] }), 4000).tone, 'busy');
+  const finished = session({ status: 'ready', agents: [root, { ...child, status: 'done' }] });
+  assert.equal(deriveAttention(finished).state, 'review');
+  assert.equal(liveStatus(finished, 5000).tone, 'idle');
+});

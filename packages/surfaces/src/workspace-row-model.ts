@@ -1,3 +1,4 @@
+import { runningChild } from './agent-status';
 import type { Profile, RepositoryGitSummary, Session, WorkspaceGitSummary } from '@lazybox/protocol';
 import { conversationDetails, conversationName } from './conversation-model';
 import type { RowPull } from './pull-requests-model';
@@ -108,7 +109,7 @@ export function featuredConversation(sessions: readonly Session[]): Session | un
   const rank = (session: Session) => {
     if (session.closed) return 3;
     if (session.status === 'waiting_approval' || session.status === 'waiting_input' || session.fault) return 0;
-    if (session.busy || session.status === 'running' || session.status === 'starting') return 1;
+    if (session.busy || session.agents.some(runningChild) || session.status === 'running' || session.status === 'starting') return 1;
     return 2;
   };
   return [...sessions].sort((a, b) => rank(a) - rank(b) || (a.createdAtUnixMillis === b.createdAtUnixMillis ? 0 : a.createdAtUnixMillis > b.createdAtUnixMillis ? -1 : 1))[0];

@@ -404,7 +404,7 @@ func TestRemoteRunnerOverSSHEndToEnd(t *testing.T) {
 
 	// Revoked on the host: the link ends within a second and says why.
 	revoked := time.Now()
-	if out, err = w.onHost("link", "owners", "revoke", final.Remote.KeyID); err != nil {
+	if out, err = w.onHost("link", "owners", "revoke", "--", final.Remote.KeyID); err != nil {
 		t.Fatalf("revoke on the host: %v\n%s", err, out)
 	}
 	st = w.waitState("build-box", "refused", 3*time.Second)

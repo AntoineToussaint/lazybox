@@ -228,7 +228,7 @@ func (c *cli) linkOwners(args []string) error {
 		return nil
 	case "revoke", "rm":
 		if len(positional) != 1 {
-			return fail(exitUsage, "lazybox link owners revoke KEY-ID (lazybox link owners ls lists them)")
+			return fail(exitUsage, "lazybox link owners revoke [--] KEY-ID (lazybox link owners ls lists them; put -- before an ID that begins with -)")
 		}
 		owner, err := owners.Revoke(positional[0])
 		if err != nil {

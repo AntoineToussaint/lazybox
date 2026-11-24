@@ -228,6 +228,9 @@ const codeSentences: Record<string, string> = {
   delivery_rejected: 'The agent refused your message. Send a message to continue the conversation.',
   account_state_write_failed: 'Lazybox could not save the subscription status.',
   authentication_failed: 'The subscription needs you to sign in again.',
+  // Claude could not save a renewed login: the stored one is intact.
+  oauth_refresh_store_refused: 'Claude could not save its renewed sign-in to the macOS Keychain. Unlock the Keychain and try again, or sign in again.',
+  gateway_session_expired: 'The sign-in to your gateway expired. Sign in again to continue.',
   billing_error: 'The subscription has a billing problem.',
   overloaded_error: 'The provider is overloaded. Try again in a moment.',
   native_exit_unconfirmed: 'Lazybox could not confirm that the agent process stopped.',

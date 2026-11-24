@@ -31,6 +31,12 @@ export function DeleteWorkspaceDialog({ workspace, onClose, onDeleted }: {
   // left here that nothing confirms stopped. The panel says which, and settles it.
   const unconfirmed = !!preview?.blocked && !settled;
   const canDelete = !!preview && !preview.blocked && (!dirty || discard) && (!active || stop);
+  // The boxes shown below, in their order, for Check all.
+  const consents = [
+    ...(preview?.supportsKeepArtifacts ? [{ checked: deleteArtifacts, onChange: setDeleteArtifacts }] : []),
+    ...(active ? [{ checked: stop, onChange: setStop }] : []),
+    ...(!unconfirmed && dirty ? [{ checked: discard, onChange: setDiscard }] : []),
+  ];
   return <ConfirmDialog title="Delete workspace?" label="Delete workspace" closeLabel="Cancel workspace deletion"
     subject={workspace.name} subjectMeta={`${workspace.members.length} ${workspace.members.length === 1 ? 'repository' : 'repositories'}`}
     kept="Source repositories, branches, saved conversations and subscriptions are kept."
@@ -50,7 +56,7 @@ export function DeleteWorkspaceDialog({ workspace, onClose, onDeleted }: {
         <ConfirmCheckbox label="Discard these workspace files permanently" checked={discard} disabled={busy} onChange={setDiscard}/>
       </ConfirmWarning>}
     </>}
-    canConfirm={canDelete} confirm="Delete workspace" working="Deleting…" onClose={onClose}
+    consents={consents} canConfirm={canDelete} confirm="Delete workspace" working="Deleting…" onClose={onClose}
     onConfirm={async () => {
       const entry = await api.scheduleDeletion({ target: { case: 'workspace', value: {
         collectionId: workspace.id, confirmName: workspace.name, discardChanges: discard, stopSessions: stop, keepArtifacts: !!preview?.supportsKeepArtifacts && !deleteArtifacts,

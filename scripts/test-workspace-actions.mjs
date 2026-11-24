@@ -29,9 +29,15 @@ try{
  await expect(removeArtifacts).not.toBeChecked();
  await removeArtifacts.check();
  await expect(dialog).toContainText('Artifacts will be removed');
- await expect(dialog).toContainText('running session');await expect(dialog).toContainText('Uncommitted or untracked files');await expect(dialog.getByRole('textbox')).toHaveCount(0);await dialog.getByLabel(/Stop .* active session/).check();await dialog.getByLabel('Discard these workspace files permanently').check();
+ await expect(dialog).toContainText('running session');await expect(dialog).toContainText('Uncommitted or untracked files');await expect(dialog.getByRole('textbox')).toHaveCount(0);
+ const stopSessions=dialog.getByLabel(/Stop .* active session/),discardFiles=dialog.getByLabel('Discard these workspace files permanently');
+ // Check all is there while any of the three boxes is unticked, and comes back when one is unticked.
+ const checkAll=dialog.getByRole('button',{name:'Check all',exact:true});
+ await expect(checkAll).toBeVisible();
+ await stopSessions.check();await discardFiles.check();await expect(checkAll).toHaveCount(0);
+ await removeArtifacts.uncheck();await expect(checkAll).toBeVisible();
  await page.route('**/ScheduleDeletion',route=>{
-   assert.equal(!!route.request().postDataJSON().workspace.keepArtifacts,false);
+   assert.equal(route.request().postDataJSON().workspace.keepArtifacts,true);
    return route.fulfill({status:400,json:{code:'failed_precondition',message:'Member is not the expected worktree root'}});
  },{times:1});
  const confirmDelete=dialog.getByRole('button',{name:'Delete workspace',exact:true});
@@ -39,11 +45,17 @@ try{
  await expect(dialog.getByRole('alert')).toContainText('Member is not the expected worktree root');
  await expect(confirmDelete).toBeEnabled();
  assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,0);
- await removeArtifacts.uncheck();
+ // Check all ticks every box and hands the focus to Delete: Enter deletes, Check all itself never does.
+ await discardFiles.uncheck();await expect(confirmDelete).toBeDisabled();
+ await checkAll.focus();await page.keyboard.press('Enter');
+ await expect(removeArtifacts).toBeChecked();await expect(stopSessions).toBeChecked();await expect(discardFiles).toBeChecked();
+ await expect(checkAll).toHaveCount(0);await expect(confirmDelete).toBeFocused();await expect(dialog).toBeVisible();
+ assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,0);
  await page.clock.install();
- await dialog.getByRole('button',{name:'Delete workspace',exact:true}).click();await expect(dialog).toHaveCount(0);await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).not.toContainText('Beta release');await expect(page.locator('.workspace-row button[aria-current=page]')).toContainText('Alpha feature');
+ await page.keyboard.press('Enter');await expect(dialog).toHaveCount(0);await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).not.toContainText('Beta release');await expect(page.locator('.workspace-row button[aria-current=page]')).toContainText('Alpha feature');
  assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,1);
- assert.equal(fixture.mutations.find(m=>m.method==='ScheduleDeletion').body.workspace.keepArtifacts,true);
+ const scheduled=fixture.mutations.find(m=>m.method==='ScheduleDeletion').body.workspace;
+ assert.equal(!!scheduled.keepArtifacts,false);assert.equal(scheduled.stopSessions,true);assert.equal(scheduled.discardChanges,true);
  const undoNotice=page.getByText('Workspace moved to Recently deleted',{exact:true});
  await expect(undoNotice).toBeVisible();
  await page.clock.fastForward(30_000);
@@ -62,6 +74,11 @@ try{
  await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).toContainText('Beta release');
  await expect(trash).toHaveCount(0);
  assert.equal(fixture.mutations.filter(m=>m.method==='UndoDeletion').length,1);
+ // A single box needs no Check all.
+ await page.route('**/PreviewWorkspaceDeletion',route=>route.fulfill({json:{activeSessionIds:[],dirtyRepositories:['api'],filesOutsideRepositories:false,blocked:''}}));
+ await page.getByLabel('Actions for Alpha feature',{exact:true}).click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();await expect(dialog).toBeVisible();
+ await expect(dialog.getByRole('checkbox')).toHaveCount(1);await expect(dialog.getByRole('button',{name:'Check all',exact:true})).toHaveCount(0);
+ await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await expect(dialog).toHaveCount(0);
  // A clean, idle workspace needs only the confirmation button, with no typing.
  await page.route('**/PreviewWorkspaceDeletion',route=>route.fulfill({json:{activeSessionIds:[],dirtyRepositories:[],filesOutsideRepositories:false,blocked:''}}));
  await page.getByLabel('Actions for Alpha feature',{exact:true}).click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();await expect(dialog).toBeVisible();await expect(dialog.getByRole('textbox')).toHaveCount(0);await expect(dialog.getByRole('button',{name:'Delete workspace',exact:true})).toBeEnabled();await page.screenshot({path:'/tmp/lazybox-workspace-delete-clean.png'});await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await expect(dialog).toHaveCount(0);assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,1);
@@ -107,5 +124,5 @@ for(const viewport of [{width:900,height:420},{width:390,height:640}]){
  await expect(removeApi).toHaveCount(0);
  await expect(repositories.getByRole('button',{name:'Remove web from Alpha feature'})).toBeVisible();
  assert.deepEqual(fixture.mutations.filter(m=>m.method==='RemoveCollectionRepository').map(m=>m.body),[{collectionId:'alpha',memberName:'api'}]);
-console.log('PASS: reachable top-layer actions in clipped/narrow panels; right-click, keyboard and outside dismissal; no toolbar overlap; focused cancel, dirty/running guards, scoped workspace deletion and repository removal. Fixture only.');
+console.log('PASS: reachable top-layer actions in clipped/narrow panels; right-click, keyboard and outside dismissal; no toolbar overlap; focused cancel, dirty/running guards, Check all ticking every box and focusing Delete, scoped workspace deletion and repository removal. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

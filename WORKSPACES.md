@@ -1155,7 +1155,11 @@ or discarding changed/untracked/ignored files. A repository whose HEAD is
 detached (its commits may be on no branch) or with a rebase, merge,
 cherry-pick, revert or bisect stopped part-way counts as changed too, even
 when `git status` is clean: removing the worktree deletes its HEAD history and
-the operation's state, so deleting asks you to discard first. Cleanup first fences new workspace
+the operation's state, so deleting asks you to discard first. When the dialog
+asks for two or more boxes (delete artifacts, stop sessions, discard files),
+**Check all** in its footer ticks every one while any is unticked and moves
+the focus to **Delete workspace**: Enter or one more click deletes, Check all
+never does by itself, and unticking a box brings it back. Cleanup first fences new workspace
 attachments, closes owned provider processes, cancels and waits for owned commands,
 then removes each worktree through Git and removes the workspace folder. Source
 repositories, branches (including committed work), accounts and conversation

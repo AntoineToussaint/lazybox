@@ -8,7 +8,7 @@ import { iconElement } from './Icons';
 import { PendingFocus, trackFocus } from './pending-focus';
 import { focusWhenShown } from './focus';
 import { beginDrag, type DragAxis } from './drag-gesture';
-import { refreshNativeWebViews } from './native-web-view';
+import { reclaimPopoutViews, refreshNativeWebViews } from './native-web-view';
 import { EMPTY_CONTENT, fromDockview, groupStates, needsEmptyContent, paramsOf, PANEL_COMPONENT, sameSizes, structureKey, TAB_COMPONENT, toDockview, type Overlay, type PanelParams } from './dock-bridge';
 import { clampSidebar, SIDEBAR_MAX, SIDEBAR_MIN } from './PanelLayout';
 import { fitWidth, groups, isSidebar, minWidthOf, sidebarAt, sidebarKinds, type Group, type LayoutNode, type Panel, type WorkspacePage } from './workspace-model';
@@ -104,6 +104,8 @@ type Props = {
   /** A key pressed in a popped-out group's window (its document is not this one: the page's keys do not see it). */
   onPopoutKey?(event: KeyboardEvent, groupID: string): void;
   popoutUrl: string;
+  /** Whether a Web panel can go into a popped-out window with its page: native views that come home (the desktop app). A browser's frame would reload there. */
+  webPopouts?: boolean;
   empty: ReactNode;
 };
 
@@ -611,10 +613,10 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
       if (!on) endDrag?.(); else if (!endDrag) drag('move');
       root.classList.toggle('dock-dragging', on); refreshNativeWebViews();
     };
-    // A Web panel's native view belongs to this window: it is not dropped into a popped-out one.
-    const webOnly = dock.onWillDrop(event => {
+    // A Web panel moves into a popped-out window only where its page can move with it (native views that come home).
+    const dropRules = dock.onWillDrop(event => {
       const data = event.getData(), moved = data?.panelId ? [dock.getPanel(data.panelId)] : data ? dock.getGroup(data.groupId)?.panels || [] : [];
-      if (event.group?.api.location.type === 'popout' && moved.some(panel => (panel?.params as Partial<PanelParams> | undefined)?.kind === 'web')) event.preventDefault();
+      if (!latest.current.webPopouts && event.group?.api.location.type === 'popout' && moved.some(panel => (panel?.params as Partial<PanelParams> | undefined)?.kind === 'web')) event.preventDefault();
       // Workspaces and Agents are the sidebar: nothing else joins or splits their groups, and they do not go into the content's.
       const kindOf = (panel: IDockviewPanel | undefined) => (panel?.params as Partial<PanelParams> | undefined)?.kind || '';
       const target = event.group?.panels || [];
@@ -623,7 +625,7 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
         if (intoSidebar ? moved.some(panel => !sidebarKinds.has(kindOf(panel))) : sidebarMoving) event.preventDefault();
       }
     });
-    const subscriptions = [webOnly, dock.onWillDragPanel(dragging(true)), dock.onWillDragGroup(dragging(true)), dock.onDidDrop(dragging(false)), dock.onDidLayoutChange(dragging(false)),
+    const subscriptions = [dropRules, dock.onWillDragPanel(dragging(true)), dock.onWillDragGroup(dragging(true)), dock.onDidDrop(dragging(false)), dock.onDidLayoutChange(dragging(false)),
       { dispose: () => { endDrag?.(); element.removeEventListener('keydown', tabKey); element.removeEventListener('pointerdown', pressed, true); window.removeEventListener('pointerup', lifted, true); clearTimeout(released); } },
       dock.onDidLayoutChange(event => report([...event.reasons].every(reason => reason === 'geometry') ? 200 : 0)), dock.onDidMaximizedGroupChange(() => { bump(); refreshNativeWebViews(); }), dock.onDidActiveGroupChange(bump), dock.onDidAddPopoutGroup(event => { bump(); refreshNativeWebViews(); listenInPopout(event.window); attachPopoutTitleBar(event.window, event.group.element.querySelector('.dv-tabs-and-actions-container')); forgetFocus(event.group); }), dock.onDidRemovePopoutGroup(event => { bump(); refreshNativeWebViews(); forgetFocus(event.group); })];
     // A panel that changed windows does not get the focus back where it was: that place belonged to the other window (Monaco keeps the window it was in).
@@ -772,7 +774,8 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
         return true;
       }
       const target = panel.group.panels.length > 1 ? panel : panel.group;
-      const opened = dock.addPopoutGroup(target, { popoutUrl: latest.current.popoutUrl })
+      // Its token names the window to the host, so a Web panel's page can move into it (native-web-view.ts).
+      const opened = dock.addPopoutGroup(target, { popoutUrl: `${latest.current.popoutUrl}?w=${crypto.randomUUID()}` })
         .finally(() => pendingPopouts.current.delete(panelID));
       pendingPopouts.current.set(panelID, opened);
       return opened;
@@ -801,6 +804,8 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
           // A window that never reports closing does not hold up what comes after it.
           const timer = window.setTimeout(finish, 2000);
         });
+        // The pages of its Web panels come home before their window goes.
+        await reclaimPopoutViews(popout);
         popout.close();
         window.focus();
         await back;

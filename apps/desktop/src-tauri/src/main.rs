@@ -162,6 +162,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             host::dock_web,
             viewer::web_view_show,
             viewer::web_view_hide,
+            viewer::web_view_reclaim,
             viewer::web_view_navigate,
             viewer::web_view_zoom,
             viewer::web_view_action,

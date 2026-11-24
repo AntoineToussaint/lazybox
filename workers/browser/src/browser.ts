@@ -1,6 +1,7 @@
 import type { CDPSession, Download, Locator, Page } from 'playwright-core';
 import type { ActParams, ActResult, Box, InputParams, PageState, Policy } from './protocol.js';
 import { judgeNavigation, originOf } from './policy.js';
+import { NavigationWatch, navigationWait } from './navigation-watch.js';
 import { capSnapshot, pageLine, quote, refLabels } from './snapshot.js';
 
 /** What a browser needs from the service that owns it. */
@@ -68,9 +69,14 @@ export class AgentBrowser {
   private casting = false;
   private buttons = 0;
   private stateTimer?: NodeJS.Timeout;
+  private mainFrameId?: string;
+  /** What the running action does to the page (beginAction() to settle()). */
+  private watch?: NavigationWatch;
 
   constructor(readonly id: string, readonly page: Page, private cdp: CDPSession, private host: Host) {
     const main = () => page.mainFrame();
+    // Page events (a requested navigation, NavigationWatch) reach this session only once its Page domain is on.
+    void this.readMainFrame();
     page.on('request', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = true; this.changed(); } });
     page.on('requestfailed', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = false; this.changed(); } });
     page.on('load', () => { this.loading = false; this.changed(); });
@@ -161,23 +167,29 @@ export class AgentBrowser {
     return this.serial('queue', async () => {
       this.actor = p.actor === 'person' ? 'person' : 'agent';
       this.denial = undefined; this.blocked = '';
-      switch (p.action) {
-        case 'navigate': return this.navigate(p);
-        case 'snapshot': {
-          const snapshot = await this.snapshot(p.maxChars);
-          return this.result(p, `Page: ${await this.where()}\n\n${snapshot}`, 'Read the page', undefined, false);
-        }
-        case 'click': return this.click(p);
-        case 'type': return this.type(p);
-        case 'select': return this.select(p);
-        case 'press': return this.press(p);
-        case 'scroll': return this.scroll(p);
-        case 'screenshot': return this.screenshot(p);
-        case 'back': case 'forward': case 'reload': return this.history(p);
-        case 'wait_for': return this.waitFor(p);
-        default: throw new Error(`Unknown browser action ${JSON.stringify(p.action)}`);
-      }
+      try { return await this.run(p); }
+      // An action that failed before it settled stops watching the page all the same.
+      finally { this.watch?.dispose(); this.watch = undefined; }
     });
+  }
+
+  private async run(p: ActParams): Promise<ActResult> {
+    switch (p.action) {
+      case 'navigate': return this.navigate(p);
+      case 'snapshot': {
+        const snapshot = await this.snapshot(p.maxChars);
+        return this.result(p, `Page: ${await this.where()}\n\n${snapshot}`, 'Read the page', undefined, false);
+      }
+      case 'click': return this.click(p);
+      case 'type': return this.type(p);
+      case 'select': return this.select(p);
+      case 'press': return this.press(p);
+      case 'scroll': return this.scroll(p);
+      case 'screenshot': return this.screenshot(p);
+      case 'back': case 'forward': case 'reload': return this.history(p);
+      case 'wait_for': return this.waitFor(p);
+      default: throw new Error(`Unknown browser action ${JSON.stringify(p.action)}`);
+    }
   }
 
   /** The person's mouse and keyboard during Take over, in page CSS pixels. */
@@ -242,10 +254,30 @@ export class AgentBrowser {
     if (!answer?.allow) throw new Error(`The person did not allow submitting the sign-in form on ${origin || url}.`);
   }
 
-  /** After an action that may navigate: wait for the next page, and say where the agent is. */
+  /** Where the page is as an action begins; what it does to the page from now on is watched (NavigationWatch). */
+  private beginAction(): string {
+    this.watch?.dispose();
+    if (!this.mainFrameId) void this.readMainFrame();
+    this.watch = new NavigationWatch(this.page, this.cdp, this.mainFrameId, () => !!this.pendingSite);
+    return this.page.url();
+  }
+
+  /** The gate began asking the person about a site: an action waiting on its navigation says so instead. */
+  askingPerson() { this.watch?.wake(); }
+
+  private async readMainFrame() {
+    try { await this.cdp.send('Page.enable'); this.mainFrameId = (await this.cdp.send('Page.getFrameTree')).frameTree.frame.id; } catch { /* read again at the next action */ }
+  }
+
+  /** After an action that may navigate: wait for where it went, and say where the agent is. */
   private async settle(before: string): Promise<string> {
+    // A page's own script may navigate a moment after the action, without Chromium seeing it requested by it.
     await this.page.waitForTimeout(150);
-    if (this.page.url() !== before || this.loading) await this.page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {});
+    const watch = this.watch;
+    const committed = watch ? await watch.settle() : false;
+    watch?.dispose();
+    if (this.watch === watch) this.watch = undefined;
+    if (committed || this.page.url() !== before) await this.page.waitForLoadState('domcontentloaded', { timeout: navigationWait }).catch(() => {});
     const notes: string[] = [];
     if (this.page.url() !== before) notes.push(`Now on ${await this.where()}.`);
     if (this.pendingSite) notes.push(`Waiting for the person to allow ${this.pendingSite}; the page changes once they answer.`);
@@ -288,7 +320,7 @@ export class AgentBrowser {
   private async click(p: ActParams): Promise<ActResult> {
     const { locator, label, box } = await this.locate(p.ref);
     await this.guardSignIn(() => locator.evaluate(submitsPassword, false));
-    const before = this.page.url();
+    const before = this.beginAction();
     // A navigation the click starts may be refused or wait on the person; settle() waits for it instead.
     await locator.click({ timeout: elementTimeout, noWaitAfter: true }).catch(error => { throw new Error(`Could not click ${label}: ${reason(error)}`); });
     return this.result(p, `Clicked ${label}.${await this.settle(before)}`, `Clicked ${label}`, box);
@@ -304,7 +336,7 @@ export class AgentBrowser {
     let after = '';
     if (p.submit) {
       await this.guardSignIn(() => locator.evaluate(submitsPassword, true));
-      const before = this.page.url();
+      const before = this.beginAction();
       await locator.press('Enter', { timeout: elementTimeout, noWaitAfter: true });
       after = await this.settle(before);
     }
@@ -315,9 +347,11 @@ export class AgentBrowser {
   private async select(p: ActParams): Promise<ActResult> {
     const { locator, label, box } = await this.locate(p.ref);
     const values = p.values || [];
-    const chosen = await locator.selectOption(values, { timeout: elementTimeout }).catch(error => { throw new Error(`Could not select in ${label}: ${reason(error)}`); });
+    // A choice may submit its form (onchange): settle() follows it like a click's.
+    const before = this.beginAction();
+    const chosen = await locator.selectOption(values, { timeout: elementTimeout, noWaitAfter: true }).catch(error => { throw new Error(`Could not select in ${label}: ${reason(error)}`); });
     const summary = `Selected ${(chosen.length ? chosen : values).map(v => quote(v)).join(', ')} in ${label}`;
-    return this.result(p, `${summary}.`, summary, box);
+    return this.result(p, `${summary}.${await this.settle(before)}`, summary, box);
   }
 
   private async press(p: ActParams): Promise<ActResult> {
@@ -329,7 +363,7 @@ export class AgentBrowser {
         try { return await active.evaluate(submitsPassword, true); } finally { await active.dispose(); }
       });
     }
-    const before = this.page.url();
+    const before = this.beginAction();
     await this.page.keyboard.press(key).catch(error => { throw new Error(`Could not press ${key}: ${reason(error)}`); });
     return this.result(p, `Pressed ${key}.${await this.settle(before)}`, `Pressed ${key}`);
   }

@@ -414,7 +414,13 @@ fn viewer(app: &tauri::AppHandle, owner: &str, id: &str) -> Result<Webview, Stri
 
 /// Places the viewer `id` over its panel and shows it, creating it on `url`
 /// the first time. With a `url` an existing viewer on another page goes there.
+///
+/// `popout` names the popped-out panel window the panel is in now (the token
+/// in its `popout.html?w=` address): the view moves there, page and all
+/// (`Webview::reparent`), and the frame was measured in that window. Only a
+/// window this owner opened is accepted.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn web_view_show(
     app: tauri::AppHandle,
     webview: Webview,
@@ -423,19 +429,36 @@ pub async fn web_view_show(
     url: String,
     frame: Frame,
     zoom: f64,
+    popout: Option<String>,
 ) -> Result<(), String> {
     let owner = owner(&webview)?;
     let label = label(&owner, view_id(&id)?);
-    let window = webview.window();
-    let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    // The webview asking is the page the frame was measured in.
-    let measured = webview
-        .size()
-        .map_err(|e| e.to_string())?
-        .to_logical::<f64>(scale);
+    let (window, measured) = match popout.as_deref().filter(|token| !token.is_empty()) {
+        Some(token) => {
+            let window = popout_window(&app, &owner, token)?;
+            let scale = window.scale_factor().map_err(|e| e.to_string())?;
+            // The popped-out page the frame was measured in fills its window.
+            let size = content_size(&window)?.to_logical::<f64>(scale);
+            (window, size)
+        }
+        None => {
+            let window = webview.window();
+            let scale = window.scale_factor().map_err(|e| e.to_string())?;
+            // The webview asking is the page the frame was measured in.
+            let size = webview
+                .size()
+                .map_err(|e| e.to_string())?
+                .to_logical::<f64>(scale);
+            (window, size)
+        }
+    };
     let (position, size) = logical(&frame, (measured.width, measured.height))
         .ok_or("The panel has no room to show a page")?;
     if let Some(view) = app.get_webview(&label) {
+        if view.window().label() != window.label() {
+            // Moved with its page: its history, scroll and forms come along.
+            view.reparent(&window).map_err(|e| e.to_string())?;
+        }
         view.set_bounds(Rect {
             position: position.into(),
             size: size.into(),
@@ -542,6 +565,96 @@ pub async fn web_view_reset(
     forget(&app, &viewers, &owner);
     Ok(())
 }
+/// Popped-out panel windows by the token in their address. Which app window
+/// opened each is the host's record (`host::popout_opener`).
+static POPOUTS: Mutex<std::collections::BTreeMap<String, String>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// Whether `token` can name a popped-out window: what the page put in its
+/// address, nothing longer or stranger.
+pub fn popout_token(token: &str) -> bool {
+    (8..=64).contains(&token.len())
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Records the popped-out window `label` opened on `token`.
+pub fn register_popout(token: &str, label: &str) {
+    if popout_token(token)
+        && let Ok(mut map) = POPOUTS.lock()
+    {
+        map.insert(token.to_string(), label.to_string());
+    }
+}
+
+/// Forgets the popped-out window `label`, closed.
+pub fn forget_popout(label: &str) {
+    if let Ok(mut map) = POPOUTS.lock() {
+        map.retain(|_, window| window != label);
+    }
+}
+
+/// The label of the popped-out window `token` names, if `owner` opened it
+/// (`opener_of`, the host's record): a window can move its views only into
+/// its own panel windows.
+fn popout_label(
+    owner: &str,
+    token: &str,
+    opener_of: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let label = POPOUTS.lock().ok()?.get(token).cloned()?;
+    (opener_of(&label).as_deref() == Some(owner)).then_some(label)
+}
+
+/// The popped-out window `token` names, if `owner` opened it.
+fn popout_window(
+    app: &tauri::AppHandle,
+    owner: &str,
+    token: &str,
+) -> Result<tauri::Window, String> {
+    popout_label(owner, token, crate::host::popout_opener)
+        .and_then(|label| app.get_window(&label))
+        .ok_or_else(|| "That panel window is closed".into())
+}
+
+/// Brings the views in the popped-out window `label` back to the window of
+/// the app page that owns them, hidden: closing a panel window must not
+/// close the pages its Web panels showed (they show again where the panels
+/// are put back).
+pub fn reclaim(app: &tauri::AppHandle, viewers: &Viewers, label: &str) {
+    let owned: Vec<(String, String)> = match viewers.0.lock() {
+        Ok(map) => map
+            .iter()
+            .map(|(view, o)| (view.clone(), o.webview.clone()))
+            .collect(),
+        Err(_) => return,
+    };
+    for (view, owner) in owned {
+        let (Some(view), Some(home)) = (app.get_webview(&view), app.get_webview(&owner)) else {
+            continue;
+        };
+        if view.window().label() == label {
+            let _ = view.hide();
+            let _ = view.reparent(&home.window());
+        }
+    }
+}
+
+/// The opener closes a popped-out window: its pages come home first.
+#[tauri::command]
+pub async fn web_view_reclaim(
+    app: tauri::AppHandle,
+    webview: Webview,
+    viewers: tauri::State<'_, Viewers>,
+    popout: String,
+) -> Result<(), String> {
+    let owner = owner(&webview)?;
+    let window = popout_window(&app, &owner, &popout)?;
+    reclaim(&app, &viewers, window.label());
+    Ok(())
+}
+
 /// Closes every viewer of a window webview that is going away or starting over.
 pub fn forget(app: &tauri::AppHandle, viewers: &Viewers, owner: &str) {
     let labels: Vec<String> = match viewers.0.lock() {
@@ -568,6 +681,31 @@ pub fn forget(app: &tauri::AppHandle, viewers: &Viewers, owner: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panel_window_is_addressed_by_its_token_and_only_by_its_opener() {
+        let token = "0b6f1c9e-8c0a-4f1e-9d2b-1a2b3c4d5e6f";
+        assert!(popout_token(token));
+        for bad in ["", "short", "has space here", "../../etc", &"x".repeat(65)] {
+            assert!(!popout_token(bad), "{bad:?}");
+        }
+        let opened_by_main = |label: &str| (label == "popout-7").then(|| "main".to_string());
+        register_popout(token, "popout-7");
+        assert_eq!(
+            popout_label("main", token, opened_by_main).as_deref(),
+            Some("popout-7")
+        );
+        // Another app window cannot move its views into a window it did not open.
+        assert_eq!(popout_label("workspace-2", token, opened_by_main), None);
+        // A token the page made up names nothing.
+        register_popout("../../etc", "popout-8");
+        assert_eq!(
+            popout_label("main", "../../etc", |_| Some("main".into())),
+            None
+        );
+        forget_popout("popout-7");
+        assert_eq!(popout_label("main", token, opened_by_main), None);
+    }
 
     #[test]
     fn viewers_open_only_web_pages_on_a_named_host() {

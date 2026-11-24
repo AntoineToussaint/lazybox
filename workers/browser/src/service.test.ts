@@ -109,7 +109,10 @@ describe('browser service', () => {
   it('asks before a new origin, and leaves the page where it is when the person says no', async () => {
     await act({ action: 'navigate', url: `${sites.home}/` });
     runner.answers.site = () => ({ allow: false, reason: 'not now' });
-    const click = await act({ action: 'click', ref: refIn(await snapshot(), 'link "Other site"') });
+    const ref = refIn(await snapshot(), 'link "Other site"');
+    const started = Date.now();
+    const click = await act({ action: 'click', ref });
+    assert.ok(Date.now() - started < 2500, `a declined site answers at once, took ${Date.now() - started}ms`);
     assert.match(click.text, new RegExp(`The person did not allow ${sites.other}: not now\\.`));
     assert.equal(new URL(click.state.url).origin, sites.home);
     await assert.rejects(act({ action: 'navigate', url: `${sites.other}/other` }), new RegExp(`The person did not allow ${sites.other}: not now`));
@@ -177,9 +180,50 @@ describe('browser service', () => {
     runner.answers.sign_in = () => ({ allow: false });
   });
 
+  // Regression: under load a submitted form's request left after settle()'s 150 ms look, and the
+  // agent was told only "Clicked …" while the page went on to Welcome.
+  it('waits for a navigation the click requested, however slow its page is to leave', async () => {
+    await act({ action: 'navigate', url: `${sites.home}/signin-slow` });
+    const submitted = await act({ action: 'click', ref: refIn(await snapshot(), 'button "Sign in"') });
+    assert.match(submitted.text, /Now on "Welcome"/);
+  });
+
+  it('follows a sign-in through its redirect, and one a script makes once its call answers', async () => {
+    for (const path of ['/signin-redirect', '/signin-script']) {
+      await act({ action: 'navigate', url: `${sites.home}${path}` });
+      const submitted = await act({ action: 'click', ref: refIn(await snapshot(), 'button "Sign in"') });
+      assert.match(submitted.text, /Now on "Dashboard"/, path);
+    }
+  });
+
+  it('follows a choice that submits its form', async () => {
+    await act({ action: 'navigate', url: `${sites.home}/choose` });
+    const chosen = await act({ action: 'select', ref: refIn(await snapshot(), 'combobox'), values: ['blue'] });
+    assert.match(chosen.text, /Now on "Done"/);
+  });
+
+  // A requested navigation that never changes this tab's address returns promptly, not after a timeout:
+  // a download, a form back to the same address, a link answered with no content.
+  it('returns promptly from a click whose navigation keeps the address', async () => {
+    const timed = async (path: string, button: string) => {
+      await act({ action: 'navigate', url: `${sites.home}${path}` });
+      const ref = refIn(await snapshot(), button), started = Date.now();
+      await act({ action: 'click', ref });
+      return Date.now() - started;
+    };
+    // A link into a new tab is timed where popups are tested: it is folded into this page.
+    for (const [path, button] of [['/download', 'link "Get the report"'], ['/same', 'button "Search again"'], ['/stay', 'link "Check again"']]) {
+      const took = await timed(path, button);
+      assert.ok(took < 2500, `${path}: the click took ${took} ms`);
+    }
+  });
+
   it('folds a popup into the page and dismisses dialogs', async () => {
     await act({ action: 'navigate', url: `${sites.home}/popup` });
-    await act({ action: 'click', ref: refIn(await snapshot(), 'link "Open in a new window"') });
+    const link = refIn(await snapshot(), 'link "Open in a new window"'), started = Date.now();
+    await act({ action: 'click', ref: link });
+    // A link into a new tab is no navigation of this one: the click returns promptly.
+    assert.ok(Date.now() - started < 2500, `the click took ${Date.now() - started} ms`);
     await runner.until(() => runner.logged('popup').length === 1);
     await act({ action: 'wait_for', text: 'Name' });
     assert.match(runner.logged('popup')[0], /^Opened 127\.0\.0\.1:\d+\/form here instead of a new window$/);

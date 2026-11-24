@@ -179,7 +179,7 @@ export class BrowserService {
       profile.lastActive = browser;
       const origin = originOf(url);
       if (origin && origin !== browser.origin && browser.actor === 'agent') {
-        browser.pendingSite = origin; browser.changed();
+        browser.pendingSite = origin; browser.askingPerson(); browser.changed();
         let answer: { allow?: boolean; reason?: string } | undefined;
         try { answer = await this.runner.request('site', { browser: browser.id, url, origin }); } catch { answer = undefined; }
         finally { browser.pendingSite = ''; browser.changed(); }

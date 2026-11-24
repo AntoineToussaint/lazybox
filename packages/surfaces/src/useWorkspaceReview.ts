@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import type { RunnerClient } from '@lazybox/client-core';
-import type { AddReviewCommentRequest, WorkspaceReview } from '@lazybox/protocol';
+import type { AddReviewCommentRequest, ReviewComment, WorkspaceReview } from '@lazybox/protocol';
+import { reviewMessage } from './review-model';
+import { conversationName } from './conversation-model';
 import { useRunner } from './RunnerContext';
 import { errorText } from './PullRequestFlow';
 
@@ -76,11 +78,38 @@ export function useWorkspaceReview(workspaceId: string) {
     /** `note` is a dismissal's reason. */
     setDisposition: (ids: string[], disposition: string, to?: { sessionId: string; sessionTitle: string }, note = '') =>
       source.change(client => client.setReviewDisposition({ collectionId, ids, disposition, sessionId: to?.sessionId || '', sessionTitle: to?.sessionTitle || '', note })),
+    /** `closeReviewers`: end and archive each reviewer this send leaves with nothing to hand on (the Runner decides which). */
+    async send(comments: ReviewComment[], sessionId: string, closeReviewers = false) {
+      let { session } = await api.getSession({ sessionId });
+      const visited = new Set<string>();
+      while (session?.collectionId === collectionId && session.successorExecutionId) {
+        if (visited.has(session.id)) throw new Error('The destination conversation has an invalid continuation.');
+        visited.add(session.id);
+        ({ session } = await api.getSession({ sessionId: session.successorExecutionId }));
+      }
+      if (!session || session.collectionId !== collectionId) throw new Error('The destination conversation is unavailable.');
+      if (session.closed) ({ session } = await api.resumeSession({ sessionId: session.id }));
+      if (!session || session.collectionId !== collectionId) throw new Error('The destination conversation is unavailable.');
+      // A lost receipt or a second click in another window checks the same delivery.
+      const revisions = comments.map(c => c.id + ':' + c.updatedAtUnix).sort();
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(revisions)));
+      const operationId = 'review-send-' + Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+      const receipt = await api.apply({ sessionId: session.id, operationId, operation: { case: 'message', value: { text: reviewMessage(comments) } } }, { timeoutMs: 30000 });
+      if (receipt.error || receipt.delivery === 'failed') throw new Error(receipt.error || 'Could not send the review.');
+      const destination = session;
+      try {
+        await source.change(client => client.setReviewDisposition({ collectionId, ids: comments.map(c => c.id), disposition: 'sent', sessionId: destination.id, sessionTitle: conversationName(destination, ''), closeReviewers }));
+      } catch (error) {
+        void source.load();
+        throw new Error('Sent. The review findings could not be marked as sent: ' + errorText(error));
+      }
+      return destination.id;
+    },
     /** A review's loop: pause, resume, stop, take_over, or loop (with its mode and rounds). */
     updateRun: (reviewId: string, action: string, loop = '', maxRounds = 0) => source.change(client => client.updateReviewRun({ collectionId, reviewId, action, loop, maxRounds })),
     /** Cancel a review under way: its reviewer's turn interrupted and session ended, its findings kept. */
     cancelRun: (reviewId: string) => source.change(client => client.cancelReview({ collectionId, reviewId }, { timeoutMs: 30000 })),
     setAutoResolve: (enabled: boolean) => source.change(client => client.setReviewAutoResolve({ collectionId, enabled })),
-  }), [snapshot, source, collectionId]);
+  }), [snapshot, source, collectionId, api]);
 }
 export type WorkspaceReviewState = ReturnType<typeof useWorkspaceReview>;

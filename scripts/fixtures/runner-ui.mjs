@@ -640,7 +640,7 @@ actions:
         else if(scope==='pr'){const pr=shipState(collection.id,body.member).pr;if(!pr)return error('failed_precondition','this branch has no pull request to review');scopeLabel=`PR #${pr.number}`;}
         else scopeLabel=!body.compare?'Changes':body.compare===':uncommitted'?'Uncommitted changes':`Changes vs ${body.compare}`;
         const label=providerName(profile.provider),title=`${body.templateId==='behavior-verification-v1'?'Behavior verification':body.templateId==='security-review-v1'?'Security review':'Review'} · ${scopeLabel} · ${label}`;
-        const reviewer={id:`review-${sessions.length}`,collectionId:collection.id,workId:collection.id,profileId:profile.id,provider:profile.provider,model,permission:'read-only',title,status:'running',busy:true,capabilities:{files:true},pending:[]};sessions.push(reviewer);
+        const reviewer={id:`review-${sessions.length}`,purpose:'reviewer',collectionId:collection.id,workId:collection.id,profileId:profile.id,provider:profile.provider,model,permission:'read-only',title,status:'running',busy:true,capabilities:{files:true},pending:[]};sessions.push(reviewer);
         const now=String(Math.floor(Date.now()/1000));
         const loop=body.templateId==='behavior-verification-v1'?'auto':body.templateId?'off':runnerSettings.review?.loop||'ask',maxRounds=Math.min(10,Math.max(1,runnerSettings.review?.maxRounds||3));
         const run={templateId:body.templateId||'',loop,maxRounds,round:1,phase:'reviewing',paused:false,stopReason:'',rounds:[{number:1,trigger:'start',startedAtUnix:now}],timeline:[],id:'rv-'+randomUUID().slice(0,8),reviewerSessionId:reviewer.id,reviewerTitle:title,reviewerLabel:label,reviewerProvider:profile.provider,reviewerProfileId:profile.id,sourceSessionId:source.id,sourceTitle:source.title||'',sourceLabel:providerName(authorProvider),sourceProvider:authorProvider,scope,scopeLabel,turn:body.turn||0,compare:body.compare||'',state:'running',detail:`${label} is reviewing ${scopeLabel.toLowerCase()}.${fallback?' '+fallback:''}`,fallback,focus:(body.focus||'').trim(),createdAtUnix:now,updatedAtUnix:now};
@@ -1055,6 +1055,15 @@ actions:
         if(chosen.length!==(body.ids||[]).length)return error('not_found','review comment not found');
         if(body.disposition==='sent')queueMicrotask(()=>findingsSent(body.collectionId,body.ids||[],'You',body.sessionTitle));
         for(const c of chosen){Object.assign(c,{disposition:body.disposition,resolvedBy:'',note:body.disposition==='dismissed'?(body.note||'').trim():''});if(body.disposition==='sent')Object.assign(c,{sentTo:body.sessionId,sentToTitle:body.sessionTitle||'',sentHead:shipState(body.collectionId,c.member).head,sentAtUnix:String(Math.floor(Date.now()/1000))});if(body.disposition==='open')Object.assign(c,{sentTo:'',sentToTitle:'',sentHead:'',sentAtUnix:'0'});}
+        if(body.closeReviewers && body.disposition==='sent') {
+          for(const run of r.runs) {
+            if(inProgress(run) || !chosen.some(c=>c.reviewId===run.id)) continue;
+            if(r.comments.some(c=>c.reviewId===run.id && ['open','proposed'].includes(c.disposition))) continue;
+            closeReviewer(run);
+            const reviewer=sessions.find(s=>s.id===run.reviewerSessionId);
+            if(reviewer) reviewer.archivedAtUnixMillis=String(Date.now());
+          }
+        }
         return json(reviewReply(body.collectionId));
       }
       case 'SetReviewAutoResolve': mutations.push({method,body});reviewOf(body.collectionId).autoResolve=!!body.enabled;return json(reviewReply(body.collectionId));

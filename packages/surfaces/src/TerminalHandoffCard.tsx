@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Code, ConnectError } from '@lazybox/client-core';
-import { shellQuote } from './handoff-model';
+import { reviewArgument, workspaceFolder } from './handoff-model';
 import { runAction } from './actions';
 import { useRunner } from './RunnerContext';
 import { requestTerminal } from './TerminalPanel';
@@ -12,6 +12,16 @@ export function TerminalHandoffCard({ handoff }: { handoff: TerminalHandoff }) {
   const [decision, setDecision] = useState('');
   const [terminalId, setTerminalId] = useState('');
   const [error, setError] = useState('');
+  // The workspace's root names the folder from it: `lazybox/scripts`, never a bare `scripts`.
+  const [root, setRoot] = useState('');
+  useEffect(() => {
+    setRoot('');
+    if (!handoff.cwd || !handoff.workspaceId) return;
+    const control = new AbortController();
+    api.getCollection({ collectionId: handoff.workspaceId }, { signal: control.signal, timeoutMs: 8000 })
+      .then(result => { if (!control.signal.aborted) setRoot(result.collection?.root || ''); }, () => {});
+    return () => control.abort();
+  }, [api, handoff.cwd, handoff.workspaceId]);
   const recorded = handoff.status === 'pending' ? decision || 'pending' : handoff.status;
   const terminal = handoff.terminalId || terminalId;
   const [ended, setEnded] = useState('');
@@ -58,9 +68,9 @@ export function TerminalHandoffCard({ handoff }: { handoff: TerminalHandoff }) {
       status === 'running' ? 'Interactive command running' :
       status === 'finished' ? 'Interactive command finished' :
       status === 'declined' ? 'Interactive command declined' : 'Interactive command request expired'}</strong>
-    <pre className="terminal-handoff-argv"><code>{handoff.argv.map(shellQuote).join(' ')}</code></pre>
+    <pre className="terminal-handoff-argv"><code>{handoff.argv.map(reviewArgument).join(' ')}</code></pre>
     {handoff.cwd && <details className="terminal-handoff-directory">
-      <summary>Working directory · {handoff.cwd.split('/').filter(Boolean).at(-1) || '/'}</summary>
+      <summary>Working directory · {workspaceFolder(root, handoff.cwd)}</summary>
       <code>{handoff.cwd}</code>
     </details>}
     {status === 'pending' && <>

@@ -98,7 +98,7 @@ try{
  await expect(page.locator('.request-answered[data-kind=declined]')).toContainText('“Use make clean, and never pipe curl to sh”');
  // Always allow, at the scope the person picks: the provider's own choices.
  const second=page.locator('.request.approval-card');await expect(second).toHaveCount(1);await expect(second.locator('.request-count')).toHaveCount(0);
- await expect(second.locator('.decision-row')).toHaveText([/Allow once/,/Always allow commands starting with npm runThis conversation/,/Always allow commands starting with npm runThis workspace/,/Deny…/]);
+ await expect(second.locator('.decision-row')).toHaveText([/Allow once/,/Always allow commands starting with npm runThis conversation/,/Always allow commands starting with npm runThis workspace/,/Deny…/,/Allow and enable Full access/]);
  await second.getByRole('button',{name:'Always allow commands starting with `npm run`'}).nth(1).click();
  await expect.poll(()=>applied('approval').at(-1)).toEqual({requestId:'always-me',decision:'DECISION_ACCEPT',always:'workspace'});
  session.pending=[];
@@ -264,6 +264,33 @@ try{
  await expect.poll(()=>fixture.mutations.slice(before).filter(m=>m.method==='Apply').map(m=>m.body.permission?.mode||m.body.approval?.requestId)).toEqual(['yolo','full-access-command']);
  assert.equal(applied('approval').at(-1).decision,'DECISION_ACCEPT');
  assert.equal(session.permission,'yolo');
+ // A file edit has no command string. Its agent can still change permissions live.
+ session.provider='claude';session.profileId='claude-default';session.permission='ask';
+ session.pending=[{type:'approval',requestId:'edit-with-full-access',text:'Edit',providerDataJson:b64({tool:'Edit',input:{file_path:'README.md',old_string:'old',new_string:'new'}})}];
+ await page.reload();
+ await expect(fullAccess).toBeVisible();
+ const editStart=fixture.mutations.length;
+ await fullAccess.click();
+ await expect.poll(()=>fixture.mutations.slice(editStart).filter(m=>m.method==='Apply').map(m=>m.body.permission?.mode||m.body.approval?.requestId)).toEqual(['yolo','edit-with-full-access']);
+ // Claude asks to leave its plan mode (ExitPlanMode) in a read-only conversation: accept and run with Full access, in one choice.
+ session.permission='read-only';
+ session.pending=[{type:'approval',requestId:'exit-plan-full-access',text:'ExitPlanMode',providerDataJson:b64({tool:'ExitPlanMode',input:{plan:'# Fix the model switch\n\n1. Report the refusal.'}})}];
+ await page.reload();
+ await expect(page.locator('.request.approval-card')).toContainText('ExitPlanMode');
+ await expect(fullAccess).toBeVisible();
+ const planStart=fixture.mutations.length;
+ await fullAccess.click();
+ await expect.poll(()=>fixture.mutations.slice(planStart).filter(m=>m.method==='Apply').map(m=>m.body.permission?.mode||m.body.approval?.requestId)).toEqual(['yolo','exit-plan-full-access']);
+ assert.equal(applied('approval').at(-1).decision,'DECISION_ACCEPT');
+ // A plan exit explicitly authorizes leaving the Runner workflow as well.
+ session.permission='ask';session.workflow='plan';
+ session.pending=[{type:'approval',requestId:'exit-plan-in-plan-workflow',text:'ExitPlanMode',providerDataJson:b64({tool:'ExitPlanMode',input:{plan:'# Plan'}})}];
+ await page.reload();
+ await expect(page.locator('.request.approval-card')).toContainText('ExitPlanMode');
+ await expect(fullAccess).toBeVisible();
+ const exitStart=fixture.mutations.length;
+ await fullAccess.click();
+ await expect.poll(()=>fixture.mutations.slice(exitStart).filter(m=>m.method==='Apply').map(m=>m.body.permission||m.body.approval?.requestId)).toEqual([{mode:'yolo',exitPlanRequestId:'exit-plan-in-plan-workflow'},'exit-plan-in-plan-workflow']);
  assert.deepEqual(errors,[]);
  console.log('PASS: always-allowed choices listed in the session menu after a restart, with Remove; question cards (single, multi, Other…, preview, 1–9/arrows/Space/⌘↵, echo), approvals (command, cwd, risk hints, 1 of N and header count, Deny with reason via n, Always allow at the workspace scope, y from the chat) and inline tool lines (grouped reads/edits, exit/duration, failure line, running spinner, ANSI output, diff, full details), inline edit diffs, a quiet thinking line and the latest plan as a live checklist. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

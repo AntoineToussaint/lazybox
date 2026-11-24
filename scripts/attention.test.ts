@@ -2,7 +2,7 @@ import { create } from '@bufbuild/protobuf';
 import { AgentEventSchema, SessionSchema, type Session } from '@lazybox/protocol';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ageLabel, buildInbox, defaultNotificationPreferences, deriveAttention, lastLine, markSeen, noticeFor, parseSeen, seenAt, seenMark, type Seen } from '../packages/surfaces/src/attention.ts';
+import { ageLabel, buildInbox, defaultNotificationPreferences, deriveAttention, isListed, lastLine, markSeen, noticeFor, parseSeen, reachesInbox, seenAt, seenMark, type Seen } from '../packages/surfaces/src/attention.ts';
 
 const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 type Agent = { id?: string; status?: string; updated?: number; ended?: number; lastTurnStatus?: string; parentId?: string };
@@ -69,7 +69,7 @@ test('working, ready for review until seen, then done', () => {
   assert.equal(deriveAttention(session('s', { status: 'ready', agents: [{ status: 'ready', updated: 9_000 }] }), 0).state, 'idle', 'no turn ended yet');
 });
 
-test('the inbox has one row per conversation, grouped by need, newest first, without assistants', () => {
+test('the inbox has one row per conversation, grouped by need, newest first, without Ask Lazybox assistants', () => {
   const inbox = buildInbox([
     session('idle-old', { agents: [{ updated: 1_000, ended: 1_000 }] }),
     session('working', { busy: true, status: 'running', agents: [{ status: 'running', updated: 5_000 }] }),
@@ -77,7 +77,6 @@ test('the inbox has one row per conversation, grouped by need, newest first, wit
     session('review-old', { agents: [{ updated: 3_000, ended: 3_000 }] }),
     session('asks', { pending: [question], status: 'waiting_input', agents: [{ updated: 2_000 }] }),
     session('broken', { fault: 'delivery_failed', agents: [{ updated: 4_000 }] }),
-    session('artifact-companion', { purpose: 'artifact', pending: [question] }),
     session('helper', { purpose: 'help', pending: [question] }),
   ], { since: 0, marks: { 'idle-old-conversation': 1_000 } });
   assert.deepEqual(inbox.rows.map(row => row.session.id), ['asks', 'broken', 'review-new', 'review-old', 'working', 'idle-old']);
@@ -85,6 +84,27 @@ test('the inbox has one row per conversation, grouped by need, newest first, wit
   assert.equal(inbox.counts['needs-input'], 1);
   assert.equal(inbox.counts.review, 2);
   assert.equal(inbox.unread, 4);
+});
+
+test('an agent that is not listed still reaches the inbox when it needs you: a companion, a reviewer', () => {
+  // The Runner's types (agent/types.go): a companion and a reviewer can act, so their requests reach the inbox.
+  const typed = (name: string, listed: boolean, reachesInbox: boolean) => ({ agentType: { name, label: name, listed, reachesInbox, closeWhenDelivered: name === 'reviewer', workspace: name !== 'help', delegates: name === 'coding', ui: name } as Session['agentType'] });
+  const companion = session('companion', { purpose: 'artifact', pending: [approval], status: 'waiting_approval', ...typed('artifact', false, true) });
+  const reviewer = session('reviewer', { purpose: 'reviewer', pending: [question], status: 'waiting_input', ...typed('reviewer', false, true) });
+  const helper = session('helper', { purpose: 'help', pending: [question], ...typed('help', false, false) });
+  const author = session('author', { purpose: 'coding', ...typed('coding', true, true) });
+  const inbox = buildInbox([companion, reviewer, helper, author], none);
+  assert.deepEqual(inbox.groups[0].rows.map(row => row.session.id).sort(), ['companion', 'reviewer']);
+  assert.equal(inbox.counts['needs-input'], 2);
+  assert.ok(!inbox.rows.some(row => row.session.id === 'helper'));
+  assert.deepEqual([companion, reviewer, helper, author].filter(isListed).map(s => s.id), ['author']);
+  // A Runner from before types: the same answers from the purpose alone, a companion included.
+  const legacy = session('old-companion', { purpose: 'artifact', pending: [question] });
+  assert.equal(reachesInbox(legacy), true);
+  assert.equal(buildInbox([legacy], none).groups[0].rows[0].reason, 'Question');
+  assert.equal(isListed(legacy), false, 'a companion stays out of the sidebar, as before types');
+  assert.equal(isListed(session('old-helper', { purpose: 'help' })), false);
+  assert.equal(reachesInbox(session('old-helper', { purpose: 'help' })), false);
 });
 
 test('seen marks only move forward; the first look and pruning never flood the inbox', () => {

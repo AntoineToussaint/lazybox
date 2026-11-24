@@ -3,7 +3,7 @@ import type { Session } from '@lazybox/protocol';
 import type { AttentionHost } from '@lazybox/platform';
 import { useRunner } from './RunnerContext';
 import { mergeConversations } from './conversation-model';
-import { buildInbox, conversationKey, defaultNotificationPreferences, deriveAttention, isWorkConversation, markSeen, parseSeen, seenAt, seenMark, type Inbox, type NotificationPreferences, type Seen } from './attention';
+import { buildInbox, conversationKey, defaultNotificationPreferences, deriveAttention, markSeen, reachesInbox, parseSeen, seenAt, seenMark, type Inbox, type NotificationPreferences, type Seen } from './attention';
 
 /**
  * Attention state is shared by every window of one Runner, live: reading a
@@ -106,7 +106,7 @@ export function useInbox(): Inbox & { mark(entries: { key: string; at: number }[
 export function useUnread(): (session: Session) => '' | 'review' | 'failed' {
   const { seen } = useSeen();
   return useCallback((session: Session) => {
-    if (!isWorkConversation(session)) return '';
+    if (!reachesInbox(session)) return '';
     const row = deriveAttention(session, seenAt(seen, conversationKey(session)));
     return row.unread && (row.state === 'review' || row.state === 'failed') ? row.state : '';
   }, [seen]);
@@ -156,7 +156,7 @@ export function useMarkViewed(session: Session | undefined, enabled = true) {
   const { mark } = useSeen();
   const live = session && info?.sessions.find(value => value.id === session.id);
   const shown = useContext(PanelShownContext);
-  const active = enabled && shown && !!session && isWorkConversation(session);
+  const active = enabled && shown && !!session && reachesInbox(session);
   const key = session ? conversationKey(session) : '';
   const at = active ? Math.max(...[session, live].filter((value): value is Session => !!value).map(value => seenMark(deriveAttention(value)))) : 0;
   const latest = useRef({ key, at }); latest.current = { key, at };

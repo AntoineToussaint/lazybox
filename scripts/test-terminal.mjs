@@ -221,13 +221,15 @@ try {
  await expect(page.locator('.panel-chat')).toBeVisible();
  // A handoff in chat opens a PTY only after the owner reviews and accepts.
  const handoff={type:'terminal_handoff',status:'pending',name:'alpha',text:'/fixture/collections/alpha',providerDataJson:Buffer.from(JSON.stringify(['acme','login','team blue',''])).toString('base64')};
- chatEvents.push({...handoff,requestId:'declined'});
+ // Reviewed before it runs: every character visible (an ESC is \e), the folder named from the workspace.
+ const reviewed={...handoff,text:'/fixture/collections/alpha/api/scripts',providerDataJson:Buffer.from(JSON.stringify(['acme','login','team blue','','safe\u001b[2Kgone'])).toString('base64')};
+ chatEvents.push({...reviewed,requestId:'declined'});
  const declined=page.getByRole('article',{name:'Interactive command'}).last();
- await expect(declined.locator('pre')).toHaveText("acme login 'team blue' ''");
- const directory=declined.getByText('Working directory · alpha');
- await expect(declined.getByText(handoff.text,{exact:true})).toBeHidden();
+ await expect(declined.locator('pre')).toHaveText("acme login 'team blue' '' $'safe\\e[2Kgone'");
+ const directory=declined.getByText('Working directory · api/scripts');
+ await expect(declined.getByText(reviewed.text,{exact:true})).toBeHidden();
  await directory.click();
- await expect(declined.getByText(handoff.text,{exact:true})).toBeVisible();
+ await expect(declined.getByText(reviewed.text,{exact:true})).toBeVisible();
  await declined.getByRole('button',{name:'Decline',exact:true}).click();
  await expect(declined).toContainText('Interactive command declined');
  await expect(panel).toHaveCount(0);

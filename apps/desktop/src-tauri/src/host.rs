@@ -1051,7 +1051,7 @@ pub fn popout_opener(label: &str) -> Option<String> {
 }
 
 /// The window a menu action runs in: the one in front, or for a popped-out
-/// panel window (which runs no script) the workspace window that draws it.
+/// panel window, the workspace window that draws it.
 fn menu_target(focused: Option<String>) -> String {
     match focused {
         Some(label) if label.starts_with("popout-") => POPOUT_OPENERS
@@ -1588,8 +1588,8 @@ mod tests {
     use super::*;
     /// A popped-out panel window is drawn by the workspace window that opened
     /// it: its panels' code runs there and calls the host through that
-    /// window's webview. The popout's own webview runs no script of its own,
-    /// so it holds no capability, like a viewer, and no viewer is ever made
+    /// window's webview. The popout reads the cached background locally.
+    /// It holds no capability, like a viewer, and no viewer is ever made
     /// in it (viewers are children of the calling app webview).
     /// The app's pages frame only an extension content server's session
     /// path (EXTENSIONS.md), never any page on any local port; a `<base>` or

@@ -16,7 +16,7 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
-use tauri::utils::config::{LogicalPosition, WindowConfig};
+use tauri::utils::config::{Color, LogicalPosition, WindowConfig};
 use tauri::{Emitter, EventTarget, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
 /// The page's event: this window entered (`true`) or left full screen.
@@ -146,19 +146,27 @@ pub fn window<'a, R: Runtime, M: Manager<R>>(
     label: &str,
     url: WebviewUrl,
 ) -> tauri::Result<WebviewWindowBuilder<'a, R, M>> {
-    WebviewWindowBuilder::from_config(manager, &config(label, url, buttons()))
+    let background = manager.state::<crate::appearance::ThemeBackground>();
+    let color = background.0.lock().ok().and_then(|value| *value);
+    WebviewWindowBuilder::from_config(manager, &config(label, url, buttons(), color))
 }
 
 /// Through a window configuration, because only that places the buttons for
 /// the window as well as for its webview: the window's (tao) puts them back
 /// when it leaves full screen, the webview's (wry) whenever it draws.
-fn config(label: &str, url: WebviewUrl, buttons: Buttons) -> WindowConfig {
+fn config(
+    label: &str,
+    url: WebviewUrl,
+    buttons: Buttons,
+    background_color: Option<Color>,
+) -> WindowConfig {
     let (x, y) = buttons.position(header_height(label));
     WindowConfig {
         label: label.to_string(),
         url,
         title_bar_style: tauri::TitleBarStyle::Overlay,
         hidden_title: true,
+        background_color,
         traffic_light_position: Some(LogicalPosition { x, y }),
         // A press on the header of a window in the background moves it, as a
         // title bar does, instead of only bringing it forward.
@@ -394,7 +402,9 @@ mod tests {
             "chat-panel-1",
             WebviewUrl::App("index.html".into()),
             Buttons::FALLBACK,
+            Some(Color(38, 45, 51, 255)),
         );
+        assert_eq!(config.background_color, Some(Color(38, 45, 51, 255)));
         assert_eq!(config.label, "chat-panel-1");
         assert_eq!(config.url, WebviewUrl::App("index.html".into()));
         assert_eq!(config.title_bar_style, tauri::TitleBarStyle::Overlay);

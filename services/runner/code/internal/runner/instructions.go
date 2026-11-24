@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/availability"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/sessionstore"
@@ -11,15 +12,22 @@ import (
 
 // SetPermission changes a running session's permission mode and remembers it,
 // so a resume or a subscription rotation keeps the new mode.
-func (b *Bench) SetPermission(ctx context.Context, e *Execution, operationID, mode string) (agent.Receipt, error) {
-	if err := b.permissionAllowed(e, mode); err != nil {
+func (b *Bench) SetPermission(ctx context.Context, e *Execution, operationID, mode, exitPlanRequestID string) (agent.Receipt, error) {
+	exitPlan := exitPlanRequestID != ""
+	if exitPlan {
+		request := e.Engine.Snapshot().Pending[exitPlanRequestID]
+		if mode != "yolo" || e.Profile.Provider != "claude" || e.Options.Workflow != "plan" || request.Type != "approval" || request.Text != "ExitPlanMode" || (request.AgentID != "" && request.AgentID != "root") {
+			return agent.Receipt{}, errors.New("the conversation has no matching plan exit approval")
+		}
+	}
+	if err := b.permissionAllowed(e, mode, exitPlan); err != nil {
 		return agent.Receipt{}, err
 	}
 	r, err := e.Engine.Apply(ctx, agent.Operation{ID: operationID, Kind: agent.Permission, Permission: mode})
 	if err != nil || r.Delivery == "failed" {
 		return r, err
 	}
-	if err = b.remember(ctx, e, mode); err != nil {
+	if err = b.remember(ctx, e, mode, exitPlan); err != nil {
 		return r, err
 	}
 	// The conversation says what changed, where the person reads it.
@@ -27,7 +35,7 @@ func (b *Bench) SetPermission(ctx context.Context, e *Execution, operationID, mo
 	return r, nil
 }
 
-func (b *Bench) permissionAllowed(e *Execution, mode string) error {
+func (b *Bench) permissionAllowed(e *Execution, mode string, exitPlan bool) error {
 	if !agent.PermissionModes[mode] {
 		return errors.New("permission must be ask, read-only or yolo")
 	}
@@ -39,19 +47,25 @@ func (b *Bench) permissionAllowed(e *Execution, mode string) error {
 			return errors.New("this review template requires read-only permissions")
 		}
 	}
-	if mode == "yolo" && e.Options.Workflow == "plan" {
+	if mode == "yolo" && e.Options.Workflow == "plan" && !exitPlan {
 		return errors.New("YOLO is incompatible with plan mode")
 	}
 	return nil
 }
 
-func (b *Bench) remember(ctx context.Context, e *Execution, mode string) error {
-	if err := b.History.Amend(ctx, e.ID, func(r *sessionstore.Record) { r.Options.Permission = mode }); err != nil {
+func (b *Bench) remember(ctx context.Context, e *Execution, mode string, exitPlan bool) error {
+	update := func(options *accounts.Options) {
+		options.Permission = mode
+		if exitPlan {
+			options.Workflow = "execute"
+		}
+	}
+	if err := b.History.Amend(ctx, e.ID, func(r *sessionstore.Record) { update(&r.Options) }); err != nil {
 		return err
 	}
 	e.activity.Lock()
-	e.Options.Permission = mode
-	e.Saved.Options.Permission = mode
+	update(&e.Options)
+	update(&e.Saved.Options)
 	e.activity.Unlock()
 	return nil
 }
@@ -60,7 +74,7 @@ func (b *Bench) remember(ctx context.Context, e *Execution, mode string) error {
 // live permission changes: the agent is ended between turns and the same
 // provider conversation resumes in a new agent started in that mode.
 func (b *Bench) RestartWithPermission(ctx context.Context, e *Execution, mode string) (*Execution, error) {
-	if err := b.permissionAllowed(e, mode); err != nil {
+	if err := b.permissionAllowed(e, mode, false); err != nil {
 		return nil, err
 	}
 	if err := restartable(e); err != nil {
@@ -70,7 +84,7 @@ func (b *Bench) RestartWithPermission(ctx context.Context, e *Execution, mode st
 	if state.Reference == "" || !state.Capabilities.Resume {
 		return nil, errors.New("this conversation cannot be resumed by its provider; start a new conversation with that permission")
 	}
-	if err := b.remember(ctx, e, mode); err != nil {
+	if err := b.remember(ctx, e, mode, false); err != nil {
 		return nil, err
 	}
 	next, err := b.restart(ctx, e)

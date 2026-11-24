@@ -407,13 +407,15 @@ takes inline comments, and the agent receives them as one message.
   it, a small window) the diff keeps its whole height and the left column shows
   **Files** or **Review**, tabs above it (←/→ between them; each keeps its
   scroll); Review in the header brings the tray to the front.
-- **Send to the agent.** **Send N comments to the agent** puts one message in
-  the message box of the conversation chosen in the tray (the current one by
-  default), opened beside Changes: each comment with `member/path:line`, the
+- **Send to the agent.** **Send N comments to the agent** sends one message directly to
+  the conversation chosen in the tray (the current one by default), opened
+  beside Changes. It includes each comment with `member/path:line`, the
   quoted lines in a fenced block, the diff it was read in, and whether it is
-  outdated. Untick a comment to leave it out. Nothing is sent for you; the
+  outdated. Untick a comment to leave it out. After delivery, the
   comments are marked **Sent** to that conversation, and **Reopen** makes one
-  pending again.
+  pending again. With **Close the reviewer after sending** on (the default, remembered on this device), a reviewer whose
+  review is over and has nothing left to hand on is ended and archived, never
+  deleted ([agent types](AGENT_TYPES.md)).
 
 ### Anchoring and freshness
 
@@ -564,9 +566,9 @@ card in the diff: **Accept** makes it pending; **Dismiss** asks why and keeps
 the reason (`dismissed`); **Ask Codex** opens the reviewer conversation with
 a follow-up about that finding started in its message box. **Send N comments
 to the agent** sends accepted findings and your pending comments to the
-author's message box as one message (the author is preselected), each finding
+author's conversation as one message (the author is preselected), each finding
 exactly as filed: its severity, title, id and author, the quoted lines and the
-body. Nothing is sent for you.
+body. The button sends the message immediately.
 
 **Following it.** The tray lists the workspace's reviews, live
 (`Codex is reviewing turn 3 · 1 blocker so far`). The author's conversation
@@ -617,8 +619,8 @@ structured channels only, and you see every step.
    the timeline: **Clean ✓** (no blocker open; said only when no major is
    open either — with majors open it reads *No blockers · 2 major open*, the
    detail *No blocker open after 1 round; 2 major still open.*, and the card
-   offers **Send 2 findings to Claude**, which puts the unsent ones in the
-   author's message box as the tray's Send does), **max rounds** (a blocker open
+   offers **Send 2 findings to Claude**, which sends the remaining findings directly to
+   the author), **max rounds** (a blocker open
    after the limit, 3 by default, 1–10), **stuck** (the same blocker still open
    after two fixes), **error** (a message could not be delivered), or you
    **stopped** or **took over**. Max rounds, stuck and error ask you: the tray

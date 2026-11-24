@@ -559,8 +559,8 @@ func (b *Bench) startReview(ctx context.Context, req ReviewRequest, markStarted 
 	if source, err = b.latest(source); err != nil {
 		return nil, reviews.Run{}, err
 	}
-	if agent.IsAssistant(source.Purpose) {
-		return nil, reviews.Run{}, errors.New("an assistant conversation has no work to review")
+	if t := agent.TypeOf(source.Purpose); !t.Reviewable {
+		return nil, reviews.Run{}, fmt.Errorf("a conversation of type %s has no work to review", t.Label)
 	}
 	if source.CollectionID == "" {
 		return nil, reviews.Run{}, errors.New("only a conversation in a Lazybox workspace can be reviewed")
@@ -651,7 +651,7 @@ func (b *Bench) startReview(ctx context.Context, req ReviewRequest, markStarted 
 		}
 	}
 	markStarted()
-	e, err := b.OpenCollection(profile.ID, workspace.ID, "", accounts.Options{Permission: "read-only", Model: chosen.model}, "", "")
+	e, err := b.OpenReviewer(profile.ID, workspace.ID, accounts.Options{Permission: "read-only", Model: chosen.model})
 	if err != nil {
 		return nil, reviews.Run{}, err
 	}
@@ -972,7 +972,7 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match, operation, reply string) {
 // person turned that on, the turn changed files, and no review of this
 // conversation is already running.
 func (b *Bench) maybeAutoReview(e *Execution, operation string, matches []reviews.Match) {
-	if b.Preferences == nil || !b.Preferences.Snapshot().Review.AutoStart || b.Checkpoints == nil || operation == "" || e.CollectionID == "" || agent.IsAssistant(e.Purpose) {
+	if b.Preferences == nil || !b.Preferences.Snapshot().Review.AutoStart || b.Checkpoints == nil || operation == "" || e.CollectionID == "" || !agent.TypeOf(e.Purpose).Reviewable {
 		return
 	}
 	for _, m := range matches {

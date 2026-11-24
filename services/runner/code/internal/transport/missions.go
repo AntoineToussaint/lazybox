@@ -203,8 +203,8 @@ func (s *Service) assign(ctx context.Context, store *work.Store, mission, key st
 			return nil, "", "", err
 		}
 	}
-	if e.Purpose != "" && e.Purpose != "coding" {
-		return nil, "", "", fmt.Errorf("%w: an Ask Lazybox conversation cannot work on a task", work.ErrRefused)
+	if t := agent.TypeOf(e.Purpose); !t.Delegates {
+		return nil, "", "", fmt.Errorf("%w: a conversation of type %s cannot work on a task", work.ErrRefused, t.Label)
 	}
 	conversation := e.Saved.ConversationID
 	if conversation == "" {

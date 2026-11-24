@@ -23,6 +23,7 @@ export { actionsFor, actionMenuItems, runAction, useAction, useActions, actionDe
 export { WebWindow } from './WebWindow';
 export { installLinkRouting, openInViewer } from './web-links';
 export { userCommands, useUserCommands, type UserCommand } from './user-commands';
+export { getAppearance, subscribeAppearance } from './appearance/apply';
 export { useAppearanceSync, useAppearance } from './appearance/useAppearance';
 export { AppearanceSync } from './appearance/AppearanceSync';
 export { AppearanceSettings } from './AppearanceSettings';

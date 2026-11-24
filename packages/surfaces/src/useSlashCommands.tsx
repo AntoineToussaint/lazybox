@@ -10,7 +10,7 @@ import type { ReviewLauncher } from './review-client';
 import { copyText, showMenuNotice } from './ContextMenu';
 import type { VimMode } from './composer-vim';
 import { conversationArtifacts, trackable } from './MessageArtifactActions';
-import { saveSnippetUse } from './snippet-usage';
+import { readCommandUsage, saveCommandUse, saveSnippetUse } from './snippet-usage';
 import { SlashMenu, SLASH_MENU_ID, slashOptionId } from './SlashMenu';
 import { useDismiss } from './dismiss';
 import { useConfirmCard } from './confirm-card';
@@ -146,7 +146,7 @@ export function useSlashCommands(o: Options) {
   // faster than that render runs (fast or scripted typing, a busy machine)
   // pile those up until React stops with "Maximum update depth exceeded".
   if (dismissed && !o.message.startsWith('/')) setDismissed(false);
-  const menu = o.enabled && (!vimMode || vimMode === 'insert') ? slashMenu(o.message, commands, dismissed) : null;
+  const menu = o.enabled && (!vimMode || vimMode === 'insert') ? slashMenu(o.message, commands, dismissed, o.message.startsWith('/') ? readCommandUsage(o.viewState) : {}) : null;
   const menuKey = menu ? `${menu.kind}:${menu.kind === 'hint' ? menu.command.key : menu.kind === 'choices' ? `${menu.command.key}:${menu.query}` : menu.query}:${menu.kind === 'hint' ? 0 : menu.items.length}` : '';
   const [picked, setPicked] = useState({ key: '', index: 0 });
   const selected = menu && menu.kind !== 'hint' ? (picked.key === menuKey ? Math.min(picked.index, menu.items.length - 1) : Math.max(0, menu.best)) : -1;
@@ -229,6 +229,7 @@ export function useSlashCommands(o: Options) {
     if (command.disabled) { notice(command.disabled); return; }
     // `/review` alone starts the default reviewer: one Enter, not a menu.
     if (!args && (command.choices?.length || command.needsArgument) && !(command.name === 'review' && reviewLauncher.choices.length)) { borrow(`/${command.name} `); return; }
+    if (from === 'box') saveCommandUse(latest.current.viewState, command.key);
     const back = boxAfterCommand(from, stash.current);
     if (back !== undefined) { stash.current = null; setText(back); }
     switch (command.name) {
@@ -331,14 +332,14 @@ export function useSlashCommands(o: Options) {
     }
     const command = menu.items[index]?.command;
     if (!command) return;
-    if (command.group === 'snippet') { saveSnippetUse(latest.current.viewState, command.name); stash.current = null; setText(command.body || '', command.name); return; }
+    if (command.group === 'snippet') { saveCommandUse(latest.current.viewState, command.key); saveSnippetUse(latest.current.viewState, command.name); stash.current = null; setText(command.body || '', command.name); return; }
     if (command.disabled) { notice(command.disabled); return; }
     if (complete || command.argumentHint || command.choices?.length || command.needsArgument) { setText(`/${command.name} `); return; }
     if (command.group === 'provider') {
       const text = `/${command.name}`;
       finish();
       // A send that did not go gives the command back to the box.
-      void latest.current.actions.sendText(text).then(sent => { if (!sent && !latest.current.message) latest.current.setText(text); });
+      void latest.current.actions.sendText(text).then(sent => { if (sent) saveCommandUse(latest.current.viewState, command.key); else if (!latest.current.message) latest.current.setText(text); });
       return;
     }
     run(command, '');
@@ -373,9 +374,8 @@ export function useSlashCommands(o: Options) {
       if (menu.kind === 'commands' && menu.query && picked.key !== menuKey) {
         const command = menu.items[selected]?.command;
         const typed = menu.query.toLowerCase();
-        const exact = findCommand(commands, typed);
         // Fuzzy matches stay available for an explicit selection.
-        if (exact ? command !== exact : !command || ![command.name, ...(command.aliases || [])].some(name => name.toLowerCase().startsWith(typed))) return false;
+        if (!command || ![command.name, ...(command.aliases || [])].some(name => name.toLowerCase().startsWith(typed))) return false;
       }
       event.preventDefault(); choose(selected); return true;
     }
@@ -392,8 +392,8 @@ export function useSlashCommands(o: Options) {
     switch (decision.kind) {
       case 'text': return false;
       case 'lazybox': run(decision.command, decision.args); return true;
-      case 'provider': if (decision.command.disabled) { notice(decision.command.disabled); return true; } return false;
-      case 'snippet': setText(decision.command.body || '', decision.command.name); return true;
+      case 'provider': if (decision.command.disabled) { notice(decision.command.disabled); return true; } saveCommandUse(latest.current.viewState, decision.command.key); return false;
+      case 'snippet': saveCommandUse(latest.current.viewState, decision.command.key); setText(decision.command.body || '', decision.command.name); return true;
     }
   };
 

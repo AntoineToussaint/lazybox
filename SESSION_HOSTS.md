@@ -49,12 +49,14 @@ speak the version in its record without displacing the attached Runner.
 
 - An agent's output is JSON lines, and only JSON is sequenced: a line that is
   not JSON (a stray print) cannot travel in a frame, so the host keeps it in
-  the bounded, redacted stderr tail its exit report carries instead. Before,
+  the bounded, redacted stderr tail its exit report carries instead (its
+  first 512 bytes, redacted before they are cut). Before,
   such a line cut the connection, and stayed at the head of the log so that
   every re-attachment failed on it. JSON that is not a message (`42`, a
-  string, `null`) reaches the Runner, which records it as a diagnostic in the
-  agent's stderr tail and acknowledges it in order with the lines before it;
-  the agent goes on being supervised. A local pipe does the same.
+  string, `null`) reaches the Runner, which acknowledges it in order with the
+  lines before it and keeps a diagnostic of it, reported with the agent's
+  stderr when its stream ends (an exit, a lost connection, a close); the
+  agent goes on being supervised. A local pipe does the same.
 - Every output line or chunk gets a transport sequence number. The Runner
   acknowledges it only after what it derived is durable: for agents, the
   events in the execution journal (each records its `transportCursor`); for
@@ -91,9 +93,11 @@ speak the version in its record without displacing the attached Runner.
   full, then stops: the program blocks on its own output instead of losing it.
   A Runner that is slow to read gets the same backpressure; only its process
   dying, or a newer Runner attaching, ends its connection. Once the program
-  has been waited for, the host takes what is left in its pipes past the
-  limit (a pipe's worth): a stopped program's exit is reported even when no
-  Runner is left to make room.
+  has been waited for, the host takes what is left in its pipes or its
+  terminal past the limit, up to 1 MiB more: a stopped program's exit is
+  reported even when no Runner is left to make room. Output beyond that,
+  from a descendant that outlived the program (a background job still
+  holding a terminal), is dropped, and the exit report says so.
 - Only the attached Runner's operations count. A connection a newer Runner
   superseded is closed at its next operation, which is not applied.
 - The Runner's input to an agent is queued and written by its own goroutine, so
@@ -140,8 +144,9 @@ notices in the conversation.
 - A command's connection to its host that ends without the host saying why
   (not superseded, not this Runner detaching) is re-attached from the last
   chunk recorded, as a restart would; the command was not stopped. A host
-  that is gone is reported as `command outcome unknown`; one that shows
-  another client attached was taken over, and this Runner stands down. A
+  that is gone is reported as `command outcome unknown`. The host's own
+  "attached" is not a reason to stand down (it counts the dead connection
+  until it reads its close); attaching supersedes that stale client. A
   connection that keeps ending before anything arrives on it is given up
   after three attempts and the command stopped. Before, the command was
   marked done while it ran, and the next Runner's sweep stopped it.
@@ -586,13 +591,16 @@ directory, in `hosts/` and `command-hosts/`.
   `TestSecretCutByTheWindowDoesNotLeak`.
 - Robustness fixes, each failing without its fix:
   `TestALineThatIsNotJSONDoesNotBlockTheConnection`,
-  `TestAStopWithAFullBufferEndsTheHost`, `TestAStopNoRunnerSeesThroughIsAbandoned`
+  `TestAStopWithAFullBufferEndsTheHost`, `TestAStopNoRunnerSeesThroughIsAbandoned`,
+  `TestOutputAfterTheProgramIsGoneIsBounded`,
+  `TestANonJSONLineCutThroughACredentialDoesNotLeakIt`
   (`internal/sessionhost`); `TestJSONThatIsNotAMessageKeepsTheAgentSupervised`,
   `TestALastLineThatIsNotAMessageIsAcknowledged`,
   `TestCloseAfterALineThatIsNotAMessageStopsTheAgent` (`adapters/jsonl`);
   `TestACommandThatFillsItsJournalKeepsItsCompletion`,
   `TestAnUnrecordedCompletionLeavesTheExitWithTheHost`,
   `TestADroppedHostConnectionIsReattached`,
+  `TestADroppedConnectionTheHostStillCountsIsReattached`,
   `TestRequestsToAFollowedRunOutliveARunnerRestart` (`runner/commands`).
 - Redelivery, backpressure, proxy re-pointing, token authentication, the
   version window, stream mode, orphan limit, terminate-kills-descendants, and

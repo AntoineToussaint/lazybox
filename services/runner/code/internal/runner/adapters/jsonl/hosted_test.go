@@ -426,3 +426,27 @@ func TestCloseAfterALineThatIsNotAMessageStopsTheAgent(t *testing.T) {
 	}
 	awaitStopped(t, pid)
 }
+
+// The diagnostic a line that is not a message leaves is reported with the
+// agent's end, as its stderr is.
+func TestTheDiagnosticOfALineThatIsNotAMessageIsReportedAtExit(t *testing.T) {
+	root := hostRoot(t)
+	p, _ := startHosted(t, context.Background(), root)
+	defer p.Close()
+	if err := p.Notify("raw", "42"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Notify("finish", nil); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		m, err := p.Receive(timeout(t))
+		if err != nil {
+			if !strings.Contains(err.Error(), "not a message") || !strings.Contains(err.Error(), "42") {
+				t.Fatalf("the exit does not report the diagnostic: %v", err)
+			}
+			return
+		}
+		p.Commit(m.Seq)
+	}
+}

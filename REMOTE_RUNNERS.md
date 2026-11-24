@@ -1166,7 +1166,9 @@ Lazybox installation using the operator's kubeconfig and kubectl:
 lazybox remote add-kubernetes --name pilot --context CONTEXT --namespace NAMESPACE --workload statefulset/RUNNER --container RUNNER
 ```
 
-Use the names from the rendered workload. Lazybox stores the explicit context,
+Use the names from the rendered workload. Lazybox first probes the container
+(its platform, and that its image includes a Lazybox that serves links; it
+never installs into a pod, which would lose it), then enrolls. It stores the explicit context,
 namespace, workload and container alongside the pinned Runner key. It resolves
 the workload's pod on each connection. The desktop discovers the saved Runner
 through the normal Runner directory. For a CLI-only connection, use

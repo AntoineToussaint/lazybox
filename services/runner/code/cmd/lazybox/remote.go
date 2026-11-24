@@ -157,7 +157,7 @@ func (c *cli) linkOwners(args []string) error {
 	name := f.String("name", "", "add: the client's name (\"MacBook Pro\")")
 	channel := f.String("channel-key", "", "add: the client's X25519 channel public key (base64url)")
 	identity := f.String("identity-key", "", "add: the client's P-256 identity public key (PKIX, base64url)")
-	via := f.String("via", "cli", "add: how the key came here (ssh, cli)")
+	via := f.String("via", "cli", "add: how the key came here (ssh, kubernetes, cli)")
 	positional, err := c.parse(f, args)
 	if err != nil {
 		return err
@@ -681,13 +681,21 @@ func (c *cli) remoteAddKubernetes(args []string) error {
 	ctx, cancel := context.WithTimeout(c.ctx, link.StepTimeout())
 	defer cancel()
 	route := link.KubernetesRoute{Target: target}
+	// The container's image installs Lazybox: it is checked, never installed into a pod that would lose it.
+	probe, err := link.RunProbe(ctx, route)
+	if err != nil {
+		return err
+	}
+	if probe.Lazybox == "" || probe.Link != 1 {
+		return fmt.Errorf("%s has no Lazybox that serves links (%s): run a Runner image that includes it", route.Describe().Host, probe.Summary())
+	}
 	enrolment, err := link.Enrol(ctx, route, keys, machineName())
 	if err != nil {
 		return err
 	}
 	r := link.Remote{Name: *name, Route: route.Kind(), Host: route.Describe().Host, Kubernetes: &target,
 		RunnerKey: enrolment.RunnerKey, Fingerprint: enrolment.Fingerprint, RunnerID: enrolment.RunnerID,
-		Machine: enrolment.Machine, OS: "linux", Release: enrolment.Release, KeyID: enrolment.KeyID, AddedAt: time.Now().UTC()}
+		Machine: firstNonEmptyString(enrolment.Machine, probe.Hostname), OS: probe.OS, Arch: probe.Arch, Release: enrolment.Release, KeyID: enrolment.KeyID, AddedAt: time.Now().UTC()}
 	if err = remotes.Save(r); err != nil {
 		return err
 	}

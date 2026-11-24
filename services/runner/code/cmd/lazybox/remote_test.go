@@ -525,6 +525,20 @@ exec "$@"
 	if err != nil {
 		t.Fatalf("enroll Kubernetes remote: %v\n%s", err, out)
 	}
+	// The container says what it runs (the probe), as an ssh host does.
+	out, err = w.lazybox("remote", "ls", "--json")
+	var listed struct {
+		Remotes []struct{ Name, OS, Arch string }
+	}
+	probed := false
+	if err == nil && json.Unmarshal([]byte(out), &listed) == nil {
+		for _, r := range listed.Remotes {
+			probed = probed || (r.Name == "pilot" && r.OS != "" && r.Arch != "")
+		}
+	}
+	if !probed {
+		t.Fatalf("the Kubernetes remote's platform was not probed: %v\n%s", err, out)
+	}
 	// A desktop-launched link may have a different PATH from the terminal.
 	w.extraEnv = nil
 	w.startConnect("pilot")

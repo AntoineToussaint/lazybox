@@ -182,6 +182,8 @@ leave out.
 - **Said plainly when something is off** No network, a Runner on another version than the app, an update that did not finish: one sentence each, with the fix.
 - **Owner uncertain, settled** A workspace or conversation a previous Lazybox left with agents or commands it can't confirm stopped no longer blocks new conversations and deleting with no way out. Lazybox checks each recorded process by its ID and start time and clears what is gone by itself, which after your Mac restarts is everything. Otherwise Delete, New conversation, the workspace's page and the conversation show which agent or command, its PID and command line, and whether it runs, with Stop them and continue, or They're already stopped, continue.
 
+- **A Runner in Kubernetes** `lazybox remote add-kubernetes` reaches a Runner deployed in a cluster through `kubectl exec`, with the same owner handshake and pinned key as SSH; the desktop finds it like any remote Runner.
+
 ### Security
 
 - **On this Mac only** The Runner answers only on loopback, to a credential in a file only you can read.

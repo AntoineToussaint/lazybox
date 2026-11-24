@@ -55,6 +55,13 @@ leave out.
 
 ### Workspaces and tabs
 
+- **Deleting a workspace keeps commits on no branch** A repository with commits only a detached HEAD reaches, or a rebase, merge, cherry-pick or bisect stopped part-way, counts as changed: deleting the workspace asks you to discard first instead of losing them.
+- **Reverting files keeps what the checkpoint could not save** A file the safety checkpoint skipped (ignored, too large, past the untracked limit, in a nested repository) is left as it is and named, instead of being overwritten where undo could not bring it back. Ignored files in a folder the revert would replace with a file stay too.
+- **A deleted workspace stays deleted** Retrying an add-repositories request no longer brings back a workspace that is being deleted or was deleted.
+- **Re-adding a removed repository from another clone** The new clone gets an entry of its own, so workspaces made from the removed clone can still be deleted.
+- **A missing repository folder does not stop the Runner** A registered repository whose folder was moved, deleted or unmounted is marked unavailable; every workspace still loads, and creating a workspace from that repository says why it cannot.
+- **Saved state survives a power cut** Linked items, reviews, artifacts, code checkpoints, the repository catalog and workspace settings finish every save on disk, and a failed save no longer shows a change that was never written. An unreadable items file is kept aside under its own name, never over an earlier one.
+- **Verification checkouts are cleaned up** Each acceptance check's checkout is removed once its command finishes, so verification no longer fills the disk with full clones.
 - **The agent browser follows a slow page** A click that sends the page elsewhere is waited for even when the page is slow to leave, so the agent learns where it landed instead of reading the page it left.
 - **A Web panel opens in its own window** In the desktop app, Open in new window (or a drag into a panel window already open) takes the page with it, history, scroll and forms intact. Put it back or close that window and the page comes back the same way.
 - **The Dock shows the Inbox count** The badge on the app icon is the Inbox button's number, pull requests and tasks included, not only conversations waiting for an answer.

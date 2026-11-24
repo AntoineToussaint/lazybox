@@ -27,7 +27,8 @@ GitHub API connection supplies repository discovery/import and issue/PR lists.
    choose **Remove…** beside the checkout. Confirm to remove the clean
    worktree while keeping its local branch and repository library entry.
    End active workspace sessions, terminals, and commands first. Commit or
-   move changed, untracked, or ignored files before removing the checkout.
+   move changed, untracked, or ignored files, and finish or abort a rebase,
+   merge, cherry-pick, revert or bisect, before removing the checkout.
    Conversations and existing worktrees remain in place.
 
 **Connections & folders** expands inside the picker: connect GitHub or choose a
@@ -346,7 +347,14 @@ uncommitted changes in the source are not copied into the new worktrees.
 
 Repeating registration through another clone or worktree of the same GitHub
 repository returns the existing library entry. Local repositories without a
-recognized GitHub origin use their canonical Git common directory instead. The library persists across Runner restarts. A checkout needs an
+recognized GitHub origin use their canonical Git common directory instead. A
+repository removed from the library and added again from a different clone gets
+an entry of its own: the removed entry stays, hidden, because the workspaces
+made from it name its Git directory and need it to be deleted. The library persists across Runner restarts. A registered
+repository whose folder is missing at startup (moved, deleted, unmounted) is
+marked unavailable instead of stopping the Runner: every workspace still
+loads, and creating a workspace from it says why it cannot until the folder is
+back and the Runner restarts. A checkout needs an
 initial commit; subfolders and `.git` paths are rejected rather than silently
 registering a parent repository.
 
@@ -940,7 +948,10 @@ files, files too large to checkpoint, repositories added since. It is refused
 while any agent in the workspace is in a turn or has a message queued. Before
 writing anything the Runner saves the current files as a safety checkpoint, then
 rewrites only the paths that differ and checks the result, naming any file it
-could not restore. **Undo revert** (in the toast, and on the reverted turn's
+could not restore. A path where something the safety checkpoint left out sits
+now (an ignored file, one too large or past the untracked limit, a nested
+repository, or a folder still holding ignored files that the revert would
+replace with a file) is left as it is and named: undo could not bring it back. **Undo revert** (in the toast, and on the reverted turn's
 marker) restores the safety checkpoint; an undo is itself undoable. The
 conversation is kept, not truncated: a Runner notice records the revert, and the
 agent is told with the next message (through the same path as instruction
@@ -1131,7 +1142,11 @@ fails, Recently deleted shows the failure until you dismiss it.
 **Workspace actions → Delete workspace** uses a confirmation button without name
 typing. It previews active executions and local
 files, states the detected risks, and asks explicitly before stopping sessions
-or discarding changed/untracked/ignored files. Cleanup first fences new workspace
+or discarding changed/untracked/ignored files. A repository whose HEAD is
+detached (its commits may be on no branch) or with a rebase, merge,
+cherry-pick, revert or bisect stopped part-way counts as changed too, even
+when `git status` is clean: removing the worktree deletes its HEAD history and
+the operation's state, so deleting asks you to discard first. Cleanup first fences new workspace
 attachments, closes owned provider processes, cancels and waits for owned commands,
 then removes each worktree through Git and removes the workspace folder. Source
 repositories, branches (including committed work), accounts and conversation

@@ -52,9 +52,16 @@ func TestVersionNamesLazyboxV2(t *testing.T) {
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestVersionNamesLazyboxV2$")
 	cmd.Env = append(os.Environ(), "LAZYBOX_TEST_VERSION_MAIN=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("%v: %s", err, out)
+		t.Fatalf("%v: %s\n%s", err, out, stderr.String())
+	}
+	// The child is this test binary again: its TestMain must not compile the
+	// remote fixture inside this test's deadline.
+	if strings.Contains(stderr.String(), buildingRemoteFixture) {
+		t.Fatalf("the --version child built the remote fixture:\n%s", stderr.String())
 	}
 	if line := strings.SplitN(string(out), "\n", 2)[0]; line != "lazybox "+version.String()+" (Lazybox V2)" {
 		t.Fatalf("--version printed %q", line)

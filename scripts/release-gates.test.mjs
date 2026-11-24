@@ -56,6 +56,10 @@ test('make check and CI install the agent browser before the browser service tes
   assert.equal(plan.status, 0, plan.stderr);
   const install = plan.stdout.indexOf('npm run --silent install:browser'), tests = plan.stdout.indexOf('npm run check:client');
   assert.ok(install >= 0 && install < tests, `make check-workspaces runs:\n${plan.stdout}`);
+  // The script both of them run installs the build the browser service's own
+  // playwright-core pins: its headless shell, kept beside any other revision.
+  const { scripts } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  assert.equal(scripts['install:browser'], 'playwright-core install --only-shell --no-remove chromium');
   const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
   const job = ci.slice(ci.indexOf('\n  typescript:'));
   const ciInstall = job.indexOf('- run: npm run install:browser'), ciTests = job.indexOf('- run: npm run check:client');

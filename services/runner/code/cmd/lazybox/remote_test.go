@@ -25,6 +25,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/installation"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/link"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/testselect"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen/genconnect"
 )
@@ -72,15 +73,35 @@ type remoteWorld struct {
 // TestMain does it once for the package, before any test runs: no test pays
 // for the compile, and none times out on a loaded box because of it. Its time
 // is bounded by the package's go test -timeout, not the per-test deadline.
+//
+// It is built only when one of remoteTests will run: not under -short (they
+// skip), -list, a -run that selects none of them (make release-smoke), or in a
+// re-executed helper child. A lazy build on first use would put the compile
+// back inside that test's deadline, which is what ran it over.
 var remoteFixture struct {
+	built       bool
 	bin, bundle string
 	err         error
 }
 
+// remoteTests are the tests that call newRemoteWorld.
+var remoteTests = []string{"TestRemoteRunnerOverSSHEndToEnd", "TestRemoteRunnerOverKubernetesExec"}
+
+// buildingRemoteFixture is what TestMain prints to stderr when it builds, so a
+// helper child can be checked to build nothing.
+const buildingRemoteFixture = "TestMain: building lazybox and lazybox-runner for the remote tests"
+
+// helperChild reports whether this test binary was re-executed by a test as a
+// helper program. Helpers that are only a program exit in init
+// (run_background_test.go); this one runs a test of its own.
+func helperChild() bool { return os.Getenv("LAZYBOX_TEST_VERSION_MAIN") == "1" }
+
 func TestMain(m *testing.M) {
 	flag.Parse()
 	var dir string
-	if !testing.Short() {
+	if !testing.Short() && !helperChild() && testselect.WillRun(remoteTests...) {
+		fmt.Fprintln(os.Stderr, buildingRemoteFixture)
+		remoteFixture.built = true
 		dir, remoteFixture.err = os.MkdirTemp("", "lbx-remote-bin-")
 		if remoteFixture.err == nil {
 			remoteFixture.bin, remoteFixture.bundle, remoteFixture.err = buildRemoteFixture(dir)
@@ -120,6 +141,9 @@ func newRemoteWorld(t *testing.T) *remoteWorld {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("builds the Runner and runs it: not in -short")
+	}
+	if !remoteFixture.built {
+		t.Fatalf("TestMain built no remote fixture: add %s to remoteTests", t.Name())
 	}
 	if remoteFixture.err != nil {
 		t.Fatalf("TestMain could not build the remote fixture: %v", remoteFixture.err)

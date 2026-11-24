@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"connectrpc.com/vanguard/vanguardgrpc"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/testselect"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"google.golang.org/grpc"
 )
@@ -22,22 +24,36 @@ import (
 // cliBuild is this build's lazybox CLI. Compiling is integration work, so
 // TestMain does it once for the package, before any test runs, and no test
 // pays for it; its time is bounded by go test's -timeout for the package, not
-// by the per-test deadline. It is built with the real HOME, so it uses the
-// existing module cache.
+// by the per-test deadline. It is built only when its test will run: zsh is
+// installed (the test skips otherwise) and -list, -run and -skip select it. It
+// is built with the real HOME, so it uses the existing module cache.
 var cliBuild struct {
-	dir string
-	err error
+	built bool
+	dir   string
+	err   error
+}
+
+const pipeInTerminalTest = "TestAPipeInAWorkspaceTerminalReachesTheWorkspaceConsole"
+
+func zshInstalled() bool {
+	_, err := os.Stat("/bin/zsh")
+	return err == nil
 }
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "lbx-cli-")
-	if err == nil {
-		build := exec.Command("go", "build", "-o", filepath.Join(dir, "lazybox"), "github.com/AntoineToussaint/lazybox/services/runner/code/cmd/lazybox")
-		if out, buildErr := build.CombinedOutput(); buildErr != nil {
-			err = fmt.Errorf("go build: %v\n%s", buildErr, out)
+	flag.Parse()
+	var dir string
+	if zshInstalled() && testselect.WillRun(pipeInTerminalTest) {
+		cliBuild.built = true
+		var err error
+		if dir, err = os.MkdirTemp("", "lbx-cli-"); err == nil {
+			build := exec.Command("go", "build", "-o", filepath.Join(dir, "lazybox"), "github.com/AntoineToussaint/lazybox/services/runner/code/cmd/lazybox")
+			if out, buildErr := build.CombinedOutput(); buildErr != nil {
+				err = fmt.Errorf("go build: %v\n%s", buildErr, out)
+			}
 		}
+		cliBuild.dir, cliBuild.err = dir, err
 	}
-	cliBuild.dir, cliBuild.err = dir, err
 	code := m.Run()
 	if dir != "" {
 		_ = os.RemoveAll(dir)
@@ -51,8 +67,11 @@ func TestMain(m *testing.M) {
 // Runner's CLI runs, reaches the Runner over Connect with the terminal's own
 // credential, and the workspace gets the run with its compact view.
 func TestAPipeInAWorkspaceTerminalReachesTheWorkspaceConsole(t *testing.T) {
-	if _, err := os.Stat("/bin/zsh"); err != nil {
+	if !zshInstalled() {
 		t.Skip("zsh is not installed")
+	}
+	if !cliBuild.built {
+		t.Fatal("TestMain built no CLI: its selection names " + pipeInTerminalTest)
 	}
 	if cliBuild.err != nil {
 		t.Fatalf("TestMain could not build the CLI: %v", cliBuild.err)

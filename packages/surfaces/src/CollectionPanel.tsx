@@ -1,7 +1,7 @@
 import { useKeyboardAction, useKeymap } from "./keyboard";
 import { useConversationIndex } from "./useConversationIndex";
 import { isListed } from "./attention";
-import { DeleteConversationDialog } from "./DeleteConversationDialog";
+import { useDeleteConversation } from "./useDeleteConversation";
 import { repositoryLabel } from "./repository-model";
 import { WorkspaceRepositories } from "./WorkspaceRepositories";
 import { PendingDeletions } from "./PendingDeletions";
@@ -12,7 +12,7 @@ import { WorkspaceRepositoryDialog } from "./WorkspaceRepositoryDialog";
 import { ConversationList } from "./ConversationList";
 import { NewTaskStart } from "./NewTaskSheet";
 import { useEffect, useRef, useState } from "react";
-import type { Collection, Repository, Session } from "@lazybox/protocol";
+import type { Collection, Repository } from "@lazybox/protocol";
 import { useRunner } from "./RunnerContext";
 import { RunnerHealthDot, useMergedInbox, useRunnerDirectory, type RunnerView } from "./RunnerDirectory";
 import { groupByMachine, linkStateText, routeLabel, rttText, runnerCounts, runnerStateText, SLOW_RTT_MS, thisMachineLabel, type Machine, type RunnerRow } from "./runner-directory";
@@ -238,7 +238,7 @@ function WorkspaceList({
   const git = useGitSummaries(index.sessions.map(s => `${s.id}:${s.busy ? 1 : 0}:${s.status}`).join(","));
   // The tracked pull requests: each row's one badge is its most urgent (pull-requests-model.ts).
   const tracked = useTrackedItems();
-  const [deletingConversation, setDeletingConversation] = useState<Session>();
+  const deletion = useDeleteConversation();
   // Each workspace lists every conversation under it; a fold keeps one quiet.
   const [folded, setFolded] = useState<string[]>(() => { try { const value: unknown = JSON.parse(readPreference(viewState, "workspaces.folded") || "[]"); return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string").slice(0, 256) : []; } catch { return []; } });
   const toggleFold = (id: string) => {
@@ -405,7 +405,9 @@ function WorkspaceList({
                     commandId: "",
                   })
                 }
-                onDeleteConversation={() => setDeletingConversation(single)}
+                onDeleteConversation={() => single && void deletion.remove(single, () => {
+                  if (target.sessionId === single.id) onTarget({ ...target, sessionId: "", commandId: "" });
+                })}
                 workspace={collection}
                 repositoryNames={collection.members.map((member) => {
                   const repo = repositories.find(
@@ -459,17 +461,7 @@ function WorkspaceList({
         target={target}
         onTarget={onTarget}
       />
-      {deletingConversation && (
-        <DeleteConversationDialog
-          session={deletingConversation}
-          onClose={() => setDeletingConversation(undefined)}
-          onDeleted={() => {
-            if (target.sessionId === deletingConversation.id)
-              onTarget({ ...target, sessionId: "", commandId: "" });
-            setDeletingConversation(undefined);
-          }}
-        />
-      )}
+      {deletion.ownership}
       {historyOpen && (
         <DraggableDialog
           ref={historyDialog}

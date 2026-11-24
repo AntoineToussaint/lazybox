@@ -106,29 +106,6 @@ try {
     await stop.screenshot({ path: `.cache/dialogs-stop-${colorScheme}.png` });
     await stop.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(stop).toHaveCount(0);
-    // The shared confirmation (ConfirmDialog): Delete conversation, its danger button off until the box is ticked, then a readable fill.
-    await page.locator('.panel-chat .chat-heading .chat-status').click({ button: 'right' });
-    await page.getByRole('menuitem', { name: 'Delete conversation…' }).click();
-    const deletion = page.getByRole('dialog', { name: 'Delete conversation', exact: true });
-    await expect(deletion.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
-    assert.equal(await deletion.evaluate(node => getComputedStyle(node.querySelector('h2')).fontSize), '15px', `${colorScheme}: the confirmation title is the shared size`);
-    const confirmButton = deletion.locator('footer button.danger');
-    // Wait until the dialog has checked for running work: a live conversation then asks for the stop box.
-    await expect(deletion.getByText('Checking running resources…')).toHaveCount(0);
-    const box = deletion.getByRole('checkbox');
-    if (await box.count()) {
-      await expect(confirmButton).toBeDisabled();
-      await page.waitForTimeout(150);
-      await deletion.screenshot({ path: `.cache/dialogs-delete-conversation-off-${colorScheme}.png` });
-      await box.check();
-    }
-    await expect(confirmButton).toBeEnabled();
-    // Measured once its colours have settled (buttons ease between states).
-    await expect.poll(async () => (await confirmButton.evaluate(contrast)).ratio, { message: `${colorScheme}: the delete label reads on its fill` }).toBeGreaterThanOrEqual(4.5);
-    await page.waitForTimeout(150);
-    await deletion.screenshot({ path: `.cache/dialogs-delete-conversation-${colorScheme}.png` });
-    await deletion.getByRole('button', { name: 'Cancel', exact: true }).click();
-    await expect(deletion).toHaveCount(0);
     // And a dialog with a primary action: New workspace, starting on its name.
     await page.getByRole('button', { name: 'Work', exact: true }).click();
     await page.getByRole('button', { name: 'New workspace', exact: true }).click();

@@ -197,7 +197,7 @@ try {
   const menu = page.locator('.context-menu[data-depth="0"]');
   // The development build adds Inspect element after everything, in its own section.
   const entries = () => menu.evaluate(n => [...n.children].map(child => child.getAttribute('role') === 'separator' ? '—' : child.querySelector('.context-menu-label')?.textContent || '')).then(list => list.join('|').replace(/\|—\|Inspect element$/, '').split('|'));
-  const expected = ['Open', 'Open in new tab', 'Open beside', 'Open below', 'Open in new window', 'Move to new page', 'Peek', '—', 'Rename', 'Pin', 'Mark as read', '—', 'Copy ID', 'Stop', 'Open in Terminal…', 'Continue in Claude Code…', '—', 'Archive…', 'Delete…'];
+  const expected = ['Open', 'Open in new tab', 'Open beside', 'Open below', 'Open in new window', 'Move to new page', 'Peek', '—', 'Rename', 'Pin', 'Mark as read', '—', 'Copy ID', 'Stop', 'Open in Terminal…', 'Continue in Claude Code…', '—', 'Archive…', 'Delete'];
   await agents.locator('li', {hasText: 'Refactor the parser'}).locator('.agent-row').click({button: 'right'});
   await expect(menu).toBeVisible();
   assert.deepEqual(await entries(), expected, 'the Agents row menu');
@@ -296,11 +296,10 @@ try {
   await expect(phoneRow('Old exploration')).toHaveCount(0, {timeout: 10_000});
   await phoneContext.close();
   await agents.locator('.agent-row', {hasText: 'Deploy preview'}).click({button: 'right'});
-  await menu.getByRole('menuitem', {name: /^Delete…/}).click();
-  const deletion = page.getByRole('dialog', {name: 'Delete conversation', exact: true});
-  await expect(deletion).toBeVisible();
-  await deletion.getByRole('button', {name: 'Cancel', exact: true}).click();
-  await expect(deletion).toHaveCount(0);
+  await menu.getByRole('menuitem', {name: /^Delete$/}).click();
+  await expect(agents.locator('.agent-row', {hasText:'Deploy preview'})).toHaveCount(0);
+  await page.locator('.toast').getByRole('button',{name:'Undo',exact:true}).click();
+  await expect(agents.locator('.agent-row', {hasText:'Deploy preview'})).toBeVisible();
 
   // The Inbox opens as the Agents panel, its first row focused; no popover over the work.
   await page.locator('.inbox-action').click();
@@ -313,5 +312,5 @@ try {
 
   assert.equal(f.mutations.filter(m => ['Apply', 'OpenSession', 'CloseSession', 'DeleteConversation'].includes(m.method)).length, 0, 'nothing started, stopped, answered or deleted an agent');
   assert.deepEqual(errors, []);
-  console.log('PASS agents visible: Workspaces above Agents in dark/light at 1440 and 1024, no scrolling tab strip, no pin over an age, a full-height background; every workspace lists its conversations with status and age, folds and remembers; Priority/By workspace, folded counts, unread dots, nested sub-agents, j/k/Space/Enter, filter as you type; one conversation menu in order with Delete last; rename, mark read, pin kept by the Runner and shown on the phone, open beside, archive and delete confirmed; the Inbox opens the Agents panel. Fake Runner.');
+  console.log('PASS agents visible: Workspaces above Agents in dark/light at 1440 and 1024, no scrolling tab strip, no pin over an age, a full-height background; every workspace lists its conversations with status and age, folds and remembers; Priority/By workspace, folded counts, unread dots, nested sub-agents, j/k/Space/Enter, filter as you type; one conversation menu in order with Delete last; rename, mark read, pin kept by the Runner and shown on the phone, open beside, archive confirmed and deletion undone; the Inbox opens the Agents panel. Fake Runner.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

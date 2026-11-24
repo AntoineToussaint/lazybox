@@ -79,7 +79,7 @@ export function sessionMenuItems({ session, allowStart, onChangePermission, onRe
     'separator',
     session && sessionID && { label: 'Rename…', icon: 'pencil', run: () => { if (!requestRename(sessionID)) showMenuNotice('Open the conversation to rename it'); } },
     sessionID && { label: 'Copy session ID', icon: 'copy', run: () => copySessionId(sessionID) },
-    { label: 'Delete conversation…', danger: true, disabled: !session, run: onDelete },
+    { label: 'Delete conversation', danger: true, disabled: !session, run: onDelete },
   ];
 }
 

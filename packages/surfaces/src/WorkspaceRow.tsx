@@ -123,7 +123,7 @@ export function WorkspaceRow({
     { label: "Rename workspace", icon: "pencil", shortcut: "F2", run: rename },
     workspaceTerminalItem(api, workspace.id),
     "separator",
-    conversation && { label: "Delete conversation…", danger: true, run: onDeleteConversation },
+    conversation && { label: "Delete conversation", danger: true, run: onDeleteConversation },
     { label: "Delete workspace…", danger: true, run: onDelete },
   ];
   return (

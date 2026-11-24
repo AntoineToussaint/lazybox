@@ -336,6 +336,10 @@ func validate(op agent.Operation, c agent.Capabilities) error {
 // Apply accepts once under an operation identity. Message queueing is generic;
 // delivery uses the engine lifetime rather than the caller's RPC lifetime.
 func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, error) {
+	return e.apply(ctx, op, true)
+}
+
+func (e *Engine) apply(ctx context.Context, op agent.Operation, interruptChildren bool) (agent.Receipt, error) {
 	if err := ctx.Err(); err != nil {
 		return agent.Receipt{}, err
 	}
@@ -486,11 +490,31 @@ func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, 
 	}
 	// Set before the provider is asked: the turn can end before its receipt.
 	var stopped uint64
+	var children []agent.Operation
 	if op.Kind == agent.Interrupt {
 		stopped = e.stop.ask()
+		if interruptChildren {
+			for id, child := range e.state.Agents {
+				if id != "root" && (child.Status == agent.Running || child.Status == agent.Starting || child.Status == agent.WaitingApproval || child.Status == agent.WaitingInput) {
+					children = append(children, agent.Operation{ID: op.ID, Kind: agent.StopAgent, AgentID: id, NativeID: child.NativeID})
+				}
+			}
+		}
 	}
 	e.mu.Unlock()
 	r, err := e.control(op)
+	rootStopFailed := err != nil
+	for _, child := range children {
+		var childErr error
+		if !e.provider.Capabilities().StopAgent || child.NativeID == "" {
+			childErr = agent.ErrUnsupported
+		} else {
+			_, childErr = e.control(child)
+		}
+		if childErr != nil {
+			err = errors.Join(err, fmt.Errorf("stop sub-agent %s: %w", child.AgentID, childErr))
+		}
+	}
 	r.ID = op.ID
 	if err != nil {
 		r.Delivery = "failed"
@@ -503,7 +527,7 @@ func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, 
 		// the request still waits, and the person can answer it again.
 		delete(e.responses, op.RequestID)
 	}
-	if op.Kind == agent.Interrupt && err != nil {
+	if op.Kind == agent.Interrupt && rootStopFailed {
 		// Not stopped: the turn goes on, and an error in it is an error.
 		e.stop.forget(stopped)
 	}
@@ -643,7 +667,7 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 	// The interrupt ends the turn; the dispatch that follows takes this message.
 	// Each delivery attempt can interrupt again if the provider did not end
 	// the turn. Reusing the queued message ID here only replayed the old receipt.
-	r, err := e.Apply(ctx, agent.Operation{ID: interruptID, Kind: agent.Interrupt})
+	r, err := e.apply(ctx, agent.Operation{ID: interruptID, Kind: agent.Interrupt}, false)
 	if err != nil && e.stillQueued(op.ID) {
 		return r, err
 	}

@@ -82,3 +82,33 @@ func TestTurnStop(t *testing.T) {
 		t.Fatal("the adopted stop reached the next turn")
 	}
 }
+
+func TestInterruptStopsActiveDescendants(t *testing.T) {
+	e, s := bench(t, false)
+	s.StopAgent = true
+	ctx := contextFor(t)
+	s.Events <- agent.Event{Type: "agent_status", AgentID: "finished", NativeID: "old", Status: "done"}
+	s.Events <- agent.Event{Type: "agent_status", AgentID: "child", NativeID: "native-child", Status: "running"}
+	s.Events <- agent.Event{Type: "agent_status", AgentID: "nested", ParentAgentID: "child", NativeID: "native-nested", Status: "waiting_approval"}
+	s.Events <- agent.Event{Type: "turn_started"}
+	await(t, e, "turn_started")
+	if _, err := e.Apply(ctx, agent.Operation{ID: "stop", Kind: agent.Interrupt}); err != nil {
+		t.Fatal(err)
+	}
+	if op := applied(t, s); op.Kind != agent.Interrupt {
+		t.Fatalf("root interrupt: %+v", op)
+	}
+	want := map[string]string{"child": "native-child", "nested": "native-nested"}
+	for range 2 {
+		op := applied(t, s)
+		if op.Kind != agent.StopAgent || want[op.AgentID] != op.NativeID || op.NativeID == "" {
+			t.Fatalf("unexpected child stop: %+v", op)
+		}
+		delete(want, op.AgentID)
+	}
+	select {
+	case extra := <-s.Applied:
+		t.Fatalf("extra stop: %+v", extra)
+	default:
+	}
+}

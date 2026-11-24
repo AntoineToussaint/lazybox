@@ -1219,8 +1219,10 @@ atomic replacement with existing mode bits; external writers do not participate
 in that lock. Binary, truncated, symlink and read-only files cannot be edited.
 Unsaved drafts require an explicit discard before closing or refreshing.
 
-**Delete conversation…** appears in conversation row actions and the chat session
-menu. It stops and waits for owned execution when explicitly confirmed, releases
+**Delete conversation** appears in conversation row actions and the chat session
+menu. One click moves it to **Recently deleted**. Use **Undo** in the notification or
+**Recently deleted** within five minutes to restore it. After five minutes, the Runner
+stops and waits for owned execution, releases
 workspace ownership, removes Lazybox attempts/transcripts/uploads and retains
 identity-only deletion tombstones so legacy import cannot resurrect them. Uncertain
 process ownership blocks deletion. Workspace files, subscriptions, accounting,
@@ -1236,7 +1238,7 @@ main-agent model, captured from startup/context/usage events as well as the save
 session metadata. Internal account IDs such as `claude-default` are presented as
 “Local CLI sign-in,” separately from the model.
 
-Sidebar navigation shows the workspace name with its repository identities underneath. Conversations use compact title/model rows; the account is shown only when a named account is known. A closed execution is labelled Saved, not an ended conversation. Action menus remain inside their rows. Deletion initially focuses Cancel; draggable headers retain keyboard movement without a hover instruction popup.
+Sidebar navigation shows the workspace name with its repository identities underneath. Conversations use compact title/model rows; the account is shown only when a named account is known. A closed execution is labelled Saved, not an ended conversation. Action menus remain inside their rows. Workspace deletion initially focuses Cancel; draggable headers retain keyboard movement without a hover instruction popup.
 
 Resuming preserves the mounted transcript and its projected messages. The successor reader inherits the predecessor’s contiguous timeline cursor and view state, then reads only the new events. An unrelated execution never inherits another conversation’s transcript.
 

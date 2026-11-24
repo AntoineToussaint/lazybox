@@ -453,6 +453,61 @@ func TestAnUnrecordedCompletionLeavesTheExitWithTheHost(t *testing.T) {
 	}
 }
 
+// A connection to a live host that drops (here closed under the Runner) is
+// not the command's end: the Runner re-attaches and records the rest of its
+// output and its own exit. Before, the command was marked done while it ran,
+// and the next Runner's sweep stopped it as an orphan.
+func TestADroppedHostConnectionIsReattached(t *testing.T) {
+	f := newHosted(t)
+	m := f.open(t)
+	defer m.Close()
+	c, err := m.Start(Spec{SessionID: "s", Title: "build", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", f.script()}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "first output never recorded", func() bool { return c.Status().Offset > 0 })
+	c.mu.Lock()
+	lost := c.host
+	c.mu.Unlock()
+	_ = lost.Detach() // The connection ends; this Runner did not detach.
+	waitFor(t, "the command was not re-attached", func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.host != lost })
+	if state := c.Status(); state.Done {
+		t.Fatalf("a running command was marked done when its connection dropped: %+v", state)
+	}
+	if err = os.WriteFile(f.gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	state := finished(t, c)
+	if state.ExitCode == nil || *state.ExitCode != 4 || state.Error != "" {
+		t.Fatalf("the command's own exit was not recorded: %+v", state)
+	}
+	if got := output(t, c); got != "beforeafterwarn" && got != "beforewarnafter" {
+		t.Fatalf("output across the dropped connection is %q: nothing may be lost or repeated", got)
+	}
+}
+
+// A host that dies while attached took its command with it (processguard):
+// its outcome is unknown, and nothing is left running to confirm.
+func TestACommandWhoseHostDiesWhileAttachedIsReportedUnknown(t *testing.T) {
+	f := newHosted(t)
+	m := f.open(t)
+	defer m.Close()
+	c, err := m.Start(Spec{SessionID: "s", Title: "build", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", f.script()}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "no output", func() bool { return c.Status().Offset > 0 })
+	record, err := sessionhost.ReadRecord(filepath.Join(f.hosts, c.hostID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = syscall.Kill(record.PID, syscall.SIGKILL)
+	state := finished(t, c)
+	if state.ExitCode != nil || !strings.Contains(state.Error, "outcome unknown") {
+		t.Fatalf("dead host: %+v", state)
+	}
+}
+
 func TestUpgradeStopsUnisolatedVerification(t *testing.T) {
 	f := newHosted(t)
 	m := f.open(t)

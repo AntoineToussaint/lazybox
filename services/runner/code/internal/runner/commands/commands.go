@@ -949,14 +949,27 @@ func (c *Command) adopt() {
 		c.finish(nil, "", processguard.ErrCleanupUnconfirmed)
 		return
 	}
+	if host := c.reattach("after a Runner restart"); host != nil {
+		c.follow(host)
+	}
+}
+
+// reattach attaches to the command's host again, resuming after the last
+// chunk recorded: after a Runner restart, or after this Runner's connection
+// to it was lost (when names which). A command whose host is gone is finished
+// as of unknown outcome (the host's exit killed its group); one whose host
+// cannot be adopted is stopped. It returns nil once the command is finished.
+func (c *Command) reattach(when string) *sessionhost.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	host, err := c.hostBackend.Attach(ctx, c.hostRoot, c.hostID, c.seq)
+	c.mu.Lock()
+	seq := c.seq
+	c.mu.Unlock()
+	host, err := c.hostBackend.Attach(ctx, c.hostRoot, c.hostID, seq)
 	var cause string
 	switch {
 	case err == nil && host.Spawned():
-		c.follow(host)
-		return
+		return host
 	case err == nil:
 		_ = host.Detach()
 		cause = "command did not start before the Runner restarted"
@@ -965,14 +978,71 @@ func (c *Command) adopt() {
 		// is gone, and its exit status with it.
 		_ = c.hostBackend.Forget(c.hostRoot, c.hostID)
 		c.finish(nil, "", errors.New("command outcome unknown: its session host exited while no Runner was attached"))
-		return
+		return nil
 	default:
-		cause = "command stopped: its session host could not be adopted after a Runner restart"
+		cause = "command stopped: its session host could not be adopted " + when
 	}
+	c.stopHost(ctx, cause)
+	return nil
+}
+
+// stopHost stops a command this Runner cannot supervise and finishes it with
+// cause, or as unconfirmed if the stop is not confirmed.
+func (c *Command) stopHost(ctx context.Context, cause string) {
 	if c.hostBackend.Stop(ctx, c.hostRoot, c.hostID) != nil {
 		cause = processguard.ErrCleanupUnconfirmed.Error()
 	}
 	c.finish(nil, "", errors.New(cause))
+}
+
+// maxReconnects bounds the attempts to re-attach a host whose connection
+// keeps ending before anything arrives on it.
+const maxReconnects = 3
+
+// reconnect handles a connection to the command's host that ended without the
+// host saying why (not superseded, not this Runner detaching). The host may
+// well be alive, and its command with it: finishing the command here would
+// call it done while it runs, and the next Runner's sweep would then stop it
+// as an orphan. So the command is re-attached, as a restart would. A host
+// that shows another client attached was taken over (its notice lost):
+// re-attaching would take it back from that Runner, so this one stands down.
+// attempt counts the reconnections since anything last arrived. It returns
+// the new connection, or nil once the command is settled here.
+func (c *Command) reconnect(lost *sessionhost.Client, attempt int) *sessionhost.Client {
+	_ = lost.Detach()
+	if attempt > maxReconnects {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		c.stopHost(ctx, "command stopped: its session host connection kept failing")
+		return nil
+	}
+	// The host learns that this connection ended only when it reads its
+	// close; until then it may still count it as attached.
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		status, err := c.hostBackend.Probe(ctx, c.hostRoot, c.hostID)
+		cancel()
+		if err != nil || !status.Attached {
+			break
+		}
+		if time.Now().After(deadline) {
+			c.handOver()
+			return nil
+		}
+	}
+	host := c.reattach("after its connection was lost")
+	if host == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.detaching {
+		// This Runner is leaving the command to the next one meanwhile.
+		_ = host.Detach()
+		return nil
+	}
+	c.host = host
+	return host
 }
 
 // follow records the host's chunks, acknowledging each only once it is in the
@@ -985,6 +1055,7 @@ func (c *Command) follow(host *sessionhost.Client) {
 	c.mu.Unlock()
 	go func() {
 		defer close(done)
+		attempts := 0
 		for {
 			m, exit, err := host.Next(context.Background())
 			if err != nil {
@@ -997,12 +1068,16 @@ func (c *Command) follow(host *sessionhost.Client) {
 					c.handOver()
 					return
 				}
-				if !detaching {
-					// The host vanished: nothing confirms the command's group stopped.
-					c.finish(nil, "", processguard.ErrCleanupUnconfirmed)
+				if detaching {
+					return
 				}
-				return
+				attempts++
+				if host = c.reconnect(host, attempts); host == nil {
+					return
+				}
+				continue
 			}
+			attempts = 0
 			if exit != nil {
 				var cause error
 				if exit.Outcome.Error != "" {

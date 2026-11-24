@@ -72,7 +72,7 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
       const receipt = await api.apply({ sessionId: session, operationId: crypto.randomUUID(), operation: { case: 'approval', value: { requestId: request.requestId, decision, always: extra.always || '', reason: extra.reason || '' } } });
       if (receipt.delivery === 'failed') throw new Error(receipt.error || 'Could not send the approval.');
     }
-    catch (e) { onError(permissionChanged ? `Full access is enabled. The command approval could not be sent. ${humanError(e)}` : humanError(e)); setWaiting(false); sent.current = false; }
+    catch (e) { onError(permissionChanged ? `Full access is enabled. The approval could not be sent. ${humanError(e)}` : humanError(e)); setWaiting(false); sent.current = false; }
   };
   const activate = (row: DecisionRow) => {
     if (waiting) return;
@@ -122,8 +122,8 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
         <span className="decision-text"><span>{row.tone === 'deny' ? 'Deny…' : <CodeText text={row.label}/>}{row.choice && SCOPE_CHIP[row.choice.scope] && <em className="decision-scope">{SCOPE_CHIP[row.choice.scope]}</em>}</span>{row.detail && <small>{row.detail}</small>}</span>
         {row.key && keys && <Kbd>{row.key.toUpperCase()}</Kbd>}
       </button>)}
-      {enableFullAccess && approval.command && !settings && !approval.acceptUnsupported && <button type="button" className="decision-row" data-tone="always" disabled={waiting} onClick={() => void decide(Decision.ACCEPT, { fullAccess: true })}>
-        <span className="decision-text"><span>Allow and enable Full access</span><small>Approves this command and skips approvals for agent tools and ordinary Lazybox commands in this conversation. Codex runs with full filesystem access on the next turn.</small></span>
+      {enableFullAccess && !settings && !approval.acceptUnsupported && <button type="button" className="decision-row" data-tone="always" disabled={waiting} onClick={() => void decide(Decision.ACCEPT, { fullAccess: true })}>
+        <span className="decision-text"><span>Allow and enable Full access</span><small>Approves this request and enables Full access for the rest of this conversation. The agent can access files and run ordinary commands without asking.</small></span>
       </button>}
     </div> : <form className="deny-reason" onSubmit={event => { event.preventDefault(); deny(); }}>
       <label>Why not? <small>Optional. {agentName} is told, and can try another way.</small>

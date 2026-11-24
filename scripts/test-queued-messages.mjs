@@ -215,9 +215,23 @@ try{
  Object.assign(codex,{busy:false,status:'ready',agents:[]});
  await expect(hint).toHaveText('Enter to send · Shift+Enter for a new line',{timeout:5000});
  const delivered=deliveries().length;
+ // Keep the receipt in flight while a second shortcut arrives for the same draft.
+ let releaseReceipt;
+ const receiptGate = new Promise(resolve => { releaseReceipt = resolve; });
+ await page.route('**/Apply', async route => {
+   const response = await route.fetch();
+   await receiptGate;
+   await route.fulfill({response});
+ }, {times:1});
  await composer.fill('Thanks, that is all.');await composer.press(sendNowKey);
+ try {
+   await expect(composer).toHaveAttribute('readonly','');
+   await composer.press(sendNowKey);
+   await expect(page.getByRole('alert').filter({hasText:'Still sending your previous message'})).toHaveCount(0);
+ } finally { releaseReceipt(); }
  await expect.poll(()=>sentAs('Thanks, that is all.')).toBeTruthy();
  await expect(composer).toHaveValue('');
+ assert.equal(f.mutations.filter(m => m.method === 'Apply' && m.body.message?.text === 'Thanks, that is all.').length, 1);
  assert.equal(deliveries().length,delivered,'no Send now');assert.equal(codex.interrupted,undefined,'nothing interrupted');
  // A custom send shortcut takes precedence over the default newline key.
  await page.getByRole('button',{name:'Settings',exact:true}).click();

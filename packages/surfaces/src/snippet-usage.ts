@@ -91,3 +91,12 @@ export function searchSnippets<T extends SearchableSnippet>(rows: readonly T[], 
 export function isReviewSnippet(key: string) {
   return key === 'review' || key === 'deepreview';
 }
+
+const commandUsageKey = 'slash-command-usage:v1';
+export function readCommandUsage(store?: ViewStateStore): SnippetUsage {
+  try { return parseSnippetUsage(readPreference(store, commandUsageKey)); } catch { return {}; }
+}
+export function saveCommandUse(store: ViewStateStore | undefined, key: string): void {
+  const next = recordSnippetUse(readCommandUsage(store), key, Date.now());
+  try { writePreference(store, commandUsageKey, JSON.stringify(next)); } catch { /* suggestions also work without storage */ }
+}

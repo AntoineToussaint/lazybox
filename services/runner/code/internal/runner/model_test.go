@@ -44,7 +44,7 @@ func TestPermissionChangeIsSaidInTheConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = b.SetPermission(context.Background(), e, "permission-1", "read-only"); err != nil {
+	if _, err = b.SetPermission(context.Background(), e, "permission-1", "read-only", ""); err != nil {
 		t.Fatal(err)
 	}
 	journaled(t, e, `"permission_changed"`, `"read-only"`, `"live"`)

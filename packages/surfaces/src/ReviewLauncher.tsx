@@ -1,4 +1,5 @@
-import { useEffect, useMemo, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { closeReviewersOnSend } from './review-close';
+import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { ReviewRun } from '@lazybox/protocol';
 import { ActionMenu } from './ActionMenu';
 import { ActionMenuItems } from './ActionMenuItems';
@@ -6,11 +7,10 @@ import { Icon } from './Icons';
 import { LiveIndicator } from './LiveIndicator';
 import type { MenuItem } from './context-menu-model';
 import { showConversation, showReview, useReviewLauncher, type ReviewLauncher, type ReviewScope } from './review-client';
-import { countsSummary, endedByHand, isPending, isProposed, loopLine, loopNeedsYou, reviewAgain, reviewInProgress, reviewMessage, runSummary } from './review-model';
+import { countsSummary, endedByHand, isPending, isProposed, loopLine, loopNeedsYou, reviewAgain, reviewInProgress, runSummary } from './review-model';
 import { openArtifact } from './artifact-events';
 import { useCancelReview } from './ReviewCancel';
-import { composeInConversation } from './compose';
-import { useRunner } from './RunnerContext';
+import { humanError } from './human-error';
 import { showMenuNotice } from './ContextMenu';
 import { useWorkspaceReview } from './useWorkspaceReview';
 import type { ReviewNote } from './transcript-model';
@@ -79,7 +79,7 @@ export function ReviewAlert({ text, id, note }: { text: string; id: string; note
  * click away.
  */
 export function ReviewCard({ data }: { data: ReviewCardData }) {
-  const { api } = useRunner();
+  const [sending, setSending] = useState(false);
   const review = useWorkspaceReview(data.workspace);
   const live = useMemo(() => review.review?.runs.find(run => run.id === data.review), [review.review, data.review]);
   const run = live || { state: data.state || (data.finished ? 'done' : 'running'), reviewerLabel: data.reviewerLabel, scopeLabel: data.scopeLabel, blockers: data.blockers || 0, majors: data.majors || 0, minors: data.minors || 0, nits: data.nits || 0, detail: '', loop: '', phase: '', round: 1, maxRounds: 1, paused: false, stopReason: '', sourceLabel: '', sourceSessionId: '', fallback: '', focus: '' };
@@ -98,14 +98,14 @@ export function ReviewCard({ data }: { data: ReviewCardData }) {
     cancelling.request(live);
   };
   const findings = run.blockers + run.majors + run.minors + run.nits;
-  // Findings still to hand to the author (to triage or accepted, not sent): one click puts them
-  // in its message box, exactly as filed, as the tray's Send does. Nothing is sent for the person.
   const unsent = review.comments.filter(c => c.reviewId === data.review && (isProposed(c) || isPending(c)));
   const author = run.sourceLabel || 'the author';
   const send = async () => {
-    if (!run.sourceSessionId || !unsent.length) return;
-    const text = reviewMessage(unsent);
-    composeInConversation({ sessionId: run.sourceSessionId, api, text, reviews: [{text, ids: unsent.map(c => c.id)}] });
+    if (sending || !run.sourceSessionId || !unsent.length) return;
+    setSending(true);
+    try { await review.send(unsent, run.sourceSessionId, closeReviewersOnSend()); }
+    catch (error) { showMenuNotice(humanError(error)); }
+    finally { setSending(false); }
   };
   const canSend = !running && !failed && unsent.length > 0 && !!run.sourceSessionId;
   const stoppedAt = live?.stoppedAtUnix ? new Date(Number(live.stoppedAtUnix) * 1000).toLocaleString([], { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' }) : '';
@@ -126,7 +126,7 @@ export function ReviewCard({ data }: { data: ReviewCardData }) {
       {live?.resultArtifactId && <button type="button" onClick={() => openArtifact({ collectionId: data.workspace, artifactId: live.resultArtifactId, version: 1 })}>Open findings artifact</button>}
       {again && <button type="button" className="primary" disabled={!!launcher.busy || !!launcher.unavailable} title={launcher.unavailable || `${run.reviewerLabel} reviews ${run.scopeLabel.toLowerCase()} again, in a new read-only conversation`}
         onClick={() => void launcher.start(again.scope, again.choice, live?.focus || '', live?.templateId)}><Icon name="review" size={12}/>{launcher.busy ? 'Starting…' : 'Review again'}</button>}
-      {canSend && <button type="button" className="primary" title={`Put ${unsent.length === 1 ? 'the finding' : `the ${unsent.length} findings`} in ${author}'s message box, exactly as filed; you send it`} onClick={() => void send()}>Send {unsent.length} finding{unsent.length === 1 ? '' : 's'} to {author}</button>}
+      {canSend && <button type="button" className="primary" disabled={sending} title={`Send the findings directly to ${author}`} onClick={() => void send()}>Send {unsent.length} finding{unsent.length === 1 ? '' : 's'} to {author}</button>}
       <button type="button" className={!running && findings && !canSend && !again ? 'primary' : ''} title={findings ? `Triage ${countsSummary(run)} in the Review tray` : 'Open the Review tray'} onClick={() => showReview({ collectionId: data.workspace, reviewId: data.review })}>Open review</button>
       <button type="button" title={`Open ${run.reviewerLabel}'s review conversation: ask it about a finding`} onClick={() => showConversation({ collectionId: data.workspace, sessionId: data.reviewerSession })}>Open conversation</button>
       {canCancel && live && <button type="button" className="review-card-cancel" aria-keyshortcuts="Escape" title={`Cancel review (Esc): ${run.reviewerLabel} stops now and no further round starts; its findings are kept`}

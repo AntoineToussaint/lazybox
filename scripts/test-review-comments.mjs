@@ -1,8 +1,8 @@
 import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // Inline review comments on the Changes page against the fake Runner: comment
 // on a range and on a removed line, edit, see the tray collect them, follow a
-// comment whose lines moved or changed, send the review to the conversation's
-// message box (never sent for the person), and find the same comments in a
+// comment whose lines moved or changed, send the review directly to the chosen
+// conversation, and find the same comments in a
 // second window.
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
@@ -108,24 +108,17 @@ try{
  await expect(elsewhere).toContainText('1 comment on lines not in this diff');await expect(elsewhere.getByRole('article',{name:'Comment on lines 3–4'})).toBeVisible();
  await page.screenshot({path:'.cache/review-outdated.png'});
 
- // 5. Send the review: one message in the conversation's message box, not sent.
+ // The Runner delivers the message. Losing the subsequent disposition reply reports that partial success.
  const applies=fixture.mutations.filter(m=>m.method==='Apply').length;
- await tray.getByRole('button',{name:'Send 2 comments to the agent'}).click();
- const box=page.getByRole('region',{name:'Agent chat'}).getByRole('textbox',{name:'Message',exact:true});
- await expect(box).toHaveValue(/^Please address these 2 review comments/);
- await expect(box).toHaveValue(/### 1\. api\/src\/handler\.go:3–4\n\n_uncommitted changes on [0-9a-f]{8} · outdated: these lines have changed since_\n\n```go\nfunc Handle\(\) error \{\n\tlog\.Print\("handle"\)\n```\n\nReturn the error; do not log it here\./);
- await expect(box).toHaveValue(/### 2\. api\/src\/handler\.go — removed line 3 \(in the version before the change\)/);
- await expect(changes).toContainText('Review it and send');
- assert.equal(fixture.mutations.filter(m=>m.method==='Apply').length,applies,'the review must not be sent on the person\'s behalf');
- assert.ok(!reviewWrites().some(m=>m.method==='SetReviewDisposition'&&m.body.disposition==='sent'));
- // The message is delivered, then marking the comments sent loses its reply: the message still
- // counts as sent (draft cleared, one delivery), and the warning says what did not happen.
  let loseReply=true;
  await page.route('**/SetReviewDisposition',async route=>{if(loseReply&&route.request().postDataJSON()?.disposition==='sent'){loseReply=false;await route.fetch();await route.fulfill({status:503,json:{code:'unavailable',message:'the reply was lost'}});}else await route.continue();});
- await box.press('Enter');
- await expect(box).toHaveValue('');
- await expect(page.getByRole('region',{name:'Agent chat'}).getByRole('alert').filter({hasText:'Sent. The review findings could not be marked as sent'})).toBeVisible();
- assert.equal(fixture.mutations.filter(m=>m.method==='Apply').length,applies+1,'delivered once');
+ await tray.getByRole('button',{name:'Send 2 comments to the agent'}).click();
+ await expect(tray.getByRole('alert').filter({hasText:'Sent. The review findings could not be marked as sent'})).toBeVisible();
+ assert.equal(fixture.mutations.filter(m=>m.method==='Apply').length,applies+1);
+ const sentText=fixture.mutations.filter(m=>m.method==='Apply').at(-1).body.message.text;
+ assert.match(sentText, /^Please address these 2 review comments/);
+ assert.match(sentText, /### 1\. api\/src\/handler\.go:3–4\n\n_uncommitted changes on [0-9a-f]{8} · outdated: these lines have changed since_\n\n```go\nfunc Handle\(\) error \{\n\tlog\.Print\("handle"\)\n```\n\nReturn the error; do not log it here\./);
+ assert.match(sentText, /### 2\. api\/src\/handler\.go — removed line 3 \(in the version before the change\)/);
  await page.unroute('**/SetReviewDisposition');
  await expect.poll(()=>reviewWrites().some(m=>m.method==='SetReviewDisposition'&&m.body.disposition==='sent')).toBe(true);
  const sent=reviewWrites().find(m=>m.method==='SetReviewDisposition').body;assert.equal(sent.disposition,'sent');assert.equal(sent.sessionId,'alpha-session');assert.equal(sent.ids.length,2);
@@ -157,5 +150,5 @@ try{
  await expect(removed.getByRole('group',{name:'Confirm delete'})).toBeVisible();await removed.getByRole('button',{name:'Delete'}).click();
  await expect(removed).toHaveCount(0);assert.equal(fixture.reviewOf('alpha').comments.length,1);
  assert.deepEqual(errors,[]);
- console.log('PASS: range and removed-line comments, edit, tray, moved and outdated anchors, one unsent message in the composer, shared across windows, resolve, reopen, delete.');
+ console.log('PASS: range and removed-line comments, edit, tray, moved and outdated anchors, one message delivered to the agent, shared across windows, resolve, reopen, delete.');
 }finally{await browser?.close();await server.close();await fixture.close();}

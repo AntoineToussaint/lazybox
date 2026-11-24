@@ -39,8 +39,11 @@ interactive commands handed off by an agent.
 
 When Codex or Claude needs a TTY for a sign-in or another prompt, it can call
 `lazybox_command` with `action: "interactive"` and the executable and arguments
-in `argv`. The conversation shows the command with shell-quoted arguments. Expand **Working directory**
-to see the full path.
+in `argv`. The conversation shows the command with shell-quoted arguments.
+An argument holding a character you could not see (an escape, a carriage
+return, a direction mark) is written in ANSI-C quoting, `$'safe\e[2K'`, so
+nothing in it is hidden. **Working directory** names the folder from the
+workspace (`lazybox/scripts`); expand it to see the full path.
 Choose **Run and take over** to launch the command and focus its terminal, or
 **Decline** to tell the agent to continue without it. This decision is required
 even in full-access mode.

@@ -42,10 +42,21 @@ export type Attention = {
   runner?: string;
 };
 
-/** Assistant side panels ("Ask Lazybox") are part of the workspace, not work items. */
-const assistantPurposes = new Set(['help', 'planning', 'summary', 'artifact']);
-export function isWorkConversation(session: Session): boolean {
-  return !assistantPurposes.has(session.purpose);
+/**
+ * What kind of agent a conversation is comes from the Runner (AgentType,
+ * agent/agent_types.go). A Runner from before types says nothing: then an
+ * Ask Lazybox side panel is neither listed nor in the inbox, a companion or
+ * a reviewer is in the inbox but not listed, and anything else is both.
+ */
+const legacyAssistants = new Set(['help', 'planning', 'summary']);
+const legacyUnlisted = new Set([...legacyAssistants, 'artifact', 'reviewer']);
+/** A conversation of its own in the sidebar, tabs and workspace lists. A companion or a reviewer is reached from its artifact or review instead. */
+export function isListed(session: Session): boolean {
+  return session.agentType ? session.agentType.listed : !legacyUnlisted.has(session.purpose);
+}
+/** Its questions, approvals and failures reach the inbox and notifications: every agent that can act, listed or not. */
+export function reachesInbox(session: Session): boolean {
+  return session.agentType ? session.agentType.reachesInbox : !legacyAssistants.has(session.purpose);
 }
 export function conversationKey(session: Session): string {
   return session.conversationId || session.id;
@@ -174,7 +185,7 @@ export type Inbox = { rows: Attention[]; groups: { state: AttentionState; rows: 
 export function buildInbox(sessions: readonly Session[], seen: Seen): Inbox {
   const byKey = new Map<string, Attention>();
   for (const session of sessions) {
-    if (!isWorkConversation(session)) continue;
+    if (!reachesInbox(session)) continue;
     const row = deriveAttention(session, seenAt(seen, conversationKey(session)));
     const previous = byKey.get(row.key);
     if (!previous || row.at > previous.at) byKey.set(row.key, row);

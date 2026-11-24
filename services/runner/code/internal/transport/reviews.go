@@ -256,6 +256,10 @@ func (s *Service) SetReviewDisposition(ctx context.Context, r *pb.SetReviewDispo
 	if reviews.Disposition(r.Disposition) == reviews.Sent {
 		// Findings handed to the author: their review's loop waits for the fix.
 		s.Bench.ReviewFindingsSent(r.CollectionId, r.Ids, r.SessionTitle)
+		if r.CloseReviewers {
+			// After the loop saw the send: a reviewer whose loop now waits for the fix stays.
+			s.Bench.CloseDeliveredReviewers(ctx, r.CollectionId, r.Ids)
+		}
 		if review, err = store.Load(r.CollectionId); err != nil {
 			return nil, rpcError(err)
 		}

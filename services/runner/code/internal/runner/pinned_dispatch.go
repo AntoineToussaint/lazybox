@@ -53,7 +53,7 @@ func (b *Bench) finishPinnedDispatch(ctx context.Context, parent *Execution, sta
 			return errors.New("reserved conversation was deleted")
 		}
 		opts := accounts.Options{Model: d.Model, Permission: work.NarrowerPermission(parent.Options.Permission, work.NarrowerPermission(grant.Ceiling.Permission, at.Permission)), NoRotation: true, Instructions: fmt.Sprintf(childBriefing, b.agentTitle(ctx, parent), state.Title, at.Role)}
-		child, err = b.openWithID(at.Execution, at.Profile, "", "", opts, parent.Saved.GatewayID, "", "", ws.ID, "coding", "", false)
+		child, err = b.openWithID(at.Execution, at.Profile, "", "", opts, parent.Saved.GatewayID, "", "", ws.ID, agent.Coding, "", false)
 	}
 	if err != nil {
 		return fmt.Errorf("open reserved conversation: %w", err)

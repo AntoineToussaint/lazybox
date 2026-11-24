@@ -115,11 +115,20 @@ func wireAccount(value *agent.AccountObservation) *pb.AccountObservation {
 func wireEvent(e agent.Event) *pb.AgentEvent {
 	return &pb.AgentEvent{Type: e.Type, SessionReference: e.SessionID, TurnId: e.TurnID, RequestId: e.RequestID, OperationId: e.OperationID, Text: e.Text, Status: e.Status, ProviderDataJson: e.Data, TerminalAgentInput: e.TerminalAgentInput, AgentId: e.AgentID, ParentAgentId: e.ParentAgentID, Name: e.Name, AgentKind: e.AgentKind, NativeId: e.NativeID, Account: wireAccount(e.Account)}
 }
+
+// wireAgentType is the type a purpose names, for a client to read rather than
+// match purposes (agent.TypeOf).
+func wireAgentType(purpose string) *pb.AgentType {
+	t := agent.TypeOf(purpose)
+	return &pb.AgentType{Name: t.Name, Label: t.Label, Listed: t.Listed, ReachesInbox: t.ReachesInbox, CloseWhenDelivered: t.CloseWhenDelivered, Workspace: t.Workspace, Delegates: t.Delegates, Ui: t.UI}
+}
+
 func wireSession(e *runner.Execution) *pb.Session {
 	s := e.Engine.Snapshot()
 	c := s.Capabilities
 	w := &pb.Session{Id: s.ID, ProfileId: s.Profile, ProviderReference: s.Reference, GatewayId: s.GatewayID, Busy: s.Busy, Closed: s.Closed, Fault: s.Fault, Queued: uint32(s.Queued), WorkId: e.WorkID, PreviousExecutionId: e.Previous, CollectionId: e.CollectionID, WorkingDirectory: e.Cwd, Purpose: e.Purpose, Status: string(s.Status), Account: wireAccount(s.Account), ActivityTruncated: s.ActivityTruncated, RotationProfileIds: e.Options.RotationProfiles, Capabilities: &pb.Capabilities{Images: c.Images, Files: c.Files, Questions: c.Questions, Approvals: c.Approvals, Steer: c.Steer, Resume: c.Resume, PendingResume: c.PendingResume, ProfileIsolation: c.ProfileIsolation, Subagents: c.Subagents, LivePermission: c.LivePermission, StopAgent: c.StopAgent, LiveModel: c.LiveModel}}
 	w.ConversationId = e.Saved.ConversationID
+	w.AgentType = wireAgentType(e.Purpose)
 	w.ForkedFromSessionId, w.ForkedFromCursor = e.Saved.ForkedFrom, e.Saved.ForkCursor
 	w.Permission, w.Workflow = e.Options.Permission, e.Options.Workflow
 	w.BehaviorProfile = e.Options.BehaviorProfile
@@ -307,7 +316,7 @@ func (s *Service) OpenAssistant(ctx context.Context, p *pb.OpenAssistantRequest)
 		options.NoRotation = p.Options.NoRotation
 		gateway = p.Options.GatewayId
 	}
-	if p.Purpose == "artifact" && p.Options != nil {
+	if p.Purpose == agent.Artifact && p.Options != nil {
 		options.Permission = p.Options.Permission
 		options.Workflow = p.Options.Workflow
 		options.BehaviorProfile = p.Options.BehaviorProfile
@@ -421,7 +430,7 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 		orchestration = s.Bench.OrchestrationNote(e)
 		op.Context = strings.TrimSpace(briefing.Text + "\n\n" + reverted + "\n\n" + orchestration)
 	case *pb.ApplyRequest_Permission:
-		receipt, err := s.Bench.SetPermission(ctx, e, p.OperationId, o.Permission.GetMode())
+		receipt, err := s.Bench.SetPermission(ctx, e, p.OperationId, o.Permission.GetMode(), o.Permission.GetExitPlanRequestId())
 		if err != nil {
 			return nil, rpcError(err)
 		}
@@ -1070,7 +1079,7 @@ func unreadableSession(r sessionstore.Record, err error) *pb.Session {
 	if title == "" {
 		title = r.Title
 	}
-	return &pb.Session{Id: r.ID, ConversationId: r.ConversationID, ProfileId: r.ProfileID, Provider: r.Provider, PreviousExecutionId: r.Previous, WorkId: r.WorkID, CollectionId: r.CollectionID, WorkingDirectory: r.Cwd, Purpose: r.Purpose, Title: title, Historical: true, Closed: true, Status: string(agent.Unknown), Fault: "conversation unreadable: " + err.Error(), CreatedAtUnixMillis: r.CreatedAt.UnixMilli(), PinnedAtUnixMillis: r.PinnedAt, ArchivedAtUnixMillis: r.ArchivedAt}
+	return &pb.Session{AgentType: wireAgentType(r.Purpose), Id: r.ID, ConversationId: r.ConversationID, ProfileId: r.ProfileID, Provider: r.Provider, PreviousExecutionId: r.Previous, WorkId: r.WorkID, CollectionId: r.CollectionID, WorkingDirectory: r.Cwd, Purpose: r.Purpose, Title: title, Historical: true, Closed: true, Status: string(agent.Unknown), Fault: "conversation unreadable: " + err.Error(), CreatedAtUnixMillis: r.CreatedAt.UnixMilli(), PinnedAtUnixMillis: r.PinnedAt, ArchivedAtUnixMillis: r.ArchivedAt}
 }
 func (s *Service) RestartWithPermission(ctx context.Context, r *pb.RestartWithPermissionRequest) (*pb.SessionResponse, error) {
 	e, err := s.Bench.Get(r.SessionId)

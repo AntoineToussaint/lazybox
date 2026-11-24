@@ -34,8 +34,9 @@ slider dragged is one write, of where it stopped.
 
 Each window also keeps the last preferences applied on the device
 (`ViewStateStore`, `appearance:v1`) and applies them before it draws, so it
-never flashes the wrong theme; the file then applies over them. A change made
-just before a window closed, which had not reached the file yet, wins over the
+starts with the saved theme. Detached windows use its background color while
+their contents load. The settings file then applies over the cached preferences.
+A change made just before a window closed, which had not reached the file yet, wins over the
 file at the next start and is written to it (`appearance:unsynced:v1`). What
 you set before the file existed moves into it once.
 

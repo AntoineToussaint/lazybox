@@ -76,7 +76,10 @@ export function applyAppearance(preferences: AppearancePreferences): AppearanceS
   catch { next = computeAppearance(parsePreferences(null)); }
   state = next;
   paint(next);
-  try { localStorage.setItem(APPEARANCE_CACHE_KEY, JSON.stringify(preferences)); } catch { /* private mode: the next window starts from the defaults */ }
+  try {
+    localStorage.setItem(APPEARANCE_CACHE_KEY, JSON.stringify(preferences));
+    localStorage.setItem('lazybox:appearance:background', next.theme.tokens.bg);
+  } catch { /* private mode: the next window starts from the defaults */ }
   for (const listener of listeners) listener();
   return next;
 }

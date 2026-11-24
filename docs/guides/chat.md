@@ -137,14 +137,16 @@ the message box and `] ] ⇧R` (⌘K *Review this workspace's changes*).
   *Review · Codex*, with a live dot while it works, then *3 findings* (or
   *done*). The conversation shows the review's card, and its findings land in
   the [Review tray](review-agent-work.md#let-another-agent-review-it). The
-  review's row in the sidebar brings its tab to the front.
+  review card’s **Open conversation** button brings its tab to the front.
 - In a slim panel the button folds into the conversation's ⋯ menu.
 
 ## Slash commands
 
 Type `/` at the start of the message box for a menu of what you can run, in
 three groups. It filters as you type; `↑`/`↓` choose, `Tab` completes, `Enter`
-runs and `Esc` closes it and leaves your text. It works in Vim insert mode too.
+runs and `Esc` closes it and leaves your text. It works in Vim insert mode too. When several names start with the same letters,
+the menu highlights the one you use most. For example, typing `/rev` can select
+`/review` ahead of the `/rev` snippet.
 
 - **Lazybox** commands do the real thing and send nothing: `/model <name>`,
   `/permissions ask|read-only|yolo`, `/subscription`, `/compact` (the agent

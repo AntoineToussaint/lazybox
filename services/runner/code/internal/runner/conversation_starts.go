@@ -362,8 +362,8 @@ func (b *Bench) RequestConversationStart(ctx context.Context, ask ConversationSt
 	if e, err = b.latest(e); err != nil {
 		return ConversationStart{}, err
 	}
-	if e.Purpose != "" && e.Purpose != "coding" {
-		return ConversationStart{}, fmt.Errorf("%w: an Ask Lazybox conversation cannot start conversations", ErrInvalidConversationStart)
+	if t := agent.TypeOf(e.Purpose); !t.Delegates {
+		return ConversationStart{}, fmt.Errorf("%w: a conversation of type %s cannot start conversations", ErrInvalidConversationStart, t.Label)
 	}
 	r := ConversationStart{Session: e.ID, Conversation: conversationOf(e), Workspace: e.CollectionID, Cwd: e.Cwd, From: b.agentTitle(ctx, e), State: StartPending,
 		Permission: e.Options.Permission, Gateway: e.Saved.GatewayID}

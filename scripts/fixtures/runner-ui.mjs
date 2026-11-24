@@ -1055,6 +1055,15 @@ actions:
         if(chosen.length!==(body.ids||[]).length)return error('not_found','review comment not found');
         if(body.disposition==='sent')queueMicrotask(()=>findingsSent(body.collectionId,body.ids||[],'You',body.sessionTitle));
         for(const c of chosen){Object.assign(c,{disposition:body.disposition,resolvedBy:'',note:body.disposition==='dismissed'?(body.note||'').trim():''});if(body.disposition==='sent')Object.assign(c,{sentTo:body.sessionId,sentToTitle:body.sessionTitle||'',sentHead:shipState(body.collectionId,c.member).head,sentAtUnix:String(Math.floor(Date.now()/1000))});if(body.disposition==='open')Object.assign(c,{sentTo:'',sentToTitle:'',sentHead:'',sentAtUnix:'0'});}
+        if(body.closeReviewers && body.disposition==='sent') {
+          for(const run of r.runs) {
+            if(inProgress(run) || !chosen.some(c=>c.reviewId===run.id)) continue;
+            if(r.comments.some(c=>c.reviewId===run.id && ['open','proposed'].includes(c.disposition))) continue;
+            closeReviewer(run);
+            const reviewer=sessions.find(s=>s.id===run.reviewerSessionId);
+            if(reviewer) reviewer.archivedAtUnixMillis=String(Date.now());
+          }
+        }
         return json(reviewReply(body.collectionId));
       }
       case 'SetReviewAutoResolve': mutations.push({method,body});reviewOf(body.collectionId).autoResolve=!!body.enabled;return json(reviewReply(body.collectionId));

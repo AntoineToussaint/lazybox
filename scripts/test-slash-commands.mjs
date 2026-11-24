@@ -106,6 +106,12 @@ try{
  await page.keyboard.type('12');await page.keyboard.press('Enter');
  await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe('/review-pr 12');
  await expect(message).toHaveValue('');
+ // A previously sent name is selected across groups on its shorter prefix.
+ await message.fill('/rev');
+ await expect(menu.getByRole('option',{selected:true})).toContainText('/review-pr');
+ await page.keyboard.press('Enter');
+ await expect(message).toHaveValue('/review-pr ');
+ await message.fill('');
  // A command without an argument goes at once.
  await page.keyboard.type('/ini');await page.keyboard.press('Enter');
  await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe('/init');

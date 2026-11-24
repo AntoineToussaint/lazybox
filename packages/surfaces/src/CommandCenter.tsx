@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Collection } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
 import { actionDefinition, actionEnabled, canonicalKey, chordFromEvent, isMac, runAction, useActions, type ActionId } from './actions';
-import { conversationKey, isWorkConversation } from './attention';
+import { conversationKey, isListed } from './attention';
 import { CommandPalette, needsYou } from './CommandPalette';
 import { mergeConversations } from './conversation-model';
 import { Icon } from './Icons';
@@ -100,7 +100,7 @@ export function CommandCenter({ viewState, navigator }: { viewState?: ViewStateS
   /** The next or previous conversation of this workspace, in sidebar order (newest first). */
   const stepConversation = (step: 1 | -1) => {
     const { navigator, info } = latest.current;
-    const rows = mergeConversations([], info?.sessions || []).filter(session => session.collectionId === navigator.current.collectionId && isWorkConversation(session));
+    const rows = mergeConversations([], info?.sessions || []).filter(session => session.collectionId === navigator.current.collectionId && isListed(session));
     if (!rows.length) { showToast({ id: 'conversation:none', tone: 'info', title: 'No conversations in this workspace yet' }); return; }
     const current = rows.find(session => session.id === navigator.current.sessionId);
     const index = current ? rows.findIndex(session => conversationKey(session) === conversationKey(current)) : -1;

@@ -119,18 +119,30 @@ try{
  await expect(briefEvent.locator('.system-event-body')).toContainText('You are an independent reviewer (Codex) of work Claude did');
  await expect(briefEvent.locator('.system-event-body')).toContainText('lazybox review add');
 
- // 5. Send the accepted finding to the author, exactly as filed; never sent for the person.
+ // 5. Send the accepted finding to the author, exactly as filed on the first click.
+ // Closing the reviewer once its findings are all handed on is the default; the Runner decides when.
+ const closeBox=tray.getByRole('checkbox',{name:'Close the reviewer after sending'});
+ await expect(closeBox).toBeChecked();
+ // Turned off, it is remembered for every send button; turned back on for this run.
+ await closeBox.uncheck();
+ assert.equal(await page.evaluate(()=>localStorage.getItem('lazybox:review-close-reviewers:v1')),'off');
+ await closeBox.check();
+ assert.equal(await page.evaluate(()=>localStorage.getItem('lazybox:review-close-reviewers:v1')),'on');
+ const remaining=fixture.fileFinding(run.id,{path:'src/handler.go',startLine:3,snippet:['func Handle() error {'],severity:'nit',title:'Document the handler',body:'Describe its return value.'});
+ fixture.finishReview(run.id);
  const applies=fixture.mutations.filter(m=>m.method==='Apply').length;
  await tray.getByRole('button',{name:/Fix 1 finding in/}).click();
- await expect(box).toHaveValue(/^Please address this review comment/);
- await expect(box).toHaveValue(new RegExp(`### 1\\. api/src/handler\\.go:3–4\\n\\n\\*\\*Blocker: The error is logged, not returned\\*\\* \\(finding ${blocker.id}, from Codex\\)`));
- await expect(box).toHaveValue(/Return it so callers can retry\./);
- assert.equal(fixture.mutations.filter(m=>m.method==='Apply').length,applies,'the review must not be sent on the person\'s behalf');
- await box.press('Enter');
+ await expect.poll(()=>fixture.mutations.filter(m=>m.method==='Apply').length).toBe(applies+1);
+ const sentFinding=fixture.mutations.filter(m=>m.method==='Apply').at(-1).body.message.text;
+ assert.match(sentFinding, new RegExp(`### 1\\. api/src/handler\\.go:3–4\\n\\n\\*\\*Blocker: The error is logged, not returned\\*\\* \\(finding ${blocker.id}, from Codex\\)`));
+ assert.match(sentFinding,/Return it so callers can retry/);
  await expect.poll(()=>fixture.mutations.filter(m=>m.method==='SetReviewDisposition').at(-1)?.body.sessionId).toBe(author.id);
+ assert.equal(fixture.mutations.filter(m=>m.method==='SetReviewDisposition').at(-1).body.closeReviewers,true,'the tray asks the Runner to close a delivered reviewer');
 
- // 6. The reviewer ends its turn: the author's conversation shows the outcome.
- fixture.finishReview(run.id);
+ assert.equal(remaining.disposition,'proposed');
+ assert.ok(!reviewer.closed && !reviewer.archivedAtUnixMillis,'a partial send leaves the reviewer open');
+
+ // 6. The author's conversation shows the outcome.
  const card=page.locator('.messages:visible').getByRole('group',{name:'Codex review'});
  await expect(card).toContainText('Codex reviewed changes · 1 blocker',{timeout:15000});
  await page.screenshot({path:'.cache/agent-review-card.png'});
@@ -173,7 +185,7 @@ try{
  await expect(page.locator('section.panel-chat:visible .system-event[data-kind=review_brief] .system-event-detail')).toHaveText('Turn 1');
 
  // 9a. A review whose loop ends with majors still open is not "clean": it says what is left,
- // and hands those findings to the author in one click (into its message box; you send them).
+ // and hands those findings to the author in one click.
  // It ends while the author's tab is behind the reviewer's. Tabs behind hold no stream, so the
  // browser's six connections to the Runner stay free for the review's reads and the card updates.
  const turnRun=fixture.reviewOf('alpha').runs.at(-1);
@@ -189,14 +201,20 @@ try{
  await expect(turnCard.getByRole('button',{name:'Open review'})).not.toHaveClass(/primary/);
  await page.screenshot({path:'.cache/agent-review-majors-open.png'});
  const sentBefore=fixture.mutations.filter(m=>m.method==='Apply').length;
- await turnCard.getByRole('button',{name:'Send 2 findings to Claude'}).click();
  const authorBox=page.locator('section.panel-chat:visible').getByRole('textbox',{name:'Message',exact:true});
- await expect(authorBox).toHaveValue(/^Please address these 2 review comments/);
- await expect(authorBox).toHaveValue(/\*\*Major: Wrap the error\*\*/);
- assert.equal(fixture.mutations.filter(m=>m.method==='Apply').length,sentBefore,'the findings are never sent for the person');
- await authorBox.press('Enter');
- await expect.poll(()=>fixture.mutations.filter(m=>m.method==='SetReviewDisposition').at(-1)?.body).toMatchObject({disposition:'sent',sessionId:author.id});
+ await authorBox.fill('Keep my draft');
+ await turnCard.getByRole('button',{name:'Send 2 findings to Claude'}).click();
+ await expect.poll(()=>fixture.mutations.filter(m=>m.method==='Apply').length).toBe(sentBefore+1);
+ const handoff=fixture.mutations.filter(m=>m.method==='Apply').at(-1).body;
+ assert.equal(handoff.sessionId,author.id);
+ assert.match(handoff.message.text,/^Please address these 2 review comments/);
+ assert.match(handoff.message.text,/\*\*Major: Wrap the error\*\*/);
+ await expect(authorBox).toHaveValue('Keep my draft');
+ await expect.poll(()=>fixture.mutations.filter(m=>m.method==='SetReviewDisposition').at(-1)?.body).toMatchObject({disposition:'sent',sessionId:author.id,closeReviewers:true});
  await expect(turnCard.getByRole('button',{name:/^Send \d+ finding/})).toHaveCount(0);
+ const deliveredReviewer=fixture.sessions.find(s=>s.id===turnRun.reviewerSessionId);
+ assert.ok(deliveredReviewer.closed && Number(deliveredReviewer.archivedAtUnixMillis)>0,'fully delivered reviewer stopped and archived');
+ assert.equal(fixture.reviewOf('alpha').comments.filter(c=>c.reviewId===turnRun.id && c.disposition==='sent').length,2,'archiving preserves both findings');
  await authorBox.fill('');
 
  // 9b. The message box: `/review claude` (and `/review` alone is the default reviewer).

@@ -486,4 +486,4 @@ checkout of REPO** directly before the block. The same destination
 instructions work with a standalone inline-code command. HTML previews and
 version comparisons remain display-only.
 
-The agent companion opens a fresh conversation by default, with the displayed revision and any selected excerpt supplied privately at startup. New companions stay out of the Agents sidebar. Selecting an existing workspace conversation explicitly continues its history. The companion remembers that choice per artifact. Enter in the detached reader uses the same configured send binding as workspace chat.
+The agent companion opens a fresh conversation by default, with the displayed revision and any selected excerpt supplied privately at startup. New companions stay out of the Agents sidebar; their questions, approvals and failures still reach the Inbox and notifications ([agent types](AGENT_TYPES.md)). Selecting an existing workspace conversation explicitly continues its history. The companion remembers that choice per artifact. Enter in the detached reader uses the same configured send binding as workspace chat.

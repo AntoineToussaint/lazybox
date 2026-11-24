@@ -284,22 +284,22 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     // ⌘↵ (chat.send-now) submits this same form, after dictation's last words
     // settle when it was listening: the message it sends goes now.
     const now = !snippetText && Date.now() - sendNowAt.current < 15_000; sendNowAt.current = 0;
+    if (sendingRef.current || sending) return false;
     // `/command`: Lazybox's runs here, an unknown one asks first; the agent's goes on as the prompt.
-    if (!snippetText && !files.length && !missingFiles.length && !sendingRef.current && !sending && slash.intercept(message)) return false;
+    if (!snippetText && !files.length && !missingFiles.length && slash.intercept(message)) return false;
     const text = snippetText ?? message;
     // Never swallow Enter: say what is in the way.
-    if (!snippetText && !sendingRef.current && !sending && missingFiles.length && (message.trim() || files.length)) { setError(`Attach ${missingFiles.length === 1 ? missingFiles[0].name : 'the files'} again, or remove ${missingFiles.length === 1 ? 'it' : 'them'}, to send.`); return false; }
+    if (!snippetText && missingFiles.length && (message.trim() || files.length)) { setError(`Attach ${missingFiles.length === 1 ? missingFiles[0].name : 'the files'} again, or remove ${missingFiles.length === 1 ? 'it' : 'them'}, to send.`); return false; }
     // Any other refusal says why: a message that cannot go must never look sent.
     if (!snippetText && (message.trim() || files.length) && !canSend) {
-      const why = sendingRef.current || sending ? 'Still sending your previous message…'
-        : !session ? 'Still connecting to this conversation…'
+      const why = !session ? 'Still connecting to this conversation…'
         : !canCompose ? (session.recoveryRequired ? 'A previous Lazybox left this conversation’s processes unconfirmed: settle that above first.' : session.resumeBlocked ? 'This conversation cannot be continued from here.' : 'This conversation has ended.')
         : session.fault ? `${faultSentence(session.fault)} Resume it or start a new conversation to continue.`
         : '';
       if (why) setError(why);
       return false;
     }
-    if (sendingRef.current || !(snippetText ? canCompose && (!session?.fault || limited || continuesAfterError) && !sending && !message.trim() && !files.length && !missingFiles.length : canSend)) return false;
+    if (!(snippetText ? canCompose && (!session?.fault || limited || continuesAfterError) && !message.trim() && !files.length && !missingFiles.length : canSend)) return false;
     sendingRef.current = true; setSending(true); setError(''); jumpToLatest();
     const signal = lifetime.current!.signal;
     try {
@@ -396,11 +396,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     } catch (e) { setError(humanError(e)); }
   };
   const setPermission = (mode: string) => { if (session?.capabilities?.livePermission) void changePermission(mode); else setRestartTo(mode); };
-  const changePermission = async (mode: string) => {
+  const changePermission = async (mode: string, exitPlanRequestId?: string) => {
     try {
-      const receipt = await api.apply({ sessionId: sessionID, operationId: crypto.randomUUID(), operation: { case: 'permission', value: { mode } } });
+      const receipt = await api.apply({ sessionId: sessionID, operationId: crypto.randomUUID(), operation: { case: 'permission', value: { mode, exitPlanRequestId } } });
       if (receipt.delivery === 'failed') throw new Error(receipt.error || 'Could not change permissions.');
-      setSession(current => current?.id === sessionID ? { ...current, permission: mode } : current);
+      setSession(current => current?.id === sessionID ? { ...current, permission: mode, workflow: exitPlanRequestId ? 'execute' : current.workflow } : current);
       return true;
     } catch (e) { setError(humanError(e)); return false; }
   };
@@ -764,7 +764,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           </button>}
           <CodeRunContext.Provider value={codeRuns}><MessageArea onBranch={allowStart && !assistant && session?.provider === 'codex'
             ? (entry, sideQuestion) => { setBranchSelection({ message: entry, source: sessionID, requestKey: crypto.randomUUID(), sideQuestion }); setRetryDraft(sideQuestion ? "" : entry.text); setBranchFromCheckpoint(entry.type !== 'operation_accepted' && !!session.collectionId && !!onOpenHandoff); } : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
-            enableFullAccess={session?.provider === 'codex' && !session.closed && session.capabilities?.livePermission && session.permission !== 'yolo' && session.workflow !== 'plan' && !assistant ? () => changePermission('yolo') : undefined}
+            enableFullAccess={session?.capabilities?.livePermission && !session.closed && session.permission !== 'yolo' && !assistant ? requestId => changePermission('yolo', requestId) : undefined}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
             subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onOpenContinuation={id => void openLinkedConversation(id, 0n)} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
           {delivery && !transcript.turnRunning && <DeliveryVerdict outcome={delivery} folded onEvidence={openCommand ? e => openCommand(e.commandId) : undefined}/>}

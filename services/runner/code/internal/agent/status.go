@@ -63,14 +63,6 @@ type AccountObservation struct {
 	RetryAfterSeconds int64         `json:"retryAfterSeconds,omitempty"`
 }
 
-func IsAssistant(purpose string) bool {
-	return purpose == "help" || purpose == "planning" || purpose == "summary"
-}
-
-func ValidPurpose(purpose string) bool {
-	return purpose == "" || purpose == "coding" || purpose == "artifact" || IsAssistant(purpose)
-}
-
 func LimitState(code string) string {
 	switch code {
 	case "usageLimitExceeded", "usage_limit_exceeded", "credits_required", "subscription_exhausted":

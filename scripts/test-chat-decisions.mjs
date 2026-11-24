@@ -41,6 +41,11 @@ try{
  await expect(card.getByRole('button',{name:'Send answer'})).toBeDisabled();
  // Keyboard: focus starts on the card itself, never a choice; 2 picks SQLite and moves on, showing its preview.
  await expect(card).toBeFocused();
+ // From the card, ↑ and ↓ go to the last and first option (the transcript does not scroll).
+ await page.keyboard.press('ArrowUp');
+ await expect(card.locator('[data-question="What should the table be called?"]').getByRole('radio',{name:/Other/})).toBeFocused();
+ await card.focus();await page.keyboard.press('ArrowDown');
+ await expect(card.getByRole('radio',{name:/Postgres/})).toBeFocused();
  await page.keyboard.press('2');
  await expect(card.getByRole('radio',{name:/SQLite/})).toHaveAttribute('aria-checked','true');
  await expect(card.getByLabel('Preview')).toContainText('db.sqlite');
@@ -130,6 +135,16 @@ try{
  await careful.getByRole('button',{name:'Back',exact:true}).click();
  await expect(careful.getByRole('button',{name:'Deny…'})).toBeFocused();
  session.pending=[];session.status='running';channel.push({type:'request_resolved',requestId:'careful-me'});
+ await expect(page.locator('.request')).toHaveCount(0);
+ // A question answered only in words starts in its field, so what the person types goes there.
+ await page.locator('.messages:visible').first().click({position:{x:5,y:5}});
+ const words={type:'question',requestId:'question-words',text:'AskUserQuestion',providerDataJson:b64({tool:'AskUserQuestion',toolUseId:'ask-2',input:{questions:[{question:'What should the release be called?',header:'Name',multiSelect:false,options:[]}]}})};
+ session.pending=[words];session.status='waiting_input';channel.push(words);
+ const wordsCard=page.locator('.request.question-card');
+ await expect(wordsCard.getByRole('textbox')).toBeFocused();
+ await page.keyboard.type('Aurora');await page.keyboard.press('Meta+Enter');
+ await expect.poll(()=>applied('answer').at(-1)).toEqual({requestId:'question-words',answers:{'What should the release be called?':{values:['Aurora']}}});
+ session.pending=[];session.status='running';channel.push({type:'request_resolved',requestId:'question-words'});
  await expect(page.locator('.request')).toHaveCount(0);
  // Typing in the composer never answers anything.
  assert.equal(applied('approval').length,3);

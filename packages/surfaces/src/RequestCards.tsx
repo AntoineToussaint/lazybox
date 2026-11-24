@@ -6,7 +6,7 @@ import { Icon } from './Icons';
 import { isSettingsUpdate, SettingsProposal } from './SettingsProposal';
 import { approvalOf, decisionForKey, decisionRows, questionsOf, scopeWords, type Approval, type AnswerNote, type DecisionRow, type Question } from './request-model';
 import { shortPath } from './tool-lines';
-import { CardHead, editable, Kbd, useChatKeys, useInitialFocus, type RequestPosition } from './request-parts';
+import { arrowIntoCard, CardHead, editable, Kbd, useChatKeys, useInitialFocus, type RequestPosition } from './request-parts';
 import { RepositoryRequestCard } from './RepositoryRequestCard';
 import { BrowserRequestCard } from './BrowserRequestCard';
 import { ConversationRequestCard } from './ConversationRequestCard';
@@ -196,10 +196,13 @@ function QuestionCard({ request, api, session, onError, position }: RequestCardP
     return true;
   };
   useChatKeys(card, onKey);
-  useInitialFocus(card);
+  // A question answered only in words starts in its field: nothing typed is lost, and typing answers nothing until it is sent.
+  useInitialFocus(card, questions[0] && !questions[0].options.length ? '.question-free input, .question-free textarea' : undefined);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void send(); return; }
     if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
+    // From the card itself, ↓ and ↑ go to the first and last option, as on the other cards.
+    if (arrowIntoCard(event, card.current, '[role=radio], [role=checkbox]')) return;
     if (onKey(event)) event.preventDefault();
   };
   return <article ref={card} tabIndex={-1} className="request question-card" aria-label="Agent question" onKeyDown={cardKeys}>

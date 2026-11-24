@@ -1003,9 +1003,12 @@ const maxReconnects = 3
 // host saying why (not superseded, not this Runner detaching). The host may
 // well be alive, and its command with it: finishing the command here would
 // call it done while it runs, and the next Runner's sweep would then stop it
-// as an orphan. So the command is re-attached, as a restart would. A host
-// that shows another client attached was taken over (its notice lost):
-// re-attaching would take it back from that Runner, so this one stands down.
+// as an orphan. So the command is re-attached, as a restart would.
+//
+// The host's own "attached" is no reason to stand down: it counts this
+// Runner's dead connection as attached until it reads its close. Attaching
+// supersedes such a stale client. Another Runner cannot hold the host: this
+// one holds the state lock, so it is the only legitimate client.
 // attempt counts the reconnections since anything last arrived. It returns
 // the new connection, or nil once the command is settled here.
 func (c *Command) reconnect(lost *sessionhost.Client, attempt int) *sessionhost.Client {
@@ -1015,20 +1018,6 @@ func (c *Command) reconnect(lost *sessionhost.Client, attempt int) *sessionhost.
 		defer cancel()
 		c.stopHost(ctx, "command stopped: its session host connection kept failing")
 		return nil
-	}
-	// The host learns that this connection ended only when it reads its
-	// close; until then it may still count it as attached.
-	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		status, err := c.hostBackend.Probe(ctx, c.hostRoot, c.hostID)
-		cancel()
-		if err != nil || !status.Attached {
-			break
-		}
-		if time.Now().After(deadline) {
-			c.handOver()
-			return nil
-		}
 	}
 	host := c.reattach("after its connection was lost")
 	if host == nil {

@@ -486,6 +486,52 @@ func TestADroppedHostConnectionIsReattached(t *testing.T) {
 	}
 }
 
+// staleAttached is a backend whose hosts all report a client attached, as a
+// host does for a connection that died until it reads its close.
+type staleAttached struct{ sessionhost.Local }
+
+func (b staleAttached) Probe(ctx context.Context, root, id string) (sessionhost.Status, error) {
+	status, err := b.Local.Probe(ctx, root, id)
+	status.Attached = true
+	return status, err
+}
+
+// A host that still counts the dropped connection as attached is no reason
+// to stand down: re-attaching supersedes the stale client. Before, the
+// command was left shown done, supervised by no one, and Cancel could not
+// reach it.
+func TestADroppedConnectionTheHostStillCountsIsReattached(t *testing.T) {
+	f := newHosted(t)
+	m, err := NewHostedOn(f.dir, 1<<20, 0, f.hosts, staleAttached{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	c, err := m.Start(Spec{SessionID: "s", Title: "build", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", f.script()}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "first output never recorded", func() bool { return c.Status().Offset > 0 })
+	c.mu.Lock()
+	lost := c.host
+	c.mu.Unlock()
+	_ = lost.Detach()
+	waitFor(t, "the command was not re-attached", func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.host != lost || c.status.Done
+	})
+	if state := c.Status(); state.Done {
+		t.Fatalf("a running command was given up: %+v", state)
+	}
+	if err = os.WriteFile(f.gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if state := finished(t, c); state.ExitCode == nil || *state.ExitCode != 4 || state.Error != "" {
+		t.Fatalf("the command's own exit was not recorded: %+v", state)
+	}
+}
+
 // A host that dies while attached took its command with it (processguard):
 // its outcome is unknown, and nothing is left running to confirm.
 func TestACommandWhoseHostDiesWhileAttachedIsReportedUnknown(t *testing.T) {

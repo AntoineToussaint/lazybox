@@ -242,6 +242,87 @@ func TestMissingRepositoryFoldersAreUnavailableNotFatal(t *testing.T) {
 	}
 }
 
+// A GitHub repository whose folder was moved is unavailable after a restart;
+// adding it at its new path registers the working clone, not the unavailable
+// entry, and that entry stays (hidden) for the workspaces made from it.
+func TestMovedRepositoryAddedAtItsNewPathIsUsable(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	gitTest(t, repo.Path, "remote", "add", "origin", "https://github.com/team/api.git")
+	gitTest(t, repo.Path, "update-ref", "refs/remotes/origin/main", "HEAD")
+	root := t.TempDir()
+	m := newTest(t, root)
+	old, err := m.AddLocalRepository(ctx, repo.Path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(t.TempDir(), "api")
+	if err = os.Rename(repo.Path, moved); err != nil {
+		t.Fatal(err)
+	}
+	m = newTest(t, root)
+	if r, _ := m.Repository(old.ID); r.Unavailable == "" {
+		t.Fatal("moved repository not unavailable")
+	}
+	added, err := m.AddLocalRepository(ctx, moved, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, _ := filepath.EvalSymlinks(moved)
+	if added.Unavailable != "" || added.Path != canonical || added.ID == old.ID {
+		t.Fatalf("added %+v, want the working clone under its own ID", added)
+	}
+	if list := m.Repositories(); len(list) != 1 || list[0].ID != added.ID {
+		t.Fatalf("library = %+v", list)
+	}
+	if hidden, ok := m.Repository(old.ID); !ok || !hidden.Hidden {
+		t.Fatalf("unavailable entry = %+v, want it kept hidden", hidden)
+	}
+	if _, err = m.Create(ctx, "after-move", Spec{Name: "after-move", Members: []MemberSpec{{RepositoryID: added.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m = newTest(t, root)
+	if list := m.Repositories(); len(list) != 1 || list[0].ID != added.ID || list[0].Unavailable != "" {
+		t.Fatalf("after restart: %+v", list)
+	}
+}
+
+// The same folder back at the same path is the same registration again.
+func TestRepositoryFolderBackAtItsPathIsRevivedInPlace(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	root := t.TempDir()
+	m := newTest(t, root)
+	old, err := m.AddLocalRepository(ctx, repo.Path, "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	aside := repo.Path + "-aside"
+	if err = os.Rename(repo.Path, aside); err != nil {
+		t.Fatal(err)
+	}
+	m = newTest(t, root)
+	if err = os.Rename(aside, repo.Path); err != nil {
+		t.Fatal(err)
+	}
+	again, err := m.AddLocalRepository(ctx, repo.Path, "api")
+	if err != nil || again.ID != old.ID || again.Unavailable != "" {
+		t.Fatalf("revived %+v, %v", again, err)
+	}
+	if _, err = m.Create(ctx, "revived", specTest(old.ID)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLegacyGitHubAliasesStayResolvableButListOnce(t *testing.T) {
 	first, second := repoTest(t), repoTest(t)
 	first.ID, second.ID = "old-one", "old-two"

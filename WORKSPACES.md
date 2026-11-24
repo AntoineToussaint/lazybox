@@ -353,8 +353,10 @@ an entry of its own: the removed entry stays, hidden, because the workspaces
 made from it name its Git directory and need it to be deleted. The library persists across Runner restarts. A registered
 repository whose folder is missing at startup (moved, deleted, unmounted) is
 marked unavailable instead of stopping the Runner: every workspace still
-loads, and creating a workspace from it says why it cannot until the folder is
-back and the Runner restarts. A checkout needs an
+loads, and creating a workspace from it says why it cannot. Adding the
+repository again fixes it: from the same path it is the same entry again; from
+a new path (the folder was moved) the working clone gets an entry of its own
+and the unavailable one is hidden, kept for the workspaces made from it. A checkout needs an
 initial commit; subfolders and `.git` paths are rejected rather than silently
 registering a parent repository.
 

@@ -41,7 +41,7 @@ type Repository struct {
 	// Unavailable says why the repository's folder could not be opened as a
 	// Git repository when the Runner started (moved, deleted, unmounted).
 	// The entry stays so its workspaces keep their record; nothing is created
-	// from it until the folder is back and the Runner restarts. Never saved.
+	// from it until it is registered again (registerRepository). Never saved.
 	Unavailable string `json:"-"`
 }
 type MemberSpec struct {

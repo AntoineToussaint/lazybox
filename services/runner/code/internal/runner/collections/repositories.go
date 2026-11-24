@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitidentity"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitidentity"
 )
 
 // RegisterRepository enrolls a verified local Git repository without modifying
@@ -40,6 +40,33 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 	if err != nil {
 		return Repository{}, err
 	}
+	// An entry for this repository whose folder was missing at startup (it
+	// was moved, say) gives way to this working clone: it is hidden, as
+	// ReplaceRepository hides an old copy, and stays the source its
+	// workspaces name. The same folder back at the same path is revived in
+	// place instead.
+	identity := gitidentity.Repository(common, r.SourceURL)
+	gaveWay := map[string]Repository{}
+	for id, old := range m.repos {
+		if old.Unavailable == "" || old.Hidden || (id == r.ID && old.Path == r.Path) || m.identity(id) != identity {
+			continue
+		}
+		gaveWay[id] = old
+		old.Hidden = true
+		m.repos[id] = old
+	}
+	registered, err := m.registerResolved(r, common, identity)
+	if err != nil {
+		for id, old := range gaveWay {
+			m.repos[id] = old
+		}
+	}
+	return registered, err
+}
+
+// registerResolved finishes registerRepository for r, whose path, source and
+// Git common directory are resolved. The caller holds m.mu.
+func (m *Manager) registerResolved(r Repository, common, identity string) (Repository, error) {
 	// A hidden entry is the source of the workspaces made from it: their
 	// members name its Git directory. Registering a different clone under the
 	// same ID would strand them, so that clone gets an ID of its own.
@@ -55,17 +82,16 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 		if old == r {
 			return old, nil
 		}
-		if old.Unavailable != "" {
-			return Repository{}, fmt.Errorf("repository %s is unavailable (%s); restore its folder and restart the Runner, or remove it first", old.ID, old.Unavailable)
+		// Only the same folder back at the same path reaches here unavailable.
+		if old.Unavailable == "" {
+			return Repository{}, errors.New("repository identity already has a different registration")
 		}
-		return Repository{}, errors.New("repository identity already has a different registration")
 	}
 	if len(m.repos) >= 512 {
 		return Repository{}, errors.New("repository library capacity reached")
 	}
-	identity := gitidentity.Repository(common, r.SourceURL)
 	for _, old := range m.repositories() {
-		if m.identity(old.ID) == identity {
+		if old.Unavailable == "" && m.identity(old.ID) == identity {
 			return old, nil
 		}
 	}
@@ -76,7 +102,7 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 		}
 		list = append(list, old)
 	}
-	if err = m.saveRepositories(list); err != nil {
+	if err := m.saveRepositories(list); err != nil {
 		return Repository{}, err
 	}
 	m.repos[r.ID] = r
@@ -189,7 +215,9 @@ func (m *Manager) AddLocalRepository(ctx context.Context, path, name string) (Re
 	source := m.resolveRepositorySource(ctx, Repository{Path: canonical})
 	identity := gitidentity.Repository(common, source.SourceURL)
 	for _, existing := range m.repositories() {
-		if m.identity(existing.ID) == identity {
+		// An entry whose folder is missing is not this working checkout;
+		// registering gives way to it (registerRepository).
+		if existing.Unavailable == "" && m.identity(existing.ID) == identity {
 			return existing, nil
 		}
 	}

@@ -202,7 +202,7 @@ function render() {
 function renderPullCosts(view, rows, win) {
   const list = $('by-pull');
   const result = state.pulls;
-  if (!result || result.error || result.truncated || (result.truncated === undefined && result.pulls.length >= 100)) {
+  if (!result?.pulls || result.truncated || (result.truncated === undefined && result.pulls.length >= 100)) {
     list.replaceChildren(el('li', 'none', result?.error || (result ? 'The tracked PR list is incomplete.' : 'Allow access to tracked pull requests to see estimates.')));
     return;
   }
@@ -228,11 +228,15 @@ function renderPullCosts(view, rows, win) {
       const linked = pulls.filter(p => p.conversations.has(row.conversationId));
       add(linked.length === 1 ? linked[0].detail : shared, row);
     }
-    for (const pull of pulls) groups.push({ label: pull.label, sub: workspace.name + ' · linked conversation estimate', detail: pull.detail });
+    for (const pull of pulls) {
+      const scope = pull.detail.records ? 'linked conversation estimate' : 'no linked usage in this period';
+      groups.push({ label: pull.label, sub: workspace.name + ' · ' + scope, detail: pull.detail });
+    }
     if (shared.records) groups.push({ label: 'Shared workspace usage', sub: workspace.name, detail: shared });
   }
-  renderRank(list, 'pull', groups.map(g => ({ ...g, usd: g.detail.usd })).sort((a, b) => b.usd - a.usd),
+  renderRank(list, 'pull', groups.map(g => ({ ...g, usd: g.detail.records ? g.detail.usd : null })).sort((a, b) => b.usd - a.usd),
     view.total.usd, 8, 'No tracked pull requests in workspaces with usage this period');
+  if (result.error) list.prepend(el('li', 'none', 'Using saved PR links. ' + result.error));
 }
 
 function renderPeriod(timed) {
@@ -325,7 +329,7 @@ function renderRank(list, kind, rows, total, limit, none) {
     const node = el(row.action ? 'button' : 'div', 'row');
     const d = row.detail;
     const detail = `${tokens(d.input + d.cacheRead + d.cacheWrite)} in · ${tokens(d.output)} out · ${plural(d.records, 'turn', 'turns')}${d.unpriced ? ` · ${d.unpriced} without a price` : ''}`;
-    node.title = `${row.label}: ${dollars(row.usd)} · ${detail}`;
+    node.title = `${row.label}: ${row.usd === null ? row.sub : dollars(row.usd)} · ${detail}`;
     if (row.action) {
       node.type = 'button';
       node.addEventListener('click', row.action);
@@ -341,7 +345,7 @@ function renderRank(list, kind, rows, total, limit, none) {
     track.append(fill);
     // What has no price says so, rather than $0.00.
     const unpriced = !row.usd && d.unpriced > 0;
-    node.append(who, el('span', unpriced ? 'cost unpriced' : 'cost', unpriced ? 'unpriced' : dollars(row.usd)), el('span', 'share', unpriced ? '' : percent(row.usd, total)), track);
+    node.append(who, el('span', unpriced ? 'cost unpriced' : 'cost', unpriced ? 'unpriced' : dollars(row.usd)), el('span', 'share', unpriced || row.usd === null ? '' : percent(row.usd, total)), track);
     li.append(node);
     return li;
   });

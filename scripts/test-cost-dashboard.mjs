@@ -72,6 +72,7 @@ const spent = (from, to = Infinity, keep = () => true) => series.filter(b => b.a
 const f = await startRunnerFixture();
 const usage = body => body.series ? report(body.workspace) : { ...report(body.workspace), series: [] };
 f.telemetry = usage;
+f.tracked.trackingError = 'GitHub is offline';
 const link = (workspace, conversation, repository, number) => ({
   collectionId: workspace, conversationId: conversation, role: 'delivers',
   item: { kind: 'pull_request', ref: { key: repository + '#' + number }, repository },
@@ -147,9 +148,11 @@ async function scenario(browser, scheme, full) {
   await col.hover();
   await expect(board.locator('#tooltip')).toBeVisible();
   await expect(board.locator('#tooltip .sum')).toHaveText(dollars(spent(today)));
+  await expect(board.locator('#by-pull')).toContainText('Using saved PR links. GitHub is offline');
   const pullCost = label => board.locator('#by-pull .row').filter({ hasText: label }).locator('.cost');
   await expect(pullCost('acme/parser#1')).toHaveText(dollars(byConversation.get('alpha')));
   await expect(pullCost('acme/cache#1')).toHaveText(dollars(byConversation.get('c-alpha-2')));
+  await expect(pullCost('acme/cache#2')).toHaveText('–');
   await expect(pullCost('Shared workspace usage')).toHaveText(dollars(byConversation.get('c-alpha-3')));
   await expect(pullCost('acme/release#2')).toHaveText(dollars(spent(today - 6 * DAY, Infinity, b => b.workspace === 'beta')));
   // ---- The lists, ranked, with the share of the period.
@@ -244,6 +247,7 @@ async function scenario(browser, scheme, full) {
     await expect(board.locator('#board')).toBeHidden();
     await shot(frameEl, 'narrow-empty');
     f.telemetry = usage;
+f.tracked.trackingError = 'GitHub is offline';
 const link = (workspace, conversation, repository, number) => ({
   collectionId: workspace, conversationId: conversation, role: 'delivers',
   item: { kind: 'pull_request', ref: { key: repository + '#' + number }, repository },

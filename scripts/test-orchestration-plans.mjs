@@ -16,6 +16,7 @@ import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const shots = fileURLToPath(new URL('../.cache/', import.meta.url));
 mkdirSync(shots, { recursive: true });
@@ -55,7 +56,7 @@ async function run(scheme, capped) {
   plan.baseline = [{ name: 'api', repositoryId: 'api', commit: 'e3f54af31fae8eb7' }];
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
   const page = await context.newPage();
-  const errors = []; page.on('pageerror', error => errors.push(String(error)));
+  const errors = []; await collectPageErrors(page, errors);
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
   const chat = page.locator('.panel-chat');
   await expect(chat.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();

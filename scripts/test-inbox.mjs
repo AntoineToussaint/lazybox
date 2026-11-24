@@ -9,6 +9,7 @@ import {webkit, chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -33,7 +34,7 @@ try {
   await server.listen();
   browser = await (process.env.TEST_CHROMIUM ? chromium : webkit).launch();
   const page = await (await browser.newContext({viewport: {width: 1440, height: 900}})).newPage();
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   // A recording stand-in for the browser's Notification API, already allowed.
   await page.addInitScript(() => {
     window.__notices = [];
@@ -234,7 +235,7 @@ try {
   // the conversation is not seen until that window is in front.
   Object.assign(session('review-session'), {status: 'done', busy: false, agents: root('done', Date.now(), {turnEndedAtUnixMillis: ms(Date.now()), lastTurnStatus: 'completed'}), lastMessage: 'Split it again.'});
   await expect(reviewRow).toHaveAttribute('data-unread', 'review', {timeout: 10_000});
-  const late = await page.context().newPage(); late.on('pageerror', e => errors.push(String(e)));
+  const late = await page.context().newPage(); await collectPageErrors(late, errors);
   await late.addInitScript(() => { window.__focused = true; document.hasFocus = () => window.__focused; });
   const loaded = Promise.withResolvers();
   await late.route(/\/(Info|GetSession)$/, async route => { await loaded.promise; await route.continue(); });

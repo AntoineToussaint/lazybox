@@ -17,6 +17,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {mkdir} from 'node:fs/promises';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 fixture.library.push({id:'infra',name:'infra-base',path:'/fixture/repos/infra-base',gitIdentity:'github:fixture-team/infra-base'});
@@ -48,7 +49,7 @@ try {
  await server.listen();await mkdir(shots,{recursive:true});
  browser=await (process.env.TEST_CHROMIUM?chromium:webkit).launch();
  const page=await (await browser.newContext({viewport:{width:1440,height:900}})).newPage();page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const chat=page.locator('.panel-chat');
  await expect(chat.getByRole('textbox',{name:'Message',exact:true})).toBeVisible();

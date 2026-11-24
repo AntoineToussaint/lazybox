@@ -25,6 +25,7 @@ import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const shots = fileURLToPath(new URL('../.cache/', import.meta.url));
 mkdirSync(shots, { recursive: true });
@@ -113,7 +114,7 @@ try {
     return context;
   };
   const pairPhone = async (context, name, grants = ['respond']) => {
-    const page = await context.newPage(); page.on('pageerror', e => errors.push(String(e)));
+    const page = await context.newPage(); await collectPageErrors(page, errors);
     await page.goto((await owner('BeginDevicePairing', { grants })).url);
     await page.getByRole('textbox', { name: 'Name this phone' }).fill(name);
     await page.getByRole('button', { name: 'Pair this phone' }).click();
@@ -286,7 +287,7 @@ try {
   assert.deepEqual(sent, { title: 'Bump dependencies', kind: 'approval', url: '/?view=remote&session=approval-session', tag: 'approval-conversation' }, 'title, kind and link only');
   await phone.close();
   await cdp.send('ServiceWorker.deliverPushMessage', { origin: `${origin}/`, registrationId: registrations.get(`${origin}/`), data: JSON.stringify(sent) });
-  phone = await context.newPage(); phone.on('pageerror', e => errors.push(String(e)));
+  phone = await context.newPage(); await collectPageErrors(phone, errors);
   // This page's device credential lasts seconds, so it renews while the steps below run.
   let signIns = 0;
   await phone.route('**/remote/v1/session', async route => { const response = await route.fetch(); const body = await response.json(); body.expiresAt = Date.now() + 90_000 + 5_500; signIns++; await route.fulfill({ response, json: body }); });

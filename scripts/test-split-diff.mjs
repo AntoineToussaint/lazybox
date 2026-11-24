@@ -13,6 +13,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const api=fixture.shipState('alpha','api');
@@ -35,7 +36,7 @@ try{
  const url=`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`;
  const context=await browser.newContext({viewport:{width:1600,height:1000}});
  const page=await context.newPage();page.setDefaultTimeout(10000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  // React's warnings (duplicate keys, bad markup) are failures here too.
  page.on('console',message=>{if(message.type()==='error'&&/key|React|Warning/.test(message.text()))errors.push(message.text());});
  await page.goto(url);

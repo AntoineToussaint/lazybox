@@ -12,6 +12,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const [alphaSession,betaSession]=fixture.sessions;
@@ -27,7 +28,7 @@ let browser;
 try{
  browser=await (process.env.TEST_CHROMIUM?chromium:webkit).launch({headless:true});
  const page=await browser.newPage({viewport:{width:1400,height:900}});page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha#token=${fixture.token}`);
  const nav=page.getByRole('navigation',{name:'Workspaces'});
  const alphaLink=nav.locator('.workspace-row').filter({hasText:'Alpha feature'}).locator('.workspace-link');

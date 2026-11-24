@@ -9,6 +9,7 @@ import {webkit, chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const chatEvents=fixture.openEvents('alpha-session');
@@ -19,9 +20,8 @@ try {
  await server.listen();browser=await (process.env.TEST_CHROMIUM?chromium:webkit).launch();
  const context=await browser.newContext({viewport:{width:1440,height:900}});
  const page=await context.newPage();
- // A reload cuts in-flight requests (a CloseTerminal still on its way on a slow machine), which WebKit reports as page errors ("access control checks") on the page being left: not failures.
- let navigating=false;const errors=[];page.on('pageerror',e=>{if(!navigating)errors.push(String(e));});
- const reload=async()=>{navigating=true;await page.reload();await expect(page.locator('.panel-terminal').getByTestId('terminal')).toContainText('ran: ls -la');navigating=false;};
+ const errors=await collectPageErrors(page);
+ const reload=async()=>{await page.reload();await expect(page.locator('.panel-terminal').getByTestId('terminal')).toContainText('ran: ls -la');};
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  await expect(page.locator('.panel-chat').getByRole('textbox',{name:'Message',exact:true})).toBeVisible();
  assert.equal(calls('OpenTerminal').length,0,'showing a workspace never starts a shell');

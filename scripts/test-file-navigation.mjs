@@ -9,6 +9,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const channel=fixture.openEvents('alpha-session');
@@ -17,7 +18,7 @@ let browser;
 try{
  await server.listen();await mkdir('.cache',{recursive:true});
  browser=await webkit.launch({headless:true});const page=await browser.newPage({viewport:{width:1600,height:950}});page.setDefaultTimeout(20000);
- const errors=[];page.on('pageerror',error=>errors.push(String(error)));
+ const errors=[];await collectPageErrors(page, errors);
  const url=`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`;
  await page.goto(url);
  await expect(page.locator('.workspace-agent-label').first()).toBeVisible();

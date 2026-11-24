@@ -19,6 +19,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectContextPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 // An agent of the chat publishes an artifact (its `lazybox artifact put`), once, when a scenario asks.
@@ -46,8 +47,8 @@ const within=async(locator,expected)=>{const now=await box(locator);return !!now
 
 async function scenario(browser,scheme){
  const context=await browser.newContext({viewport:{width:1440,height:900},colorScheme:scheme});
- const errors=[];context.on('page',p=>p.on('pageerror',e=>errors.push(String(e))));
- let page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(String(e)));
+ const errors=await collectContextPageErrors(context);
+ let page=await context.newPage();page.setDefaultTimeout(15000);
  const shot=(target,name)=>target.screenshot({path:`.cache/reattach-${name}-${scheme}.png`});
  await page.goto(url);
  const tab=kind=>page.locator('.dv-tab').filter({has:page.locator(`[data-kind="${kind}"]`)});
@@ -153,7 +154,7 @@ async function scenario(browser,scheme){
  await page.close();
  // Its window closes while the main window is gone: nobody hears it.
  await chatWindow.close();
- page=await context.newPage();page.on('pageerror',e=>errors.push(String(e)));await page.goto(url);
+ page=await context.newPage();await page.goto(url);
  await expect(page.locator('.page-layout .panel-chat').getByRole('textbox',{name:'Message',exact:true})).toBeEnabled();
  await expect(page.getByRole('region',{name:'In other windows'})).toHaveCount(0);
  await expect.poll(()=>within(page.locator('[data-dock-panel]:has(> .panel-host > .panel-chat)'),chatAt),{message:'back where it was after a reload'}).toBe(true);

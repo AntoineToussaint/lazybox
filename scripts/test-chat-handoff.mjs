@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const alpha = f.sessions.find(s => s.id === 'alpha-session'), beta = f.sessions.find(s => s.id === 'beta-session');
@@ -48,9 +49,7 @@ try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
     await context.addInitScript(clipboard);
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    // Leaving a page cuts its in-flight polls, which WebKit reports as page errors ("access control checks") on the page being left: not failures. Anything else is.
-    const errors = []; let leaving = 0; page.on('pageerror', e => { const text = String(e); if (leaving && /access control checks/.test(text)) return; errors.push(text); });
-    const leave = async to => { leaving++; try { await page.goto(to); } finally { leaving--; } };
+    const errors = await collectPageErrors(page);
     let reported = false;
     await page.route('**/GetTelemetry', route => route.fulfill({ json: reported ? usage : { groups: [], contexts: [], recent: [] } }));
     await page.goto(`${base}&collection=alpha&session=${alpha.id}#token=${f.token}`);
@@ -107,7 +106,7 @@ try {
     await page.locator('.workspace-row', { hasText: 'Beta release' }).click({ button: 'right' });
     await expect(page.getByRole('menuitem', { name: /Open in Terminal/ })).toBeVisible();
     await page.keyboard.press('Escape');
-    await leave(`${base}&collection=beta&session=${beta.id}#token=${f.token}`);
+    await page.goto(`${base}&collection=beta&session=${beta.id}#token=${f.token}`);
     await expect(header.locator('.conversation-title-text')).toHaveText('Release notes');
     await header.getByLabel('Session actions', { exact: true }).click();
     const codex = page.getByRole('group', { name: 'Session actions menu' }).getByRole('button', { name: 'Continue in Codex…' });
@@ -117,7 +116,7 @@ try {
 
     if (scheme === 'dark') {
       // R13 · With a desktop host (here a stand-in): the chosen terminal, at the folder.
-      await leave(`${base}&collection=alpha&session=${alpha.id}#token=${f.token}`);
+      await page.goto(`${base}&collection=alpha&session=${alpha.id}#token=${f.token}`);
       await expect(header.locator('.conversation-title-text')).toHaveText('Add a response cache');
       const handoff = await moduleUrl(page, 'handoff.tsx');
       assert.ok(handoff, 'the handoff module is loaded');
@@ -191,7 +190,7 @@ try {
     }
 
     // R12 · At 1024×680 the Review tray goes under the files; the diff keeps its height and width.
-    await leave(`${base}&collection=alpha&session=${alpha.id}#token=${f.token}`);
+    await page.goto(`${base}&collection=alpha&session=${alpha.id}#token=${f.token}`);
     await page.setViewportSize({ width: 1024, height: 680 });
     await openWorkspaceChanges(page);
     const changes = page.getByRole('region', { name: 'Workspace changes' });

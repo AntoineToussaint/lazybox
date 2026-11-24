@@ -6,6 +6,7 @@
 // output, errors visible, "Open full details"). Fake Runner only.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.busy=true;session.agents=[{id:'root',status:'running'}];
@@ -24,7 +25,7 @@ const applied=kind=>fixture.mutations.filter(m=>m.method==='Apply'&&m.body[kind]
 
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});let browser;
 try{
- await server.listen();browser=await (process.env.TEST_WEBKIT?webkit:chromium).launch({headless:true});const page=await browser.newPage({viewport:{width:1450,height:1050}});page.setDefaultTimeout(15000);const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ await server.listen();browser=await (process.env.TEST_WEBKIT?webkit:chromium).launch({headless:true});const page=await browser.newPage({viewport:{width:1450,height:1050}});page.setDefaultTimeout(15000);const errors=[];await collectPageErrors(page, errors);
  // Every tool call on its own line: the Verbose activity detail (test:activity-detail covers Smart and Quiet).
  await page.addInitScript(()=>localStorage.setItem('lazybox:chat.activity-detail','verbose'));
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);

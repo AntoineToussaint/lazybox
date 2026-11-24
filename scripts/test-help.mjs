@@ -13,6 +13,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: {host: '127.0.0.1', port: 0, proxy: {'/lazybox.bench.v1.RunnerService/': {target: fixture.url}}}});
@@ -22,7 +23,7 @@ try {
   const context = await browser.newContext({viewport: {width: 1440, height: 900}});
   await context.addInitScript(() => Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'}));
   const page = await context.newPage(); page.setDefaultTimeout(15000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
   await expect(page.getByRole('combobox', {name: 'Workspace', exact: true})).toHaveValue('alpha');

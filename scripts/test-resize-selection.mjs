@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 for(const id of ['alpha','beta']){
@@ -48,7 +49,7 @@ async function run(type,name){
  const browser=await type.launch({headless:true});
  try{
   const page=await browser.newPage({viewport:{width:1600,height:950}});page.setDefaultTimeout(15000);
-  const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+  const errors=[];await collectPageErrors(page, errors);
   await page.goto(`${base}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
   const chat=page.locator('.embedded-chat:visible').first(),prose=chat.locator('.message').filter({hasText:'careless drag'}).first();
   await expect(prose).toBeVisible();

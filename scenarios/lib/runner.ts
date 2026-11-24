@@ -11,6 +11,7 @@ import react from '@vitejs/plugin-react';
 import { chromium, devices, type Browser, type BrowserContext, type Page } from '../../scripts/fixtures/playwright.mjs';
 import { startRunnerFixture, type RunnerFixture } from '../../scripts/fixtures/runner-ui.mjs';
 import { testViteCache } from '../../scripts/fixtures/vite-cache.mjs';
+import { collectPageErrors } from '../../scripts/fixtures/page-errors.mjs';
 import { ScenarioClock } from './clock.ts';
 import { World, ConversationHandle, WorkspaceHandle } from './world.ts';
 import { Overlay, installOverlay, type PointerStyle } from './overlay.ts';
@@ -134,7 +135,7 @@ export async function runScenario(stage: Stage, name: string, scenario: Scenario
     const page = await context.newPage();
     page.setDefaultTimeout(options.timeout);
     let during = 'opening the app';
-    page.on('pageerror', error => { report.pageErrors.push(`${String(error).split('\n')[0]} (during: ${during})`); if (process.env.SCENARIO_DEBUG) console.error(error.stack); });
+    await collectPageErrors(page, [], { onError: (message, stack) => { report.pageErrors.push(`${message.split('\n')[0]} (during: ${during})`); if (process.env.SCENARIO_DEBUG) console.error(stack || message); } });
     if (process.env.SCENARIO_DEBUG) page.on('console', message => { if (message.type() === 'error') console.error('console:', message.text().slice(0, 2000)); });
     // The page's clock is the scenario's (SCENARIO_REAL_CLOCK=1 leaves it real, to tell a clock artefact from a bug).
     const syncPage = () => process.env.SCENARIO_REAL_CLOCK ? Promise.resolve() : page.clock.setFixedTime(clock.now);

@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const dev = await startRunnerFixture(), box = await startRunnerFixture();
 dev.versionInfo.version = '0.1.22-dev';
@@ -84,8 +85,7 @@ try {
     Object.assign(state.remote, { state: 'connected', rttMs: 42, code: '', problem: '' });
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    let navigating = false;
-    const errors = []; page.on('pageerror', e => { if (!navigating) errors.push(String(e)); });
+    const errors = await collectPageErrors(page);
     // A headless page never has the window focus; the window under test does.
     await page.addInitScript(() => { document.hasFocus = () => true; });
     await page.goto(`${base}&collection=alpha&session=alpha-session#token=${dev.token}`);

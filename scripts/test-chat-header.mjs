@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 // The prompt from the report, which the header showed cut mid-sentence.
 const PROMPT = 'I want to start a plan, we want to look at SOTA but the goal is to write down a design for how Lazybox names conversations and lays out the chat header, then build it with tests.';
@@ -78,7 +79,7 @@ try {
   for (const scheme of ['dark', 'light']) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    const errors = []; page.on('pageerror', e => errors.push(String(e)));
+    const errors = []; await collectPageErrors(page, errors);
     await page.route('**/GetTelemetry', route => route.fulfill({ json: telemetry }));
     session.title = FALLBACK;
     await page.goto(url);

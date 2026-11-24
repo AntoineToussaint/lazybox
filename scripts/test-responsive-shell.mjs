@@ -5,12 +5,13 @@ import {webkit, chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 let browser;
 try {
  await server.listen();browser=await (process.env.TEST_CHROMIUM?chromium:webkit).launch();
- const page=await browser.newPage({viewport:{width:1440,height:900}});const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const page=await browser.newPage({viewport:{width:1440,height:900}});const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const chat=page.locator('.panel-chat');const composer=chat.getByRole('textbox',{name:'Message',exact:true});
  await expect(composer).toBeVisible();await composer.fill('Keep this draft through navigation and resizing');

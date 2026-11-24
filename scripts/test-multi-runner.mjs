@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const dev = await startRunnerFixture(), working = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -66,9 +67,7 @@ try {
     resetWorking();
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    // A reload cuts in-flight polls, which WebKit reports as page errors ("access control checks") on the page being left: not failures.
-    let navigating = false;
-    const errors = []; page.on('pageerror', e => { if (!navigating) errors.push(String(e)); });
+    const errors = await collectPageErrors(page);
     await page.addInitScript(() => {
       window.__notices = []; window.__focused = true; document.hasFocus = () => window.__focused;
       window.Notification = class { static permission = 'granted'; static async requestPermission() { return 'granted'; }
@@ -105,7 +104,7 @@ try {
     if (scheme === 'dark') {
       // Dismissed, the hint does not come back; Working stays out until the person opts in, in Settings → Runners.
       await hint.getByRole('button', { name: 'Dismiss' }).click();
-      navigating = true; await page.reload(); await page.waitForLoadState('load'); navigating = false;
+      await page.reload(); await page.waitForLoadState('load');
       await expect(page.locator('.panel-collections')).toContainText('Alpha feature');
       await page.waitForTimeout(1000);
       await expect(page.locator('.toast').filter({ hasText: 'also running on this Mac' })).toHaveCount(0);
@@ -397,7 +396,7 @@ try {
       await expect(list.locator('.runners-item[data-runner=working] .runners-tag.is-primary')).toHaveText('Primary');
       await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Work', exact: true }).click();
       await expect(groups).toHaveCount(2);
-      navigating = true; await page.reload(); await page.waitForLoadState('load'); navigating = false;
+      await page.reload(); await page.waitForLoadState('load');
       await expect(page.locator('.runner-group[data-active]')).toHaveAttribute('data-runner', 'working');
       await expect(page.locator('.runner-group')).toHaveCount(2);
       // Working stopping hands the page back to Dev, quietly.

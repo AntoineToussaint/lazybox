@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { monacoVimCompat } from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 // Opt-in Vim editing in the message box and the Monaco file editor, against
 // the fake Runner fixture. WebKit is the desktop shell's engine; Chromium
@@ -25,7 +26,7 @@ try {
     fixture.config.remove('keys');
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     page.setDefaultTimeout(15000);
-    const errors = []; page.on('pageerror', error => errors.push(String(error)));
+    const errors = []; await collectPageErrors(page, errors);
     await page.goto(url);
     const message = page.getByRole('textbox', { name: 'Message', exact: true });
     const chip = page.locator('.vim-mode-chip');

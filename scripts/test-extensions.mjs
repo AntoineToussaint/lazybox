@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const listen = handler => new Promise(resolve => { const s = createHttp(handler); s.listen(0, '127.0.0.1', () => resolve(s)); });
 // Where a malicious extension would send what it read: nothing may arrive.
@@ -53,7 +54,7 @@ async function scenario(browser, scheme, full) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
   const page = await context.newPage();
   page.setDefaultTimeout(10000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   const shot = name => page.screenshot({ path: `.cache/extensions-${name}-${scheme}.png` });
   await page.goto(url);
   await expect(page.locator('.page-layout .panel-chat').getByRole('textbox', { name: 'Message', exact: true })).toBeEnabled();

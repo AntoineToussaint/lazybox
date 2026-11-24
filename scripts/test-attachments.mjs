@@ -5,6 +5,7 @@ import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 // Exercise the real shared composer against fake RPC, without accounts/inference.
 const fixture = await startRunnerFixture();
@@ -18,7 +19,7 @@ try {
   for (const view of ['agent', 'chat', 'workspace']) {
     const context = await browser.newContext();
     const page = await context.newPage();
-    page.on('pageerror', error => errors.push(String(error)));
+    await collectPageErrors(page, errors);
     await page.route('**/Info', async route => {
       const response = await route.fetch();
       const body = await response.json();
@@ -142,7 +143,7 @@ try {
     fixture.openEvents(id);
     const context = await browser.newContext();
     const page = await context.newPage();
-    page.on('pageerror', error => errors.push(String(error)));
+    await collectPageErrors(page, errors);
     await page.goto(`${base}/?view=chat&session=${id}&collection=alpha#token=${fixture.token}`);
     const chat = page.locator('.agent-window');
     const composer = chat.getByRole('textbox', { name: 'Message', exact: true });
@@ -172,7 +173,7 @@ try {
   {
     const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
     const page = await context.newPage();
-    page.on('pageerror', error => errors.push(String(error)));
+    await collectPageErrors(page, errors);
     await page.goto(`${base}/?view=chat&session=alpha-session&collection=alpha#token=${fixture.token}`);
     const chat = page.locator('.agent-window');
     const composer = chat.getByRole('textbox', { name: 'Message', exact: true });

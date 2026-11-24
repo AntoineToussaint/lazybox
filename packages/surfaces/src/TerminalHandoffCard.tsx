@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Code, ConnectError } from '@lazybox/client-core';
 import { shellQuote } from './handoff-model';
 import { runAction } from './actions';
@@ -12,8 +12,25 @@ export function TerminalHandoffCard({ handoff }: { handoff: TerminalHandoff }) {
   const [decision, setDecision] = useState('');
   const [terminalId, setTerminalId] = useState('');
   const [error, setError] = useState('');
-  const status = handoff.status === 'pending' ? decision || 'pending' : handoff.status;
+  const recorded = handoff.status === 'pending' ? decision || 'pending' : handoff.status;
   const terminal = handoff.terminalId || terminalId;
+  const [ended, setEnded] = useState('');
+  const status = terminal && ended === terminal ? 'finished' : recorded;
+  useEffect(() => {
+    if (!terminal || status !== 'running') return;
+    const control = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    async function reconcile() {
+      try {
+        const list = await api.listTerminals({ collectionId: handoff.workspaceId }, { signal: control.signal });
+        const live = list.terminals.find(item => item.id === terminal);
+        if (!control.signal.aborted && (!live || live.done)) { setEnded(terminal); return; }
+      } catch { /* Reconnect on the next poll. */ }
+      if (!control.signal.aborted) timer = setTimeout(reconcile, 5000);
+    }
+    void reconcile();
+    return () => { control.abort(); clearTimeout(timer); };
+  }, [api, terminal, status, handoff.workspaceId]);
   function showTerminal(id: string) {
     requestTerminal(handoff.workspaceId, id);
     runAction('terminal.open');
@@ -22,7 +39,7 @@ export function TerminalHandoffCard({ handoff }: { handoff: TerminalHandoff }) {
     setBusy(true);
     setError('');
     try {
-      const started = await api.decideTerminalHandoff({ handoffId: handoff.id, accept });
+      const started = await api.decideTerminalHandoff({ handoffId: handoff.id, accept, allowAgentInput: accept && handoff.agentInput });
       if (accept) {
         setDecision('running');
         setTerminalId(started.id);
@@ -37,7 +54,7 @@ export function TerminalHandoffCard({ handoff }: { handoff: TerminalHandoff }) {
     }
   }
   return <article className="message" aria-label="Interactive command">
-    <strong>{status === 'pending' ? 'The agent needs you at the terminal' :
+    <strong>{status === 'pending' ? (handoff.agentInput ? 'Allow the agent to read and type in this terminal?' : 'The agent needs you at the terminal') :
       status === 'running' ? 'Interactive command running' :
       status === 'finished' ? 'Interactive command finished' :
       status === 'declined' ? 'Interactive command declined' : 'Interactive command request expired'}</strong>
@@ -47,7 +64,8 @@ export function TerminalHandoffCard({ handoff }: { handoff: TerminalHandoff }) {
       <code>{handoff.cwd}</code>
     </details>}
     {status === 'pending' && <>
-      <button className="primary" disabled={busy} onClick={() => void decide(true)}>Run and take over</button>{' '}
+      {handoff.agentInput && <p>The agent can read output and type freely until this command exits. In a shell or interpreter it can run additional commands without asking again.</p>}
+      <button className="primary" disabled={busy} onClick={() => void decide(true)}>{handoff.agentInput ? 'Run with agent input' : 'Run and take over'}</button>{' '}
       <button disabled={busy} onClick={() => void decide(false)}>Decline</button>
     </>}
     {terminal && <button onClick={() => showTerminal(terminal)}>Show terminal</button>}

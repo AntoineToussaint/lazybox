@@ -149,6 +149,27 @@ try {
   await expect(nav.locator('[data-drop]')).toHaveCount(1);
   await page.screenshot({path: '.cache/workspace-reorder-drag-light.png'});
   await page.keyboard.press('Escape'); await page.mouse.up();
+  const original=f.sessions.find(s=>s.collectionId==='alpha');
+  original.title='First discussion';
+  f.sessions.push({...original,id:'second-thread',workId:'second-thread',conversationId:'second-thread',title:'Second discussion'});
+  await page.reload();
+  const conversations=nav.getByRole('navigation',{name:'Workspace conversations'});
+  const links=conversations.locator('.conversation-link');
+  await expect(links).toHaveCount(2);
+  const titles=links.locator('strong');
+  const before=await titles.allTextContents();
+  await links.first().focus();
+  await page.keyboard.press('Alt+Shift+ArrowDown');
+  await expect(titles).toHaveText([...before].reverse());
+  await expect.poll(()=>f.mutations.filter(m=>m.method==='ArrangeConversations').length).toBe(1);
+  await page.reload();
+  await expect(titles).toHaveText([...before].reverse());
+  const first=await centre(links.first()), second=await centre(links.last());
+  await page.mouse.move(first.x,first.y); await page.mouse.down();
+  await page.mouse.move(second.x,second.box.y+second.box.height-1,{steps:10}); await page.mouse.up();
+  await expect(titles).toHaveText(before);
+  await expect.poll(()=>f.mutations.filter(m=>m.method==='ArrangeConversations').length).toBe(2);
+  await expect(names).toHaveText(afterKeys);
   assert.deepEqual(errors, []);
   console.log('PASS workspace reorder: a mouse drag shows where the row lands and keeps the order on the Runner (no text selected, no hover card, the drop is no click), Esc puts it back, the list scrolls at its edge, ⌥⇧↑/⌥⇧↓ move a focused row and keep its focus (⌥↓ still opens the card, right-click the menu), and the order survives a reload; dark and light.');
 } finally {

@@ -17,7 +17,7 @@ import { switchedLine } from './subscription-model';
 import { useCheckpointUI, type CheckpointScope } from './TurnCheckpoints';
 import { MessageArtifactActions } from './MessageArtifactActions';
 import { SubagentCard } from './SubagentCard';
-import { ACTIVITY_LABELS } from './activity-detail';
+import { ACTIVITY_LABELS, useResponseDetails } from './activity-detail';
 import { ToolLineContext, ToolLines } from './ToolLine';
 import { ACTIVITY_DETAILS, turnActivity, type ActivityDetail, type ToolEntry, type TurnCache } from './tool-lines';
 import { AnsweredLine } from './RequestCards';
@@ -119,7 +119,7 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
  * is added as the reader scrolls toward it. A render of the window that hosts
  * it (a keystroke in the composer) does not touch the rows.
  */
-export const MessageList = memo(function MessageList({ messages, visible, agentName, onOpenFile, onShowEarlier, nameFor, checkpoints, sessionId, onReveal, onHandoff, onBranch, detail = 'verbose', loadingEarlier = false, alwaysShowTime }: { messages: TranscriptMessage[]; visible: number; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; onShowEarlier(): void; /** A subscription's name by profile ID, for switch lines. */ nameFor?(id: string): string; checkpoints?: CheckpointScope; /** The conversation, for Quote in reply. */ sessionId?: string; /** Scroll a message into view, mounting earlier history when needed. */ onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; onBranch?(message: TranscriptMessage, sideQuestion?: boolean): void; /** How much tool activity to show. */ detail?: ActivityDetail; /** Only the latest turns are in: the earlier history is being read (transcript `partial`). */ loadingEarlier?: boolean; alwaysShowTime?: boolean }) {
+export const MessageList = memo(function MessageList({ messages, visible, agentName, onOpenFile, onShowEarlier, nameFor, checkpoints, sessionId, conversationId, onReveal, onHandoff, onBranch, detail = 'verbose', loadingEarlier = false, alwaysShowTime }: { messages: TranscriptMessage[]; visible: number; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; onShowEarlier(): void; /** A subscription's name by profile ID, for switch lines. */ nameFor?(id: string): string; checkpoints?: CheckpointScope; /** The conversation, for Quote in reply. */ sessionId?: string; conversationId: string; /** Scroll a message into view, mounting earlier history when needed. */ onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; onBranch?(message: TranscriptMessage, sideQuestion?: boolean): void; /** How much tool activity to show. */ detail?: ActivityDetail; /** Only the latest turns are in: the earlier history is being read (transcript `partial`). */ loadingEarlier?: boolean; alwaysShowTime?: boolean }) {
   const hidden = Math.max(0, messages.length - visible);
   const checkpoint = useCheckpointUI(messages, checkpoints);
   // One stable menu for every row, so a new message does not re-render the others.
@@ -142,15 +142,14 @@ export const MessageList = memo(function MessageList({ messages, visible, agentN
   // Quiet: a turn's calls are one line, on its first run of calls.
   const turnCache = useRef<TurnCache>(new Map());
   const scope = useContext(ToolLineContext);
-  const [overrides, setOverrides] = useState<Record<string, ActivityDetail | 'hidden'>>({});
+  const overrides = useResponseDetails(conversationId);
   const responseModes = useMemo(() => {
     const result = new Map<string, ActivityDetail | 'hidden'>();
-    if (!Object.keys(overrides).length) return result;
     let mode: ActivityDetail | 'hidden' | undefined;
     let turnId = '';
     for (const m of messages) {
       if (m.type === 'operation_accepted' && !m.steered) {
-        mode = overrides[m.id];
+        mode = overrides.read(m.operationId || m.id) || undefined;
         turnId = m.turnId;
       }
       if (!mode || (m.type !== 'tools' && m.type !== 'message_delta')) continue;
@@ -160,19 +159,15 @@ export const MessageList = memo(function MessageList({ messages, visible, agentN
     }
     return result;
   }, [messages, overrides]);
-  const quiet = detail === 'quiet' || Object.values(overrides).includes('quiet');
+  const hasQuietResponse = useMemo(() => Array.from(responseModes.values()).includes('quiet'), [responseModes]);
+  const quiet = detail === 'quiet' || hasQuietResponse;
   const turns = useMemo(() => quiet ? turnActivity(messages, turnCache.current, hidden) : undefined, [messages, quiet, hidden]);
   const days = useMemo(() => messageDays(messages, hidden), [messages, hidden]);
   const row = (m: TranscriptMessage) => {
     const mode = responseModes.get(m.id);
-    const control = m.type === 'operation_accepted' && !m.steered && !m.command && !m.origin && <select aria-label="Response detail for this prompt" value={overrides[m.id] || ''} onChange={e => {
+    const control = m.type === 'operation_accepted' && !m.steered && !m.command && !m.origin && <select aria-label="Response detail for this prompt" value={overrides.read(m.operationId || m.id)} onChange={e => {
       const value = e.currentTarget.value as ActivityDetail | 'hidden' | '';
-      setOverrides(previous => {
-        const next = { ...previous };
-        if (value) next[m.id] = value;
-        else delete next[m.id];
-        return next;
-      });
+      overrides.choose(m.operationId || m.id, value);
     }}>
       <option value="">Session · {ACTIVITY_LABELS[detail].label}</option>
       {ACTIVITY_DETAILS.map(level => <option key={level} value={level}>{ACTIVITY_LABELS[level].label}</option>)}

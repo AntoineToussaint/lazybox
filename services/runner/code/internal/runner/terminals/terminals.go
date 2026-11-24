@@ -51,8 +51,9 @@ type Spec struct {
 	// Place is "" in the workspace; "repository-home" (RepositoryID's home
 	// checkout) or "user-home" for a shell started outside it, at Cwd
 	// (runner/homes.go). Directory is then "".
-	Place        string `json:"place,omitempty"`
-	RepositoryID string `json:"repositoryId,omitempty"`
+	AgentConversation string `json:"agentConversation,omitempty"`
+	Place             string `json:"place,omitempty"`
+	RepositoryID      string `json:"repositoryId,omitempty"`
 	// PromptMarks: the shell says when its prompt is ready for input (zsh
 	// with Lazybox's integration, agentshell). Set by Start, from the shell
 	// and its environment: a window waits for that mark before typing.

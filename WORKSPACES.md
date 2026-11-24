@@ -228,11 +228,12 @@ each member's home; `ListWorkspaceRepositories` (so `lazybox workspace repos`,
 `ListRepositoryHomes`, `SetRepositoryHome` and `OpenRepositoryHome` are the
 owner's alone.
 
-**Run in … home.** The conversation's last message, once its turn is over,
-gets one button per command it hands to the person (`home-run.ts`): the
+**Run in … home.** Use **Select commands…** to choose steps, then **Run selected in order**. Each selected command runs in its named location after the previous command exits successfully. Leave alternative commands unchecked. Cancel remaining commands to let the current command finish and skip the rest. After a failure, completed steps are unchecked for retry. Earlier replies keep their buttons when the agent continues.
+
+A reply gets one button per distinct command it hands to the person (`home-run.ts`): the
 briefing's phrase is read for certain; otherwise a command the message plainly
 hands over ("run … yourself", "you'll need to run", "needs a real terminal",
-a login) is offered, at most three, never one the agent says it ran or one for
+a login) is offered, never one the agent says it ran or one for
 later. The command is kept exactly (`env -u VAR`, every argument; in a fenced
 `sh` block too), less a leading `cd` into another absolute folder (a temporary
 checkout the home replaces, whose name also picks the repository). A click
@@ -438,6 +439,10 @@ the list is by ID, as before. With several Runners, each section reorders
 within its own Runner. The move shows at once and goes back if the Runner
 refuses it. `useListReorder.ts` is the gesture, `workspace-order.ts` the pure
 half, `collections/arrangement.go` the Runner's.
+
+In an expanded workspace, drag a conversation row or focus it and press
+`⌥⇧↑` or `⌥⇧↓` to move it one place. Pinned conversations stay at the top.
+The Runner saves the order for that workspace across windows and restarts.
 
 **Peek.** Alt-click a peekable row, press Space on it (like Quick Look), or
 choose **Peek** in its context menu to see the item live over the current page

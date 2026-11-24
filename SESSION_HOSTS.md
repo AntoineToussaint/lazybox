@@ -686,3 +686,5 @@ block the acknowledgement. A superseded attachment cannot resolve requests.
 Older hosts without the capability keep their existing asynchronous resolve
 protocol; this guarantee applies when the host was launched with the new binary.
 No live user host is restarted by this change.
+
+Interactive commands can request agent input. After the person approves that mode, the requesting conversation can read terminal output and send keystrokes while the terminal runs. Login handoffs keep input with the person.

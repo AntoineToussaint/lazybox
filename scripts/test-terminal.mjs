@@ -242,6 +242,18 @@ try {
  await expect.poll(()=>fixture.terminals.get('interactive-accepted')?.input.join('')).toBe('fixture');
  chatEvents.push({...handoff,requestId:'accepted',status:'finished',text:'interactive-accepted'});
  await expect(accepted).toContainText('Interactive command finished');
+ chatEvents.push({...handoff,requestId:'agent-input',terminalAgentInput:true,providerDataJson:Buffer.from(JSON.stringify(['example','deploy'])).toString('base64')});
+ const shared=page.getByRole('article',{name:'Interactive command'}).last();
+ await expect(shared.locator('pre')).toHaveText('example deploy');
+ await expect(shared).toContainText('additional commands without asking again');
+ const decided=calls('DecideTerminalHandoff').length;
+ await shared.getByRole('button',{name:'Run with agent input'}).click();
+ // The decision is sent after the click returns: wait for that request, then read it.
+ await expect.poll(()=>calls('DecideTerminalHandoff').length).toBe(decided+1);
+ assert.equal(calls('DecideTerminalHandoff').at(-1).body.allowAgentInput,true);
+ await expect(shared).toContainText('Interactive command running');
+ fixture.terminals.get('interactive-agent-input').done=true;
+ await expect(shared).toContainText('Interactive command finished',{timeout:12000});
  assert.equal(calls('OpenTerminal').length,opened,'handoff reused the PTY started by the owner decision');
  assert.deepEqual(errors,[]);
  console.log('PASS terminal: an agent handoff requires approval, focuses the PTY and receives owner input; a wrapped sign-in URL is one link (pointer and underline on hover, a click opens the whole address, a drag does not, the right-click menu offers it), exit closes the tab and panel, header opens a shell docked right, focuses rather than duplicates, fitted size, ordered input, member directory, close, re-attach after reload, × close and reopen, dock via menu and keyboard, layout survives reload, remembered dock side, drag a tab below the chat with a drop preview, neighbours stay mounted, reopen from Panels, phone close.');

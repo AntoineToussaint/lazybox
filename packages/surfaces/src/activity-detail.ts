@@ -1,7 +1,7 @@
-import { createContext, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useSyncExternalStore } from 'react';
 import type { ViewStateStore } from '@lazybox/platform';
 import { ACTIVITY_DETAILS, DEFAULT_ACTIVITY_DETAIL, isActivityDetail, type ActivityDetail } from './tool-lines';
-import { readPreference, writePreference } from './view-state';
+import { PREFERENCE_EVENT, readPreference, writePreference } from './view-state';
 import { useActions } from './actions';
 import { showToast } from './toasts';
 
@@ -47,6 +47,50 @@ export function writeActivityOverride(store: ViewStateStore | undefined, convers
   const next = detail ? [[conversation, detail] as [string, ActivityDetail], ...rest].slice(0, OVERRIDES) : rest;
   try { writePreference(store, overridesKey, JSON.stringify(next)); } catch { /* kept for this window only */ }
   changed();
+}
+
+export const ResponseDetailStore = createContext<ViewStateStore | undefined>(undefined);
+type ResponseDetail = ActivityDetail | 'hidden' | '';
+
+function subscribeResponseDetail(listener: () => void) {
+  window.addEventListener(PREFERENCE_EVENT, listener);
+  window.addEventListener('storage', listener);
+  return () => {
+    window.removeEventListener(PREFERENCE_EVENT, listener);
+    window.removeEventListener('storage', listener);
+  };
+}
+
+/** One preference per prompt so edits to different answers in separate windows coexist. */
+export function useResponseDetails(conversation: string) {
+  const store = useContext(ResponseDetailStore);
+  const prefix = `chat.response-detail.${encodeURIComponent(conversation)}.`;
+  const [version, refresh] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => subscribeResponseDetail(refresh), []);
+  const unsaved = useMemo(() => new Map<string, ResponseDetail>(), [store, prefix]);
+  return useMemo(() => {
+    const cache = new Map<string, ResponseDetail>();
+    function read(id: string): ResponseDetail {
+      if (!cache.has(id)) {
+        let value: string | null = unsaved.get(id) ?? null;
+        if (value === null) {
+          try { value = readPreference(store, prefix + encodeURIComponent(id)); } catch { /* Storage unavailable. */ }
+        }
+        cache.set(id, isActivityDetail(value) || value === 'hidden' ? value : '');
+      }
+      return cache.get(id) || '';
+    }
+    function choose(id: string, value: ResponseDetail) {
+      try {
+        writePreference(store, prefix + encodeURIComponent(id), value);
+        unsaved.delete(id);
+      } catch {
+        unsaved.set(id, value);
+        refresh();
+      }
+    }
+    return { read, choose };
+  }, [store, prefix, version, unsaved]);
 }
 
 export type ActivityDetailState = {

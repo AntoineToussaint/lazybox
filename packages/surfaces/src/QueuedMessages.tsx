@@ -8,7 +8,7 @@
  * worker): the strip says so and offers Send now. ⌘↵ (chat.send-now) is Send now from the keyboard: the
  * typed message, or with an empty box the oldest queued one.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { RunnerClient } from '@lazybox/client-core';
 import type { JournalEvent, Session } from '@lazybox/protocol';
 import { Icon } from './Icons';
@@ -46,6 +46,7 @@ const queueFeedback = {
   delegate: { pending: 'Requesting a sub-agent…', failure: 'Could not request a sub-agent', timeout: 'Delegation was not confirmed. Check the conversation.' },
 } satisfies Record<QueueAction, { pending: string; failure: string; timeout: string }>;
 export type QueuedDelivery = {
+  edit(operationId: string, how: EditAction, editId: string, text?: string): Promise<string>;
   working?: { id: string; how: QueueAction; acknowledged?: boolean };
   error?: { id: string; text: string };
   /**
@@ -92,7 +93,75 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
       setError({ id: operationId, text: `${queueFeedback[how].failure}: ${why}` });
     }
   };
-  return { working, error, deliver };
+  const edit: QueuedDelivery['edit'] = async (operationId, how, editId, text = '') => {
+    const receipt = await api.apply({ sessionId: sessionID, operationId: crypto.randomUUID(), operation: { case: 'deliverQueued', value: { operationId, how, editId, text } } }, { timeoutMs: DELIVERY_TIMEOUT_MS });
+    return receipt.queuedText;
+  };
+  return { working, error, deliver, edit };
+}
+
+type EditAction = 'edit' | 'save_edit' | 'cancel_edit';
+
+function QueueEditor({ message, conversationId, edit }: { message: QueuedEntry; conversationId: string; edit: QueuedDelivery['edit'] }) {
+  const key = `lazybox:queue-edit:${conversationId}:${message.operationId}`;
+  const [draft, setDraft] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const editor = useRef<HTMLDivElement>(null);
+  const activeEdit = useRef('');
+  const release = useRef<() => void>(undefined);
+  useEffect(() => () => release.current?.(), []);
+  // A browser lock lets another window recover this draft after the editor closes.
+  // Runners also check the edit ID, including requests from other devices.
+  const storage = () => navigator.locks ? localStorage : sessionStorage;
+  const act = async (how: EditAction) => {
+    setBusy(true);
+    setError('');
+    try {
+      if (how === 'edit') {
+        activeEdit.current = storage().getItem(key) || crypto.randomUUID();
+        storage().setItem(key, activeEdit.current);
+      }
+      const original = await edit(message.operationId, how, activeEdit.current, draft);
+      if (how === 'edit') setDraft(storage().getItem(key + ':draft') ?? original);
+      else {
+        storage().removeItem(key + ':draft');
+        storage().removeItem(key);
+        setDraft(undefined);
+        release.current?.();
+      }
+    } catch (e) {
+      setError(humanError(e));
+      // A lost reply may mean Save already released the message. Reacquire
+      // before allowing more typing. The draft stays available for the retry.
+      setDraft(undefined);
+      release.current?.();
+    }
+    finally { setBusy(false); }
+  };
+  const begin = () => {
+    if (!navigator.locks) return act('edit');
+    return navigator.locks.request(key, { ifAvailable: true }, async lock => {
+      if (!editor.current) return;
+      if (!lock) { setError('This message is being edited in another window.'); return; }
+      const closed = new Promise<void>(resolve => { release.current = resolve; });
+      await act('edit');
+      await closed;
+      release.current = undefined;
+    }).catch(e => setError(humanError(e)));
+  };
+  return <div ref={editor} className="queued-edit">
+    {draft === undefined ? <button type="button" disabled={busy} onClick={() => void begin()}>{message.editing ? 'Resume edit' : 'Edit'}</button> : <>
+      <label>Editing queued message · delivery paused<textarea autoFocus value={draft} disabled={busy} onChange={event => {
+        const text = event.currentTarget.value;
+        setDraft(text);
+        try { storage().setItem(key + ':draft', text); } catch { /* The open editor keeps the draft when storage is full. */ }
+      }}/></label>
+      <button type="button" disabled={busy} onClick={() => void act('save_edit')}>Save</button>
+      <button type="button" disabled={busy} onClick={() => void act('cancel_edit')}>Cancel edit</button>
+    </>}
+    {error && <span role="alert" className="queued-error">{error}</span>}
+  </div>;
 }
 
 export function QueuedMessages({ session, queued, turnRunning, live, agentName, activity, delivery, sendNowKey }: {
@@ -147,17 +216,18 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
               : <q className="queued-text" title={message.text}>{clip(message.text)}</q>}
             <span className="queued-actions">
               {mine ? <span className="queued-working" role="status">{working.how === 'now' && working.acknowledged ? 'Waiting for the current turn to end…' : queueFeedback[working.how].pending}</span> : <>
-                {busy && steer && <button type="button" onClick={() => void deliver(message, 'steer')}
+                {busy && !message.editing && steer && <button type="button" onClick={() => void deliver(message, 'steer')}
                   title={`Give ${agentName} this message now, inside the running turn, without stopping it`}><Icon name="send" size={11}/>Steer</button>}
-                {busy && steer && session.capabilities?.subagents && !origin && <button type="button" onClick={() => void deliver(message, 'delegate')}
+                {busy && !message.editing && steer && session.capabilities?.subagents && !origin && <button type="button" onClick={() => void deliver(message, 'delegate')}
                   title={`Ask ${agentName} to delegate this message to a sub-agent and continue the current task`}>Request delegation</button>}
-                {busy && <button type="button" onClick={() => void deliver(message, 'now')}
+                {busy && !message.editing && <button type="button" onClick={() => void deliver(message, 'now')}
                   title={`${stops} and send this as the next turn${index === 0 && sendNowKey ? ` (${sendNowKey})` : ''}`}><Icon name="stop" size={11}/>Send now</button>}
                 <button type="button" onClick={() => void deliver(message, 'delete')}
                   title="Delete this queued message">Delete</button>
               </>}
             </span>
           </div>
+          {!origin && <QueueEditor key={session.id + message.operationId} message={message} conversationId={session.conversationId || session.id} edit={delivery.edit}/>}
           {error?.id === message.operationId && <p className="queued-error" role="alert">{error.text}</p>}
         </li>;
       })}

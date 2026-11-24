@@ -215,10 +215,10 @@ try{
  // Chips move with the arrow keys.
  await tray.locator('.subagent-chip').first().focus();await page.keyboard.press('ArrowRight');
  await expect(tray.locator('.subagent-chip').nth(1)).toBeFocused();
- // The tree: every sub-agent, nested under who started it.
- await tray.getByRole('button',{name:'All background work: 5 sub-agents · 1 command · 4 running · 1 failed'}).click();
+ // Active agents nest under the parent that started them.
+ await tray.getByRole('button',{name:'All background work: 3 sub-agents · 1 command · 4 running'}).click();
  const tree=page.getByRole('dialog',{name:'Background work',exact:true});
- await expect(tree.getByRole('region',{name:'Sub-agents'}).locator('li')).toHaveCount(5);
+ await expect(tree.getByRole('region',{name:'Sub-agents'}).locator('li')).toHaveCount(3);
  await expect(tree.getByRole('region',{name:'Background commands'}).locator('li')).toHaveText(/pytest tests\/test_mcp\.py/);
  await expect(tree.locator(`li[data-depth="1"]`)).toContainText('Read the CI logs');
  await expect(tree.locator('.subagent-tree-row').first()).toBeFocused();
@@ -234,15 +234,15 @@ try{
  await bgPanel.getByRole('button',{name:'Close background command panel'}).click();
  // The header keeps the way to all background work.
  // Its numbers say what they count: in words, and in full in the tooltip.
- const workButton=chat.locator('.chat-heading').getByRole('button',{name:'Background work: 5 sub-agents · 1 command · 4 running · 1 failed'});
+ const workButton=chat.locator('.chat-heading').getByRole('button',{name:'Background work: 3 sub-agents · 1 command · 4 running'});
  await expect(workButton).toHaveText('3 sub-agents · 1 command running');
- await expect(workButton).toHaveAttribute('title','5 sub-agents · 1 command · 4 running · 1 failed. Show them all.');
+ await expect(workButton).toHaveAttribute('title','3 sub-agents · 1 command · 4 running. Show them all.');
  // The count is neutral; only what failed is red, and it says so.
  {const activity=chat.locator('.chat-heading').getByRole('button',{name:'View tools and activity'});
   await expect(activity.locator('.tool-activity-count')).toHaveText(/^\d+ tool calls$/);await expect(activity.locator('.tool-activity-failed')).toHaveText('1 failed');
   const colours=await activity.evaluate(node=>({count:getComputedStyle(node.querySelector('.tool-activity-count')).color,failed:getComputedStyle(node.querySelector('.tool-activity-failed')).color,context:getComputedStyle(node.closest('.chat-heading').querySelector('.context-trigger')).color}));
   assert.notEqual(colours.count,colours.failed,'the count is not drawn in the failure colour');}
- await expect(tray.locator('.subagent-tray-all')).toHaveText('All · 5 sub-agents · 1 command');
+ await expect(tray.locator('.subagent-tray-all')).toHaveText('All · 3 sub-agents · 1 command');
  await page.screenshot({path:'.cache/subagents-polish-header.png',clip:{x:280,y:88,width:1160,height:80}});
 
  // A panel of its own, docked, following live.
@@ -255,7 +255,7 @@ try{
  await expect(panel.locator('.subagent-panel-head, .subagent-panel-meta').locator('time'),'one elapsed time for the sub-agent').toHaveCount(1);
  // Beside a docked panel the header is slim: counts stay, their words go to the tooltip, the status line keeps its room.
  await expect(workButton).toHaveText('3 · 1',{useInnerText:true});
- await expect(workButton).toHaveAttribute('title',/^5 sub-agents · 1 command · 4 running/);
+ await expect(workButton).toHaveAttribute('title',/^3 sub-agents · 1 command · 4 running/);
  // The card, its panel and its chip read one clock: never two different times for one sub-agent.
  for(let i=0;i<3;i++){const times=await page.evaluate(id=>[document.querySelector(`.subagent-card[data-agent-id="${id}"] .subagent-stats time`),document.querySelector('.subagent-panel .subagent-stats time'),[...document.querySelectorAll('.subagent-chip')].find(c=>c.textContent.includes('Map the transcript'))?.querySelector('time')].map(n=>n?.textContent),A);
   assert.ok(times[0]&&times.every(t=>t===times[0]),`one elapsed time everywhere: ${times.join(' / ')}`);await page.waitForTimeout(400);}
@@ -293,12 +293,21 @@ try{
  await expect(card(A).getByRole('button',{name:/^Stopping sub-agent/})).toHaveText('Stopping…');
  await expect(card(A).getByRole('button',{name:/^Stopping sub-agent/})).toBeDisabled();
  await expect(card(A)).toHaveAttribute('data-status','running');
+ // A child can keep working after its parent stops.
+ const child='claude-tool:surviving-child';
+ push(24,{type:'agent_status',agentId:child,parentAgentId:A,name:'Inspect the retry path',status:'running',agentKind:'local_agent'});
  // The Runner journals the stop it accepted, then Claude reports the end.
  push(25,{type:'operation_accepted',agentId:A});
  push(30,{type:'agent_status',agentId:A,status:'stopped',data:{toolUseId:'toolu_explore'}});
  await expect(card(A)).toHaveAttribute('data-status','stopped');
  await expect(card(A).locator('.subagent-outcome strong')).toHaveText('Stopped by you');
  await expect(card(A).getByRole('button',{name:/Stop sub-agent/})).toHaveCount(0);
+ await expect(tray.locator('.subagent-chip').filter({hasText:'Inspect the retry path'})).toBeVisible();
+ await tray.locator('.subagent-tray-all').click();
+ await expect(tree.locator(`li[data-id="${child}"]`)).toHaveAttribute('data-depth','0');
+ await expect(tree.locator(`li[data-id="${A}"]`)).toHaveCount(0);
+ await page.keyboard.press('Escape');
+ push(31,{type:'agent_status',agentId:child,status:'done'});
  await expect(tray.locator('.subagent-chip:not(.command)')).toHaveCount(1);
  // From the keyboard: Delete on a running card's header stops it too.
  const stopsBefore=f.mutations.filter(m=>m.method==='Apply'&&m.body.stopAgent).length;
@@ -371,10 +380,13 @@ try{
  {const first=await bgChip.locator('time').textContent();await expect.poll(()=>bgChip.locator('time').textContent(),{timeout:4000}).not.toBe(first);}
  await page.screenshot({path:'.cache/subagents-stale.png'});
 
+ push(230,{type:'agent_status',agentId:'claude-tool:finished-command',parentAgentId:'root',status:'done',name:'pwd',agentKind:'local_bash',data:{toolUseId:'finished-command',taskType:'local_bash'}});
  // Clear finished: the list leaves out what ended, counts follow, Undo brings it back; running work stays.
  await tray.locator('.subagent-tray-all').click();
  {const list=page.getByRole('dialog',{name:'Background work',exact:true});
   const rows=()=>list.locator('li[data-id]').count();
+  await expect(list.getByRole('region',{name:'Sub-agents'})).toHaveCount(0);
+  await expect.poll(rows).toBe(2);
   const before=await rows();
   await list.getByRole('button',{name:'Clear finished'}).click();
   await expect(list.locator('li[data-id]')).toHaveCount(1);

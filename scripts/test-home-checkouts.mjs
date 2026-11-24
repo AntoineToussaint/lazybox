@@ -248,9 +248,9 @@ try {
  await expect.poll(()=>calls('OpenTerminal').length).toBe(4);
  await expect.poll(()=>[...fixture.terminals.values()].at(-1).input.join('')).toBe('make seed\r');
  await page.screenshot({path:`${shots}/home-checkouts-slow-shell.png`});
- // The new last message takes the offers; the earlier one no longer shows them.
- await expect(chat.getByRole('group',{name:'Commands for you to run'})).toHaveCount(1);
- await expect(chat.getByRole('group',{name:'Commands for you to run'}).locator('.home-run').first()).toHaveText(/Run in api home\s*make seed/);
+ // A later message keeps earlier handoffs available.
+ await expect(offers).toHaveCount(2);
+ await expect(offers.last().locator('.home-run').first()).toHaveText(/Run in api home\s*make seed/);
 
  // A named checkout also routes the fence's own Run button. A compound
  // login must wait for Return so the Git steps cannot execute on click.
@@ -279,6 +279,39 @@ try {
  push({turnId:'t5',type:'operation_accepted',text:'Check another repository'});
  push({turnId:'t5',type:'message_delta',text:'Run in the home checkout of absent-repo: `make inspect`'});
  await expect(chat.getByRole('button',{name:/No checkout for absent-repo/})).toBeDisabled();
+
+ push({turnId:'t6',type:'operation_accepted',text:'How do I verify it?'});
+ const commands=['make step-one','make fail','make step-two','make step-three'];
+ push({turnId:'t6',type:'message_delta',text:commands.map(c=>'Run in the home checkout of api: `'+c+'`').join('\n')});
+ const sequence=offers.filter({hasText:'make step-one'});
+ await sequence.getByRole('button',{name:'Select commands…'}).click();
+ for(const c of [commands[3],commands[0],commands[2]]) await sequence.getByRole('checkbox',{name:'Include '+c,exact:true}).check();
+ await sequence.getByRole('button',{name:'Run selected in order (3)'}).click();
+ await expect(sequence.getByRole('status').filter({hasText:'Finished 3 commands'})).toBeVisible();
+ const writes=calls('WriteTerminal').map(m=>Buffer.from(m.body.data,'base64').toString().replace(/^\x15/,'').trim()).filter(c=>commands.includes(c));
+ assert.deepEqual(writes,[commands[0],commands[2],commands[3]]);
+ await sequence.getByRole('button',{name:'Select commands…'}).click();
+ for(const c of commands) await sequence.getByRole('checkbox',{name:'Include '+c,exact:true}).check();
+ const beforeFailure=calls('WriteTerminal').length;
+ await sequence.getByRole('button',{name:'Run selected in order (4)'}).click();
+ await expect(sequence.getByRole('status').filter({hasText:'Stopped at command 2 · exit 1'})).toBeVisible();
+ assert.equal(calls('WriteTerminal').length,beforeFailure+2,'later steps were never written to the terminal');
+
+ await expect(sequence.getByRole('checkbox',{name:'Include make step-one',exact:true})).not.toBeChecked();
+
+ push({turnId:'t7',type:'operation_accepted',text:'What should I run next?'});
+ push({turnId:'t7',type:'message_delta',text:'Run in your home folder: `watch make check`\nRun in your home folder: `make after-watch`'});
+ const watching=offers.filter({hasText:'make after-watch'});
+ await watching.getByRole('button',{name:'Select commands…'}).click();
+ for(const box of await watching.getByRole('checkbox').all()) await box.check();
+ await watching.getByRole('button',{name:'Run selected in order (2)'}).click();
+ const watched=()=>[...fixture.terminals.values()].find(t=>t.input.join('').includes('watch make check'));
+ await expect.poll(()=>watched()?.running).toBe(true);
+ await watching.getByRole('button',{name:'Cancel remaining commands'}).click();
+ const terminal=watched();
+ fixture.terminalOutput(terminal,'\x1b]133;D;0\x07$ \x1b]133;B\x07');
+ await expect(watching.getByRole('status').filter({hasText:'Finished in your home folder'})).toBeVisible();
+ assert.ok(![...fixture.terminals.values()].some(t=>t.input.join('').includes('make after-watch')));
 
  // ── Settings → Repositories lists every home with its state.
  await page.getByRole('button',{name:'Settings',exact:true}).click();

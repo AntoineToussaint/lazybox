@@ -240,13 +240,15 @@ func ValidEffort(provider, effort string) error {
 }
 
 type Operation struct {
-	ID        string  `json:"id"`
-	Kind      Kind    `json:"kind"`
-	Text      string  `json:"text,omitempty"`
-	Images    []Image `json:"images,omitempty"`
-	Files     []File  `json:"files,omitempty"`
-	RequestID string  `json:"requestId,omitempty"`
-	Decision  string  `json:"decision,omitempty"`
+	// QueueEditID holds a queued message until its editor saves or cancels.
+	QueueEditID string  `json:"queueEditId,omitempty"`
+	ID          string  `json:"id"`
+	Kind        Kind    `json:"kind"`
+	Text        string  `json:"text,omitempty"`
+	Images      []Image `json:"images,omitempty"`
+	Files       []File  `json:"files,omitempty"`
+	RequestID   string  `json:"requestId,omitempty"`
+	Decision    string  `json:"decision,omitempty"`
 	// Always, with an accepting Decision, names one of the "always allow"
 	// choices the request offered (its data's `always` list): the provider's
 	// own way to stop asking within that scope. Empty allows once.
@@ -378,20 +380,21 @@ func Prompt(op Operation) string {
 }
 
 type Event struct {
-	Type          string              `json:"type"`
-	SessionID     string              `json:"sessionId,omitempty"`
-	TurnID        string              `json:"turnId,omitempty"`
-	RequestID     string              `json:"requestId,omitempty"`
-	OperationID   string              `json:"operationId,omitempty"`
-	Text          string              `json:"text,omitempty"`
-	Status        string              `json:"status,omitempty"`
-	Data          json.RawMessage     `json:"data,omitempty"`
-	AgentID       string              `json:"agentId,omitempty"`
-	ParentAgentID string              `json:"parentAgentId,omitempty"`
-	Name          string              `json:"name,omitempty"`
-	AgentKind     string              `json:"agentKind,omitempty"`
-	NativeID      string              `json:"nativeId,omitempty"`
-	Account       *AccountObservation `json:"account,omitempty"`
+	TerminalAgentInput bool                `json:"terminalAgentInput,omitempty"`
+	Type               string              `json:"type"`
+	SessionID          string              `json:"sessionId,omitempty"`
+	TurnID             string              `json:"turnId,omitempty"`
+	RequestID          string              `json:"requestId,omitempty"`
+	OperationID        string              `json:"operationId,omitempty"`
+	Text               string              `json:"text,omitempty"`
+	Status             string              `json:"status,omitempty"`
+	Data               json.RawMessage     `json:"data,omitempty"`
+	AgentID            string              `json:"agentId,omitempty"`
+	ParentAgentID      string              `json:"parentAgentId,omitempty"`
+	Name               string              `json:"name,omitempty"`
+	AgentKind          string              `json:"agentKind,omitempty"`
+	NativeID           string              `json:"nativeId,omitempty"`
+	Account            *AccountObservation `json:"account,omitempty"`
 	// Cursor is the session host transport position of the native line this
 	// event came from. Recorded in the journal so a re-attaching Runner knows
 	// exactly which lines it already holds.

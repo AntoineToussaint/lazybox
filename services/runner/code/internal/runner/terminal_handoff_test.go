@@ -34,7 +34,7 @@ func TestInteractiveCommandHandsPTYToOwner(t *testing.T) {
 	}
 	defer spool.Close()
 	e := &Execution{
-		Cwd: c.Root, CollectionID: c.ID, spool: spool,
+		ID: "fixture-execution", Cwd: c.Root, CollectionID: c.ID, spool: spool,
 		Options: accounts.Options{Permission: "yolo"},
 		Env:     []string{"PATH=/usr/bin:/bin", "LAZYBOX_V2_ENDPOINT=private", "FIXTURE=present"},
 	}
@@ -42,10 +42,10 @@ func TestInteractiveCommandHandsPTYToOwner(t *testing.T) {
 		body string
 		err  error
 	}
-	start := func(after uint64) (agent.Event, <-chan response) {
+	start := func(after uint64, agentInput bool) (agent.Event, <-chan response) {
 		t.Helper()
 		done := make(chan response, 1)
-		args, err := json.Marshal(map[string]any{"action": "interactive", "argv": []string{
+		args, err := json.Marshal(map[string]any{"action": "interactive", "agentInput": agentInput, "argv": []string{
 			"/bin/sh", "-c", `test -t 0 && test -t 1 && test -z "${LAZYBOX_V2_ENDPOINT+x}" && test "$FIXTURE" = present || exit 1
 printf 'enter code: '
 IFS= read -r line
@@ -69,28 +69,33 @@ exit 23`, "fixture", "literal $(false)",
 		}
 		return ev, done
 	}
-	pending, rejected := start(0)
+	pending, rejected := start(0, false)
 	if len(b.Terminals.List(c.ID)) != 0 {
 		t.Fatal("approval must precede launch, including in full access")
 	}
-	if _, err := b.DecideTerminalHandoff(pending.RequestID, false); err != nil {
+	if _, err := b.DecideTerminalHandoff(pending.RequestID, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if result := <-rejected; result.err != nil || result.body != `{"status":"declined"}` {
 		t.Fatalf("declined response: %+v", result)
 	}
-	if _, err := b.DecideTerminalHandoff(pending.RequestID, true); !errors.Is(err, os.ErrNotExist) {
+	if _, err := b.DecideTerminalHandoff(pending.RequestID, true, false); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("declined request could still launch: %v", err)
 	}
-	pending, accepted := start(2)
-	terminal, err := b.DecideTerminalHandoff(pending.RequestID, true)
+	pending, accepted := start(2, false)
+	terminal, err := b.DecideTerminalHandoff(pending.RequestID, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if retried, err := b.DecideTerminalHandoff(pending.RequestID, true); err != nil || retried != terminal {
+	if retried, err := b.DecideTerminalHandoff(pending.RequestID, true, false); err != nil || retried != terminal {
 		t.Fatalf("retry did not return the same terminal: %v", err)
 	}
 	id := terminal.Status().ID
+	for _, action := range []string{"interactive_read", "interactive_write"} {
+		if _, err := b.interactiveTerminalIO(ctx, e, action, id, "unexpected", 0); err == nil {
+			t.Fatalf("private terminal permitted %s", action)
+		}
+	}
 	if _, err := os.Stat(b.TerminalEndpoint(id)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("handoff got an endpoint: %v", err)
 	}
@@ -117,5 +122,68 @@ exit 23`, "fixture", "literal $(false)",
 	}
 	if result := <-accepted; result.err != nil || result.body != `{"exitCode":23}` {
 		t.Fatalf("expected only the exit status, got %+v", result)
+	}
+
+	// Older clients see the original argv array and approve only a private terminal.
+	pending, legacy := start(5, true)
+	var argv []string
+	if !pending.TerminalAgentInput || json.Unmarshal(pending.Data, &argv) != nil || len(argv) == 0 {
+		t.Fatal("incompatible handoff proposal")
+	}
+	private, err := b.DecideTerminalHandoff(pending.RequestID, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.interactiveTerminalIO(ctx, e, "interactive_write", private.Status().ID, "unexpected", 0); err == nil {
+		t.Fatal("old client granted agent input")
+	}
+	if err := private.Write([]byte("fixture\n")); err != nil {
+		t.Fatal(err)
+	}
+	if result := <-legacy; result.err != nil || result.body != `{"exitCode":23}` {
+		t.Fatalf("private fallback: %+v", result)
+	}
+	pending, shared := start(8, true)
+	terminal, err = b.DecideTerminalHandoff(pending.RequestID, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := <-shared
+	var opened struct{ ID string }
+	if result.err != nil || json.Unmarshal([]byte(result.body), &opened) != nil || opened.ID != terminal.Status().ID {
+		t.Fatalf("shared terminal: %+v", result)
+	}
+	call := func(execution *Execution, action, input string, offset uint64) (string, error) {
+		args, _ := json.Marshal(map[string]any{"action": action, "input": input, "offset": offset, "id": opened.ID})
+		return b.toolWithEnv(ctx, execution, agent.CommandTool, args, nil)
+	}
+	if _, err := call(&Execution{ID: "other", CollectionID: c.ID}, "interactive_write", "wrong\n", 0); err == nil {
+		t.Fatal("another execution could type")
+	}
+	output.Reset()
+	offset = 0
+	for !strings.Contains(output.String(), "enter code:") {
+		result, err := call(e, "interactive_read", "", offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var page struct {
+			Output string
+			Offset uint64
+		}
+		if err := json.Unmarshal([]byte(result), &page); err != nil {
+			t.Fatal(err)
+		}
+		offset = page.Offset
+		output.WriteString(page.Output)
+	}
+	continued := &Execution{ID: "resumed", CollectionID: c.ID}
+	continued.Saved.ConversationID = e.ID
+	if _, err := call(continued, "interactive_write", "fixture\n", 0); err != nil {
+		t.Fatal(err)
+	}
+	status, err := terminal.Wait(ctx)
+	if err != nil || status.ExitCode == nil || *status.ExitCode != 23 {
+		t.Fatalf("agent input: %+v, %v", status, err)
 	}
 }

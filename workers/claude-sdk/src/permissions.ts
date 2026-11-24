@@ -9,13 +9,15 @@ import { randomUUID } from 'node:crypto';
  * (destination `session`) or this workspace (`localSettings`, the worktree's
  * .claude/settings.local.json). Claude then enforces them itself.
  *
- * Lazybox's "ask" permission adds a tool-wide `ask` rule for Bash and the
- * managed command tool, so every command asks. That rule outranks allow rules
- * and Claude offers no suggestions under it (observed with the CLI 2.1.325:
- * no `suggestions`, and a session allow rule did not stop the next ask). For
- * those two tools the worker keeps the grants itself, and matches them
+ * Lazybox's "ask" permission adds a tool-wide `ask` rule for every command
+ * tool (COMMAND_TOOL_NAMES: Bash, Monitor, PowerShell and the managed command
+ * tool), so every command asks. That rule outranks allow rules and Claude
+ * offers no suggestions under it (observed with the CLI 2.1.325: no
+ * `suggestions`, and a session allow rule did not stop the next ask). For
+ * those tools the worker keeps the grants itself, and matches them
  * conservatively: an exact command, or a prefix of plain words on a command
- * with no shell operators. Anything else asks again.
+ * with no shell operators (PowerShell: exact commands only). Anything else
+ * asks again.
  *
  * Claude's Monitor tool runs a shell command too. Since SDK 0.3.325 Claude
  * suggests rules for Bash and Monitor only when saving them would allow that
@@ -42,13 +44,25 @@ export type Grant = GrantRule & { id: string; label: string };
 type Choice = AlwaysChoice & { updates?: PermissionUpdate[]; grant?: GrantRule };
 
 const SHELL_OPERATORS = /[;&|<>`$()\n\\]/;
-/** Tools whose request runs a command: a grant for every request would allow any command. */
-const COMMAND_TOOLS = new Set(['Bash', 'Monitor', 'mcp__lazybox__command']);
+/**
+ * Tools whose request runs a command: a grant for every request would allow
+ * any command, and Lazybox's "ask" permission makes each of them ask
+ * (options.ts). PowerShell is Claude's built-in shell tool on Windows (SDK
+ * 0.3.330 lists it among its built-in tools).
+ */
+export const COMMAND_TOOL_NAMES = ['Bash', 'Monitor', 'PowerShell', 'mcp__lazybox__command'] as const;
+const COMMAND_TOOLS = new Set<string>(COMMAND_TOOL_NAMES);
 const words = (command: string) => command.trim().split(/\s+/).filter(Boolean);
+/**
+ * Whether a prefix grant is safe for the tool's commands. SHELL_OPERATORS is
+ * a POSIX shell's; PowerShell has a grammar of its own, so it gets exact
+ * commands only.
+ */
+const prefixes = (tool: string) => tool !== 'PowerShell';
 
-/** The command a request runs, as one line, for Bash, Monitor and the managed command tool. */
+/** The command a request runs, as one line, for Bash, Monitor, PowerShell and the managed command tool. */
 export function commandOf(tool: string, input: Record<string, unknown>): string {
-  if ((tool === 'Bash' || tool === 'Monitor') && typeof input.command === 'string') return input.command.trim();
+  if ((tool === 'Bash' || tool === 'Monitor' || tool === 'PowerShell') && typeof input.command === 'string') return input.command.trim();
   if (tool === 'mcp__lazybox__command' && input.action === 'start' && Array.isArray(input.argv) && input.argv.every(a => typeof a === 'string')) return (input.argv as string[]).join(' ');
   return '';
 }
@@ -88,7 +102,7 @@ export function covers(grant: GrantRule, tool: string, input: Record<string, unk
   const command = commandOf(tool, input);
   if (!command) return false;
   if (grant.exact !== undefined) return grant.exact === command;
-  if (!grant.prefix?.length || SHELL_OPERATORS.test(command)) return false;
+  if (!grant.prefix?.length || !prefixes(tool) || SHELL_OPERATORS.test(command)) return false;
   const have = words(command);
   return grant.prefix.every((word, i) => have[i] === word);
 }
@@ -140,7 +154,7 @@ export function alwaysChoices(tool: string, input: Record<string, unknown>, cont
   const command = commandOf(tool, input);
   if (command) {
     const out: Choice[] = [];
-    const prefix = commandPrefix(command);
+    const prefix = prefixes(tool) ? commandPrefix(command) : [];
     if (prefix.length && prefix.join(' ') !== command) out.push({ id: 'prefix', scope: 'prefix', label: `commands starting with \`${prefix.join(' ')}\``, detail: 'For the rest of this conversation. Commands that chain, pipe or redirect still ask.', grant: { tool, prefix } });
     out.push({ id: 'command', scope: 'conversation', label: `\`${command.length > 80 ? command.slice(0, 79) + '…' : command}\``, detail: 'This exact command, for the rest of this conversation.', grant: { tool, exact: command } });
     return out;
@@ -189,4 +203,19 @@ export function restoreGrant(value: unknown): Grant | undefined {
 export function runnerApprovesTerminalAction(name: string, action: unknown): boolean {
   return name === 'mcp__lazybox__command' &&
     (action === 'interactive' || action === 'interactive_read' || action === 'interactive_write');
+}
+
+/**
+ * The grants the Runner opened this worker with that it holds, and the ids of
+ * those it dropped. The worker reports each drop (`permission_grant_dropped`),
+ * so the Runner stops keeping and listing a grant nothing enforces.
+ */
+export function restoreGrants(values: unknown): { grants: Grant[]; dropped: string[] } {
+  const grants: Grant[] = [], dropped: string[] = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const grant = restoreGrant(value);
+    if (grant) grants.push(grant);
+    else if (value && typeof value === 'object' && typeof (value as { id?: unknown }).id === 'string' && (value as { id: string }).id) dropped.push((value as { id: string }).id);
+  }
+  return { grants, dropped };
 }

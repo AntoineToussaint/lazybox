@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
-import { runnerApprovesTerminalAction, alwaysChoices, commandPrefix, covers, decide, describeUpdates, offered, restoreGrant } from './permissions.js';
+import { runnerApprovesTerminalAction, alwaysChoices, commandPrefix, covers, decide, describeUpdates, offered, restoreGrant, restoreGrants } from './permissions.js';
 
 // What CLI 2.1.325 suggested for `npm run lint --silent` in default mode.
 const npmRun: PermissionUpdate[] = [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'npm run *' }], behavior: 'allow', destination: 'localSettings' }];
@@ -104,11 +104,33 @@ test('Monitor runs a command: without suggestions it offers that command, never 
   const tail: PermissionUpdate[] = [{ type: 'addRules', rules: [{ toolName: 'Monitor', ruleContent: 'tail *' }], behavior: 'allow', destination: 'localSettings' }];
   assert.deepEqual(offered(alwaysChoices('Monitor', input, { suggestions: tail })).map(c => c.id), ['conversation', 'workspace']);
   // A tool-wide grant for a command tool, kept from an earlier worker, no longer reads back nor covers.
-  for (const tool of ['Monitor', 'Bash', 'mcp__lazybox__command']) {
+  for (const tool of ['Monitor', 'Bash', 'PowerShell', 'mcp__lazybox__command']) {
     assert.equal(restoreGrant({ id: 'old', label: 'every request', tool, all: true }), undefined, tool);
     assert.ok(!covers({ tool, all: true }, tool, { command: 'rm -rf /' }), tool);
   }
   assert.ok(restoreGrant({ id: 'w', label: 'every WebSearch request', tool: 'WebSearch', all: true }), 'other tools keep tool-wide grants');
+});
+
+test('a grant the worker was opened with and does not hold is reported, so the Runner stops listing it', () => {
+  const exact = { id: 'g-exact', label: '`make test`', tool: 'Bash', exact: 'make test' };
+  const web = { id: 'g-web', label: 'every WebSearch request', tool: 'WebSearch', all: true };
+  const { grants, dropped } = restoreGrants([exact, { id: 'g-monitor', label: 'every Monitor request', tool: 'Monitor', all: true }, web, { id: 'g-ps', label: 'every PowerShell request', tool: 'PowerShell', all: true }, { label: 'no id' }, null, 'x']);
+  assert.deepEqual(grants, [exact, web]);
+  assert.deepEqual(dropped, ['g-monitor', 'g-ps'], 'only grants with an id are reported; anything else names nothing to drop');
+  assert.deepEqual(restoreGrants(undefined), { grants: [], dropped: [] });
+});
+
+test('PowerShell runs a command: without suggestions it offers that exact command, never every PowerShell request', () => {
+  // SDK 0.3.330 lists PowerShell among Claude's built-in tools.
+  const input = { command: 'Get-ChildItem -Recurse' };
+  const choices = alwaysChoices('PowerShell', input, {});
+  // Exact only: a prefix grant reads a POSIX shell's operators, not PowerShell's.
+  assert.deepEqual(offered(choices).map(c => [c.id, c.label]), [['command', '`Get-ChildItem -Recurse`']]);
+  const exact = decide('PowerShell', input, choices, { decision: 'accept', always: 'command' }, () => 'g6').grant!;
+  assert.ok(covers(exact, 'PowerShell', input) && !covers(exact, 'PowerShell', { command: 'Remove-Item -Recurse C:\\' }));
+  assert.ok(!covers({ tool: 'PowerShell', prefix: ['Get-ChildItem'] }, 'PowerShell', { command: 'Get-ChildItem; Remove-Item x' }), 'a prefix grant never covers a PowerShell command');
+  // A PowerShell request with no command has nothing safe to remember.
+  assert.deepEqual(alwaysChoices('PowerShell', {}, {}), []);
 });
 
 test('Bash without suggestions, as SDK 0.3.325 sends for a command a saved rule would not allow, offers only that command', () => {

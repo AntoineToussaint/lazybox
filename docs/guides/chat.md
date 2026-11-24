@@ -237,6 +237,19 @@ when you resume the conversation later. The session menu (⋯) lists them under
 request. What you allow for the whole workspace is saved in the workspace's
 `.claude/settings.local.json` instead, where Claude itself keeps it.
 
+With **Ask for approval**, a Claude conversation asks before every command it
+runs: Bash, Monitor and PowerShell commands and Lazybox's own command tool,
+even one a saved rule or Claude's read-only judgement would let through.
+For a command, **Always allow** offers that exact command, or the commands
+starting with its first words (never for PowerShell), but never every
+request of the tool. An older "every Monitor request" Claude no longer
+honours leaves **Always allowed**. If Claude reports that it did not apply
+Lazybox's own approval settings, a conversation in Ask stops and says what did
+not load rather than run commands without asking; resume it once that is
+fixed. When Claude rejected only your own settings files (or the conversation
+is not in Ask), its warning shows in the conversation, naming the file, and
+the agent goes on.
+
 ## Follow what it does
 
 - **The header** names the conversation and says how it is going. The title

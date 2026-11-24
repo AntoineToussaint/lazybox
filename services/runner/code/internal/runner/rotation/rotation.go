@@ -389,6 +389,12 @@ func (s *session) run() {
 				s.open.Grants = agent.WithGrant(s.open.Grants, g)
 			}
 		}
+		if root && ev.Type == agent.GrantDroppedEvent {
+			// Nor does a later attempt get one the provider dropped.
+			if id, ok := agent.DroppedGrant(ev); ok {
+				s.open.Grants = agent.WithoutGrant(s.open.Grants, id)
+			}
+		}
 		s.mu.Unlock()
 		s.mu.Lock()
 		pooled := len(s.adapter.Eligible) > 0 && s.adapter.Switching != nil

@@ -256,4 +256,25 @@ func TestAnArgumentAfterDoubleDashIsPositionalEvenWithADash(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0] != "-Abc123" || !*asJSON {
 		t.Fatalf("positional %q json=%v err=%v", got, *asJSON, err)
 	}
+
+	// Every word after `--` is positional, not only the first: a flag-looking
+	// word in a message is text, never an option that changes the target.
+	f = flag.NewFlagSet("send", flag.ContinueOnError)
+	asJSON = f.Bool("json", false, "")
+	runner := f.String("runner", "local", "")
+	got, err = parseInterleaved(f, []string{"agent-1", "--", "use", "-runner=evil", "and", "--json", "-runner", "x"})
+	want := []string{"agent-1", "use", "-runner=evil", "and", "--json", "-runner", "x"}
+	if err != nil || !slices.Equal(got, want) || *asJSON || *runner != "local" {
+		t.Fatalf("positional %q json=%v runner=%q err=%v", got, *asJSON, *runner, err)
+	}
+
+	// Flags before `--` still interleave with positional words, and a `--`
+	// that is a flag's value does not end the flags.
+	f = flag.NewFlagSet("new", flag.ContinueOnError)
+	title := f.String("title", "", "")
+	asJSON = f.Bool("json", false, "")
+	got, err = parseInterleaved(f, []string{"a", "--title", "--", "b", "--json", "--", "-c", "--title=x"})
+	if err != nil || !slices.Equal(got, []string{"a", "b", "-c", "--title=x"}) || *title != "--" || !*asJSON {
+		t.Fatalf("positional %q title=%q json=%v err=%v", got, *title, *asJSON, err)
+	}
 }

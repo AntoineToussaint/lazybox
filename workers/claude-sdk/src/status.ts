@@ -23,10 +23,16 @@ const TERMINAL=['done','failed','stopped'];
 const SPAWN_TOOLS=new Set(['Task','Agent']);
 // Tool calls remembered for naming a forked run, and forked runs at once: the newest.
 const CALL_LIMIT=512, FORK_LIMIT=256;
-// A sign-in Claude cannot use, renew or keep. oauth_refresh_store_refused: the
-// macOS Keychain did not take a renewed login (since Claude Code 2.1.329 its
-// coarse error is invalid_request, no longer authentication_failed).
-const AUTH_CODES = ['authentication_failed', 'oauth_org_not_allowed', 'cloud_credential_error', 'gateway_signin_required', 'gateway_session_expired', 'org_config_refused', 'oauth_refresh_store_refused'];
+// A sign-in Claude cannot use or renew: only signing in again helps.
+const AUTH_CODES = ['authentication_failed', 'oauth_org_not_allowed', 'cloud_credential_error', 'gateway_signin_required', 'gateway_session_expired', 'org_config_refused'];
+// Typed causes that are no account state, yet say what the person can fix on
+// this computer. The failure carries the cause as its text, which the client
+// words. oauth_refresh_store_refused: the macOS Keychain (locked, say) did not
+// take a renewed login; the stored login is intact, so the account is not
+// marked as needing a sign-in and no other subscription takes over: signing in
+// again cannot help while the Keychain refuses. (Since Claude Code 2.1.329 its
+// coarse error is invalid_request.)
+const LOCAL_CAUSES = ['oauth_refresh_store_refused'];
 export function limitState(code: string): string {
   if (AUTH_CODES.includes(code)) return 'auth_required';
   if (code === 'rate_limit') return 'throttled';
@@ -38,15 +44,17 @@ export function limitState(code: string): string {
 }
 /**
  * Claude Code's typed cause of an API error (`api_error` on an assistant or
- * result message), when it names a state of its own. The SDK's types leave the
- * field out, but Claude Code writes it for hosts that key on the cause rather
- * than the text, and the coarse `error` alone no longer tells a Keychain that
- * refused a renewed login (`invalid_request`) from a malformed request.
+ * result message), when it names a state of its own or a local cause. The
+ * SDK's types leave the field out, but Claude Code writes it for hosts that
+ * key on the cause rather than the text, and the coarse `error` alone no
+ * longer tells a Keychain that refused a renewed login (`invalid_request`)
+ * from a malformed request.
  */
 export function typedCause(m: object): string | undefined {
   const cause = (m as { api_error?: unknown }).api_error;
-  return typeof cause === 'string' && cause && limitState(cause) !== 'unknown' ? cause : undefined;
+  return typeof cause === 'string' && cause && (limitState(cause) !== 'unknown' || LOCAL_CAUSES.includes(cause)) ? cause : undefined;
 }
+const localCause = (m: object) => { const cause = typedCause(m); return cause && LOCAL_CAUSES.includes(cause) ? cause : undefined; };
 /** Reduces structured CLI events. Text is never used as a control signal. */
 export class NativeStatus {
   reference = '';
@@ -179,7 +187,7 @@ export class NativeStatus {
       emit({ type: 'usage', data: { totalCostUSD: m.total_cost_usd, modelUsage: m.modelUsage, cumulative: true } });
       if (m.is_error && !this.failure) {
         const state = limitState(('startup_failure_reason' in m ? m.startup_failure_reason : '') || typedCause(m) || m.subtype);
-        emit({ type: 'failure', status: state === 'unknown' ? 'provider_error' : state, account: { state, reason: typedCause(m) || m.subtype }, text: 'errors' in m ? m.errors.join('\n') : m.result });
+        emit({ type: 'failure', status: state === 'unknown' ? 'provider_error' : state, account: { state, reason: typedCause(m) || m.subtype }, text: localCause(m) || ('errors' in m ? m.errors.join('\n') : m.result) });
       }
       if (!child) this.endTurn(emit);
       const turnId = !child && m.stop_reason === 'end_turn' ? this.forkPoint : undefined;

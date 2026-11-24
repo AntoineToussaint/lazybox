@@ -10,7 +10,7 @@ import { NativeStatus } from './status.js';
 import { CommandCatalog } from './catalog.js';
 import { contextReporter } from './context.js';
 import { SettingsApprovals, settingsServer, settingsServerName, updateSettingsTool } from './settings.js';
-import { runnerApprovesTerminalAction, alwaysChoices, covers, decide, offered, restoreGrant, type Grant } from './permissions.js';
+import { runnerApprovesTerminalAction, alwaysChoices, covers, decide, offered, restoreGrants, type Grant } from './permissions.js';
 import { browserServer, browserServerName } from './browser.js';
 import { generateTitle } from './title.js';
 import { ModelSwitch } from './model.js';
@@ -18,6 +18,7 @@ import { messageContent } from './content.js';
 import { steerPriority, userMessage } from './steer.js';
 import { errorText } from './error-text.js';
 import { route, type Request } from './wire.js';
+import { SettingsWatch, asksBySettings } from './settings-effect.js';
 
 let session: Query | undefined;
 let reference = '';
@@ -26,12 +27,16 @@ const interrupts = new TurnInterrupts();
 // Current Lazybox permission mode; 'yolo' approves tool requests here, which
 // works even when the SDK refuses to switch a running session to bypass mode.
 let permission = '';
+// Whether approvals rest on the worker's own ask rules (settings-effect.ts).
+let asks = false;
 let inputWake: (() => void) | undefined;
 const messages: SDKUserMessage[] = [];
 const requests = new Map<string, { resolve: (value: PermissionResult) => void; input: Record<string, unknown>; kind: string; name: string; choices: ReturnType<typeof alwaysChoices> }>();
 // "Always allow" grants this worker enforces itself, for this conversation
 // (see permissions.ts). The Runner keeps them and opens a new worker with them.
 let grants: Grant[] = [];
+// Grants the Runner opened this worker with that it does not hold (restoreGrants).
+let droppedGrants: string[] = [];
 const tools = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void }>();
 const settingsApprovals = new SettingsApprovals();
 // The agent's own slash commands and models, said once per change.
@@ -80,14 +85,19 @@ export function mcpServers(purpose: string, browser = false, call: typeof callRu
 
 async function open(options: any) {
   permission = options.permission || '';
-  grants = (Array.isArray(options.grants) ? options.grants : []).map(restoreGrant).filter((g: Grant | undefined): g is Grant => !!g);
+  const restored = restoreGrants(options.grants);
+  grants = restored.grants;
+  droppedGrants = restored.dropped;
   if (options.forkThread) {
     if (!options.forkAfterTurn) throw new Error("A Claude fork requires a completed message");
     const fork = await forkSession(options.forkThread, { upToMessageId: options.forkAfterTurn });
     options = { ...options, resume: fork.sessionId };
   }
+  // After a fork, so the options name the forked session.
+  const native = nativeOptions(options, process.env);
+  asks = asksBySettings(native);
   session = query({ prompt: input(), options: {
-    ...nativeOptions(options, process.env),
+    ...native,
     mcpServers: mcpServers(options.purpose, options.browser === true),
     canUseTool: async (name, original, context): Promise<PermissionResult> => {
       if (name === 'mcp__lazybox__review_finding') return { behavior: 'allow', updatedInput: original };
@@ -134,7 +144,11 @@ async function receive(q: Query) {
     () => q.getContextUsage({ detail: 'summary' }),
     data => event({ type: 'context', agentId: 'root', sessionId: reference, data }),
   );
+  // Settings Claude did not apply (settings-effect.ts): a session whose
+  // approvals rest on the worker's ask rules ends; any other reports it.
+  const settings = new SettingsWatch(asks, () => q.close(), failure => event({ ...failure, sessionId: reference }));
   const end = await readStream(q, message => {
+    if (!settings.pass(message)) return;
     for (const normalized of status.normalize(message)) {
       // A turn the person interrupted ends with Claude's "error during
       // execution" diagnostic ("[ede_diagnostic] … stop_reason=tool_use").
@@ -156,7 +170,7 @@ async function receive(q: Query) {
     }
   });
   // Nothing will read another message: say why, and exit (see exitAfter).
-  exitAfter(end, (line, written) => { process.stdout.write(line, () => written()); }, code => process.exit(code));
+  exitAfter(settings.end ?? end, (line, written) => { process.stdout.write(line, () => written()); }, code => process.exit(code));
 }
 
 async function handle(request: Request) {
@@ -168,7 +182,13 @@ async function handle(request: Request) {
   try {
     const p = request.params;
     if (request.method === 'account_usage') { if (session) throw new Error('account query requires a dedicated worker'); reply(request.id, await readQuota(p)); return; }
-    if (request.method === 'open') { if (session) throw new Error('already opened'); reply(request.id, await open(p)); return; }
+    if (request.method === 'open') {
+      if (session) throw new Error('already opened');
+      reply(request.id, await open(p));
+      // Grants it was opened with and does not hold: the Runner stops keeping them.
+      for (const id of droppedGrants) event({ type: 'permission_grant_dropped', sessionId: reference, data: { id } });
+      return;
+    }
     if (!session) throw new Error('session not opened');
     switch (request.method) {
       case 'message': {

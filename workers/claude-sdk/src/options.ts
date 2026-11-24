@@ -1,6 +1,7 @@
 import type { Options, Settings } from '@anthropic-ai/claude-agent-sdk';
 import { helpPermissions } from './settings.js';
 import { browserRule } from './browser.js';
+import { COMMAND_TOOL_NAMES } from './permissions.js';
 
 type ExecutionOptions = {
   cwd: string; model?: string; effort?: Options['effort']; resume?: string; context?: string;
@@ -43,7 +44,10 @@ function baseOptions(o: ExecutionOptions, env: NodeJS.ProcessEnv): Options {
     o.purpose === 'help' ? { permissionMode: 'default', settings: { permissions: helpPermissions, ...off } }
       : o.permission === 'read-only' || o.workflow === 'plan' ? { permissionMode: 'plan' }
       : o.permission === 'yolo' ? { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true }
-      : o.permission === 'ask' ? { permissionMode: 'default', settings: { permissions: { ask: ['Bash', 'mcp__lazybox__command'] }, ...off } }
+      // Every tool that runs a command asks (Bash, Monitor, PowerShell, the
+      // managed command tool): the rule outranks a saved allow rule and
+      // Claude's read-only auto-allow, which would otherwise run it unasked.
+      : o.permission === 'ask' ? { permissionMode: 'default', settings: { permissions: { ask: [...COMMAND_TOOL_NAMES] }, ...off } }
       : {};
   const flagSettings = permission.settings ?? (connectors ? undefined : off);
   return {

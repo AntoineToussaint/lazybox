@@ -3,7 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -457,6 +463,57 @@ func TestRemoteRunnerOverSSHEndToEnd(t *testing.T) {
 		t.Logf("ssh commands:\n%s", log)
 	}
 	fmt.Fprint(os.Stderr)
+}
+
+// When `remote rm` cannot revoke this computer's key on the host, the command
+// it suggests revokes that key as typed, even one that begins with "-".
+func TestTheSuggestedRevokeCommandRevokesAKeyThatBeginsWithADash(t *testing.T) {
+	state := t.TempDir()
+	endpoint := filepath.Join(state, "endpoint.json")
+	if err := os.WriteFile(endpoint, []byte(`{"url":"http://127.0.0.1:1","token":"t"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identityKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := x509.MarshalPKIXPublicKey(&identityKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The key ID is a hash of the channel key: find a channel key whose ID begins with "-".
+	channel := make([]byte, 32)
+	for n := 0; !strings.HasPrefix(link.KeyID(channel), "-"); n++ {
+		binary.BigEndian.PutUint64(channel, uint64(n))
+	}
+	owner, err := link.Owners{State: state}.Add("Laptop", channel, identity, "ssh", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hint := stillEnrolled("build-box", owner.KeyID, errors.New("connection refused"))
+	_, command, ok := strings.Cut(hint, "`")
+	command, _, _ = strings.Cut(command, "`")
+	words := strings.Fields(command)
+	if !ok || len(words) < 2 || words[0] != "lazybox" {
+		t.Fatalf("no command in %q", hint)
+	}
+	// The person runs it in their own terminal on the host, whose one registered Runner is this one.
+	home := t.TempDir()
+	runners := filepath.Join(home, ".config", "lazybox", "runners")
+	data, _ := json.Marshal(locator{Name: "host", Endpoint: endpoint})
+	if err = os.MkdirAll(runners, 0o700); err == nil {
+		err = os.WriteFile(filepath.Join(runners, "host.json"), data, 0o600)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := runPower(context.Background(), t, home, nil, "", words[1:]...)
+	if out.err != nil {
+		t.Fatalf("%s: %v %+v", command, out.err, out)
+	}
+	if left, err := (link.Owners{State: state}).List(); err != nil || len(left) != 0 {
+		t.Fatalf("after %s the owners are %+v (%v)", command, left, err)
+	}
 }
 
 // The link endpoint never listens: without --stdio it refuses, and from

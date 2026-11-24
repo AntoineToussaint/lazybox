@@ -69,6 +69,11 @@ Runner's computer, so each needs its program and a sign-in:
   (`claude`, then `/login`) and Lazybox uses that sign-in as *CLI sign-in*. For
   Codex, Settings → Subscriptions → add a ChatGPT subscription, or `codex
   login`. Why Claude differs: [Subscriptions and limits](guides/subscriptions.md#claude-an-api-key-or-your-own-claude-code-sign-in).
+- **Claude could not save its renewed sign-in to the macOS Keychain.** The
+  Keychain (locked, say) refused Claude's renewed login. Your sign-in is still
+  there, so signing in again does not help: unlock the Keychain (Keychain
+  Access, or log in to the Mac again), then send your message again. The
+  subscription is not marked as needing a sign-in.
 - **Limit reached · back at …** Every subscription of that agent is at its
   limit. Wait for the reset, or add another subscription.
 - **Cannot run.** The panel says why (a program that does not start, the Claude

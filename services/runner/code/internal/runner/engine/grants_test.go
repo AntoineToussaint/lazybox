@@ -66,6 +66,74 @@ func TestGrantsAreKeptWithTheConversationAndCanBeTakenBack(t *testing.T) {
 	}
 }
 
+// A grant the provider was opened with but no longer honours (the Claude
+// worker drops an old "every Monitor request") is no longer listed, saved or
+// handed on; a sub-agent's report, or one naming no grant, changes nothing.
+func TestAGrantTheProviderDroppedIsNoLongerKept(t *testing.T) {
+	ctx := contextFor(t)
+	spool, err := journal.Open(filepath.Join(t.TempDir(), "session"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved Snapshot
+	wide := agent.Grant{ID: "g-wide", Label: "every Monitor request", Tool: "Monitor", Spec: json.RawMessage(`{"id":"g-wide","label":"every Monitor request","tool":"Monitor","all":true}`)}
+	exact := agent.Grant{ID: "g-exact", Label: "`make test`", Tool: "Bash", Spec: json.RawMessage(`{"id":"g-exact","label":"` + "`make test`" + `","tool":"Bash","exact":"make test"}`)}
+	a := &agenttest.Adapter{}
+	e, err := NewPersisted(ctx, a, agent.Open{ID: "execution", Grants: []agent.Grant{wide, exact}}, spool, func(s Snapshot, _ json.RawMessage) error { saved = s; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close(); _ = spool.Dispose() })
+	a.Session.Events <- agent.Event{Type: agent.GrantDroppedEvent, AgentID: "claude-tool:x", Data: json.RawMessage(`{"id":"g-exact"}`)}
+	a.Session.Events <- agent.Event{Type: agent.GrantDroppedEvent, Data: json.RawMessage(`{}`)}
+	a.Session.Events <- agent.Event{Type: agent.GrantDroppedEvent, Data: json.RawMessage(`{"id":"g-wide"}`)}
+	a.Session.Events <- agent.Event{Type: "message_delta", Text: "done"}
+	deadline := time.Now().Add(5 * time.Second)
+	for e.Snapshot().LastMessage != "done" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := e.Snapshot().Grants; len(got) != 1 || got[0].ID != "g-exact" {
+		t.Fatalf("grants after the provider dropped one: %+v", got)
+	}
+	if len(saved.Grants) != 1 || saved.Grants[0].ID != "g-exact" {
+		t.Fatalf("the dropped grant is still saved: %+v", saved.Grants)
+	}
+}
+
+// A provider's notice (the Claude worker's settings_not_in_effect while the
+// agent goes on) is one line in the conversation: it never faults it, as the
+// failure it once was did.
+func TestAProviderNoticeNeverFaultsTheConversation(t *testing.T) {
+	ctx := contextFor(t)
+	spool, err := journal.Open(filepath.Join(t.TempDir(), "session"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &agenttest.Adapter{}
+	e, err := New(ctx, a, agent.Open{ID: "execution"}, spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close(); _ = spool.Dispose() })
+	a.Session.Events <- agent.Event{Type: "provider_notice", Status: "settings_not_in_effect", Text: "Claude did not apply some settings."}
+	a.Session.Events <- agent.Event{Type: "message_delta", Text: "done"}
+	deadline := time.Now().Add(5 * time.Second)
+	for e.Snapshot().LastMessage != "done" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fault := e.Snapshot().Fault; fault != "" {
+		t.Fatalf("a notice faulted the conversation: %q", fault)
+	}
+	// The failure it replaces would have.
+	a.Session.Events <- agent.Event{Type: "failure", Status: "provider_error", Text: "Claude did not apply some settings."}
+	for e.Snapshot().Fault == "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fault := e.Snapshot().Fault; fault != "provider_error" {
+		t.Fatalf("a failure left the fault %q", fault)
+	}
+}
+
 func TestGrantListIsBounded(t *testing.T) {
 	var grants []agent.Grant
 	for i := range agent.GrantLimit + 5 {

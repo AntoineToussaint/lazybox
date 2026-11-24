@@ -23,20 +23,25 @@ test('claude.ai connectors are off unless the person turned them on, whatever th
     assert.deepEqual(options.env, { ...env, ENABLE_CLAUDEAI_MCP_SERVERS: 'false' });
     assert.equal(options.env!.CLAUDE_CODE_OAUTH_TOKEN, 'fixture-subscription');
   }
-  assert.deepEqual(nativeOptions({ cwd: '/fixture', permission: 'ask' }, {}).settings, { permissions: { ask: ['Bash', 'mcp__lazybox__command'] }, disableClaudeAiConnectors: true });
+  assert.deepEqual(nativeOptions({ cwd: '/fixture', permission: 'ask' }, {}).settings, { permissions: { ask: ['Bash', 'Monitor', 'PowerShell', 'mcp__lazybox__command'] }, disableClaudeAiConnectors: true });
   assert.equal((nativeOptions({ cwd: '/fixture', purpose: 'help' }, {}).settings as { disableClaudeAiConnectors?: boolean }).disableClaudeAiConnectors, true);
   for (const permission of ['read-only', 'yolo', 'inherit']) assert.deepEqual(nativeOptions({ cwd: '/fixture', permission }, {}).settings, { disableClaudeAiConnectors: true }, permission);
   // On: nothing is added, and the permission settings stay as they were.
   const on = nativeOptions({ cwd: '/fixture', permission: 'ask', claudeAiConnectors: true }, env);
-  assert.deepEqual(on.settings, { permissions: { ask: ['Bash', 'mcp__lazybox__command'] } });
+  assert.deepEqual(on.settings, { permissions: { ask: ['Bash', 'Monitor', 'PowerShell', 'mcp__lazybox__command'] } });
   assert.equal(on.env, env);
+});
+
+test('ask mode makes every tool that runs a command ask, so no saved rule or read-only auto-allow runs one unasked', () => {
+  const ask = (nativeOptions({ cwd: '/fixture', permission: 'ask' }, {}).settings as { permissions: { ask: string[] } }).permissions.ask;
+  for (const tool of ['Bash', 'Monitor', 'PowerShell', 'mcp__lazybox__command']) assert.ok(ask.includes(tool), tool);
 });
 
 test('explicit permission choices remain explicit and retain saved settings sources', () => {
   const ask = nativeOptions({ cwd: '/fixture', permission: 'ask', claudeAiConnectors: true }, {});
   assert.equal(ask.permissionMode, 'default');
   assert.equal(ask.settingSources, undefined);
-  assert.deepEqual(ask.settings, { permissions: { ask: ['Bash', 'mcp__lazybox__command'] } });
+  assert.deepEqual(ask.settings, { permissions: { ask: ['Bash', 'Monitor', 'PowerShell', 'mcp__lazybox__command'] } });
   const readOnly = nativeOptions({ cwd: '/fixture', permission: 'read-only', claudeAiConnectors: true }, {});
   assert.equal(readOnly.permissionMode, 'plan');
   assert.equal(readOnly.settings, undefined);

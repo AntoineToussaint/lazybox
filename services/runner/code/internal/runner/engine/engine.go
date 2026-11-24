@@ -1025,6 +1025,12 @@ func (e *Engine) receive() {
 			if g, err := agent.GrantOf(ev, time.Now()); err == nil {
 				e.state.Grants = agent.WithGrant(e.state.Grants, g)
 			}
+		case agent.GrantDroppedEvent:
+			// The provider was opened with a grant it no longer honours: it
+			// is neither listed nor handed to a later process.
+			if id, ok := agent.DroppedGrant(ev); ok && rootEvent {
+				e.state.Grants = agent.WithoutGrant(e.state.Grants, id)
+			}
 		case "approval", "question":
 			if _, known := e.state.Pending[ev.RequestID]; known && ev.RequestID != "" {
 				// A request redelivered after re-attachment is already recorded.

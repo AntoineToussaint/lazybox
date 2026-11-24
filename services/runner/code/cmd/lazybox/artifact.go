@@ -77,19 +77,51 @@ func artifactVerb(ctx context.Context, endpointPath string, args []string, stdin
 
 // parseInterleaved parses flags wherever they appear among the positional
 // arguments (`put plan.md --title T` as well as `put --title T plan.md`).
+// A `--` ends the flags: every word after it is positional, even one that
+// looks like a flag, so `send ID -- use -runner=x` sends that text and never
+// changes the target.
 func parseInterleaved(flags *flag.FlagSet, args []string) ([]string, error) {
+	head, tail := args, []string(nil)
+	if i := terminatorIndex(flags, args); i >= 0 {
+		head, tail = args[:i], args[i+1:]
+	}
 	var positional []string
 	for {
-		if err := flags.Parse(args); err != nil {
+		if err := flags.Parse(head); err != nil {
 			return nil, err
 		}
 		rest := flags.Args()
 		if len(rest) == 0 {
-			return positional, nil
+			return append(positional, tail...), nil
 		}
 		positional = append(positional, rest[0])
-		args = rest[1:]
+		head = rest[1:]
 	}
+}
+
+// terminatorIndex is the index of the `--` that ends the flags, or -1. It
+// reads the words as the flag package does, so a `--` that is a flag's value
+// (`--title --`) is not the terminator.
+func terminatorIndex(flags *flag.FlagSet, args []string) int {
+	for i := 0; i < len(args); i++ {
+		word := args[i]
+		if word == "--" {
+			return i
+		}
+		if len(word) < 2 || word[0] != '-' {
+			continue
+		}
+		name := strings.TrimPrefix(strings.TrimPrefix(word, "-"), "-")
+		if strings.Contains(name, "=") {
+			continue
+		}
+		if f := flags.Lookup(name); f != nil {
+			if b, ok := f.Value.(interface{ IsBoolFlag() bool }); !ok || !b.IsBoolFlag() {
+				i++ // the next word is this flag's value
+			}
+		}
+	}
+	return -1
 }
 
 func artifactCommand(ctx context.Context, client artifactAPI, workspace string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {

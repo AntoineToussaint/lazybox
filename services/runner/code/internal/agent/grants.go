@@ -11,6 +11,23 @@ import (
 // the Grant's provider half (id, label, tool and the provider's own spec).
 const GrantEvent = "permission_grant"
 
+// GrantDroppedEvent is the event a provider sends when it was opened with a
+// grant it no longer honours (the Claude worker drops a tool-wide grant for a
+// tool that runs commands): its Data is {"id": …}. The Runner stops keeping
+// and listing it, so the list says what the provider holds.
+const GrantDroppedEvent = "permission_grant_dropped"
+
+// DroppedGrant reads a GrantDroppedEvent: the id of the grant dropped.
+func DroppedGrant(ev Event) (string, bool) {
+	var d struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(ev.Data, &d) != nil || d.ID == "" {
+		return "", false
+	}
+	return d.ID, true
+}
+
 // GrantLimit bounds the grants one conversation keeps.
 const GrantLimit = 64
 

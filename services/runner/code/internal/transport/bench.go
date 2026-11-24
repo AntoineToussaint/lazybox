@@ -36,7 +36,8 @@ import (
 )
 
 type Service struct {
-	Inspector gitinspect.Inspector
+	savingSnippet sync.Mutex
+	Inspector     gitinspect.Inspector
 	pb.UnimplementedRunnerServiceServer
 	Bench       *runner.Bench
 	assigning   sync.Map // mission/task -> channel closed when the assignment finishes

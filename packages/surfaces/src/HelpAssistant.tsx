@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import type { ViewStateStore } from '@lazybox/platform';
 import { ActionMenu } from './ActionMenu';
+import { CanSaveHelpSnippet } from './SnippetProposal';
 import { ChatPanel } from './AgentWindow';
 import { Icon } from './Icons';
 import { actionEnabled, runAction } from './actions';
@@ -150,8 +151,8 @@ ${layout}`].filter(Boolean).join('\n\n');
     </form>}
     {error && <div className="error help-assistant-error" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
     {sessionId
-      ? <ApplyWindowArrangement.Provider value={onArrangeWindows}><ReviewLayoutProposal.Provider value={onReviewLayout}><ChatPanel key={sessionId} collectionId={workspaceId} purpose="help" embedded showCommands={false} initialSessionId={sessionId} viewState={viewState}
-        onSessionChange={id => { adopt(id); if (!id) focus(); }}/></ReviewLayoutProposal.Provider></ApplyWindowArrangement.Provider>
+      ? <CanSaveHelpSnippet.Provider value={true}><ApplyWindowArrangement.Provider value={onArrangeWindows}><ReviewLayoutProposal.Provider value={onReviewLayout}><ChatPanel key={sessionId} collectionId={workspaceId} purpose="help" embedded showCommands={false} initialSessionId={sessionId} viewState={viewState}
+        onSessionChange={id => { adopt(id); if (!id) focus(); }}/></ReviewLayoutProposal.Provider></ApplyWindowArrangement.Provider></CanSaveHelpSnippet.Provider>
       : pick.kind === 'none'
         ? <NoAgent report={report} checking={availability.checking} onRefresh={() => void availability.refresh()}/>
         : <div className="help-start">

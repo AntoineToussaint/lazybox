@@ -1,3 +1,4 @@
+import { CanSaveHelpSnippet, SaveHelpSnippet } from './SnippetProposal';
 import { ApplyWindowArrangement, ReviewLayoutProposal, windowArrangements } from './layout-proposal';
 import { actionEnabled, runAction } from './actions';
 import { fileReference, type FileLink } from './file-reference';
@@ -35,6 +36,8 @@ function Copy({text}:{text:string}) {
 }
 /** `runnable`: a block of a message's Markdown, which can offer Run when it is a shell block in an agent's message (code-runs.tsx). */
 export const CodeBlock=memo(function CodeBlock({text,language='',label,runnable=false,action,offset}:{text:string;language?:string;label?:string;runnable?:boolean;offset?:number;action?:ReactNode}) {
+ const canSaveSnippet = useContext(CanSaveHelpSnippet);
+ if (canSaveSnippet && (language === 'lazybox-snippet' || (language === 'yaml' && /^\s*-\s+key:/u.test(text)))) action = <SaveHelpSnippet key={text} yaml={text}/>;
  const reviewLayout = useContext(ReviewLayoutProposal);
  if (language === 'lazybox-layout' && reviewLayout) action = <button type="button" onClick={() => reviewLayout(text)}>Review layout</button>;
  const highlighted=useMemo(()=>text.length<=100000&&hljs.getLanguage(language)?hljs.highlight(text,{language,ignoreIllegals:true}).value:undefined,[text,language]);

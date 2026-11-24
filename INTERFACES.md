@@ -117,8 +117,7 @@ an approval card showing the reason and current → proposed values, whatever
 the Runner's default permission: Claude runs the help assistant in `default`
 mode with an `ask` rule, and its worker runs an update only for an input the
 user allowed; Codex dynamic-tool calls always surface as Runner approvals.
-Snippets are not changeable: the Runner's snippet catalog is a read-only
-adapter. Coding agents, planning and summary assistants never get these tools.
+Help can propose a snippet in a YAML block. **Save snippet** adds it to the Runner’s catalog through the owner-only SaveSnippet RPC. Coding agents, planning and summary assistants never get these tools.
 
 It also reads the user documentation (docs, the pages Help → Documentation
 shows) through two read-only Runner tools that never ask: Claude's

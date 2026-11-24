@@ -253,6 +253,7 @@ const (
 	RunnerService_InstallBrowser_FullMethodName               = "/lazybox.bench.v1.RunnerService/InstallBrowser"
 	RunnerService_DeleteTheme_FullMethodName                  = "/lazybox.bench.v1.RunnerService/DeleteTheme"
 	RunnerService_DecideTerminalHandoff_FullMethodName        = "/lazybox.bench.v1.RunnerService/DecideTerminalHandoff"
+	RunnerService_SaveSnippet_FullMethodName                  = "/lazybox.bench.v1.RunnerService/SaveSnippet"
 )
 
 // RunnerServiceClient is the client API for RunnerService service.
@@ -805,6 +806,7 @@ type RunnerServiceClient interface {
 	InstallBrowser(ctx context.Context, in *InfoRequest, opts ...grpc.CallOption) (*CommandStatus, error)
 	DeleteTheme(ctx context.Context, in *DeleteThemeRequest, opts ...grpc.CallOption) (*ThemeFolder, error)
 	DecideTerminalHandoff(ctx context.Context, in *DecideTerminalHandoffRequest, opts ...grpc.CallOption) (*TerminalStatus, error)
+	SaveSnippet(ctx context.Context, in *SaveSnippetRequest, opts ...grpc.CallOption) (*Snippet, error)
 }
 
 type runnerServiceClient struct {
@@ -3199,6 +3201,16 @@ func (c *runnerServiceClient) DecideTerminalHandoff(ctx context.Context, in *Dec
 	return out, nil
 }
 
+func (c *runnerServiceClient) SaveSnippet(ctx context.Context, in *SaveSnippetRequest, opts ...grpc.CallOption) (*Snippet, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Snippet)
+	err := c.cc.Invoke(ctx, RunnerService_SaveSnippet_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunnerServiceServer is the server API for RunnerService service.
 // All implementations must embed UnimplementedRunnerServiceServer
 // for forward compatibility.
@@ -3749,6 +3761,7 @@ type RunnerServiceServer interface {
 	InstallBrowser(context.Context, *InfoRequest) (*CommandStatus, error)
 	DeleteTheme(context.Context, *DeleteThemeRequest) (*ThemeFolder, error)
 	DecideTerminalHandoff(context.Context, *DecideTerminalHandoffRequest) (*TerminalStatus, error)
+	SaveSnippet(context.Context, *SaveSnippetRequest) (*Snippet, error)
 	mustEmbedUnimplementedRunnerServiceServer()
 }
 
@@ -4457,6 +4470,9 @@ func (UnimplementedRunnerServiceServer) DeleteTheme(context.Context, *DeleteThem
 }
 func (UnimplementedRunnerServiceServer) DecideTerminalHandoff(context.Context, *DecideTerminalHandoffRequest) (*TerminalStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method DecideTerminalHandoff not implemented")
+}
+func (UnimplementedRunnerServiceServer) SaveSnippet(context.Context, *SaveSnippetRequest) (*Snippet, error) {
+	return nil, status.Error(codes.Unimplemented, "method SaveSnippet not implemented")
 }
 func (UnimplementedRunnerServiceServer) mustEmbedUnimplementedRunnerServiceServer() {}
 func (UnimplementedRunnerServiceServer) testEmbeddedByValue()                       {}
@@ -8631,6 +8647,24 @@ func _RunnerService_DecideTerminalHandoff_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_SaveSnippet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SaveSnippetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).SaveSnippet(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_SaveSnippet_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).SaveSnippet(ctx, req.(*SaveSnippetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunnerService_ServiceDesc is the grpc.ServiceDesc for RunnerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -9545,6 +9579,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DecideTerminalHandoff",
 			Handler:    _RunnerService_DecideTerminalHandoff_Handler,
+		},
+		{
+			MethodName: "SaveSnippet",
+			Handler:    _RunnerService_SaveSnippet_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

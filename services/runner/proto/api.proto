@@ -551,6 +551,7 @@ service RunnerService {
   rpc DeleteTheme(DeleteThemeRequest) returns (ThemeFolder);
 
   rpc DecideTerminalHandoff(DecideTerminalHandoffRequest) returns (TerminalStatus);
+  rpc SaveSnippet(SaveSnippetRequest) returns (Snippet);
 }
 
 message InfoRequest {}
@@ -4658,3 +4659,5 @@ message ArrangeConversationsRequest {
   string collection_id = 1;
   repeated string conversation_ids = 2;
 }
+
+message SaveSnippetRequest { string yaml = 1; }

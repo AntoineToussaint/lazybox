@@ -519,6 +519,8 @@ in the same dialog. The review runs
 locally on startup and hourly, uses the retained prompt log, and recognizes
 repeated wording across two or more conversations.
 
+In **Help → Ask Lazybox**, describe the snippet you want. Review the YAML in the reply and click **Save snippet**. It becomes available by slash command and in the snippet picker across workspaces on that Runner. Use a new key for a new snippet. The built-in **/wrap-up** checks all touched repositories for work that still needs to land on remote main.
+
 A Runner can load declarative snippet packs through its `snippetPacks` array
 of absolute YAML file paths. Each pack contains a list, for example:
 

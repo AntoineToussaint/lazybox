@@ -16,6 +16,8 @@ import { useFileOpener, type OpenModifiers } from './file-links';
 import type { FileLink } from './file-reference';
 import { useTranscript } from './useTranscript';
 import { useLiveStatus } from './LiveIndicator';
+import { useRestartPreview } from './useRestartPreview';
+import { RewindPicker } from './RewindPicker';
 import { PromptHistoryDialog } from './PromptHistoryDialog';
 import { savePrompt } from './prompt-history';
 import { isReviewSnippet, saveSnippetUse } from './snippet-usage';
@@ -180,8 +182,9 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // other read of the window (its review, its sessions) then waited forever.
   const shown = useContext(PanelShownContext);
   const transcript = useTranscript(api, sessionID, !!info && shown);
-  const [branchSelection, setBranchSelection] = useState<{ message: TranscriptMessage; source: string; requestKey: string; sideQuestion?: boolean }>();
+  const [branchSelection, setBranchSelection] = useState<{ message: TranscriptMessage; source: string; sideQuestion?: boolean }>();
   const branchMessage = branchSelection?.source === sessionID ? branchSelection.message : undefined;
+  const preview = useRestartPreview(api, sessionID, branchMessage);
   const [retryDraft, setRetryDraft] = useState('');
   const [branchFromCheckpoint, setBranchFromCheckpoint] = useState(false);
   const [handoffMessage, setHandoffMessage] = useState<HandoffMessage>();
@@ -601,27 +604,47 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     if (transferError) showMenuNotice(transferError);
     else if (firstMessage) writePreference(viewState, continuationKey(source), opened.session.id);
   };
+  const [rewindSession, setRewindSession] = useState('');
+  const escapePress = useRef<{ source: string; at: number } | undefined>(undefined);
+  const canBranch = allowStart && !assistant && (session?.provider === 'codex' || session?.provider === 'claude');
+  const pendingRestartKey = (id: string, sideQuestion = false) => JSON.stringify(['restart', viewState?.key, sessionID, id, sideQuestion]);
+  const selectBranch = (entry: TranscriptMessage, sideQuestion = false) => {
+    setRewindSession('');
+    setBranchSelection({ message: entry, source: sessionID, sideQuestion });
+    const pending = sessionStorage.getItem(pendingRestartKey(entry.id, sideQuestion));
+    const saved = pending ? JSON.parse(pending) : undefined;
+    setRetryDraft(saved?.text ?? (sideQuestion ? '' : entry.text));
+    setBranchFromCheckpoint(saved?.checkpoint ?? (!!session?.collectionId && !!onOpenHandoff));
+  };
   const openBranch = async () => {
     if (!branchMessage || !branchSelection) return;
     const retry = branchMessage.type === 'operation_accepted';
     const boundary = retry
       ? { case: 'beforePromptCursor' as const, value: BigInt(branchMessage.id) }
       : { case: 'afterTurnId' as const, value: branchMessage.turnId };
-    const opened = await api.openSession({ fork: { sourceSessionId: branchSelection.source, boundary, checkpointFiles: branchFromCheckpoint, requestKey: branchSelection.requestKey } }, { timeoutMs: 90_000 });
+    const pendingKey = pendingRestartKey(branchMessage.id, branchSelection.sideQuestion);
+    const previous = sessionStorage.getItem(pendingKey);
+    const remembered = previous && JSON.parse(previous) as { text: string; requestKey: string; checkpoint: boolean };
+    const requestKey = remembered && remembered.text === retryDraft && remembered.checkpoint === branchFromCheckpoint ? remembered.requestKey : crypto.randomUUID();
+    sessionStorage.setItem(pendingKey, JSON.stringify({ text: retryDraft, requestKey, checkpoint: branchFromCheckpoint }));
+    const opened = await api.openSession({ fork: { sourceSessionId: branchSelection.source, boundary, checkpointFiles: branchFromCheckpoint, requestKey } }, { timeoutMs: 90_000 });
     if (!opened.session) throw new Error('Runner did not return the branched conversation');
     const child = opened.session;
-    if (retry) {
+    if (retry || branchSelection.sideQuestion) writeDraft(viewState, child.id, { text: retryDraft, files: [], operationId: requestKey });
+    if (retry && !branchFromCheckpoint) {
       const stopped = await api.stopSessionResources({ sessionId: branchSelection.source }, { timeoutMs: 90_000 });
       if (!stopped.session?.closed || stopped.session.recoveryRequired) {
         throw new Error('Lazybox could not confirm that the previous continuation stopped.');
       }
     }
     if (retry || branchSelection.sideQuestion) {
-      const receipt = await api.apply({ sessionId: child.id, operationId: branchSelection.requestKey,
+      const receipt = await api.apply({ sessionId: child.id, operationId: requestKey,
         operation: { case: 'message', value: { text: retryDraft, attachments: [] } } });
       if (receipt.error || receipt.delivery === "failed") throw new Error(receipt.error || "The Runner could not deliver this message.");
+      writeDraft(viewState, child.id, { text: '', files: [], operationId: '' });
       savePrompt(viewState, retryDraft, child.conversationId || child.id);
     }
+    sessionStorage.removeItem(pendingKey);
     setBranchSelection(undefined);
     if (!retry || branchFromCheckpoint) {
       if (!onOpenHandoff?.({ collectionId: child.collectionId, sessionId: child.id, commandId: '' })) {
@@ -740,11 +763,13 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {transcript.error && <TranscriptNotice error={transcript.error} onRetry={transcript.retry}/>}
           {handoffMessage && session?.collectionId && onOpenHandoff && <ConversationHandoff source={session} message={handoffMessage}
             open={onOpenHandoff} onClose={() => setHandoffMessage(undefined)}/>}
+          {rewindSession && rewindSession === sessionID && <RewindPicker messages={conversation} loading={!!(transcript.partial || transcript.loading)} onPick={selectBranch} onClose={() => { setRewindSession(''); requestAnimationFrame(() => composer.current?.focus()); }}/>}
           {branchMessage && <ConfirmDialog title={branchSelection?.sideQuestion ? 'Ask a side question' : branchMessage.type === 'operation_accepted' ? 'Edit and restart here' : 'Fork after this turn'}
             confirm={branchSelection?.sideQuestion ? 'Ask in new conversation' : branchMessage.type === 'operation_accepted' ? 'Restart with revised prompt' : 'Fork conversation'} working="Opening conversation…" tone="primary"
-            closeLabel="Close conversation branch" canConfirm={(!branchSelection?.sideQuestion && branchMessage.type !== 'operation_accepted') || !!retryDraft.trim()}
+            closeLabel="Close conversation branch" canConfirm={(branchMessage.type !== 'operation_accepted' || (!!preview && !preview.boundaryError && (!branchFromCheckpoint || !preview.fileError))) && ((!branchSelection?.sideQuestion && branchMessage.type !== 'operation_accepted') || !!retryDraft.trim())}
             onClose={() => setBranchSelection(undefined)} onConfirm={openBranch}
             details={busy => <>
+              {branchMessage.type === 'operation_accepted' && <p role="status">{!preview ? 'Checking restart point…' : preview.boundaryError || [workspace?.name, preview.members.length ? preview.members.length + (preview.members.length === 1 ? ' repository (' : ' repositories (') + preview.members.join(', ') + ')' : '', preview.fileError].filter(Boolean).join(' · ')}</p>}
               {session?.collectionId && onOpenHandoff && <label>Workspace files<select disabled={busy} value={branchFromCheckpoint ? 'checkpoint' : 'current'} onChange={event => setBranchFromCheckpoint(event.target.value === 'checkpoint')}>
                 <option value="checkpoint">New workspace from this turn</option>
                 <option value="current">Use current workspace files</option>
@@ -752,7 +777,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
               {(branchSelection?.sideQuestion || branchMessage.type === 'operation_accepted') && <label>{branchSelection?.sideQuestion ? 'Side question' : 'Revised prompt'}<textarea disabled={busy} value={retryDraft} onChange={event => setRetryDraft(event.target.value)}/></label>}
             </>}>
             {branchSelection?.sideQuestion ? 'Only the new conversation receives your question. Its history ends at this turn.' : branchMessage.type === 'operation_accepted'
-              ? 'Restarting stops the previous continuation and sends your revised prompt. The previous continuation remains available in History.'
+              ? branchFromCheckpoint ? 'The revised prompt starts in a separate workspace. The original conversation can keep working.' : 'Restarting stops the previous continuation and sends your revised prompt. The previous continuation remains available in History.'
               : 'The source conversation can keep working while the fork runs.'}
             {' '}
             {branchFromCheckpoint
@@ -762,8 +787,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {session?.forkedFromSessionId && <button type="button" className="text-button" onClick={() => void openLinkedConversation(session.forkedFromSessionId, session.forkedFromCursor)}>
             Open previous conversation
           </button>}
-          <CodeRunContext.Provider value={codeRuns}><MessageArea onBranch={allowStart && !assistant && session?.provider === 'codex'
-            ? (entry, sideQuestion) => { setBranchSelection({ message: entry, source: sessionID, requestKey: crypto.randomUUID(), sideQuestion }); setRetryDraft(sideQuestion ? "" : entry.text); setBranchFromCheckpoint(entry.type !== 'operation_accepted' && !!session.collectionId && !!onOpenHandoff); } : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
+          <CodeRunContext.Provider value={codeRuns}><MessageArea onBranch={canBranch ? selectBranch : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             enableFullAccess={session?.provider === 'codex' && !session.closed && session.capabilities?.livePermission && session.permission !== 'yolo' && session.workflow !== 'plan' && !assistant ? () => changePermission('yolo') : undefined}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
             subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onOpenContinuation={id => void openLinkedConversation(id, 0n)} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
@@ -785,7 +809,18 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             onSubmit={send}
             onChange={text => { if (sendingRef.current) return; recall.reset(); setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); }}
             onDictate={setMessage}
-            onRecallKey={recall.onKeyDown}
+            onRecallKey={(event, mode) => {
+              const previous = escapePress.current;
+              escapePress.current = undefined;
+              if (canBranch && event.key === 'Escape' && !event.repeat && !event.nativeEvent.isComposing && !event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.currentTarget.value) {
+                const at = performance.now();
+                if (previous?.source === sessionID && at - previous.at <= 650) {
+                  event.preventDefault(); event.stopPropagation(); setRewindSession(sessionID); return true;
+                }
+                escapePress.current = { source: sessionID, at };
+              }
+              return recall.onKeyDown(event, mode);
+            }}
             onOpenPromptHistory={canCompose && sessionID ? () => setHistoryOpen(true) : undefined}
             onRemoveMissingFile={i => { const next = missingFiles.filter((_, index) => index !== i); setMissingFiles(next); setUncertainSend(''); setError(''); persistDraft(message, files, next); }}
             onDropMissingFiles={() => { setMissingFiles([]); setUncertainSend(''); setError(''); persistDraft(message, files, []); requestAnimationFrame(() => composer.current?.focus()); }}

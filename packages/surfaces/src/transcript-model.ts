@@ -589,3 +589,8 @@ function boundedActivity(record:JournalEvent):JournalEvent {
  if(data.length>32768){const item=raw.item;raw=item?{item:{id:item.id,type:item.type,tool:item.tool,status:item.status,exitCode:item.exitCode,result:'[Large payload omitted]'}}:{type:raw.type,id:raw.id,tool_use_id:raw.tool_use_id,name:raw.name,status:raw.status,is_error:raw.is_error,output:raw.output===undefined?undefined:'[Large payload omitted]',input:'[Large payload omitted]',content:'[Large payload omitted]'};data=new TextEncoder().encode(JSON.stringify(raw));}
  return {...record,event:{...event,providerDataJson:data}};
 }
+
+export function canRestartPrompt(message: TranscriptMessage): boolean {
+  return message.type === 'operation_accepted' && !!message.operationId &&
+    !message.origin && !message.command && !message.steered && !message.files?.length;
+}

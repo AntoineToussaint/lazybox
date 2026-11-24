@@ -35,6 +35,13 @@ func (s *Service) ListTurnCheckpoints(ctx context.Context, r *pb.TurnCheckpoints
 		return nil, checkpointError(err)
 	}
 	out := &pb.TurnCheckpoints{NotePending: rec.Note != ""}
+	if r.BeforePromptCursor != 0 {
+		reason := ""
+		if err := s.Bench.CheckRestartBoundary(ctx, r.SessionId, r.BeforePromptCursor); err != nil {
+			reason = err.Error()
+		}
+		out.RestartBoundaryError = &reason
+	}
 	for _, t := range rec.Turns {
 		turn := &pb.TurnCheckpoint{Turn: uint32(t.Seq), OperationId: t.OperationID, Prompt: t.Prompt, StartedAtUnixMillis: t.Before.At.UnixMilli(), Files: uint32(t.Files), Additions: uint32(t.Additions), Deletions: uint32(t.Deletions)}
 		if t.After != nil {

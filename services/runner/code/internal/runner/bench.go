@@ -736,8 +736,8 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 	if selected.ID == "" {
 		return nil, errors.New("unknown account profile")
 	}
-	if len(fork) > 0 && (selected.Provider != "codex" || !sameAccount(selected, fork[0].profileBinding)) {
-		return nil, errors.New("source Codex profile is no longer available")
+	if len(fork) > 0 && (selected.Provider != fork[0].provider || !sameAccount(selected, fork[0].profileBinding)) {
+		return nil, errors.New("source conversation profile is no longer available")
 	}
 	if emptyWorkspace {
 		root := filepath.Join(b.Config.State, "workspaces")
@@ -920,6 +920,7 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 	}
 	if parent != nil {
 		record.ForkedFrom, record.ForkCursor = parent.ForkedFrom, parent.ForkCursor
+		record.ForkThread, record.ForkTurn = parent.ForkThread, parent.ForkTurn
 		record.Title = parent.Title
 		if parent.Snapshot.Title != "" {
 			record.Title = parent.Snapshot.Title
@@ -934,6 +935,7 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 	if len(fork) > 0 {
 		record.ForkedFrom = fork[0].source
 		record.ForkCursor = fork[0].cursor
+		record.ForkThread, record.ForkTurn = fork[0].thread, fork[0].turn
 		inherited = fork[0].history
 	}
 	e.Saved = record

@@ -1,3 +1,4 @@
+import { canRestartPrompt } from './transcript-model';
 import { ActivityTime, exactTime, localDay, validActivityTime } from './ActivityTime';
 import type { OpenModifiers } from './file-links';
 import { Fragment, memo, type ReactNode, useContext, useMemo, useRef, useState } from 'react';
@@ -129,7 +130,7 @@ export const MessageList = memo(function MessageList({ messages, visible, agentN
     const { messages, checkpoint, onReveal, onHandoff, onBranch } = latest.current;
     const { message, role } = context.detail;
     const id = message.id;
-    const retry = role === 'user' && !!message.operationId && !message.command && !message.steered && !message.files?.length;
+    const retry = role === 'user' && canRestartPrompt(message);
     const fork = role === 'agent' && !!message.turnId;
     const actions = checkpoint.items(id);
     if (onBranch && (retry || fork)) actions.push({
@@ -179,7 +180,7 @@ export const MessageList = memo(function MessageList({ messages, visible, agentN
       <option value="hidden">Hide response</option>
     </select>;
     if (mode === 'hidden') return <Fragment key={m.id}>{checkpoint.marker(m.id)}</Fragment>;
-    const content = <MessageRow turnControl={control} message={m} agentName={agentName} onOpenFile={onOpenFile} nameFor={nameFor} sessionId={sessionId} menu={menu} turn={turns?.get(m.id)} alwaysShowTime={alwaysShowTime}/>;
+    const content = <MessageRow turnControl={<>{control}{onBranch && canRestartPrompt(m) && <button type="button" className="text-button" onClick={() => onBranch(m)}>Restart from here…</button>}</>} message={m} agentName={agentName} onOpenFile={onOpenFile} nameFor={nameFor} sessionId={sessionId} menu={menu} turn={turns?.get(m.id)} alwaysShowTime={alwaysShowTime}/>;
     return <Fragment key={m.id}>{mode && m.type === 'tools'
       ? <ToolLineContext.Provider value={{ ...scope, detail: mode }}>{content}</ToolLineContext.Provider>
       : content}{checkpoint.marker(m.id)}</Fragment>;

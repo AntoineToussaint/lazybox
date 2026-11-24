@@ -24057,10 +24057,12 @@ func (x *SetReviewAutoResolveRequest) GetEnabled() bool {
 }
 
 type TurnCheckpointsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	SessionId string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// When selecting a prompt for restart, validate its native conversation boundary.
+	BeforePromptCursor uint64 `protobuf:"varint,2,opt,name=before_prompt_cursor,json=beforePromptCursor,proto3" json:"before_prompt_cursor,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *TurnCheckpointsRequest) Reset() {
@@ -24098,6 +24100,13 @@ func (x *TurnCheckpointsRequest) GetSessionId() string {
 		return x.SessionId
 	}
 	return ""
+}
+
+func (x *TurnCheckpointsRequest) GetBeforePromptCursor() uint64 {
+	if x != nil {
+		return x.BeforePromptCursor
+	}
+	return 0
 }
 
 // One repository's checkpoint at a point of the conversation.
@@ -24409,9 +24418,10 @@ type TurnCheckpoints struct {
 	Turns   []*TurnCheckpoint      `protobuf:"bytes,1,rep,name=turns,proto3" json:"turns,omitempty"`
 	Reverts []*CodeRevert          `protobuf:"bytes,2,rep,name=reverts,proto3" json:"reverts,omitempty"`
 	// A note for the agent waits for the next message.
-	NotePending   bool `protobuf:"varint,3,opt,name=note_pending,json=notePending,proto3" json:"note_pending,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	NotePending          bool    `protobuf:"varint,3,opt,name=note_pending,json=notePending,proto3" json:"note_pending,omitempty"`
+	RestartBoundaryError *string `protobuf:"bytes,4,opt,name=restart_boundary_error,json=restartBoundaryError,proto3,oneof" json:"restart_boundary_error,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *TurnCheckpoints) Reset() {
@@ -24463,6 +24473,13 @@ func (x *TurnCheckpoints) GetNotePending() bool {
 		return x.NotePending
 	}
 	return false
+}
+
+func (x *TurnCheckpoints) GetRestartBoundaryError() string {
+	if x != nil && x.RestartBoundaryError != nil {
+		return *x.RestartBoundaryError
+	}
+	return ""
 }
 
 type TurnChangesRequest struct {
@@ -41178,10 +41195,11 @@ const file_api_proto_rawDesc = "" +
 	"\x04note\x18\x06 \x01(\tR\x04note\"\\\n" +
 	"\x1bSetReviewAutoResolveRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12\x18\n" +
-	"\aenabled\x18\x02 \x01(\bR\aenabled\"7\n" +
+	"\aenabled\x18\x02 \x01(\bR\aenabled\"i\n" +
 	"\x16TurnCheckpointsRequest\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\"\xb3\x01\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x120\n" +
+	"\x14before_prompt_cursor\x18\x02 \x01(\x04R\x12beforePromptCursor\"\xb3\x01\n" +
 	"\x14RepositoryCheckpoint\x12\x16\n" +
 	"\x06member\x18\x01 \x01(\tR\x06member\x12\x16\n" +
 	"\x06commit\x18\x02 \x01(\tR\x06commit\x12\x16\n" +
@@ -41208,11 +41226,13 @@ const file_api_proto_rawDesc = "" +
 	"\tundone_by\x18\x05 \x01(\tR\bundoneBy\x12$\n" +
 	"\x0eat_unix_millis\x18\x06 \x01(\x03R\fatUnixMillis\x12\x14\n" +
 	"\x05files\x18\a \x01(\rR\x05files\x12\x1a\n" +
-	"\bproblems\x18\b \x03(\tR\bproblems\"\xa4\x01\n" +
+	"\bproblems\x18\b \x03(\tR\bproblems\"\xfa\x01\n" +
 	"\x0fTurnCheckpoints\x126\n" +
 	"\x05turns\x18\x01 \x03(\v2 .lazybox.bench.v1.TurnCheckpointR\x05turns\x126\n" +
 	"\areverts\x18\x02 \x03(\v2\x1c.lazybox.bench.v1.CodeRevertR\areverts\x12!\n" +
-	"\fnote_pending\x18\x03 \x01(\bR\vnotePending\"G\n" +
+	"\fnote_pending\x18\x03 \x01(\bR\vnotePending\x129\n" +
+	"\x16restart_boundary_error\x18\x04 \x01(\tH\x00R\x14restartBoundaryError\x88\x01\x01B\x19\n" +
+	"\x17_restart_boundary_error\"G\n" +
 	"\x12TurnChangesRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
@@ -44101,6 +44121,7 @@ func file_api_proto_init() {
 	file_api_proto_msgTypes[182].OneofWrappers = []any{}
 	file_api_proto_msgTypes[192].OneofWrappers = []any{}
 	file_api_proto_msgTypes[202].OneofWrappers = []any{}
+	file_api_proto_msgTypes[317].OneofWrappers = []any{}
 	file_api_proto_msgTypes[330].OneofWrappers = []any{}
 	file_api_proto_msgTypes[363].OneofWrappers = []any{
 		(*UpdateMissionRequest_Edit)(nil),

@@ -217,3 +217,19 @@ test('late progress and start notifications cannot restart a completed task', ()
   }
   assert.equal(status.normalize(message({ ...task, subtype: 'task_started', run_id: '003', description: 'Retry' }))[0].status, 'running');
 });
+
+test('a completed root turn forks at its last assistant UUID and clears it before the next turn', () => {
+  const status = new NativeStatus();
+  const assistant = (uuid: string, parent_tool_use_id?: string) => status.normalize(message({
+    type: 'assistant', uuid, parent_tool_use_id, message: { content: [], model: 'fixture' },
+  }));
+  const end = (stop_reason: string) => status.normalize(message({ type: 'result', uuid: 'result-id', subtype: 'success', stop_reason }))
+    .find(event => event.type === 'turn_ended');
+  assistant('earlier');
+  assistant('last-root');
+  assistant('child-only', 'agent-tool');
+  assert.equal(end('end_turn')?.turnId, 'last-root');
+  assert.equal(end('end_turn')?.turnId, undefined);
+  assistant('unfinished');
+  assert.equal(end('tool_use')?.turnId, undefined);
+});

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 )
 
@@ -109,6 +111,10 @@ func TestClaudeSDKWithDeterministicGateway(t *testing.T) {
 			}
 		}
 		content := map[string]any{"type": "text", "text": "FIXTURE-HELLO"}
+		rawMessages, _ := json.Marshal(request.Messages)
+		if strings.Contains(string(rawMessages), "Continue from hello.") && strings.Contains(string(rawMessages), "FIXTURE-HELLO") && !strings.Contains(string(rawMessages), "BENCH_FIXTURE_") {
+			content["text"] = "FORK-OK"
+		}
 		stop := "end_turn"
 		if scenario == "question" && !resolved {
 			stop = "tool_use"
@@ -161,20 +167,27 @@ func TestClaudeSDKWithDeterministicGateway(t *testing.T) {
 	defer server.Close()
 	t.Setenv("BENCH_FIXTURE_KEY", "fixture-api-key")
 	root := t.TempDir()
-	b, err := runner.New(runner.Config{State: root, Worker: worker, Profiles: []accounts.Profile{{ID: "fixture", Provider: "claude", Home: filepath.Join(root, "profile"), Isolation: "environment", EnvRefs: map[string]string{"ANTHROPIC_API_KEY": "BENCH_FIXTURE_KEY"}}}, Gateways: []runner.Gateway{{Provider: "claude", Gateway: agent.Gateway{ID: "fixture-meter", URL: server.URL + "/anthropic/execution"}}}})
+	repos, members := restartRepositories(t)
+	b, err := runner.New(runner.Config{State: root, WorktreeRoot: t.TempDir(), Repositories: repos, Worker: worker, ClaudeBinary: os.Getenv("LAZYBOX_V2_CLAUDE_BINARY"), Profiles: []accounts.Profile{{ID: "fixture", Provider: "claude", Home: filepath.Join(root, "profile"), Isolation: "environment", EnvRefs: map[string]string{"ANTHROPIC_API_KEY": "BENCH_FIXTURE_KEY"}}}, Gateways: []runner.Gateway{{Provider: "claude", Gateway: agent.Gateway{ID: "fixture-meter", URL: server.URL + "/anthropic/execution"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = b.Close() })
-	e, err := b.Open("fixture", t.TempDir(), "", accounts.Options{Model: "claude-fixture", Permission: "ask"}, "fixture-meter", "", "")
+	workspace, err := b.Collections.Create(context.Background(), "source", collections.Spec{Name: "Source", Members: members})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := b.OpenCollection("fixture", workspace.ID, "", accounts.Options{Model: "claude-fixture", Permission: "ask"}, "fixture-meter", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	cursor := uint64(0)
+	var beforeQuestion uint64
 	questions, approvals := 0, 0
 	for _, prompt := range []string{"Say hello without tools.", "BENCH_FIXTURE_QUESTION", "BENCH_FIXTURE_COMMAND"} {
+		writeRestartFiles(t, workspace, prompt)
 		if _, err = e.Engine.Apply(ctx, agent.Operation{ID: commands.ID(), Kind: agent.Message, Text: prompt}); err != nil {
 			t.Fatal(err)
 		}
@@ -186,6 +199,9 @@ func TestClaudeSDKWithDeterministicGateway(t *testing.T) {
 			cursor = r.Sequence
 			var ev agent.Event
 			_ = json.Unmarshal(r.Value, &ev)
+			if ev.Type == "operation_accepted" && ev.Text == "BENCH_FIXTURE_QUESTION" {
+				beforeQuestion = cursor
+			}
 			if ev.Type == "session_ready" {
 				var metadata struct {
 					Version string `json:"version"`
@@ -238,6 +254,60 @@ func TestClaudeSDKWithDeterministicGateway(t *testing.T) {
 	if err != nil || string(data) != "CLAUDE-SHARED-OUTPUT\n" {
 		t.Fatalf("%q %v", data, err)
 	}
+	child, err := b.ForkConversation(ctx, e.ID, "", beforeQuestion, true, "fixture-fork")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.CollectionID == e.CollectionID || child.Cwd == e.Cwd {
+		t.Fatal("fork reused the source workspace")
+	}
+	forkedWorkspace, err := b.Collections.Get(child.CollectionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifyRestartFiles(t, forkedWorkspace, "BENCH_FIXTURE_QUESTION")
+	writeRestartFiles(t, forkedWorkspace, "child edits")
+	verifyRestartFiles(t, workspace, "BENCH_FIXTURE_COMMAND")
+	again, err := b.ForkConversation(ctx, e.ID, "", beforeQuestion, true, "fixture-fork")
+	if err != nil || again.ID != child.ID {
+		t.Fatalf("retry returned another child: %v", err)
+	}
+	if _, err := child.Engine.Apply(ctx, agent.Operation{ID: commands.ID(), Kind: agent.Message, Text: "Continue from hello."}); err != nil {
+		t.Fatal(err)
+	}
+	var childCursor, revisedCursor uint64
+	var sawReply bool
+	for {
+		r, err := child.Engine.Events(ctx, childCursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		childCursor = r.Sequence
+		var ev agent.Event
+		if err := json.Unmarshal(r.Value, &ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.Type == "failure" {
+			t.Fatalf("fork failed: %s", ev.Text)
+		}
+		if ev.Type == "operation_accepted" && ev.Text == "Continue from hello." {
+			revisedCursor = childCursor
+		}
+		if ev.Type == "message_delta" && ev.Text == "FORK-OK" {
+			sawReply = true
+		}
+		if ev.Type == "turn_ended" && sawReply {
+			break
+		}
+	}
+	if _, err := b.ForkConversation(ctx, child.ID, "", revisedCursor, true, "second-revision"); err != nil {
+		t.Fatalf("restart from revised prompt: %v", err)
+	}
+	shared, err := b.ForkConversation(ctx, e.ID, "", beforeQuestion, false, "fixture-shared")
+	if err != nil || shared.CollectionID != workspace.ID {
+		t.Fatalf("shared restart: %v", err)
+	}
+	verifyRestartFiles(t, workspace, "BENCH_FIXTURE_COMMAND")
 	mu.Lock()
 	defer mu.Unlock()
 	if !authOK {

@@ -52,6 +52,8 @@ try {
   await expect(d.getByRole("checkbox", { name: "codefly-dev/module-datasource", exact: true })).toBeVisible();
   const bounds = () => Promise.all([d, search, nameField, create].map(locator => locator.boundingBox()));
   const unfiltered = await bounds();
+  await search.fill("codefly-dev");
+  await expect(d.getByRole("checkbox", { name: "codefly-dev/module-datasource", exact: true })).toHaveCount(0);
   await search.fill("no-such-repository");
   await expect(d.getByText("No matches in the current catalog")).toBeVisible();
   assert.deepEqual(await bounds(), unfiltered, "a zero-result search must leave the dialog and its controls in place");

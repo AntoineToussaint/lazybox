@@ -13,7 +13,7 @@ GitHub API connection supplies repository discovery/import and issue/PR lists.
 
 ## Create or extend a workspace
 
-1. Open **New workspace** and search by organization or repository name. The
+1. Open **New workspace** and search by repository name. Include a slash to search by owner and repository, such as `acme/api`. The
    shared catalog includes registered sources, saved local scans and cached
    GitHub discovery. The same catalog appears in Settings → Repositories.
 2. Select repositories. Selection does not clone or register anything. Previously

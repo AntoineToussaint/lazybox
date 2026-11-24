@@ -43,6 +43,12 @@ const DefaultBufferLimit = 64 << 20
 // conversation itself survives: it resumes natively when its Runner returns.
 const DefaultOrphanAfter = 24 * time.Hour
 
+// abandonStopAfter is how long, beyond its program's stop grace, a host that
+// was told to stop and has no Runner attached waits for the stop to complete
+// before it abandons the program and exits: a host must never outlive a stop
+// forever because nothing collects what it holds.
+const abandonStopAfter = time.Minute
+
 type launch struct {
 	ID          string        `json:"id"`
 	Dir         string        `json:"dir"`
@@ -103,13 +109,19 @@ type host struct {
 	spawned bool
 	// readDone: the agent's stdout reached EOF and every line is buffered.
 	readDone bool
+	// gone: the program was waited for. What it left in its pipes is
+	// bounded, so the reader takes it even past the buffer limit: waiting
+	// for room nobody may ever make would keep the exit from being reported.
+	gone     bool
 	exited   bool
 	outcome  Outcome
 	stderr   *redact.Tail
 	released bool
 	stopping bool
-	upstream *url.URL
-	proxy    string
+	// stoppingSince is when the host was first told to stop.
+	stoppingSince time.Time
+	upstream      *url.URL
+	proxy         string
 	// proxyKey is a random first path segment: the proxy forwards nothing else.
 	proxyKey string
 
@@ -231,14 +243,9 @@ func (h *host) watchdog() {
 			}
 		}
 		h.mu.Lock()
-		done := h.finished() || (!h.spawned && h.client == nil && time.Since(start) > 30*time.Second)
-		orphaned := !done && h.spawned && !h.stopping && h.client == nil && time.Since(h.unattached) > h.cfg.OrphanAfter
-		if orphaned {
-			// Claimed under the lock, so no later tick decides it again.
-			h.stopping = true
-		}
+		done, abandon := h.verdictLocked(time.Now(), start)
 		h.mu.Unlock()
-		if orphaned {
+		if abandon {
 			h.abandon()
 			continue
 		}
@@ -250,6 +257,28 @@ func (h *host) watchdog() {
 			os.Exit(0)
 		}
 	}
+}
+
+// verdictLocked decides, at now, whether the host is done (it exits) or must
+// abandon its program. A host that started at start and never spawned is done
+// after 30 seconds without a client.
+//
+// It abandons a program left unattached past its orphan limit, and one it was
+// told to stop that is still not stopped long after its grace period while no
+// Runner is attached: the Runner that asked went away, and nothing else would
+// ever end the host.
+func (h *host) verdictLocked(now, start time.Time) (done, abandon bool) {
+	done = h.finished() || (!h.spawned && h.client == nil && now.Sub(start) > 30*time.Second)
+	if done || h.client != nil {
+		return done, false
+	}
+	if h.spawned && !h.stopping && now.Sub(h.unattached) > h.cfg.OrphanAfter {
+		// Claimed under the lock, so no later tick decides it again.
+		h.stopping, h.stoppingSince = true, now
+		return false, true
+	}
+	limit := h.grace + abandonStopAfter
+	return false, h.stopping && !h.released && now.Sub(h.unattached) > limit && now.Sub(h.stoppingSince) > limit
 }
 
 // helloLimit bounds what a connection may send before authenticating.
@@ -550,7 +579,7 @@ func (h *host) recordOutput(line, data []byte) {
 	id, request, _ := classify(line)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for h.size >= h.cfg.BufferLimit && !h.released {
+	for h.size >= h.cfg.BufferLimit && !h.released && !h.gone {
 		h.cond.Wait() // Backpressure: the agent blocks on its own stdout.
 	}
 	if data != nil {
@@ -731,6 +760,10 @@ func (h *host) spawn(spec *Spec) error {
 		if timer != nil {
 			timer.Stop()
 		}
+		h.mu.Lock()
+		h.gone = true
+		h.cond.Broadcast()
+		h.mu.Unlock()
 		// Escaped descendants can keep output open; do not wait for them forever.
 		select {
 		case <-readDone:
@@ -819,6 +852,9 @@ func (h *host) readChunks(channel string, out *os.File) {
 // kill its whole process group, mirroring jsonl.Process.Close.
 func (h *host) terminate() {
 	h.mu.Lock()
+	if !h.stopping {
+		h.stoppingSince = time.Now()
+	}
 	h.stopping = true
 	stdin, guard, spawned, terminal, grace := h.stdin, h.guard, h.spawned, h.terminal != nil, h.grace
 	if !spawned {

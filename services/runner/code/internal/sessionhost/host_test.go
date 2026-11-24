@@ -1114,3 +1114,62 @@ func TestALineThatIsNotJSONDoesNotBlockTheConnection(t *testing.T) {
 	}
 	_ = again.Release()
 }
+
+// A host told to stop while its buffer is full, by a Runner that then went
+// away, still stops its program and exits. Its reader waited for room nobody
+// would make, so the exit was never reported and the host stayed for ever:
+// the orphan limit skips a host that is already stopping.
+func TestAStopWithAFullBufferEndsTheHost(t *testing.T) {
+	dir := root(t)
+	ctx := deadline(t)
+	const limit = 64 << 10
+	c, err := Launch(ctx, dir, Options{BufferLimit: limit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Spawn(ctx, streamSpec(`exec /usr/bin/yes`)); err != nil {
+		t.Fatal(err)
+	}
+	record, err := ReadRecord(filepath.Join(dir, c.ID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := c.AgentPID()
+	// Nothing is acknowledged: once this much was sent, the host holds a full
+	// buffer and its reader waits for room.
+	for held := 0; held < limit; {
+		held += len(next(t, c).Line)
+	}
+	if err = c.Terminate(); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Detach()
+	eventually(t, "the stopped program kept running", func() bool { return !alive(program) })
+	eventually(t, "a host stopped with a full buffer never exited", func() bool { return !alive(record.PID) })
+}
+
+// A host that was told to stop, and whose program has still not stopped long
+// after its grace period with no Runner attached, abandons it and exits. One
+// a Runner still attends, or still within the limit, waits.
+func TestAStopNoRunnerSeesThroughIsAbandoned(t *testing.T) {
+	now := time.Now()
+	stopped := now.Add(-abandonStopAfter - time.Second)
+	h := &host{cfg: launch{OrphanAfter: DefaultOrphanAfter}, spawned: true, stopping: true, stoppingSince: stopped, unattached: stopped}
+	if done, abandon := h.verdictLocked(now, stopped); done || !abandon {
+		t.Fatalf("a stuck stop: done %v, abandon %v", done, abandon)
+	}
+	h.grace = time.Minute
+	if _, abandon := h.verdictLocked(now, stopped); abandon {
+		t.Fatal("abandoned within the program's grace period")
+	}
+	h.grace = 0
+	h.unattached = now
+	if _, abandon := h.verdictLocked(now, stopped); abandon {
+		t.Fatal("abandoned a stop whose Runner just left")
+	}
+	h.unattached = stopped
+	h.client = &conn{}
+	if _, abandon := h.verdictLocked(now, stopped); abandon {
+		t.Fatal("abandoned a stop a Runner still attends")
+	}
+}

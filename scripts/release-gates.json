@@ -3,6 +3,7 @@
   "policyFiles": ["Makefile", "scripts/release-gates.mjs", "scripts/unit-test-timeouts.mjs", "scripts/go-test-guard.mjs", ".config/nextest.toml"],
   "gates": [
     { "id": "core", "scope": "core", "command": "make", "args": ["check"], "timeoutMs": 1800000, "covers": ["test:client", "test:worker", "test:browser-service"] },
+    { "id": "claude-settings", "scope": "core", "script": "test:claude-settings", "timeoutMs": 600000 },
     { "id": "reboot", "scope": "core", "command": "make", "args": ["test-reboot"], "timeoutMs": 300000, "covers": [] },
     { "id": "desktop", "scope": "native", "command": "make", "args": ["check-desktop"], "timeoutMs": 3600000, "covers": [] },
     { "id": "startup", "scope": "ui", "script": "test:startup" },

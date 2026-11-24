@@ -34,6 +34,7 @@
     "docs:build": "vitepress build docs-site",
     "docs:preview": "vitepress preview docs-site",
     "docs:check": "vitepress build docs-site && node scripts/docs-site-check.mjs",
+    "test:claude-settings": "node --import tsx workers/claude-sdk/src/settings-capture.ts",
     "test:worker": "node --import tsx --test --test-timeout=30000 workers/claude-sdk/src/*.test.ts",
     "test:browser-service": "node --import tsx --test --test-timeout=30000 workers/browser/src/*.test.ts",
     "test:startup": "node scripts/test-startup.mjs",

@@ -10,7 +10,7 @@ import { createRoot } from 'react-dom/client';
 import { Workspace } from '@lazybox/surfaces';
 import type { AppHost, UpdateErrorKind, WorkspaceHost } from '@lazybox/platform';
 import { isNewer } from '../../../packages/surfaces/src/update-model';
-// Fake credentials for the redaction tests, assembled so no source line looks like a real one (export-repo secret scan).
+// Fake credentials for the redaction tests, assembled so no source line looks like a real one (the secret scan in scripts/check-private.mjs).
 const FAKE_GITHUB_TOKEN = ['ghp', '0123456789abcdefghijABCDEFGHIJ012345'].join('_');
 
 const params = new URLSearchParams(location.search);

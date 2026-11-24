@@ -12,10 +12,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const changelogPath = resolve(root, 'CHANGELOG.md');
 export const releaseNotesPath = resolve(root, 'packages/surfaces/src/release-notes.ts');
 
-// The install guide the GitHub release links to. The path is written from the
-// repository root of this tree's monorepo (v2/ is its folder there);
-// export-repo.mjs's v2-prefix rewrite drops that prefix in the standalone
-// repository, where docs/ is at the root, so the link resolves in both.
+// The install guide the GitHub release links to, on the repository's main branch.
 export const installGuidePath = 'docs/install.md';
 export const installGuide = `https://github.com/AntoineToussaint/lazybox/blob/main/${installGuidePath}`;
 

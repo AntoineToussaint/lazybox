@@ -1,7 +1,7 @@
 # Support
 
-Lazybox is an early preview, developed in a private repository and tried by a
-few invited testers.
+Lazybox is an early preview, developed in this public repository. Expect
+rough edges, and please report them.
 
 ## Questions, bugs and feature requests
 

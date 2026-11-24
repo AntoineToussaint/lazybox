@@ -9,7 +9,7 @@ a second Mac, a Linux VM, a cloud dev box (EC2, GCE, Hetzner, Fly), a
 devcontainer, or a home server. The goal is the **full Lazybox experience on that
 machine**: workspaces, chat, files, diffs and review, terminals, command
 output, artifacts and PRs, not only "see and answer". It amends nothing by itself.
-[MULTI_RUNNER.md step 3](MULTI_RUNNER.md#step-3-runners-on-other-machines-designed-not-built)
+[MULTI_RUNNER.md step 3](MULTI_RUNNER.md#step-3-runners-on-other-machines-owner-level-built-over-ssh-device-level-designed)
 (a remote Runner as a paired device), [D16](DECISIONS.md#remote-control--2026-11-16)
 (tailnet transport) and C17 (the shared Hub lives elsewhere) stand until the
 user decides otherwise ([§11](#11-decisions-for-the-user)).

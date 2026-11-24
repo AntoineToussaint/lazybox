@@ -218,20 +218,38 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          # check-private reads the commits a pull request or a push adds.
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
+      # The container's user does not own the checkout; git refuses to read it
+      # until told it is safe. docs-links.test.ts and check-private.mjs read it.
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       # The image supplies headless Chromium and its system libraries.
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run check:client
       - name: README and CONTRIBUTING name only what exists
         run: node scripts/export-check.mjs
-      - name: Nothing private or secret in the tree
+      # The tree, and the author, committer and co-author addresses of the
+      # commits this pull request (or push to main) adds; never all history.
+      - name: Nothing private or secret in the tree or the new commits
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          node scripts/check-private.mjs
+          range=
+          if [ "$EVENT" = pull_request ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ "$EVENT" = push ] && [ "$GITHUB_REF" = refs/heads/main ] && [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            range="$PUSH_BEFORE..$GITHUB_SHA"
+          fi
+          node scripts/check-private.mjs ${range:+--commits "$range"}
 
   desktop:
     needs: plan

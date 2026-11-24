@@ -12,6 +12,13 @@ target/
 .env.*
 !.env.example
 
+# A bare `go build` in the Runner's module writes its binary beside the source
+# (`lazybox` from ./cmd/lazybox, `code` from the module root). `make build-go`
+# writes to bin/; check-private.mjs refuses any tracked executable.
+/services/runner/code/lazybox
+/services/runner/code/code
+/services/runner/code/cmd/lazybox/lazybox
+
 .codefly/
 runner.config.json
 playwright-report/

@@ -126,7 +126,7 @@ environments:
 share-subscriptions:
 	node scripts/environments.mjs share-subscriptions '$(SUBSCRIPTION_STATE)'
 test-environments:
-	node --test scripts/managed-build.test.mjs scripts/environments.test.mjs scripts/runner-service.test.mjs scripts/runner-restart.test.mjs scripts/release-gates.test.mjs scripts/user-config.test.mjs scripts/release/release.test.mjs scripts/release/install.test.mjs scripts/export-check.test.mjs
+	node --test scripts/managed-build.test.mjs scripts/environments.test.mjs scripts/runner-service.test.mjs scripts/runner-restart.test.mjs scripts/release-gates.test.mjs scripts/user-config.test.mjs scripts/release/release.test.mjs scripts/release/install.test.mjs scripts/export-check.test.mjs scripts/check-private.test.mjs
 	bash scripts/release/publish-cask_test.sh
 
 # An installable release (RELEASING.md): dist/$(VERSION)/ with the DMG, the

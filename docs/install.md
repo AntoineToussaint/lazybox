@@ -9,7 +9,8 @@ signed in as usual. You also need `git`.
 
 During the preview, Lazybox is installed [from source](#install-from-source):
 one command builds the app from a clone and installs it. The disk image and
-Homebrew (below) are for published releases. For a Runner on a Linux machine,
+Homebrew are for [published releases](#install-a-published-release); none is
+published yet, and Homebrew and in-app updates start with the first stable one. For a Runner on a Linux machine,
 see [Runner on a Linux machine](#runner-on-a-linux-machine).
 
 ## Install from source
@@ -74,21 +75,37 @@ make uninstall PURGE=1         # also conversations, subscriptions, workspaces a
 macOS keeps permissions such as the microphone per build of an app it cannot
 verify, so after an update Lazybox may ask for them again.
 
-## Install
+## Install a published release
+
+Building [from source](#install-from-source) is the way to install Lazybox
+today. What a release adds depends on its kind:
+
+| | A prerelease (`0.1.0-pre.1`, `0.2.0-rc.1`) | A stable release (`0.1.0`) |
+| --- | --- | --- |
+| On the [releases page](https://github.com/AntoineToussaint/lazybox/releases) | Yes, marked *Pre-release*: the disk image, the Linux tarballs, checksums | Yes, the same files |
+| Signed and notarized by Apple | Only if the title does not say *(unsigned)*: see [Unsigned builds](#unsigned-builds) | The same |
+| Homebrew (`lazybox-v2` cask, `lazybox-runner` formula) | No: the tap is not touched | Yes |
+| Updates in the app | No: it offers the next *stable* release, once there is one | Yes ([Updates](#updates)) |
+
+No release has been published yet; the first ones will be prereleases. Until
+a stable release, use the disk image of a prerelease, or build from source.
 
 **Disk image.** Download `Lazybox_<version>_aarch64.dmg` from the
-[releases](https://github.com/AntoineToussaint/lazybox/releases) (the ones
-named *Lazybox x.y.z*), open it, and drag **Lazybox** onto **Applications**.
-Eject the disk image, then open Lazybox from Applications.
+[releases](https://github.com/AntoineToussaint/lazybox/releases), open it,
+and drag **Lazybox** onto **Applications**. Eject the disk image, then open
+Lazybox from Applications.
 
-**Homebrew.**
+**Homebrew** (from the first stable release):
 
 ```sh
 brew install --cask AntoineToussaint/lazybox/lazybox-v2
 ```
 
-Open Lazybox from Applications once afterwards: the first launch sets up the
-Runner and puts the `lazybox` command on your PATH (below).
+Until then this command finds no `lazybox-v2` cask: the tap holds only V1's
+`lazybox` formula.
+
+Either way, open Lazybox from Applications once afterwards: the first launch
+sets up the Runner and puts the `lazybox` command on your PATH (below).
 
 If you installed an older Lazybox with this tap's `lazybox` formula, remove
 it: its `lazybox` in `/opt/homebrew/bin` comes first on your PATH, so
@@ -163,6 +180,10 @@ Lazybox offers updates and never forces one. **Settings → About & updates** (o
 dedicated workspace, the result opens in that window. From a detached chat,
 artifact, console or web window, the native menu opens it in the main window.
 
+Only stable releases are offered: a prerelease never reaches the update
+feed, and the feed itself appears with the first stable release. A build
+[from source](#install-from-source) updates with `make update` instead.
+
 - **Check automatically** (on by default) asks for a new version when
   Lazybox opens and every six hours after. A check downloads one small file
   (`latest.json` from the `v2-updates` release on GitHub) and sends nothing
@@ -198,13 +219,13 @@ the app, it says why and offers **Move the Runner now** (`lazybox service
 install`; agents keep running). Lazybox also does this by itself the next
 time it starts.
 
-Homebrew installs update the same way (the cask is marked `auto_updates`);
+Homebrew installs (from the first stable release) update the same way (the cask is marked `auto_updates`);
 `brew upgrade --greedy --cask lazybox-v2` also works.
 
 | Message in Settings → About & updates | What it means |
 | --- | --- |
 | *Lazybox could not reach GitHub* | No network, or GitHub is unreachable. Nothing to do; it tries again later. |
-| *No update information is published* | The feed does not exist yet (no release has been published), or GitHub answered without it. |
+| *No update information is published* | The feed does not exist yet (no stable release has been published; prereleases never write it), or GitHub answered without it. |
 | *The download is not signed with Lazybox's key* | The update was refused before anything was replaced. Try again later; if it keeps happening, send feedback. |
 | *Lazybox cannot replace itself where it is installed* | The app is somewhere it cannot write (not in Applications, or another user's copy). Move it to Applications, or install from the disk image. |
 
@@ -320,7 +341,7 @@ lazybox uninstall               # the service, the CLI link, completions
 lazybox uninstall --remove-data # also conversations, subscriptions, workspaces, logs (asks first)
 ```
 
-Then drag Lazybox from Applications to the Trash (or
+Then drag Lazybox from Applications to the Trash (or, for the Homebrew cask,
 `brew uninstall --cask lazybox-v2`; `brew uninstall --zap` also deletes your
 data). Without `--remove-data` your conversations and settings stay, so a
 reinstall picks up where you left off. `--remove-data` deletes the
@@ -358,8 +379,9 @@ APT, then use the Go and Node.js versions reported by `make install-check`.
 Runner and removes its runtime and links while keeping your data. Pass the same
 `PREFIX` if you installed to a custom directory.
 
-**Homebrew.** Once a stable release publishes the Linux formula, install it
-from the Lazybox tap and register the service under your user account:
+**Homebrew** (from the first stable release; until then the tap has no
+`lazybox-runner`). Install the formula from the Lazybox tap and register the
+service under your user account:
 
 ```sh
 brew install AntoineToussaint/lazybox/lazybox-runner

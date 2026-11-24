@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { feedbackReport, issueTitle, issueUrl, ISSUE_URL_LIMIT, redact, tailLines, type FeedbackInput } from '../packages/surfaces/src/feedback-model.ts';
-// Fake credentials for the redaction tests, assembled so no source line looks like a real one (export-repo secret scan).
+// Fake credentials for the redaction tests, assembled so no source line looks like a real one (the secret scan in scripts/check-private.mjs).
 const FAKE_AWS_KEY = 'AKIA' + 'IOSFODNN7EXAMPLE';
 const FAKE_GITHUB_TOKEN = ['ghp', '0123456789abcdefghijABCDEFGHIJ012345'].join('_');
 const FAKE_SLACK_TOKEN = ['xoxb', '123456789012-abcdefghijkl'].join('-');

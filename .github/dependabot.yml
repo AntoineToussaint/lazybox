@@ -1,0 +1,61 @@
+# Weekly, grouped dependency update pull requests. Each one runs CI like any
+# other pull request; nothing merges on its own.
+#
+# Not updated here, because they are bumped deliberately elsewhere:
+#   - the codefly-dev Go modules: the generated Runner code (`make generate`,
+#     `make check-generated`) must match the Codefly CLI and go-grpc agent
+#     pinned in ci.yml and services/runner/service.codefly.yaml;
+#   - lazybox-config in tools/lazybox-snippets: a reviewed lazybox-v1 revision
+#     (REUSE_AUDIT.md);
+#   - the Node bundled into the app (scripts/release/node.json) and the CI
+#     Node version, which are not package manifests.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      npm:
+        update-types: [minor, patch]
+
+  - package-ecosystem: gomod
+    directory: /services/runner/code
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "github.com/codefly-dev/*"
+    groups:
+      go:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directories:
+      - /apps/desktop/src-tauri
+      - /tools/lazybox-snippets
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: lazybox-config
+    groups:
+      cargo:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      actions:
+        patterns: ["*"]

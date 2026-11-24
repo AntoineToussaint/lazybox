@@ -2,9 +2,13 @@
 //! notification sounds (Settings → Notifications → Sounds). The page cannot
 //! read `/System/Library/Sounds`, so the host plays the one named, at the
 //! volume asked, with `afplay`. Only a sound of that folder, by its bare name.
+//! `afplay` is waited for on a thread of its own (`children::reap`), so no
+//! sound leaves a zombie behind.
 use std::{
+    io,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
+    thread::JoinHandle,
 };
 use tauri::Webview;
 
@@ -31,6 +35,19 @@ fn volume(value: f64) -> Result<String, String> {
     Ok(format!("{value:.2}"))
 }
 
+/// Starts `afplay` on `file`; the handle says how it ended.
+fn play(file: &Path, volume: &str) -> io::Result<JoinHandle<io::Result<ExitStatus>>> {
+    let child = Command::new("/usr/bin/afplay")
+        .arg("-v")
+        .arg(volume)
+        .arg(file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    crate::children::reap(child)
+}
+
 #[tauri::command]
 pub fn play_system_sound(window: Webview, name: String, level: f64) -> Result<(), String> {
     let label = window.label();
@@ -38,14 +55,7 @@ pub fn play_system_sound(window: Webview, name: String, level: f64) -> Result<()
         return Err("Only a Lazybox window plays its sounds".into());
     }
     let file = sound_file(Path::new(FOLDER), &name)?;
-    Command::new("/usr/bin/afplay")
-        .arg("-v")
-        .arg(volume(level)?)
-        .arg(file)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    play(&file, &volume(level)?)
         .map(|_| ())
         .map_err(|_| "Could not play the sound".into())
 }
@@ -73,6 +83,22 @@ mod tests {
         ] {
             assert!(sound_file(folder.path(), bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// One notification sound left one zombie `afplay` behind: it is waited for.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_played_sound_is_waited_for() {
+        let Ok(file) = sound_file(Path::new(FOLDER), "Tink") else {
+            return;
+        };
+        // How afplay ends depends on the machine's audio (none in some
+        // sessions); that it is waited for does not.
+        play(&file, "0.00")
+            .expect("afplay")
+            .join()
+            .expect("join")
+            .expect("waited for");
     }
 
     #[test]

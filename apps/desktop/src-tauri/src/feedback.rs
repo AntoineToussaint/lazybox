@@ -74,7 +74,14 @@ fn macos_version() -> String {
 /// what only the native side knows: macOS, the home directory to redact,
 /// and an installed release's Runner log.
 #[tauri::command]
-pub async fn feedback_diagnostics(app: tauri::AppHandle) -> Result<Diagnostics, String> {
+pub async fn feedback_diagnostics(
+    app: tauri::AppHandle,
+    window: tauri::Webview,
+) -> Result<Diagnostics, String> {
+    crate::host::allow(
+        crate::host::is_workspace_window(window.label()),
+        "Feedback belongs to the workspace window",
+    )?;
     let home = app
         .path()
         .home_dir()
@@ -183,9 +190,14 @@ pub fn write_report(
 #[tauri::command]
 pub fn save_feedback(
     app: tauri::AppHandle,
+    window: tauri::Webview,
     markdown: String,
     screenshot: Option<String>,
 ) -> Result<String, String> {
+    crate::host::allow(
+        crate::host::is_workspace_window(window.label()),
+        "Feedback belongs to the workspace window",
+    )?;
     let png = screenshot
         .map(|data| base64::engine::general_purpose::STANDARD.decode(data))
         .transpose()

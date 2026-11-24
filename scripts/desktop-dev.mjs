@@ -76,6 +76,6 @@ export function desktopDevConfig(paths, url, nonce) {
   return {
     identifier: paths.identifier, productName: paths.productName,
     build: { devUrl: parsed.origin },
-    app: { security: { devCsp: `default-src 'self'; script-src 'self' 'nonce-${nonce}'; connect-src ipc: http://ipc.localhost ${parsed.origin} ws://${parsed.host}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; worker-src 'self' blob:; frame-src http://127.0.0.1:*` } },
+    app: { security: { devCsp: `default-src 'self'; script-src 'self' 'nonce-${nonce}'; connect-src ipc: http://ipc.localhost ${parsed.origin} ws://${parsed.host}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; worker-src 'self' blob:; frame-src http://127.0.0.1:*/x/; base-uri 'none'; form-action 'none'` } },
   };
 }

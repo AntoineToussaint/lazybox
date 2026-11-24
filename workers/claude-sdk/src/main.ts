@@ -17,8 +17,8 @@ import { ModelSwitch } from './model.js';
 import { messageContent } from './content.js';
 import { steerPriority, userMessage } from './steer.js';
 import { errorText } from './error-text.js';
+import { route, type Request } from './wire.js';
 
-type Request = { id?: string; method?: string; params?: any; result?: any; error?: any };
 let session: Query | undefined;
 let reference = '';
 // The turn the person interrupted, and only that one.
@@ -245,9 +245,16 @@ async function handle(request: Request) {
   } catch (error) { send({ id: request.id, error: { message: errorText(error) } }); }
 }
 
+// A line the worker cannot take fails that request alone, never the worker (wire.ts).
 const reader = createInterface({ input: process.stdin, crlfDelay: Infinity });
-reader.on('line', line => {
-  if (line.length > 16 << 20) { process.exitCode = 1; reader.close(); return; }
-  try { void handle(JSON.parse(line)); } catch { process.exitCode = 1; reader.close(); }
-});
+reader.on('line', line => route(line, {
+  handle: request => void handle(request),
+  failTool: (id, message) => {
+    const pending = tools.get(id);
+    if (!pending) return false;
+    tools.delete(id); pending.reject(new Error(message)); return true;
+  },
+  refuse: (id, message) => send({ id, error: { message } }),
+  discard: reason => process.stderr.write(`ignored ${reason} from the Runner\n`),
+}));
 reader.on('close', () => { session?.close(); process.exit(); });

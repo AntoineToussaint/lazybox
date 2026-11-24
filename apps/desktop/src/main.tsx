@@ -331,10 +331,14 @@ configureContextMenus({
 });
 // "Open in Terminal" opens the person's own terminal app at a workspace's
 // folder, and notification sounds can be macOS system sounds: both played by
-// the host (src-tauri/src/terminal.rs, sounds.rs), never by the page.
+// the host (src-tauri/src/terminal.rs, sounds.rs), never by the page. A custom
+// terminal command is the host's setting: it keeps a new one only once the
+// person allowed it in its own confirmation.
 configureExternalTerminal({
   installed: () => invoke<string[]>('terminal_apps'),
-  open: request => invoke('open_terminal', { request }),
+  open: ({ path, app }) => invoke('open_terminal', { request: { path, app } }),
+  customCommand: () => invoke<string>('terminal_command'),
+  setCustomCommand: command => invoke<string>('set_terminal_command', { command }),
 });
 configureSystemSounds({ play: (name, level) => invoke<void>('play_system_sound', { name, level }) });
 // An installed release's first run opens the setup window instead (release.rs).

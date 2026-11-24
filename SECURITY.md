@@ -38,6 +38,11 @@ before publication.
 - Remote phone access is off by default. When turned on, the device gateway is
   served over HTTPS on the owner's tailnet only, devices pair with a one-time
   QR code and hold revocable, scoped grants ([REMOTE.md](REMOTE.md)).
+- The desktop app's pages call the native host only through commands that
+  check which window calls them; a Web panel's page holds no capability. The
+  host never runs a command line a page sends: a custom "Open in Terminal"
+  command is the host's own setting, saved only after a native confirmation
+  showing the exact line ([apps/desktop/src-tauri/README.md](apps/desktop/src-tauri/README.md)).
 - Provider credentials stay in each account profile's isolated home; they are
   never placed in URLs, profile values or logs
   ([SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)).

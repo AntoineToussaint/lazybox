@@ -639,10 +639,15 @@ pub fn open_chat(
 #[tauri::command]
 pub fn open_web_window(
     app: tauri::AppHandle,
+    window: Webview,
     web_id: String,
     url: String,
     collection_id: String,
 ) -> Result<(), String> {
+    allow(
+        is_workspace_window(window.label()),
+        "Only a workspace window moves a Web panel to a window",
+    )?;
     let label = mutate(&app, |layout| {
         layout.web(Target {
             web_id,
@@ -1149,8 +1154,26 @@ pub fn chat_window_open(
         .is_some_and(|surface| surface.open))
 }
 
-fn is_workspace_window(label: &str) -> bool {
+/// The main window and workspace windows: where Settings and the workspace live.
+pub fn is_workspace_window(label: &str) -> bool {
     label == "main" || label.starts_with("workspace-")
+}
+
+/// A page of the app's own: a window `APP_WEBVIEWS` names, or the setup
+/// window. Never a Web panel's viewer (`viewer-…`) or a popped-out panel
+/// window (`popout-…`), which run no code of the app's.
+pub fn is_app_window(label: &str) -> bool {
+    label == "main"
+        || label == crate::release::SETUP_LABEL
+        || APP_WEBVIEWS
+            .iter()
+            .filter_map(|pattern| pattern.strip_suffix('*'))
+            .any(|prefix| label.starts_with(prefix))
+}
+
+/// `Ok` when the calling window may do this; otherwise why not.
+pub fn allow(allowed: bool, refusal: &str) -> Result<(), String> {
+    if allowed { Ok(()) } else { Err(refusal.into()) }
 }
 
 pub fn window_event(window: &tauri::Window, event: &WindowEvent) {
@@ -1561,6 +1584,54 @@ mod tests {
     /// window's webview. The popout's own webview runs no script of its own,
     /// so it holds no capability, like a viewer, and no viewer is ever made
     /// in it (viewers are children of the calling app webview).
+    /// The app's pages frame only an extension content server's session
+    /// path (EXTENSIONS.md), never any page on any local port; a `<base>` or
+    /// a form cannot send the page anywhere.
+    #[test]
+    fn the_app_frames_only_extension_content_and_submits_no_form() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let csp = config["app"]["security"]["csp"].as_str().expect("csp");
+        let directives: Vec<&str> = csp.split(';').map(str::trim).collect();
+        for directive in [
+            "frame-src http://127.0.0.1:*/x/",
+            "base-uri 'none'",
+            "form-action 'none'",
+        ] {
+            assert!(directives.contains(&directive), "{directive}");
+        }
+        assert!(!directives.contains(&"frame-src http://127.0.0.1:*"));
+    }
+
+    /// Links and media open from the app's own pages only; a Web panel's
+    /// viewer or a popped-out panel window is never one of them.
+    #[test]
+    fn only_the_apps_own_pages_are_app_windows() {
+        for label in [
+            "main",
+            "setup",
+            "workspace-a",
+            "console-a",
+            "chat-a",
+            "artifact-a",
+            "mission-a",
+            "web-a",
+        ] {
+            assert!(is_app_window(label), "{label}");
+        }
+        for label in ["", "viewer-main-1", "popout-1", "mainx", "setupx", "other"] {
+            assert!(!is_app_window(label), "{label}");
+        }
+        for label in ["main", "workspace-a"] {
+            assert!(is_workspace_window(label), "{label}");
+        }
+        for label in ["setup", "chat-a", "web-a", "viewer-main-1", "popout-1"] {
+            assert!(!is_workspace_window(label), "{label}");
+        }
+        assert!(allow(false, "no").is_err());
+        assert!(allow(true, "no").is_ok());
+    }
+
     #[test]
     fn a_popped_out_panel_window_holds_no_capability() {
         let patterns: Vec<glob::Pattern> = APP_WEBVIEWS
@@ -1776,8 +1847,12 @@ fn external_link(raw: &str) -> Result<url::Url, String> {
     Ok(url)
 }
 #[tauri::command]
-pub fn open_link(app: tauri::AppHandle, url: String) -> Result<(), String> {
+pub fn open_link(app: tauri::AppHandle, window: Webview, url: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    allow(
+        is_app_window(window.label()),
+        "Only a Lazybox window opens links",
+    )?;
     let url = external_link(&url)?;
     app.opener()
         .open_url(url.as_str(), None::<&str>)
@@ -1819,8 +1894,16 @@ fn local_media_path(raw: &str, home: &std::path::Path) -> Option<PathBuf> {
 }
 
 #[tauri::command]
-pub fn open_local_media(app: tauri::AppHandle, path: String) -> Result<bool, String> {
+pub fn open_local_media(
+    app: tauri::AppHandle,
+    window: Webview,
+    path: String,
+) -> Result<bool, String> {
     use tauri_plugin_opener::OpenerExt;
+    allow(
+        is_app_window(window.label()),
+        "Only a Lazybox window opens media files",
+    )?;
     let home = app.path().home_dir().map_err(|error| error.to_string())?;
     let Some(file) = local_media_path(&path, &home) else {
         return Ok(false);

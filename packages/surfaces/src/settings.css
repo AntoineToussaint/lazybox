@@ -63,6 +63,9 @@
 .settings-row-control{min-width:0}
 .settings-page .settings-row-control select,.settings-page .settings-row-control input:not([type=checkbox]):not([type=radio]){width:100%;height:var(--s-control);padding:0 10px;font-size:calc(13px * var(--text-scale))}
 .settings-page .settings-row-control textarea{width:100%;min-height:72px;padding:10px 12px;font-size:calc(13px * var(--text-scale));line-height:1.5;resize:vertical}
+.settings-inline-form{display:flex;align-items:center;gap:8px;min-width:0}
+.settings-page .settings-inline-form input:not([type=checkbox]):not([type=radio]){flex:1;min-width:0;width:auto}
+.settings-inline-form button{flex:none;white-space:nowrap;height:var(--s-control);padding:0 12px}
 @container settings-group (max-width:560px){.settings-row{grid-template-columns:minmax(0,1fr)}}
 
 /* Notes, errors, saved and empty states: sentences, quiet unless something is wrong. */

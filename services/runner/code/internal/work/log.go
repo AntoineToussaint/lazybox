@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/atomicfile"
 )
 
 // file is one append-only JSONL log: one event per line, written and fsynced
@@ -21,6 +24,10 @@ type file struct {
 	size int64
 	// limit bounds the file; an append past it is refused.
 	limit int64
+	// broken is set when a failed append could not be undone: bytes past
+	// size may be on disk, so nothing more is written until a rewrite
+	// replaces the file.
+	broken error
 }
 
 // openFile reads every complete event of a log and leaves it open for appending.
@@ -64,6 +71,9 @@ var ErrFull = errors.New("the log is full")
 
 // append writes events as one write and one fsync.
 func (l *file) append(events []Event) error {
+	if l.broken != nil {
+		return l.broken
+	}
 	var buffer bytes.Buffer
 	for _, e := range events {
 		line, err := json.Marshal(e)
@@ -84,8 +94,12 @@ func (l *file) append(events []Event) error {
 		err = l.f.Sync()
 	}
 	if err != nil {
-		// Whatever reached the disk without a newline is truncated on the next open.
-		_ = l.f.Truncate(l.size)
+		// Cut what may have reached the disk, so a later append cannot
+		// complete a torn line into an event nobody acknowledged.
+		if truncErr := l.f.Truncate(l.size); truncErr != nil {
+			l.broken = fmt.Errorf("the log could not be repaired after a failed write, so nothing more is written to it: %w", errors.Join(err, truncErr))
+			return l.broken
+		}
 		return err
 	}
 	l.size += int64(n)
@@ -118,9 +132,10 @@ func (l *file) rewrite(path string, events []Event) error {
 		f.Close()
 		return err
 	}
+	// The new file is the log now, whether or not the rename is durable yet.
 	_ = l.f.Close()
-	l.f, l.size = f, int64(buffer.Len())
-	return nil
+	l.f, l.size, l.broken = f, int64(buffer.Len()), nil
+	return atomicfile.SyncDir(filepath.Dir(path))
 }
 
 func (l *file) close() error { return l.f.Close() }

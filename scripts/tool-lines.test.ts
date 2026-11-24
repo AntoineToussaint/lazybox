@@ -4,7 +4,7 @@ import { create } from '@bufbuild/protobuf';
 import { JournalEventSchema } from '@lazybox/protocol';
 import { emptyTranscript, foldTranscript } from '../packages/surfaces/src/transcript-model.ts';
 import { applyToolPayload, artifactOutcomes, describeGroup, describeTool, groupTools, kindOf, latestPlanId, lineChange, publishedArtifacts, retiredArtifacts, shortPath, type ToolEntry } from '../packages/surfaces/src/tool-lines.ts';
-import { answerNote, approvalOf, questionsOf, requestNote, risksOf } from '../packages/surfaces/src/request-model.ts';
+import { answerNote, approvalOf, decisionForKey, decisionRows, questionsOf, requestNote, risksOf } from '../packages/surfaces/src/request-model.ts';
 
 const ROOT = '/Users/me/ws/alpha';
 const call = (payload: Record<string, unknown>, previous?: ToolEntry, at?: number) => applyToolPayload(previous, payload, at)!;
@@ -156,6 +156,18 @@ test('questions and approvals read the same for Claude and Codex', () => {
   assert.equal(approvalOf({}, 'item/permissions/requestApproval', '').acceptUnsupported, true);
   const access = approvalOf({ grantable: true, title: 'More access: network access', reason: 'needs the registry', always: [{ id: 'session', scope: 'conversation', label: 'network access' }] }, 'item/permissions/requestApproval', '/w');
   assert.deepEqual([access.acceptUnsupported, access.title, access.description, access.always.map(a => a.id)], [false, 'More access: network access', 'needs the registry', ['session']]);
+});
+
+test('an approval’s keys: 1–9 and y/a/n pick a row, but a default-to-no request is never approved by one key', () => {
+  const always = [{ id: 'conversation', scope: 'conversation', label: 'commands starting with `npm run`' }, { id: 'workspace', scope: 'workspace', label: 'commands starting with `npm run`' }];
+  const usual = decisionRows({ always, defaultToNo: false }, 'Claude');
+  assert.deepEqual(usual.map(row => [row.id, row.digit, row.key]), [['once', '1', 'y'], ['always:conversation', '2', 'a'], ['always:workspace', '3', undefined], ['deny', '4', 'n']]);
+  assert.deepEqual(['1', 'y', 'Y', 'a', '3', 'n', '4', '5', 'x'].map(key => decisionForKey(usual, key)?.id), ['once', 'once', 'once', 'always:conversation', 'always:workspace', 'deny', 'deny', undefined, undefined]);
+  // Claude's defaultToNo: no digit, no letter picks an allow row, and none is shown on them.
+  const careful = decisionRows({ always, defaultToNo: true }, 'Claude');
+  assert.deepEqual(careful.map(row => [row.id, row.digit, row.key]), [['once', undefined, undefined], ['always:conversation', undefined, undefined], ['always:workspace', undefined, undefined], ['deny', undefined, 'n']]);
+  for (const key of ['1', '2', '3', '4', 'y', 'a', 'Y', 'A']) assert.equal(decisionForKey(careful, key), undefined, `${key} picks nothing`);
+  assert.equal(decisionForKey(careful, 'n')?.id, 'deny');
 });
 
 test('how a request was answered becomes one line of the conversation', () => {

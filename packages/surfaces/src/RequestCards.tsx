@@ -4,7 +4,7 @@ import { Decision, type AgentEvent } from '@lazybox/protocol';
 import { CodeBlock } from './RichContent';
 import { Icon } from './Icons';
 import { isSettingsUpdate, SettingsProposal } from './SettingsProposal';
-import { approvalOf, questionsOf, scopeWords, type AlwaysChoice, type Approval, type AnswerNote, type Question } from './request-model';
+import { approvalOf, decisionForKey, decisionRows, questionsOf, scopeWords, type Approval, type AnswerNote, type DecisionRow, type Question } from './request-model';
 import { shortPath } from './tool-lines';
 import { CardHead, editable, Kbd, useChatKeys, useInitialFocus, type RequestPosition } from './request-parts';
 import { RepositoryRequestCard } from './RepositoryRequestCard';
@@ -51,8 +51,6 @@ const SCOPE_CHIP: Record<string, string> = { conversation: 'This conversation', 
 
 /* ───────────────────────── Approvals ───────────────────────── */
 
-type Row = { id: string; label: string; detail?: string; key?: string; tone: 'allow' | 'always' | 'deny'; choice?: AlwaysChoice };
-
 function ApprovalCard({ request, api, session, onError, root = '', position, agentName = 'the agent', confirmAllow, enableFullAccess }: RequestCardProps) {
   const data = useMemo(() => providerData(request.providerDataJson), [request.providerDataJson]);
   const approval = useMemo(() => approvalOf(data, request.text, root), [data, request.text, root]);
@@ -61,11 +59,8 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
   const [denying, setDenying] = useState(false);
   const [reason, setReason] = useState('');
   const card = useRef<HTMLElement>(null);
-  const rows: Row[] = [
-    { id: 'once', label: 'Allow once', key: approval.defaultToNo ? undefined : 'y', tone: 'allow' },
-    ...approval.always.map((choice, i): Row => ({ id: `always:${choice.id}`, label: `Always allow ${choice.label}`, detail: choice.detail, key: i === 0 ? 'a' : undefined, tone: 'always', choice })),
-    { id: 'deny', label: 'Deny', detail: `Tell ${agentName} what to do instead`, key: 'n', tone: 'deny' },
-  ];
+  // Default-to-no: only Deny has a key; allowing takes a click or Tab and Enter.
+  const rows = decisionRows(approval, agentName);
   const sent = useRef(false);
   const decide = async (decision: Decision, extra: { always?: string; reason?: string; fullAccess?: boolean } = {}) => {
     if (sent.current) return;
@@ -79,7 +74,7 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
     }
     catch (e) { onError(permissionChanged ? `Full access is enabled. The command approval could not be sent. ${humanError(e)}` : humanError(e)); setWaiting(false); sent.current = false; }
   };
-  const activate = (row: Row) => {
+  const activate = (row: DecisionRow) => {
     if (waiting) return;
     if (row.tone === 'deny') { setDenying(true); requestAnimationFrame(() => card.current?.querySelector<HTMLTextAreaElement>('.deny-reason textarea')?.focus()); return; }
     if (approval.acceptUnsupported) return;
@@ -87,15 +82,16 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
     void decide(Decision.ACCEPT, { always: row.choice?.id });
   };
   const deny = () => void decide(Decision.DECLINE, { reason: reason.trim() });
+  // Leaving the reason (Esc or Back) returns focus to Deny…, not to the page: the form and its Back button are gone.
+  const back = () => { setDenying(false); setReason(''); requestAnimationFrame(() => card.current?.querySelector<HTMLElement>('[data-row=deny]')?.focus()); };
   const onKey = (event: { key: string }) => {
     if (denying) return false;
-    const digit = /^[1-9]$/.test(event.key) ? Number(event.key) - 1 : -1;
-    const row = digit >= 0 ? rows[digit] : rows.find(r => r.key === event.key.toLowerCase());
+    const row = decisionForKey(rows, event.key);
     if (!row) return false;
     activate(row); return true;
   };
   useChatKeys(card, onKey);
-  useInitialFocus(card, approval.defaultToNo ? '[data-row=deny]' : '[data-row=once]');
+  useInitialFocus(card);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -109,7 +105,7 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
   // Keys answer the first waiting request; later ones show none.
   const keys = !position || position.index === 0;
   const heading = settings ? 'Change Lazybox settings' : approval.description || approval.title || `Allow ${approval.tool}?`;
-  return <article ref={card} className="request approval-card" data-risk={approval.risks.length ? 'flagged' : undefined} aria-label={`Approval required: ${heading}`} onKeyDown={cardKeys}>
+  return <article ref={card} tabIndex={-1} className="request approval-card" data-risk={approval.risks.length ? 'flagged' : undefined} aria-label={`Approval required: ${heading}`} onKeyDown={cardKeys}>
     <CardHead eyebrow="Approval required" tool={approval.tool} position={position}/>
     <h3>{heading}</h3>
     {approval.title && approval.title !== heading && <p className="approval-description">{approval.title}</p>}
@@ -120,9 +116,9 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
     {approval.risks.length > 0 && <ul className="approval-risks" aria-label="Worth a second look">{approval.risks.map(r => <li key={r.kind} data-kind={r.kind}><Icon name="alert" size={12}/>{r.text}</li>)}</ul>}
     <details className="request-metadata"><summary>Request details</summary><CodeBlock text={JSON.stringify(data, null, 2)} language="json"/><small className="mono">{request.requestId}</small></details>
     {!denying ? <div className="decision-rows" role="group" aria-label="Your decision">
-      {rows.map((row, i) => <button key={row.id} type="button" className="decision-row" data-row={row.tone === 'always' ? 'always' : row.id} data-tone={row.tone} aria-label={row.tone === 'deny' ? 'Deny…' : row.label} aria-keyshortcuts={[String(i + 1), row.key].filter(Boolean).join(' ')}
+      {rows.map(row => <button key={row.id} type="button" className="decision-row" data-row={row.tone === 'always' ? 'always' : row.id} data-tone={row.tone} aria-label={row.tone === 'deny' ? 'Deny…' : row.label} aria-keyshortcuts={[row.digit, row.key].filter(Boolean).join(' ') || undefined}
         disabled={waiting || (row.tone !== 'deny' && approval.acceptUnsupported)} title={row.tone !== 'deny' && approval.acceptUnsupported ? 'Lazybox cannot grant this kind of permission yet' : row.detail} onClick={() => activate(row)}>
-        {keys && <Kbd>{i + 1}</Kbd>}
+        {keys && row.digit && <Kbd>{row.digit}</Kbd>}
         <span className="decision-text"><span>{row.tone === 'deny' ? 'Deny…' : <CodeText text={row.label}/>}{row.choice && SCOPE_CHIP[row.choice.scope] && <em className="decision-scope">{SCOPE_CHIP[row.choice.scope]}</em>}</span>{row.detail && <small>{row.detail}</small>}</span>
         {row.key && keys && <Kbd>{row.key.toUpperCase()}</Kbd>}
       </button>)}
@@ -133,10 +129,10 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
       <label>Why not? <small>Optional. {agentName} is told, and can try another way.</small>
         <textarea rows={2} value={reason} placeholder={`e.g. Use make test instead`} onChange={e => setReason(e.target.value)} onKeyDown={event => {
           if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); deny(); }
-          if (event.key === 'Escape') { event.preventDefault(); setDenying(false); setReason(''); requestAnimationFrame(() => card.current?.querySelector<HTMLElement>('[data-row=deny]')?.focus()); }
+          if (event.key === 'Escape') { event.preventDefault(); back(); }
         }}/>
       </label>
-      <div className="row"><button type="button" disabled={waiting} onClick={() => { setDenying(false); setReason(''); }}>Back</button><button type="submit" className="danger" disabled={waiting}>Deny</button></div>
+      <div className="row"><button type="button" disabled={waiting} onClick={back}>Back</button><button type="submit" className="danger" disabled={waiting}>Deny</button></div>
     </form>}
     {waiting && <small role="status" className="request-sending">Sending…</small>}
   </article>;
@@ -200,13 +196,13 @@ function QuestionCard({ request, api, session, onError, position }: RequestCardP
     return true;
   };
   useChatKeys(card, onKey);
-  useInitialFocus(card, '[role=radio], [role=checkbox], .question-free input, .question-free textarea');
+  useInitialFocus(card);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void send(); return; }
     if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
     if (onKey(event)) event.preventDefault();
   };
-  return <article ref={card} className="request question-card" aria-label="Agent question" onKeyDown={cardKeys}>
+  return <article ref={card} tabIndex={-1} className="request question-card" aria-label="Agent question" onKeyDown={cardKeys}>
     <CardHead eyebrow="Agent question" position={position}/>
     {!questions.length && <p className="approval-description">The agent asked a question Lazybox cannot read. Request details below.</p>}
     {questions.map((q, i) => <QuestionField key={q.key} question={q} index={i} total={questions.length} answer={answers[q.key] || empty} disabled={waiting}

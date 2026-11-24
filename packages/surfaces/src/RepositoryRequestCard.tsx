@@ -87,7 +87,7 @@ export function RepositoryRequestCard({ request, api, onError, position, agentNa
     activate(row); return true;
   };
   useChatKeys(card, onKey);
-  useInitialFocus(card, target ? '[data-row=add]' : '[data-row=choose]');
+  useInitialFocus(card);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -101,7 +101,7 @@ export function RepositoryRequestCard({ request, api, onError, position, agentNa
   const keys = !position || position.index === 0;
   const others = view.candidates.length > 1;
   const heading = target ? <>{agent} asks to add <strong>{target.name}</strong> to this workspace</> : <>{agent} asks for a repository: <strong>“{view.query}”</strong></>;
-  return <article ref={card} className="request repository-request-card" aria-label={`Repository request: ${target ? `add ${target.name}` : view.query}`} onKeyDown={cardKeys}>
+  return <article ref={card} tabIndex={-1} className="request repository-request-card" aria-label={`Repository request: ${target ? `add ${target.name}` : view.query}`} onKeyDown={cardKeys}>
     <CardHead eyebrow="Repository request" tool={sourceTag(target)} position={position}/>
     <h3>{heading}</h3>
     {view.reason && <p className="repository-reason"><span>Why</span>{view.reason}</p>}

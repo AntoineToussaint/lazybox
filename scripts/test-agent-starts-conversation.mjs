@@ -39,7 +39,7 @@ try{
  await expect(card.locator('[data-fact=agent]')).toContainText('Claude · Opus 5.5');
  await expect(card.locator('.decision-row')).toHaveText([/Start/,/Start in a new workspace/,/Edit…/,/Deny…/]);
  await expect(card.getByRole('button',{name:'Let this conversation start agents (orchestrator grant)…'})).toBeVisible();
- await expect(card.getByRole('button',{name:'Start',exact:true})).toBeFocused();
+ await expect(card).toBeFocused();
  await expect(page.locator('.chat-status [role=status]').first()).toHaveText('Waiting to start a conversation');
  await page.screenshot({path:'.cache/start-conversation-card.png'});
 

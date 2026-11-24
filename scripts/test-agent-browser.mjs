@@ -129,7 +129,7 @@ try {
   await expect(card.locator('.repository-reason')).toHaveText('WhyThe release notes for 2.4 are published there.');
   await expect(card).toContainText('Full access still asks before a new site.');
   await expect(card.locator('.decision-row')).toHaveText([/Allow once/, /Allow for this conversation/, /Always allow in this workspace/, /Deny…/]);
-  await expect(card.getByRole('button', { name: 'Allow once' })).toBeFocused();
+  await expect(card).toBeFocused();
   await expect(chat.locator('.chat-status [role=status]')).toHaveText('Waiting for you');
   await expect(chip).toHaveText('Waiting for you');
   await page.screenshot({ path: '.cache/agent-browser-site-card.png' });
@@ -148,7 +148,7 @@ try {
   for (const [request, key, decision] of [['site-2', 'y', 'once'], ['site-3', 'a', 'workspace']]) {
     fake.request(id, { id: request, kind: 'site', url: `https://${request}.example.org/`, origin: `https://${request}.example.org` });
     await expect(card.getByRole('heading')).toHaveText(`Claude wants to open ${request}.example.org`);
-    await expect(card.getByRole('button', { name: 'Allow once' })).toBeFocused();
+    await expect(card).toBeFocused();
     await page.keyboard.press(key);
     await expect.poll(() => fake.decisions.at(-1)).toEqual({ requestId: request, decision, reason: '' });
     await expect(card).toHaveCount(0);

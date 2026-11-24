@@ -159,9 +159,16 @@ the RPCs a paired phone with the same grants may call, less `Info`
 it and removes the file. Every power RPC (the actions file, hook runs, the
 CLI's window requests) is the owner's alone.
 
-This separates authority at the RPC boundary only. An agent runs as the same
-OS user and can read the owner's file directly; that needs process isolation,
-which the Runner does not claim. An agent started before this change keeps the
+This separates authority at the RPC boundary only, and **prevents accidents,
+not a hostile agent**. An agent runs as the same OS user and can read the
+Runner state directly: the owner's `endpoint.json`, `agent-credential.key`
+(from which any conversation's credential can be computed), the saved API key,
+other executions' endpoint files and the session hosts' control sockets. An
+agent that misbehaves on purpose can therefore act as the person. What that
+leaves, what the harnesses could deny and why they do not, and the design
+that closes it (credentials in the Keychain, owner identified by a Unix
+socket's peer rather than a bearer) are in
+[SECURITY.md](SECURITY.md#what-an-agent-can-reach). An agent started before this change keeps the
 owner path in its own environment until it ends: re-attaching cannot change a
 running process's environment, though commands the Runner starts for it get
 the scoped file. Continue or restart such a conversation to drop it.

@@ -62,14 +62,23 @@ var knownGrants = map[string]int{GrantRead: 0, GrantRespond: 1, GrantStart: 2}
 // screen; a challenge is answered by the device at once; an access credential
 // is renewed by the device well before it ends.
 const (
-	OfferLifetime       = 5 * time.Minute
-	ChallengeLifetime   = time.Minute
-	CredentialLifetime  = 15 * time.Minute
-	offerRetention      = 10 * time.Minute
-	maxPendingOffers    = 8
-	maxOfferFailures    = 5
-	maxDevices          = 32
-	maxChallenges       = 1024
+	OfferLifetime      = 5 * time.Minute
+	ChallengeLifetime  = time.Minute
+	CredentialLifetime = 15 * time.Minute
+	offerRetention     = 10 * time.Minute
+	maxPendingOffers   = 8
+	maxOfferFailures   = 5
+	// maxOfferAttempts bounds the pairing requests one offer answers per
+	// minute, whatever they carry. It is per offer, so only someone who has
+	// the pairing code can spend it: no tailnet peer can block pairing by
+	// flooding the endpoint (a shared budget let any of them).
+	maxOfferAttempts = 30
+	maxDevices       = 32
+	// maxDeviceChallenges bounds one device's pending sign-in challenges.
+	// The challenge endpoint is unauthenticated, so the bound is per device:
+	// whoever floods one device's challenges cannot keep another device from
+	// signing in. The whole table holds at most maxDevices of these.
+	maxDeviceChallenges = 8
 	lastSeenPersistence = time.Minute
 	keyBytes            = 32
 	// TokenPrefix marks a device access credential; no other bearer has it.
@@ -103,6 +112,8 @@ var (
 	ErrBadChallenge   = errors.New("the sign-in challenge is unknown, used or expired")
 	ErrBadCredential  = errors.New("invalid device credential")
 	ErrTooMany        = errors.New("too many pending requests; try again shortly")
+	// ErrTooManyAttempts refuses a pairing offer's requests past its budget.
+	ErrTooManyAttempts = errors.New("too many pairing attempts; wait a minute")
 	// ErrCredentialEnded is the cause of a bound context (Bind) ending
 	// because its credential expired or its device was revoked.
 	ErrCredentialEnded = errors.New("this device's credential ended; sign in again from the phone")
@@ -167,6 +178,9 @@ type offer struct {
 	expires  time.Time
 	state    string
 	failures int
+	// attempts counts the requests naming this offer since window began.
+	window   time.Time
+	attempts int
 	device   string
 	ended    time.Time
 }
@@ -455,6 +469,12 @@ func (m *Manager) Complete(r PairRequest) (Device, error) {
 	case OfferFailed:
 		return Device{}, ErrUnknownOffer
 	}
+	if now.Sub(o.window) >= time.Minute {
+		o.window, o.attempts = now, 0
+	}
+	if o.attempts++; o.attempts > maxOfferAttempts {
+		return Device{}, ErrTooManyAttempts
+	}
 	if subtle.ConstantTimeCompare(presented[:], o.secret[:]) != 1 {
 		o.failures++
 		if o.failures >= maxOfferFailures {
@@ -540,7 +560,13 @@ func (m *Manager) Challenge(device string) (string, time.Time, error) {
 	if m.devices[device] == nil {
 		return "", time.Time{}, ErrUnknownDevice
 	}
-	if len(m.challenges) >= maxChallenges {
+	pending := 0
+	for _, c := range m.challenges {
+		if c.device == device {
+			pending++
+		}
+	}
+	if pending >= maxDeviceChallenges {
 		return "", time.Time{}, ErrTooMany
 	}
 	expires := now.Add(ChallengeLifetime)

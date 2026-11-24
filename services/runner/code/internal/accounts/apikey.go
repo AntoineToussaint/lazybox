@@ -23,6 +23,13 @@ func APIKeyFile(state string) string {
 // so the key is what the agent runs on, whatever the Runner inherited.
 var ClaudeAuthEnv = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_HOST_CREDS_FILE", "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_SESSION_INGRESS_TOKEN_FILE", "ANTHROPIC_PROFILE", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE", "CLAUDE_CODE_USE_MANTLE"}
 
+// ClaudeEndpointEnv are the environment variables that send Claude Code's
+// requests, and so its credential, somewhere other than Anthropic. A key
+// Lazybox supplies goes to Anthropic, or to a gateway the Runner selects
+// (which sets the base URL after this: the Claude adapter's GatewayEnv),
+// never to an endpoint the Runner merely inherited.
+var ClaudeEndpointEnv = []string{"ANTHROPIC_BASE_URL", "CLAUDE_CODE_API_BASE_URL", "CLAUDE_CODE_CUSTOM_OAUTH_URL"}
+
 // CheckAPIKey refuses what is not an Anthropic API key, a subscription token
 // first: Lazybox may not store a Claude.ai credential.
 func CheckAPIKey(key string) error {
@@ -113,12 +120,13 @@ func APIKeyHint(key string) string {
 }
 
 // WithAPIKey is env with key as the only Claude credential: every other
-// credential or provider selection is removed and ANTHROPIC_API_KEY set.
+// credential, provider selection and inherited endpoint (ClaudeEndpointEnv)
+// is removed and ANTHROPIC_API_KEY set.
 func WithAPIKey(env []string, key string) []string {
 	out := make([]string, 0, len(env)+1)
 	for _, entry := range env {
 		name, _, _ := strings.Cut(entry, "=")
-		if !contains(ClaudeAuthEnv, name) {
+		if !contains(ClaudeAuthEnv, name) && !contains(ClaudeEndpointEnv, name) {
 			out = append(out, entry)
 		}
 	}

@@ -209,7 +209,11 @@ Anthropic.
    a `0700` folder; the Runner has no Keychain storage to reuse), never returns
    it (only its last four characters), and gives it to the `claude-default`
    account's agents as `ANTHROPIC_API_KEY`, removing the other Claude
-   credentials from their environment. Each Runner (Working, Dev) keeps its
+   credentials from their environment, and any inherited endpoint
+   (`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_API_BASE_URL`,
+   `CLAUDE_CODE_CUSTOM_OAUTH_URL`) so the key goes only to Anthropic or to a
+   gateway the Runner selects. The key is in the agent's process environment,
+   so every command the agent runs inherits it ([SECURITY.md](SECURITY.md#the-saved-anthropic-api-key)). Each Runner (Working, Dev) keeps its
    own. A subscription token pasted as a key
    (`sk-ant-oat…`) is refused. Bedrock, Vertex, Foundry and Claude Platform on
    AWS work by setting their variables in the Runner's environment; Settings

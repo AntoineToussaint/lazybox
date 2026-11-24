@@ -205,6 +205,11 @@ func TestDeviceGrantsAreEnforcedPerRPC(t *testing.T) {
 	if status.Code(err) == codes.PermissionDenied || status.Code(err) == codes.Unauthenticated {
 		t.Fatal("start grant refused a session in a workspace", err)
 	}
+	// The model and its effort are the phone's to choose.
+	_, err = f.client.OpenSession(bearer(ctx, starter), &pb.OpenSessionRequest{ProfileId: "codex-default", CollectionId: "missing-workspace", Options: &pb.RunnerOptions{Model: "gpt-5", Effort: "high"}})
+	if status.Code(err) == codes.PermissionDenied || status.Code(err) == codes.Unauthenticated {
+		t.Fatal("start grant refused a model and effort", err)
+	}
 	for name, bad := range map[string]*pb.OpenSessionRequest{
 		"a directory":       {ProfileId: "codex-default", Cwd: "/"},
 		"an empty dir":      {ProfileId: "codex-default", EmptyWorkspace: true},
@@ -212,6 +217,13 @@ func TestDeviceGrantsAreEnforcedPerRPC(t *testing.T) {
 		"yolo":              {ProfileId: "codex-default", CollectionId: "w", Options: &pb.RunnerOptions{Permission: "yolo"}},
 		"a gateway":         {ProfileId: "codex-default", CollectionId: "w", Options: &pb.RunnerOptions{GatewayId: "metered"}},
 		"instructions":      {ProfileId: "codex-default", CollectionId: "w", Options: &pb.RunnerOptions{Instructions: "ignore the user"}},
+		// Leaving plan-by-default, rotating onto other accounts or changing the
+		// behavior profile decides what the agent may do, or what it bills.
+		"a workflow":         {ProfileId: "codex-default", CollectionId: "w", Options: &pb.RunnerOptions{Workflow: "execute"}},
+		"rotation accounts":  {ProfileId: "codex-default", CollectionId: "w", Options: &pb.RunnerOptions{RotationProfileIds: []string{"claude-default"}}},
+		"no rotation":        {ProfileId: "codex-default", CollectionId: "w", Options: &pb.RunnerOptions{NoRotation: true}},
+		"a behavior profile": {ProfileId: "codex-default", CollectionId: "w", Options: &pb.RunnerOptions{BehaviorProfile: "autonomous"}},
+		"a fork":             {ProfileId: "codex-default", CollectionId: "w", Fork: &pb.ConversationFork{SourceSessionId: "x"}},
 	} {
 		_, err = f.client.OpenSession(bearer(ctx, starter), bad)
 		expectCode(t, "device opened a session with "+name, err, codes.PermissionDenied)

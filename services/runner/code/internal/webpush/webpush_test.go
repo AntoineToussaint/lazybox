@@ -151,7 +151,10 @@ func TestValidateEndpoint(t *testing.T) {
 }
 
 func TestProductionDialerRefusesPrivateAddresses(t *testing.T) {
-	for _, address := range []string{"127.0.0.1:443", "[::1]:443", "10.1.2.3:443", "192.168.1.5:443", "172.16.0.1:443", "169.254.169.254:80", "100.101.102.103:443", "0.0.0.0:443", "[fd7a:115c:a1e0::1]:443"} {
+	for _, address := range []string{"127.0.0.1:443", "[::1]:443", "10.1.2.3:443", "192.168.1.5:443", "172.16.0.1:443", "169.254.169.254:80", "100.101.102.103:443", "0.0.0.0:443", "[fd7a:115c:a1e0::1]:443",
+		// "This network", benchmarking, and the IPv6 prefixes that carry an IPv4
+		// address (NAT64, 6to4): each can reach a host the rest refuse.
+		"0.1.2.3:443", "198.18.0.1:443", "198.19.255.254:443", "[64:ff9b::7f00:1]:443", "[64:ff9b::a01:203]:443", "[2002:7f00:1::1]:443", "[2002:c0a8:105::1]:443"} {
 		if webpush.RefusePrivate("tcp", address, nil) == nil {
 			t.Fatalf("dialer would connect to %s", address)
 		}

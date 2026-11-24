@@ -23,7 +23,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitidentity"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 )
 
@@ -39,6 +38,11 @@ type Repository struct {
 	// deletes. Libraries written before it have none; a local repository's
 	// source folder then serves as its home (Manager.Home).
 	Home string `json:"home,omitempty"`
+	// Unavailable says why the repository's folder could not be opened as a
+	// Git repository when the Runner started (moved, deleted, unmounted).
+	// The entry stays so its workspaces keep their record; nothing is created
+	// from it until the folder is back and the Runner restarts. Never saved.
+	Unavailable string `json:"-"`
 }
 type MemberSpec struct {
 	Name         string `json:"name"`
@@ -163,13 +167,18 @@ func New(root string, repositories []Repository) (*Manager, error) {
 		for _, r := range library {
 			if prior, ok := configured[r.ID]; ok {
 				canonical, resolveErr := filepath.EvalSymlinks(prior.Path)
-				if resolveErr != nil || canonical != r.Path {
+				// A folder that is gone is reported as unavailable below, not as a conflict.
+				if resolveErr == nil && canonical != r.Path {
 					return fail(errors.New("repository library conflicts with Runner configuration"))
 				}
 				for i := range repositories {
 					if repositories[i].ID == r.ID {
 						repositories[i].Hidden = r.Hidden
 						repositories[i].Home = r.Home
+						if resolveErr != nil {
+							// Keep the canonical path the library recorded.
+							repositories[i].Path = r.Path
+						}
 					}
 				}
 				continue
@@ -181,17 +190,13 @@ func New(root string, repositories []Repository) (*Manager, error) {
 		if !component.MatchString(r.ID) || m.repos[r.ID].ID != "" || !filepath.IsAbs(r.Path) {
 			return fail(errors.New("invalid or duplicate repository id or non-absolute path"))
 		}
-		r.Path, err = filepath.EvalSymlinks(r.Path)
+		// One repository folder that is gone must not keep the Runner, and
+		// every other workspace, from starting.
+		common, err := m.openRepository(ctx, &r)
 		if err != nil {
-			return fail(err)
-		}
-		common, err := m.git(ctx, r.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
-		if err != nil {
-			return fail(fmt.Errorf("repository %s: %w", r.ID, err))
-		}
-		common, err = filepath.EvalSymlinks(common)
-		if err != nil {
-			return fail(err)
+			r.Unavailable = err.Error()
+			m.repos[r.ID] = r
+			continue
 		}
 		m.repos[r.ID], m.common[r.ID] = m.resolveRepositorySource(ctx, r), common
 	}
@@ -265,6 +270,21 @@ func New(root string, repositories []Repository) (*Manager, error) {
 	return m, nil
 }
 
+// openRepository resolves r.Path to its canonical form and answers its Git
+// common directory.
+func (m *Manager) openRepository(ctx context.Context, r *Repository) (string, error) {
+	path, err := filepath.EvalSymlinks(r.Path)
+	if err != nil {
+		return "", fmt.Errorf("repository %s: %w", r.ID, err)
+	}
+	r.Path = path
+	common, err := m.git(ctx, r.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("repository %s: %w", r.ID, err)
+	}
+	return filepath.EvalSymlinks(common)
+}
+
 func (m *Manager) Repositories() []Repository {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -285,7 +305,7 @@ func (m *Manager) repositories() []Repository {
 	unique := out[:0]
 	seen := map[string]bool{}
 	for _, r := range out {
-		identity := gitidentity.Repository(m.common[r.ID], r.SourceURL)
+		identity := m.identity(r.ID)
 		if !seen[identity] {
 			unique = append(unique, r)
 			seen[identity] = true
@@ -552,6 +572,9 @@ func (m *Manager) planMembers(ctx context.Context, c Collection, specs []MemberS
 		r, ok := m.repos[s.RepositoryID]
 		if !ok {
 			return Collection{}, fmt.Errorf("unknown repository %q", s.RepositoryID)
+		}
+		if r.Unavailable != "" {
+			return Collection{}, fmt.Errorf("repository %q is unavailable: %s", s.RepositoryID, r.Unavailable)
 		}
 		if s.Name == "" {
 			s.Name = r.Name

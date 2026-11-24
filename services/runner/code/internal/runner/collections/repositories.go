@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitidentity"
 	"os"
 	"path/filepath"
@@ -54,6 +55,9 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 		if old == r {
 			return old, nil
 		}
+		if old.Unavailable != "" {
+			return Repository{}, fmt.Errorf("repository %s is unavailable (%s); restore its folder and restart the Runner, or remove it first", old.ID, old.Unavailable)
+		}
 		return Repository{}, errors.New("repository identity already has a different registration")
 	}
 	if len(m.repos) >= 512 {
@@ -61,7 +65,7 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 	}
 	identity := gitidentity.Repository(common, r.SourceURL)
 	for _, old := range m.repositories() {
-		if gitidentity.Repository(m.common[old.ID], old.SourceURL) == identity {
+		if m.identity(old.ID) == identity {
 			return old, nil
 		}
 	}
@@ -103,7 +107,7 @@ func (m *Manager) ReplaceRepository(ctx context.Context, r Repository) (Reposito
 	var replaced []Repository
 	previous := map[string]Repository{}
 	for _, old := range m.repositories() {
-		if gitidentity.Repository(m.common[old.ID], old.SourceURL) != identity {
+		if m.identity(old.ID) != identity {
 			continue
 		}
 		previous[old.ID] = old
@@ -185,7 +189,7 @@ func (m *Manager) AddLocalRepository(ctx context.Context, path, name string) (Re
 	source := m.resolveRepositorySource(ctx, Repository{Path: canonical})
 	identity := gitidentity.Repository(common, source.SourceURL)
 	for _, existing := range m.repositories() {
-		if gitidentity.Repository(m.common[existing.ID], existing.SourceURL) == identity {
+		if m.identity(existing.ID) == identity {
 			return existing, nil
 		}
 	}
@@ -217,6 +221,18 @@ func (m *Manager) Repository(id string) (Repository, bool) {
 	defer m.mu.Unlock()
 	r, ok := m.repos[id]
 	return r, ok
+}
+
+// identity is registration id's checkout-independent identity. A repository
+// whose Git directory could not be read at startup (Unavailable) and has no
+// GitHub origin has none to share, so it is only ever itself. The caller
+// holds m.mu.
+func (m *Manager) identity(id string) string {
+	r := m.repos[id]
+	if m.common[id] == "" && gitidentity.GitHubName(r.SourceURL) == "" {
+		return "unavailable:" + id
+	}
+	return gitidentity.Repository(m.common[id], r.SourceURL)
 }
 
 func (m *Manager) RepositoryIdentity(id string) string {
@@ -256,10 +272,10 @@ func (m *Manager) RemoveRepository(id string) error {
 	if repo.Hidden {
 		return nil
 	}
-	identity := gitidentity.Repository(m.common[id], repo.SourceURL)
+	identity := m.identity(id)
 	list := []Repository{}
 	for _, r := range m.repos {
-		if gitidentity.Repository(m.common[r.ID], r.SourceURL) == identity {
+		if m.identity(r.ID) == identity {
 			r.Hidden = true
 		}
 		list = append(list, r)

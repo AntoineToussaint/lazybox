@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -187,6 +188,57 @@ func TestReaddingRemovedGitHubRepositoryFromAnotherCloneKeepsItsWorkspaces(t *te
 	}
 	if _, err = m.FinishDeletion(ctx, c.ID, false, inactive); err != nil {
 		t.Fatal("workspace from the removed clone stranded", err)
+	}
+}
+
+// A registered repository whose folder is gone (moved, deleted, unmounted),
+// hidden or not, configured or added later, must not stop the Runner.
+func TestMissingRepositoryFoldersAreUnavailableNotFatal(t *testing.T) {
+	ctx := context.Background()
+	configured, added, hidden, kept := repoTest(t), repoTest(t), repoTest(t), repoTest(t)
+	configured.ID, kept.ID = "configured", "kept"
+	root := t.TempDir()
+	m := newTest(t, root, configured, kept)
+	addedRepo, err := m.AddLocalRepository(ctx, added.Path, "added")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hiddenRepo, err := m.AddLocalRepository(ctx, hidden.Path, "hidden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.RemoveRepository(hiddenRepo.ID); err != nil {
+		t.Fatal(err)
+	}
+	c, err := m.Create(ctx, "survivor", specTest(kept.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{configured.Path, added.Path, hidden.Path} {
+		if err = os.RemoveAll(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m = newTest(t, root, configured, kept)
+	for _, id := range []string{configured.ID, addedRepo.ID, hiddenRepo.ID} {
+		if r, ok := m.Repository(id); !ok || r.Unavailable == "" {
+			t.Fatalf("%s: %+v, want an unavailable entry", id, r)
+		}
+		if _, err = m.Create(ctx, "from-"+id, specTest(id)); err == nil || !strings.Contains(err.Error(), "unavailable") {
+			t.Fatalf("%s: created a workspace from a missing folder: %v", id, err)
+		}
+	}
+	if got, err := m.Get(c.ID); err != nil || got.State != "ready" {
+		t.Fatal("other workspace lost", got, err)
+	}
+	if _, err = m.Create(ctx, "still-works", specTest(kept.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Repositories()) != 3 {
+		t.Fatalf("library = %+v", m.Repositories())
 	}
 }
 

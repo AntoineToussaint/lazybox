@@ -409,3 +409,44 @@ func TestAdoptDoesNotDeliverDeletedMessageFromStaleAttachment(t *testing.T) {
 		t.Fatalf("dispatched %+v, want next", op)
 	}
 }
+
+func TestQueuedEditHoldSurvivesAdoptionWithStaleAttachment(t *testing.T) {
+	e, native, st, path := durableEngine(t)
+	ctx := contextFor(t)
+	for _, id := range []string{"current", "queued"} {
+		if _, err := e.Apply(ctx, agent.Operation{ID: id, Kind: agent.Message, Text: id}); err != nil {
+			t.Fatal(err)
+		}
+		if id == "current" {
+			applied(t, native)
+		}
+	}
+	_, stale := st.saved()
+	if _, err := e.EditQueued("queued", "edit", "editor", ""); err != nil {
+		t.Fatal(err)
+	}
+	carried, err := RestoreQueued(ctx, e.journal, stale.Queue)
+	if err != nil || len(carried) != 1 || carried[0].QueueEditID != "editor" {
+		t.Fatalf("carried queue lost the hold: %+v, %v", carried, err)
+	}
+	if err := e.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.attach(stale); err != nil {
+		t.Fatal(err)
+	}
+	next, adapter, err := adopt(t, path, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := next.Snapshot().QueuedMessages; len(q) != 1 || !q[0].Editing {
+		t.Fatalf("edit hold was lost: %+v", q)
+	}
+	if _, err := next.EditQueued("queued", "save_edit", "editor", "revised"); err != nil {
+		t.Fatal(err)
+	}
+	adapter.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	if op := applied(t, adapter.Session); op.ID != "queued" || op.Text != "revised" {
+		t.Fatalf("wrong adopted message: %+v", op)
+	}
+}

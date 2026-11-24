@@ -72,7 +72,7 @@ export type Transcript = { messages: TranscriptMessage[]; recent: JournalEvent[]
 export const emptyTranscript = (): Transcript => ({ messages: [], recent: [], activity: [], activityTruncated: false, cursor: 0n, appendToLast: false, reportedModel:'', subagents: emptySubagents(), requests: {}, catalog: emptyCatalog() });
 
 /** A message waiting behind the turn in progress, as the Queued strip shows it. */
-export type QueuedEntry = { operationId: string; text: string; /** A message Lazybox wrote (QueuedMessage.origin, or the transcript's parsed one). */ origin?: unknown };
+export type QueuedEntry = { editing?: boolean; operationId: string; text: string; /** A message Lazybox wrote (QueuedMessage.origin, or the transcript's parsed one). */ origin?: unknown };
 /**
  * What the Queued strip shows: the Runner's queue (polled every 1.5 s)
  * merged with the transcript's, which knows at once. A message accepted
@@ -155,9 +155,9 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
    * strip shows it, and the conversation does once it is delivered. One sent
    * while idle is the next turn's start, shown at once.
    */
-  const accept = (message: TranscriptMessage) => {
+  const accept = (message: TranscriptMessage, held = false) => {
     const id = message.operationId;
-    if (id && (next.turnRunning || Object.keys(queued()).length)) (pending ??= { ...state.pending })[id] = message;
+    if (id && (held || next.turnRunning || Object.keys(queued()).length)) (pending ??= { ...state.pending })[id] = message;
     else place(message);
   };
   for (const record of fresh) {
@@ -179,6 +179,17 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
     // got it: after the turn it waited for (and the stop Send now made), as
     // the start of its own turn; or, steered, inside the running one. One the
     // session dropped while it waited never does.
+    if (event.type === 'queued_message_edit') {
+      if (event.status === 'save_edit') {
+        const message = queued()[event.operationId];
+        if (message) (pending ??= { ...state.pending })[event.operationId] = { ...message, text: event.text };
+        else {
+          const i = lastWith(messages ?? state.messages, event.operationId);
+          if (i >= 0) list()[i] = { ...list()[i], text: event.text };
+        }
+      }
+      continue;
+    }
     const receipt = receiptOf(record);
     if (receipt) {
       if (receipt.delivery === 'canceled_before_delivery') {
@@ -395,7 +406,7 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
       } else add({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, ...when });
       next.appendToLast = true;
     } else if (event.type === 'operation_accepted' && (event.text || files?.length)) {
-      accept({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, files, ...when, promptModel: next.lastObservedModel, promptContext: next.reportedContext, ...(event.operationId ? { operationId: event.operationId } : {}), ...(ranCommand(event.text, next.catalog) ? { command: true } : {}) });
+      accept({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, files, ...when, promptModel: next.lastObservedModel, promptContext: next.reportedContext, ...(event.operationId ? { operationId: event.operationId } : {}), ...(ranCommand(event.text, next.catalog) ? { command: true } : {}) }, event.status === 'queued_for_edit');
     } else if (event.type === 'failure' && (event.text || files?.length)) {
       const sentence = failureSentence(event.status, event.text);
       add({ id: record.cursor.toString(), type: event.type, text: sentence, turnId: event.turnId, files, ...(event.text.trim() && sentence !== event.text.trim() ? { detail: event.text.trim() } : {}) });

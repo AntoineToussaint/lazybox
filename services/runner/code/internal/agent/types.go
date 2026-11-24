@@ -240,13 +240,15 @@ func ValidEffort(provider, effort string) error {
 }
 
 type Operation struct {
-	ID        string  `json:"id"`
-	Kind      Kind    `json:"kind"`
-	Text      string  `json:"text,omitempty"`
-	Images    []Image `json:"images,omitempty"`
-	Files     []File  `json:"files,omitempty"`
-	RequestID string  `json:"requestId,omitempty"`
-	Decision  string  `json:"decision,omitempty"`
+	// QueueEditID holds a queued message until its editor saves or cancels.
+	QueueEditID string  `json:"queueEditId,omitempty"`
+	ID          string  `json:"id"`
+	Kind        Kind    `json:"kind"`
+	Text        string  `json:"text,omitempty"`
+	Images      []Image `json:"images,omitempty"`
+	Files       []File  `json:"files,omitempty"`
+	RequestID   string  `json:"requestId,omitempty"`
+	Decision    string  `json:"decision,omitempty"`
 	// Always, with an accepting Decision, names one of the "always allow"
 	// choices the request offered (its data's `always` list): the provider's
 	// own way to stop asking within that scope. Empty allows once.

@@ -139,7 +139,7 @@ func wireSession(e *runner.Execution) *pb.Session {
 	}
 	w.LastMessage = s.LastMessage
 	for _, q := range s.QueuedMessages {
-		m := &pb.QueuedMessage{OperationId: q.OperationID, Text: q.Text}
+		m := &pb.QueuedMessage{Editing: q.Editing, OperationId: q.OperationID, Text: q.Text}
 		if o := q.Origin; o != nil {
 			m.Origin = &pb.MessageOrigin{Kind: o.Kind, Summary: o.Summary, Detail: o.Detail, Copy: o.Copy, From: o.From}
 		}
@@ -450,6 +450,21 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 		queue, ok := e.Engine.(queueRuntime)
 		if !ok {
 			return nil, rpcError(agent.ErrUnsupported)
+		}
+		action := o.DeliverQueued
+		switch action.How {
+		case "edit", "save_edit", "cancel_edit":
+			editor, ok := e.Engine.(interface {
+				EditQueued(string, string, string, string) (string, error)
+			})
+			if !ok {
+				return nil, rpcError(agent.ErrUnsupported)
+			}
+			text, err := editor.EditQueued(action.OperationId, action.How, action.EditId, action.Text)
+			if err != nil {
+				return nil, grpcError(codes.FailedPrecondition, err)
+			}
+			return &pb.Receipt{OperationId: action.OperationId, Delivery: action.How, QueuedText: text}, nil
 		}
 		var foreground []*commands.Command
 		if o.DeliverQueued.GetHow() == engine.DeliverNow && e.Engine.Snapshot().Busy {

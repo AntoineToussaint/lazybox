@@ -502,11 +502,16 @@ func (b *Bench) endLost(ctx context.Context, r sessionstore.Record, why string) 
 // endInterrupted is endLost once the attachment is read: the notice, the
 // carried messages and the interrupted snapshot, then the attachment goes.
 func (b *Bench) endInterrupted(ctx context.Context, r sessionstore.Record, record engine.Attachment, why string) error {
-	if err := b.saveCarried(r.ID, record.Queue); err != nil {
-		return err
-	}
 	spool, err := b.openJournal(r.ID)
 	if err != nil {
+		return err
+	}
+	record.Queue, err = engine.RestoreQueued(ctx, spool, record.Queue)
+	if err == nil {
+		err = b.saveCarried(r.ID, record.Queue)
+	}
+	if err != nil {
+		spool.Dispose()
 		return err
 	}
 	noted := false

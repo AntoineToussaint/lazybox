@@ -53,6 +53,7 @@ type Snapshot struct {
 
 // QueuedMessage is a message accepted while the agent was busy.
 type QueuedMessage struct {
+	Editing     bool      `json:"editing,omitempty"`
 	OperationID string    `json:"operationId"`
 	Text        string    `json:"text"`
 	QueuedAt    time.Time `json:"queuedAt,omitzero"`
@@ -219,7 +220,7 @@ func QueuedMessages(queue []agent.Operation, at map[string]time.Time) []QueuedMe
 		if len(text) > queuedPreview {
 			text = append(text[:queuedPreview-1], '…')
 		}
-		out = append(out, QueuedMessage{OperationID: op.ID, Text: string(text), QueuedAt: at[op.ID], Origin: op.Origin})
+		out = append(out, QueuedMessage{Editing: op.QueueEditID != "", OperationID: op.ID, Text: string(text), QueuedAt: at[op.ID], Origin: op.Origin})
 	}
 	return out
 }
@@ -426,6 +427,10 @@ func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, 
 	// the operation's kind from its data: an interrupt explains a tool call
 	// that then fails as one the person stopped.
 	record := map[string]any{"type": "operation_accepted", "operationId": op.ID, "kind": op.Kind, "text": op.Text, "imageCount": len(op.Images), "requestId": op.RequestID, "data": map[string]any{"files": op.Files, "kind": op.Kind}}
+	// A held message carried into a new execution waits even before its first turn.
+	if op.QueueEditID != "" {
+		record["status"] = "queued_for_edit"
+	}
 	// A response's decision and answers are journaled so a request redelivered
 	// after a restart can be answered as the user did.
 	if op.Decision != "" {
@@ -554,6 +559,10 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 		}
 		return agent.Receipt{}, ErrNotQueued
 	}
+	if e.queue[at].QueueEditID != "" && how != DeleteQueued {
+		e.mu.Unlock()
+		return agent.Receipt{}, errors.New("message is paused for editing")
+	}
 	if how == DeleteQueued {
 		defer e.mu.Unlock()
 		return e.deleteQueuedLocked(at)
@@ -644,6 +653,64 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 	return agent.Receipt{ID: op.ID, Delivery: "accepted"}, nil
 }
 
+// EditQueued serializes an edit hold with dispatch. The head keeps its position
+// while held. Explicit delivery of another message can still move it ahead.
+func (e *Engine) EditQueued(id, how, editor, text string) (string, error) {
+	if editor == "" || len(editor) > 128 {
+		return "", errors.New("edit id required (max 128 bytes)")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range e.queue {
+		op := &e.queue[i]
+		if op.ID != id || op.Kind != agent.Message {
+			continue
+		}
+		if op.Origin != nil {
+			return "", errors.New("only a person's message can be edited")
+		}
+		original := *op
+		event := map[string]any{"type": "queued_message_edit", "operationId": id, "status": how}
+		switch how {
+		case "edit":
+			if op.QueueEditID == editor {
+				return op.Text, nil
+			}
+			if op.QueueEditID != "" {
+				return "", errors.New("message is being edited in another window")
+			}
+			op.QueueEditID = editor
+			event["editId"] = editor
+		case "save_edit", "cancel_edit":
+			if op.QueueEditID != editor {
+				return "", errors.New("this edit is no longer active")
+			}
+			if how == "save_edit" {
+				next := *op
+				next.Text = text
+				if err := validate(next, e.state.Capabilities); err != nil {
+					return "", err
+				}
+				op.Text = text
+				event["text"] = text
+				event["data"] = map[string]any{"files": op.Files}
+			}
+			op.QueueEditID = ""
+		default:
+			return "", errors.New("unknown edit action")
+		}
+		if !e.appendLocked(event) {
+			*op = original
+			return "", errors.New("could not record queued message edit")
+		}
+		if how != "edit" {
+			go e.dispatch()
+		}
+		return op.Text, nil
+	}
+	return "", ErrNotQueued
+}
+
 // Record cancellation before allowing dispatch or acknowledging it. If the
 // attachment write lags, adoption uses the journal receipt to skip this message.
 func (e *Engine) deleteQueuedLocked(at int) (agent.Receipt, error) {
@@ -656,6 +723,7 @@ func (e *Engine) deleteQueuedLocked(at int) (agent.Receipt, error) {
 		return agent.Receipt{}, errors.New("could not record queued message deletion")
 	}
 	delete(e.queuedAt, id)
+	go e.dispatch()
 	e.setReceiptLocked(id, r)
 	return r, nil
 }
@@ -721,7 +789,7 @@ func (e *Engine) dispatch() {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
 	e.mu.Lock()
-	if e.state.Busy || e.state.Closed || len(e.queue) == 0 {
+	if e.state.Busy || e.state.Closed || len(e.queue) == 0 || e.queue[0].QueueEditID != "" {
 		e.mu.Unlock()
 		return
 	}

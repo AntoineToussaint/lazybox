@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
@@ -65,7 +66,17 @@ func TestSendNowThroughTheAPIDeliversAfterClaudeReportsTheStop(t *testing.T) {
 	}
 	_ = delivered(t, first)
 	first.Events <- agent.Event{Type: "turn_started"}
-	if err := send(message("queued", "Use port 4000 instead")); err != nil {
+	original := strings.Repeat("Use another port. ", 24)
+	if err := send(message("queued", original)); err != nil {
+		t.Fatal(err)
+	}
+	edit := &pb.DeliverQueued{OperationId: "queued", How: "edit", EditId: "editor"}
+	receipt, err := service.Apply(ctx, &pb.ApplyRequest{SessionId: id, OperationId: "begin-edit", Operation: &pb.ApplyRequest_DeliverQueued{DeliverQueued: edit}})
+	if err != nil || receipt.GetQueuedText() != original {
+		t.Fatalf("edit did not return the full queued text: %v, %v", receipt, err)
+	}
+	edit.How, edit.Text = "save_edit", "Use port 4000 instead"
+	if err := send(&pb.ApplyRequest{OperationId: "save-edit", Operation: &pb.ApplyRequest_DeliverQueued{DeliverQueued: edit}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := send(&pb.ApplyRequest{OperationId: "deliver-queued", Operation: &pb.ApplyRequest_DeliverQueued{DeliverQueued: &pb.DeliverQueued{OperationId: "queued", How: "now"}}}); err != nil {
@@ -76,7 +87,7 @@ func TestSendNowThroughTheAPIDeliversAfterClaudeReportsTheStop(t *testing.T) {
 	}
 	first.Events <- agent.Event{Type: "failure", Status: "provider_error", Text: "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use", Account: &agent.AccountObservation{State: "unknown", Reason: "error_during_execution"}}
 	first.Events <- agent.Event{Type: "turn_ended", Status: "interrupted"}
-	if op := delivered(t, first); op.ID != "queued" {
+	if op := delivered(t, first); op.ID != "queued" || op.Text != edit.Text {
 		t.Fatalf("delivered %+v", op)
 	}
 	e, err := service.Bench.Get(id)

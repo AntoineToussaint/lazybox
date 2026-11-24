@@ -14,6 +14,14 @@ installLinkRouting();
 const fragment = new URLSearchParams(location.hash.slice(1));
 const token = fragment.get('token') || sessionStorage.getItem('runner-token') || '';
 if (token) sessionStorage.setItem('runner-token', token);
+// The owner's bearer came in the fragment: keep it in this tab's session storage
+// only, and take it out of the address bar and the history entry (as the phone
+// does with its pairing secret), so it is not shown, copied, or synced.
+if (fragment.has('token')) {
+  fragment.delete('token');
+  const url = new URL(location.href); url.hash = fragment.toString();
+  history.replaceState(history.state, '', url);
+}
 const initial = new URLSearchParams(location.search);
 const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(location.origin + '\0' + token));
 const scope = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');

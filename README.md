@@ -117,10 +117,10 @@ privately, as [SECURITY.md](SECURITY.md) describes.
 has the setup, the tests and the conventions, and [AGENTS.md](AGENTS.md)
 the rules for coding agents.
 
-## Preview terms
+## License
 
-Lazybox is proprietary software: see [LICENSE](LICENSE). For this
-preview, the owner permits you to build Lazybox from this repository, install
-it on your own computer and use it to evaluate it, and to share feedback and
-bug reports. Everything else the LICENSE reserves stays reserved: please do not
-redistribute the code or your builds, or publish modified versions.
+Lazybox is licensed under the [Apache License 2.0](LICENSE); [NOTICE](NOTICE)
+has the copyright and the license history. Release builds bundle third-party
+components under their own terms, including Claude Code under Anthropic's
+(see [CLAUDE_COMPLIANCE.md](CLAUDE_COMPLIANCE.md)). Contributions are accepted
+under the [Contributor License Agreement](CLA.md).

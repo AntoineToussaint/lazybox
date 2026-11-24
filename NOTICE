@@ -1,8 +1,13 @@
-NOTICE — License change
+Lazybox
+Copyright 2026 Antoine Toussaint
 
-Effective 2026-09-02, this software is licensed under the terms set out in the
-LICENSE file (proprietary; all rights reserved by Antoine Toussaint).
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
-Versions of this software published before 2026-09-02 under the MIT License remain
-available under the MIT License. This license change applies to this version and
-all subsequent versions only, and does not affect copies obtained earlier.
+License history: versions of Lazybox published before 2026-09-02 were released
+under the MIT License and remain available under it. Versions published from
+2026-09-02 until 2026-11-24 were proprietary; the owner relicenses them, and
+every later version, under the Apache License, Version 2.0.
+
+Third-party components keep their own licenses. Release builds list them in
+THIRD_PARTY_NOTICES; the bundled Claude Code is governed by Anthropic's terms
+(see CLAUDE_COMPLIANCE.md).

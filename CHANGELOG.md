@@ -27,6 +27,7 @@ leave out.
 
 ### Install and updates
 
+- **Open source under Apache 2.0** Lazybox's code is licensed under the Apache License 2.0; versions published since 2026-09-02 are relicensed under it too.
 - **Dictation keeps the start of your sentence** If the browser sends an empty speech result during a pause, the message box keeps the words already heard.
 - **Faster pull request checks** CI spreads UI suites across six runners and uses a Playwright image with browsers and system libraries ready to go.
 - **Track never covers the message** The Track button is an icon in a gutter the message keeps free, so hovering a message no longer hides its text.

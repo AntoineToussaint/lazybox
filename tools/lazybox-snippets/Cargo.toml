@@ -2,6 +2,7 @@
 name = "lazybox-snippets"
 description = "Read-only snippet catalog adapter: V1's lazybox-config library behind the Runner's snippet command seam."
 version = "0.0.0"
+license = "Apache-2.0"
 edition = "2024"
 publish = false
 

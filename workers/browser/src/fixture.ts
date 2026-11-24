@@ -34,6 +34,9 @@ export async function startSites(): Promise<Sites> {
       case '/done': return { body: page('Done', `<p>Thanks ${escape(query.get('name') || '')}, ${escape(query.get('color') || '')}</p>`) };
       case '/slow': return { body: page('Slow', `<p id="state">Loading</p><script>setTimeout(() => { document.getElementById('state').textContent = 'Ready now'; }, 400)</script>`) };
       case '/signin': return { body: page('Sign in', `<form action="/welcome"><label>Email <input name="email"></label><label>Password <input type="password" name="password"></label><button>Sign in</button></form>`) };
+      // A page slow to leave (a busy machine, or its own beforeunload): the navigation is requested at
+      // once, but its request leaves only after this handler, well past a fixed short look.
+      case '/signin-slow': return { body: page('Sign in', `<form action="/welcome"><label>Email <input name="email"></label><button>Sign in</button></form><script>addEventListener('beforeunload', () => { const end = Date.now() + 400; while (Date.now() < end); });</script>`) };
       case '/welcome': return { body: page('Welcome', '<h1>Signed in</h1>') };
       case '/download': return { body: page('Download', '<a href="/file">Get the report</a>') };
       case '/file': return { headers: { 'content-type': 'text/plain', 'content-disposition': 'attachment; filename="report.txt"' }, body: 'report body\n' };

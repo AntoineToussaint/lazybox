@@ -55,6 +55,7 @@ leave out.
 
 ### Workspaces and tabs
 
+- **The agent browser follows a slow page** A click that sends the page elsewhere is waited for even when the page is slow to leave, so the agent learns where it landed instead of reading the page it left.
 - **A Web panel opens in its own window** In the desktop app, Open in new window (or a drag into a panel window already open) takes the page with it, history, scroll and forms intact. Put it back or close that window and the page comes back the same way.
 - **The Dock shows the Inbox count** The badge on the app icon is the Inbox button's number, pull requests and tasks included, not only conversations waiting for an answer.
 - **Notifications that reach you, or say why not** On macOS, Lazybox asks permission once and posts through macOS's current notification system; Settings → Notifications shows what macOS decided and why a notification was refused, instead of reporting success for notifications macOS dropped.

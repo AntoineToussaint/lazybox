@@ -177,6 +177,14 @@ describe('browser service', () => {
     runner.answers.sign_in = () => ({ allow: false });
   });
 
+  // Regression: under load a submitted form's request left after settle()'s 150 ms look, and the
+  // agent was told only "Clicked …" while the page went on to Welcome.
+  it('waits for a navigation the click requested, however slow its page is to leave', async () => {
+    await act({ action: 'navigate', url: `${sites.home}/signin-slow` });
+    const submitted = await act({ action: 'click', ref: refIn(await snapshot(), 'button "Sign in"') });
+    assert.match(submitted.text, /Now on "Welcome"/);
+  });
+
   it('folds a popup into the page and dismisses dialogs', async () => {
     await act({ action: 'navigate', url: `${sites.home}/popup` });
     await act({ action: 'click', ref: refIn(await snapshot(), 'link "Open in a new window"') });

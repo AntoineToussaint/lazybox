@@ -68,9 +68,17 @@ export class AgentBrowser {
   private casting = false;
   private buttons = 0;
   private stateTimer?: NodeJS.Timeout;
+  /** The page asked to go somewhere since the action began (a link, a form submitted): settle() waits for it. */
+  private requested = false;
+  private mainFrameId?: string;
 
   constructor(readonly id: string, readonly page: Page, private cdp: CDPSession, private host: Host) {
     const main = () => page.mainFrame();
+    // Chromium says a navigation was requested while the click is still being handled, before any
+    // request leaves: a busy machine cannot delay it past settle()'s look, as it could the request.
+    // Page events reach this session only once its Page domain is on.
+    void cdp.send('Page.enable').then(() => cdp.send('Page.getFrameTree')).then(tree => { this.mainFrameId = tree.frameTree.frame.id; }).catch(() => {});
+    cdp.on('Page.frameRequestedNavigation', event => { if (!this.mainFrameId || event.frameId === this.mainFrameId) this.requested = true; });
     page.on('request', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = true; this.changed(); } });
     page.on('requestfailed', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = false; this.changed(); } });
     page.on('load', () => { this.loading = false; this.changed(); });
@@ -243,9 +251,21 @@ export class AgentBrowser {
   }
 
   /** After an action that may navigate: wait for the next page, and say where the agent is. */
+  /** Where the page is as an action begins; a navigation requested from now on is that action's. */
+  private beginAction(): string {
+    this.requested = false;
+    return this.page.url();
+  }
+
   private async settle(before: string): Promise<string> {
     await this.page.waitForTimeout(150);
-    if (this.page.url() !== before || this.loading) await this.page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {});
+    const requested = this.requested;
+    this.requested = false;
+    if (this.page.url() !== before || this.loading || requested) {
+      // A requested navigation that has not reached the network yet: wait for it to commit first.
+      if (requested && this.page.url() === before && !this.loading) await this.page.waitForURL(url => url.toString() !== before, { timeout: 10_000, waitUntil: 'commit' }).catch(() => {});
+      await this.page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {});
+    }
     const notes: string[] = [];
     if (this.page.url() !== before) notes.push(`Now on ${await this.where()}.`);
     if (this.pendingSite) notes.push(`Waiting for the person to allow ${this.pendingSite}; the page changes once they answer.`);
@@ -288,7 +308,7 @@ export class AgentBrowser {
   private async click(p: ActParams): Promise<ActResult> {
     const { locator, label, box } = await this.locate(p.ref);
     await this.guardSignIn(() => locator.evaluate(submitsPassword, false));
-    const before = this.page.url();
+    const before = this.beginAction();
     // A navigation the click starts may be refused or wait on the person; settle() waits for it instead.
     await locator.click({ timeout: elementTimeout, noWaitAfter: true }).catch(error => { throw new Error(`Could not click ${label}: ${reason(error)}`); });
     return this.result(p, `Clicked ${label}.${await this.settle(before)}`, `Clicked ${label}`, box);
@@ -304,7 +324,7 @@ export class AgentBrowser {
     let after = '';
     if (p.submit) {
       await this.guardSignIn(() => locator.evaluate(submitsPassword, true));
-      const before = this.page.url();
+      const before = this.beginAction();
       await locator.press('Enter', { timeout: elementTimeout, noWaitAfter: true });
       after = await this.settle(before);
     }
@@ -329,7 +349,7 @@ export class AgentBrowser {
         try { return await active.evaluate(submitsPassword, true); } finally { await active.dispose(); }
       });
     }
-    const before = this.page.url();
+    const before = this.beginAction();
     await this.page.keyboard.press(key).catch(error => { throw new Error(`Could not press ${key}: ${reason(error)}`); });
     return this.result(p, `Pressed ${key}.${await this.settle(before)}`, `Pressed ${key}`);
   }
@@ -367,7 +387,7 @@ export class AgentBrowser {
 
   private async history(p: ActParams): Promise<ActResult> {
     const options = { waitUntil: 'domcontentloaded' as const, timeout: navigationTimeout };
-    const before = this.page.url();
+    const before = this.beginAction();
     const words = { back: ['Went back', 'There is no previous page.'], forward: ['Went forward', 'There is no next page.'], reload: ['Reloaded the page', ''] }[p.action as 'back' | 'forward' | 'reload'];
     const response = p.action === 'back' ? await this.page.goBack(options) : p.action === 'forward' ? await this.page.goForward(options) : await this.page.reload(options);
     if (!response && p.action !== 'reload' && this.page.url() === before) return this.result(p, words[1], words[0], undefined, false);

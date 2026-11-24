@@ -51,7 +51,7 @@ try {
   if (mode === 'go') {
     const count = options.count ?? '50';
     const packages = names.length ? names : ['./internal/...'];
-    const args = ['-race', `-count=${count}`, ...(options.run ? ['-run', options.run] : []), ...packages];
+    const args = ['-trimpath', '-race', `-count=${count}`, ...(options.run ? ['-run', options.run] : []), ...packages];
     console.log(`go test ${args.join(' ')}  (GOMAXPROCS=1, ${spinners.length} busy loops, 30 s per test)`);
     // Through the per-test guard, as make test runs them: a run that hangs is
     // stopped at 30 s and counted against its test (--- TIMEOUT), not left to

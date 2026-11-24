@@ -89,7 +89,7 @@ export async function executeGate(gate, { root, signal, env = process.env }) {
   // another source tree, a regression toggle, or a different watcher backend.
   const gateEnv = Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('LAZYBOX_V2_') && !key.startsWith('CHOKIDAR_') && !['TEST_SOURCE', 'TEST_WEBKIT', 'REPRO_OLD_BLUR'].includes(key)));
   const child = spawnProcessGroup(gate.command, gate.args, {
-    cwd: root, stdio: 'inherit', env: { ...gateEnv, CARGO_BUILD_JOBS: env.CARGO_BUILD_JOBS || '1', GOMAXPROCS: env.GOMAXPROCS || '1', GOFLAGS: env.GOFLAGS || '-p=1' },
+    cwd: root, stdio: 'inherit', env: { ...gateEnv, CARGO_BUILD_JOBS: env.CARGO_BUILD_JOBS || '1', GOMAXPROCS: env.GOMAXPROCS || '1', GOFLAGS: `${env.GOFLAGS || '-p=1'} -trimpath` },
   });
   let stopped, termination;
   const stop = reason => {

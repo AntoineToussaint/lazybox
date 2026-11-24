@@ -298,8 +298,10 @@ func fileDiff(ctx context.Context, top, a, b, path, original string) (Diff, erro
 // restore makes the work tree's files match tree to, given they currently
 // match tree from: it writes only the paths that differ, through a private
 // index, and deletes the files to does not have. The repository's index,
-// HEAD and branch are untouched; ignored files are never in either tree, so
-// they stay as they are. It returns what it changed and what it could not.
+// HEAD and branch are untouched. Files the from snapshot skipped (ignored,
+// too large, past the untracked limit, nested repositories) are in neither
+// tree, so a path that would overwrite or remove one is left as it is and
+// reported. It returns what it changed and what it could not.
 func restore(ctx context.Context, top, scratch, from, to string) ([]entry, []string, error) {
 	diff, err := rawDiff(ctx, top, from, to)
 	if err != nil || len(diff) == 0 {
@@ -337,7 +339,12 @@ func restore(ctx context.Context, top, scratch, from, to string) ([]entry, []str
 		if e.Status == "D" || e.OldMode == gitlink || e.NewMode == gitlink {
 			continue
 		}
-		if _, err := inside(root, top, e.Path); err != nil {
+		full, err := inside(root, top, e.Path)
+		if err != nil {
+			problems = append(problems, e.Path+": "+err.Error())
+			continue
+		}
+		if err = unsaved(top, full, e.Status); err != nil {
 			problems = append(problems, e.Path+": "+err.Error())
 			continue
 		}
@@ -362,6 +369,53 @@ func restore(ctx context.Context, top, scratch, from, to string) ([]entry, []str
 		}
 	}
 	return changed, problems, nil
+}
+
+// errUnsaved names a file restore would overwrite that the safety checkpoint
+// does not hold, so undoing the revert could not bring it back.
+var errUnsaved = errors.New("left as it is: a file there is not in the saved checkpoint (ignored, too large, past the untracked limit, or in a nested repository)")
+
+// unsaved refuses to write full when checkout-index -f would destroy bytes the
+// safety tree (the from side of the diff) does not hold. Deletions have run, so
+// what remains on disk at an added path, a directory with entries at any
+// written path, or a non-directory where a directory must be created was
+// skipped by the snapshot.
+func unsaved(top, full, status string) error {
+	for dir := filepath.Dir(full); dir != top && strings.HasPrefix(dir, top+string(filepath.Separator)); dir = filepath.Dir(dir) {
+		info, err := os.Lstat(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return errUnsaved
+		}
+	}
+	info, err := os.Lstat(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		entries, err := os.ReadDir(full)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return errors.New("left as it is: a directory there still holds files the saved checkpoint does not (ignored or skipped)")
+		}
+		return nil
+	}
+	// Modified and type-changed paths are in the safety tree as they are on
+	// disk; an added one is not.
+	if status == "A" {
+		return errUnsaved
+	}
+	return nil
 }
 
 // inside resolves a repository-relative path, refusing one that escapes the

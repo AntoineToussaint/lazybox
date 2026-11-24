@@ -50,7 +50,15 @@ try{
  await expect(bar.getByRole('button',{name:'Publish branch'})).toBeVisible();
  await bar.getByRole('button',{name:'Commit 1…'}).click();dialog=page.getByRole('dialog',{name:'Commit changes in api'});
  await expect(dialog.getByRole('textbox',{name:'Message'})).toHaveValue('Ship API contract');await dialog.getByRole('textbox',{name:'Message'}).fill('Add the new view');
- await dialog.getByRole('button',{name:'Commit & push'}).click();await expect(dialog).toHaveCount(0);
+ // The commit lands, the push fails: the dialog says so and offers only the push again (committing again would fail).
+ let pushFails=true;
+ await page.route('**/PushWorkspaceBranch',async route=>{if(pushFails){pushFails=false;await route.fulfill({status:503,json:{code:'unavailable',message:'the remote hung up'}});}else await route.continue();});
+ await dialog.getByRole('button',{name:'Commit & push'}).click();
+ await expect(dialog.getByRole('status')).toHaveText(/^Committed 1 file · [0-9a-f]{8} Add the new view\. Not pushed yet\.$/);
+ await expect(dialog.getByRole('alert')).toContainText('The push failed: the remote hung up');
+ await expect(dialog.getByRole('button',{name:'Commit & push'})).toHaveCount(0);
+ await dialog.getByRole('button',{name:'Push again'}).click();await expect(dialog).toHaveCount(0);
+ await page.unroute('**/PushWorkspaceBranch');
  assert.deepEqual(writes().map(m=>m.method),['Apply','CommitWorkspaceChanges','CommitWorkspaceChanges','PushWorkspaceBranch']);
  assert.equal(fixture.mutations.filter(m=>m.method==='CommitWorkspaceChanges')[1].body.paths?.length??0,0,'all remaining files commit without a path list');
 

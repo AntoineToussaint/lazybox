@@ -10,6 +10,8 @@
 .ship-muted{display:flex;align-items:center;gap:6px;margin:0;color:var(--text-muted);font-size:calc(11px * var(--text-scale));line-height:1.5}
 .ship-warning{color:var(--warn)}
 .ship-error{margin:0;color:var(--danger);font-size:calc(11px * var(--text-scale));line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.ship-committed{display:flex;align-items:center;gap:6px;margin:0;color:var(--text);font-size:calc(12px * var(--text-scale));overflow-wrap:anywhere}
+.ship-committed svg{color:var(--ok);flex:none}
 .ship-notice{margin:0;color:var(--ok);font-size:calc(11px * var(--text-scale));line-height:1.5;overflow-wrap:anywhere}
 .changes-panel .ship-link{border:0!important;background:transparent!important;padding:0 2px!important;color:var(--accent)!important;text-decoration:underline}
 .changes-panel .ship button.ship-icon{margin-left:auto;padding:2px 4px;border:0;background:transparent;color:var(--text-muted);flex-shrink:0}

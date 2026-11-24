@@ -808,8 +808,8 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     title: titleOf,
     canClose: panel => !panel.detached,
     close: closePanel,
-    // A Web panel has its own window (its ⋯ → Move to a new window): its native view belongs to one window.
-    canOpenWindow: panel => panel.kind === 'chat' ? !!chatHost && !!resolveTarget(panel, page.selection).sessionId : panel.kind !== 'web' && !narrow,
+    // A Web panel opens in a window like any panel, its page moving with it (native-web-view.ts, viewer.rs).
+    canOpenWindow: panel => panel.kind === 'chat' ? !!chatHost && !!resolveTarget(panel, page.selection).sessionId : !narrow,
     openWindow: (panel, handle) => {
       if (panel.kind === 'chat') { void detach(panel); return; }
       void handle.popout(panel.id).then(opened => { if (!opened) setError('The new window was blocked. Allow pop-ups for Lazybox and try again.'); });

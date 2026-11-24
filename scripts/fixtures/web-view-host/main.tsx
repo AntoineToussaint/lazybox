@@ -8,24 +8,27 @@ import { createRoot } from 'react-dom/client';
 import type { NativeWebViews, WebViewEvent, WebViewFrame } from '@lazybox/platform';
 import { WindowErrorBoundary, Workspace, installLinkRouting } from '@lazybox/surfaces';
 
-type View = { shown: boolean; url: string; frame?: WebViewFrame; shows: number };
+type View = { shown: boolean; url: string; frame?: WebViewFrame; shows: number; /** The popped-out panel window it is in, by its token; '' for this window. */ popout: string; /** Times it was created: a move to another window keeps its page, so this stays 1. */ created: number };
 const views: Record<string, View> = {};
 const listeners = new Set<(event: WebViewEvent) => void>();
 const emit = (event: WebViewEvent) => setTimeout(() => { for (const listener of listeners) listener(event); });
 const loaded = (id: string, url: string) => emit({ id, kind: 'loaded', url, title: new URL(url).host });
 const webViews: NativeWebViews = {
-  async show(id, url, frame) {
-    const view = views[id] ??= { shown: false, url: '', shows: 0 };
-    Object.assign(view, { shown: true, frame, shows: view.shows + 1 });
+  async show(id, url, frame, _zoom, popout) {
+    const view = views[id] ??= { shown: false, url: '', shows: 0, popout: '', created: 1 };
+    Object.assign(view, { shown: true, frame, shows: view.shows + 1, popout: popout || '' });
     if (url && url !== view.url) { view.url = url; loaded(id, url); }
   },
   async hide(id) { if (views[id]) views[id].shown = false; },
   async navigate(id, url) { if (views[id]) { views[id].url = url; loaded(id, url); } },
   async action(id, action) { if (action === 'close') delete views[id]; },
   async zoom() {},
+  async reclaim(popout) { for (const view of Object.values(views)) if (view.popout === popout) Object.assign(view, { shown: false, popout: '' }); reclaimed.push(popout); },
   subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
 };
-(window as unknown as { nativeWebViews: typeof views }).nativeWebViews = views;
+const reclaimed: string[] = [];
+(window as unknown as { nativeWebViews: typeof views; reclaimedPopouts: string[] }).nativeWebViews = views;
+(window as unknown as { reclaimedPopouts: string[] }).reclaimedPopouts = reclaimed;
 
 installLinkRouting();
 const token = new URLSearchParams(location.hash.slice(1)).get('token') || '';

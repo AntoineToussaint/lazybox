@@ -21,7 +21,7 @@ const site = `http://127.0.0.1:${fixture.previewPort}`;
 fixture.openEvents('alpha-session').push({ type: 'message_delta', text: `The docs are on [the fixture site](${site}/about).` });
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
 // The workspace with native web views, whose host records where it would draw them.
-const nativeServer = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('./fixtures/web-view-host', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
+const nativeServer = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('./fixtures/web-view-host', import.meta.url)), publicDir: fileURLToPath(new URL('../apps/web/public', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
 // The dock tab of the nth Web panel.
 const webTabIn = (page, n) => page.locator('.dv-tab').filter({ has: page.locator('[data-kind="web"]') }).nth(n);
 const engine = process.env.TEST_WEBKIT ? webkit : chromium;
@@ -303,8 +303,29 @@ try {
   await expect.poll(placed).toBe('placed');
   await host.screenshot({ path: '.cache/web-viewer-native.png' });
 
+  // Open in new window: the page moves into the panel's window, measured there, the same page (never
+  // created again). Resized, it follows. Put back, it comes home before that window closes, and shows here.
+  const createdBefore = await host.evaluate(() => Object.keys(window.nativeWebViews).length);
+  await webTabIn(host, 0).click({ button: 'right' });
+  const [popped] = await Promise.all([native.waitForEvent('page'), host.getByRole('menuitem', { name: 'Open in new window' }).click()]);
+  await popped.waitForLoadState();
+  const windowToken = new URL(popped.url()).searchParams.get('w');
+  assert.ok(windowToken, `the panel window names itself: ${popped.url()}`);
+  const inWindow = () => Promise.all([host.evaluate(t => Object.values(window.nativeWebViews).filter(view => view.shown && view.popout === t).map(view => view.frame), windowToken),
+    popped.evaluate(() => { const r = document.querySelector('.web-surface')?.getBoundingClientRect(); return r && { x: r.left, y: r.top, width: Math.min(r.right, document.documentElement.clientWidth) - r.left, height: Math.min(r.bottom, document.documentElement.clientHeight) - r.top, viewportWidth: innerWidth, viewportHeight: innerHeight }; })])
+    .then(([frames, want]) => frames.length === 1 && want && Object.keys(want).every(key => Math.abs(frames[0][key] - want[key]) < 0.01) ? 'placed' : JSON.stringify({ frames, want }));
+  await expect.poll(inWindow).toBe('placed');
+  assert.equal(await host.evaluate(() => Object.keys(window.nativeWebViews).length), createdBefore, 'the page moved, it was not opened again');
+  await popped.setViewportSize({ width: 900, height: 700 });
+  await expect.poll(inWindow).toBe('placed');
+  await popped.screenshot({ path: '.cache/web-viewer-popout.png' });
+  await popped.getByRole('button', { name: 'Put back in main window' }).click();
+  await expect.poll(() => host.evaluate(t => window.reclaimedPopouts.includes(t), windowToken)).toBe(true);
+  await expect.poll(placed).toBe('placed');
+  assert.equal(await host.evaluate(() => Object.values(window.nativeWebViews).filter(view => view.popout).length), 0, 'every view is back in the main window');
+
   assert.deepEqual(errors, []);
-  console.log('Web viewer: links routed by click, ⌥-click and menu; address bar, search, history, zoom, copy, fallback, settings, detach and dock, persistence; native views placed over the page area through sidebar, window, notice, text size, split and maximize changes, and hidden under menus and other pages.');
+  console.log('Web viewer: links routed by click, ⌥-click and menu; address bar, search, history, zoom, copy, fallback, settings, detach and dock, persistence; native views placed over the page area, in a panel window of its own and back, through sidebar, window, notice, text size, split and maximize changes, and hidden under menus and other pages.');
 } catch (error) {
   for (const p of browser?.contexts().flatMap(c => c.pages()) || []) await p.screenshot({ path: '.cache/web-viewer-failure.png', fullPage: true }).catch(() => {});
   throw error;

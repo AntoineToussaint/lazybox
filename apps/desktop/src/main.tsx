@@ -47,7 +47,8 @@ const desktopAttention: AttentionHost = {
  */
 const reset = invoke<void>('web_view_reset').catch(error => console.error('Could not reset web views', error));
 const desktopWebViews: NativeWebViews = {
-  show: async (id, url, frame, zoom) => { await reset; await invoke<void>('web_view_show', { id, url, frame, zoom }); },
+  show: async (id, url, frame, zoom, popout) => { await reset; await invoke<void>('web_view_show', { id, url, frame, zoom, popout: popout || null }); },
+  reclaim: popout => invoke<void>('web_view_reclaim', { popout }),
   hide: async id => { await reset; await invoke<void>('web_view_hide', { id }); },
   navigate: (id, url) => invoke<void>('web_view_navigate', { id, url }),
   action: (id, action) => invoke<void>('web_view_action', { id, action }),

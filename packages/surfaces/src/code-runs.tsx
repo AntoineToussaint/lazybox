@@ -19,7 +19,7 @@
  *
  * A command the agent hands back to the person (a login, a dev server to try
  * by hand) also runs in a home checkout: the menus offer "Run in <repo> home"
- * and the conversation's last message, once its turn is over, shows one
+ * and each reply that hands commands back keeps one
  * button per such command (`home-run.ts`, `HomeRuns`). It runs the command
  * in a shell of the workspace's Terminal panel there (`home-shell.ts`): at
  * once when it is one line with nothing to fill in, else typed at the prompt
@@ -285,14 +285,13 @@ export class CodeRuns {
     }
     return out;
   }
-  /** What the conversation's last message hands back to the person, once its turn is over: nothing for any other message. */
+  /** Keep a handoff with its message after a command reports back and starts another turn. */
   homeOffers(messageId: string): { offer: HomeOffer; place: HomePlace }[] {
-    if (this.session?.busy || !this.session) return [];
-    let last: TranscriptMessage | undefined;
-    for (let i = this.messages.length - 1; i >= 0 && !last; i--) if (this.messages[i].type === 'message_delta') last = this.messages[i];
-    if (!last || last.id !== messageId) return [];
+    const message = this.messages.find(m => m.id === messageId && m.type === 'message_delta');
+    if (!this.session || !message) return [];
+    if (this.session.busy && message === this.messages.at(-1) && !this.memory.terminal.some(run => run.messageId === messageId)) return [];
     const repositories = this.homeRepositories();
-    return homeOffers(last.text).map(offer => ({
+    return homeOffers(message.text).map(offer => ({
       offer, place: offer.explicit ? this.runPlace(offer.target) : placeFor(offer.target, repositories, offer.hint),
     }));
   }
@@ -321,13 +320,13 @@ export class CodeRuns {
    * into a temporary checkout is left out (the home stands for it). A
    * repository without a home gets one first.
    */
-  async runIn(messageId: string, script: string, place: RunPlace, mode: 'run' | 'paste' = 'run', report = false) {
+  async runIn(messageId: string, script: string, place: RunPlace, mode: 'run' | 'paste' = 'run', report = false, ended?: (status?: number) => void) {
     const workspace = this.workspaceId();
-    if (place.kind === 'unknown') { showMenuNotice(`No checkout for ${place.name} is available on this Runner.`); return; }
+    if (place.kind === 'unknown') { showMenuNotice(`No checkout for ${place.name} is available on this Runner.`); ended?.(); return; }
     let shell: ShellPlace, typed = script;
     if (place.kind === 'here') {
       const here = this.here();
-      if (!here) { await copyText(script, 'The terminal needs a workspace: the command is copied, to paste in yours'); return; }
+      if (!here) { await copyText(script, 'The terminal needs a workspace: the command is copied, to paste in yours'); ended?.(); return; }
       shell = { directory: here.directory, label: here.label };
     } else if (place.kind === 'user') shell = { userHome: true, label: 'your home folder' };
     else {
@@ -335,7 +334,7 @@ export class CodeRuns {
       if (!repository.home) {
         showMenuNotice(`Cloning ${repository.name}’s home checkout…`);
         try { await this.api.setRepositoryHome({ repositoryId: repository.repositoryId, action: 'create', path: '' }, { timeoutMs: 10 * 60_000 }); homesChanged(this.api); }
-        catch (error) { showMenuNotice(`Could not create ${repository.name}’s home: ${String(error instanceof Error ? error.message : error).replace(/^\[\w+\]\s*/, '')}`); return; }
+        catch (error) { showMenuNotice(`Could not create ${repository.name}’s home: ${String(error instanceof Error ? error.message : error).replace(/^\[\w+\]\s*/, '')}`); ended?.(); return; }
       }
       shell = { repositoryId: repository.repositoryId, label: `${repository.name} home` };
       typed = inHome(script).command;
@@ -350,13 +349,15 @@ export class CodeRuns {
         if (report && how === 'run') record.reportId = crypto.randomUUID();
         this.emit();
       },
+      onLost: () => { this.memory.terminal = this.memory.terminal.filter(run => run !== record); this.emit(); ended?.(); },
       onEnd: status => {
         record.state = 'finished'; record.exitCode = status;
         if (record.reportId) void this.reportTerminalRun(record);
         else this.emit();
+        ended?.(status);
       },
     });
-    if (opened.error) { this.memory.terminal = this.memory.terminal.filter(run => run !== record); this.emit(); }
+    if (opened.error) { this.memory.terminal = this.memory.terminal.filter(run => run !== record); this.emit(); ended?.(); }
   }
   private terminalView(messageId: string, script: string, where?: string): TerminalRunView | undefined {
     const run = this.memory.terminal.findLast(entry => entry.messageId === messageId && entry.script === script && (!where || where === entry.where));
@@ -626,7 +627,7 @@ export function InlineRuns({ messageId }: { messageId: string }) {
 }
 
 /**
- * Under the conversation's last message, once its turn is over: one button
+ * Under the agent's reply: one button
  * per command it hands back to the person ("run in the home checkout of api:
  * `make playground`", a login). A click runs it in a shell there (or types
  * it at the prompt for review); the ⌄ beside it pastes it without running,
@@ -635,9 +636,57 @@ export function InlineRuns({ messageId }: { messageId: string }) {
 function HomeRuns({ host, messageId }: { host: CodeRuns; messageId: string }) {
   const signature = useSyncExternalStore(host.subscribe, () => host.homeSignature(messageId));
   const offers = JSON.parse(signature) as { offer: HomeOffer; place: HomePlace }[];
+  const [choosing, setChoosing] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [progress, setProgress] = useState('');
+  const active = useRef<AbortController | null>(null);
+  useEffect(() => () => active.current?.abort(), [host, messageId]);
+  const keyOf = (offer: HomeOffer) => JSON.stringify([offer.target, offer.command]);
+  const steps = offers.filter(({ offer }) => selected.includes(keyOf(offer)));
+  const runSelected = async () => {
+    if (active.current || !steps.length) return;
+    const sequence = new AbortController();
+    active.current = sequence;
+    try {
+      for (const [i, { offer, place }] of steps.entries()) {
+        setProgress(`Running command ${i + 1} of ${steps.length}`);
+        const status = await new Promise<number | undefined>((resolve, reject) => {
+          void host.runIn(messageId, offer.command, place, 'run', false, resolve).catch(reject);
+        });
+        if (sequence.signal.aborted) return;
+        if (status !== 0) {
+          setProgress(status === undefined ? 'Sequence stopped before completion' : `Stopped at command ${i + 1} · exit ${status}`);
+          return;
+        }
+        setSelected(previous => previous.filter(key => key !== keyOf(offer)));
+      }
+      setProgress(`Finished ${steps.length} commands`);
+      setChoosing(false);
+      setSelected([]);
+    } catch { if (!sequence.signal.aborted) setProgress('Sequence stopped before completion'); }
+    finally { if (active.current === sequence) active.current = null; }
+  };
   if (!offers.length) return null;
   return <div className="home-runs" role="group" aria-label="Commands for you to run">
-    {offers.map(({ offer, place }) => <HomeRun key={JSON.stringify([offer.target, offer.command])} host={host} messageId={messageId} offer={offer} place={place}/>)}
+    {offers.map(({ offer, place }) => {
+      const key = keyOf(offer);
+      return <div key={key} className="home-run-row">
+        {choosing ? <label className="home-run-choice"><input type="checkbox" aria-label={`Include ${offer.command}`} checked={selected.includes(key)} disabled={!!active.current || place.kind === 'unknown'}
+          onChange={() => setSelected(previous => previous.includes(key) ? previous.filter(value => value !== key) : [...previous, key])}/><span>{placeLabel(place)}</span><code>{offer.command}</code></label>
+          : <HomeRun host={host} messageId={messageId} offer={offer} place={place}/>}
+      </div>;
+    })}
+    {offers.length > 1 && <div>
+      {active.current ? <button type="button" onClick={() => {
+        active.current?.abort();
+        setProgress('Remaining commands cancelled');
+        setChoosing(false);
+        setSelected([]);
+        active.current = null;
+      }}>Cancel remaining commands</button> : <button type="button" onClick={() => { setChoosing(!choosing); setSelected([]); setProgress(''); }}>{choosing ? 'Cancel selection' : 'Select commands…'}</button>}
+      {choosing && <button type="button" disabled={!steps.length || !!active.current} onClick={() => void runSelected()}>Run selected in order ({steps.length})</button>}
+    </div>}
+    {progress && <small role="status">{progress}</small>}
   </div>;
 }
 function HomeRun({ host, messageId, offer, place }: { host: CodeRuns; messageId: string; offer: HomeOffer; place: HomePlace }) {
@@ -652,7 +701,7 @@ function HomeRun({ host, messageId, offer, place }: { host: CodeRuns; messageId:
     { label: 'Open in Terminal (your app)', icon: 'external', disabled: unavailable || undefined, run: () => void host.openOwnTerminal(offer.command, place) },
     { label: 'Copy command', icon: 'copy', run: () => void copyText(place.kind === 'repository' ? inHome(offer.command).command : offer.command, 'Copied the command') },
   ];
-  return <span className="home-run-row">
+  return <>
     <span className="home-run-split" role="group" aria-label={`${label}: ${offer.command}`}>
       <button type="button" className={'home-run' + (setup ? ' is-setup' : '')}
         disabled={!!unavailable}
@@ -664,7 +713,7 @@ function HomeRun({ host, messageId, offer, place }: { host: CodeRuns; messageId:
         onClick={event => { const box = event.currentTarget.getBoundingClientRect(); openContextMenu({ x: box.left, y: box.bottom + 4 }, others(), { keyboard: event.detail === 0, target: event.currentTarget, label: 'Run' }); }}><Icon name="chevron" size={10}/></button>
     </span>
     {view.terminal && <TerminalStatus host={host} messageId={messageId} script={offer.command} run={view.terminal}/>}
-  </span>;
+  </>;
 }
 const terminalText: Record<TerminalState, (run: TerminalRunView) => string> = {
   starting: run => `Waiting for the shell (${run.where})…`,

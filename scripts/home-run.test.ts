@@ -85,9 +85,9 @@ test('logins and prompts need a terminal; which belong to no repository', () => 
     assert.ok(!needsTerminal(script), script);
 });
 
-test('at most three, no repeats', () => {
+test('all distinct commands in message order', () => {
   const text = ['Run `acme login` yourself.', 'Run `acme login` yourself again.', 'You need to run `make a`.', 'You need to run `make b`.', 'You need to run `make c`.'].join('\n');
-  assert.deepEqual(homeOffers(text).map(o => o.command), ['acme login', 'make a', 'make b']);
+  assert.deepEqual(homeOffers(text).map(o => o.command), ['acme login', 'make a', 'make b', 'make c']);
 });
 
 test('where an offer runs', () => {

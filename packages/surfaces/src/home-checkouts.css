@@ -133,6 +133,13 @@ section.settings-group.home-checkouts-settings {
   gap: 6px;
   margin-top: 8px;
 }
+.home-runs .home-run-choice {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+.home-runs .home-run-choice code { white-space: pre-wrap; }
 .home-runs .home-run {
   display: inline-flex;
   align-items: center;

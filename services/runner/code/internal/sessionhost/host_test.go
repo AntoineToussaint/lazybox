@@ -15,9 +15,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/redact"
 )
 
 // The test binary doubles as a fake JSONL agent and as a short-lived "Runner"
@@ -1172,4 +1175,46 @@ func TestAStopNoRunnerSeesThroughIsAbandoned(t *testing.T) {
 	if _, abandon := h.verdictLocked(now, stopped); abandon {
 		t.Fatal("abandoned a stop a Runner still attends")
 	}
+}
+
+// Once the program is gone the host takes what it left in its pipes past the
+// buffer limit, but no more: a descendant that outlived it (a background job
+// holding a terminal, say) cannot grow the unacknowledged log without bound.
+func TestOutputAfterTheProgramIsGoneIsBounded(t *testing.T) {
+	const limit = 4 << 10
+	h := &host{cfg: launch{BufferLimit: limit}, open: map[string]entry{}, answered: map[string]bool{}, stderr: &redact.Tail{}, gone: true}
+	h.cond = sync.NewCond(&h.mu)
+	line, _ := json.Marshal(Chunk{Channel: TerminalChannel, Data: make([]byte, 1024)})
+	for range 4 * (limit + goneSlack) / len(line) {
+		h.recordOutput(line, nil)
+	}
+	if h.size > limit+goneSlack+int64(len(line)) {
+		t.Fatalf("the host kept %d bytes after its program was gone", h.size)
+	}
+	if !strings.Contains(h.stderr.Text(), "dropped") {
+		t.Fatal("dropped output is not reported")
+	}
+}
+
+// A line that is not JSON is cut for the diagnostics only after its
+// credentials are redacted: a cut through one must not leave its start.
+func TestANonJSONLineCutThroughACredentialDoesNotLeakIt(t *testing.T) {
+	dir := root(t)
+	c, _ := started(t, dir)
+	raw, _ := json.Marshal(strings.Repeat("x", notJSONLimit-12) + "credential-value and more")
+	_ = c.Send(json.RawMessage(`{"method":"raw","params":` + string(raw) + `}`))
+	_ = c.Send(json.RawMessage(`{"method":"exit","params":0}`))
+	for {
+		_, exit, err := c.Next(deadline(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exit != nil {
+			if strings.Contains(exit.Stderr, "credential-v") || !strings.Contains(exit.Stderr, "[redacted]") {
+				t.Fatalf("the cut line leaks the credential: %q", exit.Stderr)
+			}
+			break
+		}
+	}
+	_ = c.Release()
 }

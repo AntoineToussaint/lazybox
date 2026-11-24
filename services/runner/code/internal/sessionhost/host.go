@@ -49,6 +49,10 @@ const DefaultOrphanAfter = 24 * time.Hour
 // forever because nothing collects what it holds.
 const abandonStopAfter = time.Minute
 
+// goneSlack is how far past its buffer limit a host keeps output once its
+// program has been waited for: more than a pipe or a terminal holds.
+const goneSlack = 1 << 20
+
 type launch struct {
 	ID          string        `json:"id"`
 	Dir         string        `json:"dir"`
@@ -109,10 +113,13 @@ type host struct {
 	spawned bool
 	// readDone: the agent's stdout reached EOF and every line is buffered.
 	readDone bool
-	// gone: the program was waited for. What it left in its pipes is
-	// bounded, so the reader takes it even past the buffer limit: waiting
-	// for room nobody may ever make would keep the exit from being reported.
+	// gone: the program was waited for. The reader then takes what it left
+	// in its pipes past the buffer limit, up to goneSlack: waiting for room
+	// nobody may ever make would keep the exit from being reported. Output
+	// beyond that (a descendant that outlived it and keeps writing) is
+	// dropped, and dropped says so once.
 	gone     bool
+	dropped  bool
 	exited   bool
 	outcome  Outcome
 	stderr   *redact.Tail
@@ -582,6 +589,15 @@ func (h *host) recordOutput(line, data []byte) {
 	for h.size >= h.cfg.BufferLimit && !h.released && !h.gone {
 		h.cond.Wait() // Backpressure: the agent blocks on its own stdout.
 	}
+	if h.size >= h.cfg.BufferLimit+goneSlack && !h.released {
+		// Only after gone: what is left in a pipe or a terminal fits in the
+		// slack, so this is a descendant that outlived the program.
+		if !h.dropped {
+			h.dropped = true
+			_, _ = h.stderr.Write([]byte("\nsession host: output written after the program exited was dropped: no Runner collected it"))
+		}
+		return
+	}
 	if data != nil {
 		if h.hungUp {
 			return
@@ -823,12 +839,10 @@ func (h *host) readLines(out *os.File) {
 const notJSONLimit = 512
 
 // notJSON keeps a line that is not JSON as a diagnostic: the stderr tail is
-// bounded and redacted, and nothing waits on it.
+// bounded and redacted, and nothing waits on it. The excerpt is redacted
+// before it is cut, so a credential the cut splits cannot escape.
 func (h *host) notJSON(line []byte) {
-	if len(line) > notJSONLimit {
-		line = append(line[:notJSONLimit:notJSONLimit], "…"...)
-	}
-	_, _ = h.stderr.Write(append([]byte("\nsession host: agent wrote a line that is not JSON: "), line...))
+	h.stderr.WriteExcerpt("\nsession host: agent wrote a line that is not JSON: ", line, notJSONLimit)
 }
 
 // readChunks records a command's output stream, one entry per read.

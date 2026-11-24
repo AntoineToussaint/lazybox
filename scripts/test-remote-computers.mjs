@@ -9,7 +9,7 @@
 // build-box. WebKit, the desktop app's engine; dark and light screenshots in
 // .cache/remote-computers-*.png. Fixture only: no ssh, no agent runs.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

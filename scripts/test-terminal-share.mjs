@@ -4,7 +4,7 @@
 // box; nothing is sent until the person sends. A run shared from the terminal
 // with `--to` lands in that conversation's message box by itself, once.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

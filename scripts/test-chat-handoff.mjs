@@ -13,7 +13,7 @@ import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 //   palette and from a workspace row; Settings → Agents & workspaces chooses it.
 // Screenshots in .cache/handoff-*.png, dark and light. WebKit.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

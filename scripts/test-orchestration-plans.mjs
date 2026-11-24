@@ -8,7 +8,7 @@
 // tests (internal/transport/plans_test.go); this checks what the person sees.
 //
 // Screenshots, dark and light, in .cache/orchestration-{plan,budget}-*.png.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

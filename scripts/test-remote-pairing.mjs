@@ -5,7 +5,7 @@
 // new one; closing the dialog withdraws its code; Revoke signs the phone out
 // at its next request. The phone never holds or sends the owner's bearer and
 // never calls an RPC off the device allowlist. Fake Runner; no agent runs.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, chromium, devices, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

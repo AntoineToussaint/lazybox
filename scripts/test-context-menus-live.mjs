@@ -2,7 +2,7 @@
 // the live bar (Stop, Open in console, copy the command), a sub-agent's card
 // and chip (its steps, a panel, copy its prompt, stop it) and a background
 // command's chip (Show output, Copy command). Part of test:context-menus.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

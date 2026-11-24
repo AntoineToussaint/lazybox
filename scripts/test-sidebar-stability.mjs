@@ -12,7 +12,7 @@
 // folded, it stays folded the same way. WebKit (the desktop app's engine), the
 // browser build, fake Runner.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

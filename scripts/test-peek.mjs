@@ -4,7 +4,7 @@
 // be answered from the peek; a process shows its output and can be stopped;
 // a file in Files reads in place; "Peek" is in the rows' context menus.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

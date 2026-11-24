@@ -6,7 +6,7 @@
 // install warns that running agents keep running, and the launch after it
 // says that it took. App and Runner versions that differ are explained, with
 // the fix. Screenshots: .cache/updates-*.png, dark and light.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

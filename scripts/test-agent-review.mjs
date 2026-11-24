@@ -9,7 +9,7 @@ import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // ⌘K, and Settings → Agents & workspaces → Review by another agent. The
 // header button, `/review <focus>`, the default reviewer and the review tab
 // are test-review-from-chat.mjs's.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

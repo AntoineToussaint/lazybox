@@ -3,7 +3,7 @@ import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // agent-drafted message), push, open a pull request, read its checks, send the
 // failing ones to the conversation's message box, and merge when green.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

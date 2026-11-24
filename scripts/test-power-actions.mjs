@@ -8,7 +8,7 @@
 // problems by line, taken keys, a stale file, creating the file, testing a
 // hook and its output; and it fits a phone.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

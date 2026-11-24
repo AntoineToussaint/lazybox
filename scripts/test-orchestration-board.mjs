@@ -8,7 +8,7 @@
 // (work/lease_test.go, cmd/lazybox/lease_test.go, transport/plans_test.go).
 //
 // Screenshots, dark and light, in .cache/orchestration-{page,timeline,messages,leases}-*.png.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

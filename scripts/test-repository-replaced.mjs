@@ -8,7 +8,7 @@
 // the name and offers to use it. Settings → Repositories offers the same.
 // All by keyboard. Screenshot: .cache/repository-replaced.png. WebKit.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

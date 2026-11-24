@@ -13,7 +13,7 @@
 // the browser build, the fake Runner (its GetTelemetry answers the series
 // built here); the content origin and its policies are real.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

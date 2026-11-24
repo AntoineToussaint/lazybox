@@ -7,7 +7,7 @@
 // streams, the console's chrome does not move, and a long log stays windowed.
 // Screenshots: .cache/console-log-{dark,light}.png (maximized), -docked.png, and console-log-window.png.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

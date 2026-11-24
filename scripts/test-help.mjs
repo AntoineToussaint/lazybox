@@ -5,7 +5,7 @@
 // usable lists what each provider needs with the step that fixes it. Entry
 // points: Help → Ask Lazybox…, ⌘K, ]] h — each focuses the message box. The
 // welcome shows the same check. Fixture only: no agent runs.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

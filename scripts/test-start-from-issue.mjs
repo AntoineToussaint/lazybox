@@ -11,7 +11,7 @@
 // branch of its own). An issue whose repository is not on the Runner offers to
 // find or add it. Screenshots in .cache/start-from-issue-*.png. WebKit.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

@@ -1,7 +1,7 @@
 // Runs stay in the command list until the user opens the console.
 // An open console can follow new runs while the user is idle.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

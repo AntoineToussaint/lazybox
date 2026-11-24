@@ -5,7 +5,7 @@
 // of another workspace and opens it there; "All workspaces" groups every
 // workspace's artifacts; with none, nothing shows. Fixture only; WebKit by
 // default (the desktop engine).
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

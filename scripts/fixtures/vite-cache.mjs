@@ -1,5 +1,6 @@
 import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createServer as createViteServer } from 'vite';
 
 /**
  * Vite options that give one UI test its own dependency cache.
@@ -16,4 +17,25 @@ import { fileURLToPath } from 'node:url';
 export function testViteCache(scriptUrl) {
   const name = basename(fileURLToPath(scriptUrl), '.mjs');
   return { cacheDir: fileURLToPath(new URL(`../../node_modules/.vite/tests/${name}`, import.meta.url)) };
+}
+
+/**
+ * The Vite dev server a UI test serves the app from: Vite's own, minus file
+ * watching and hot reload. A gate tests the source as it was when the page
+ * loaded. With Vite's watcher on, any edit in the checkout while a gate runs
+ * (another agent's change, a branch switch, a formatter) sent a full reload
+ * to the gate's page in the middle of a step: the page came back without the
+ * state the step had built, and the gate failed with what looked like a race
+ * in the app. The release runner already fails a run whose source changed
+ * (`sourceChanged` in its receipt); the pages under test no longer change
+ * with it. Every `scripts/test-*.mjs` takes `createServer` from here
+ * (scripts/vite-server.test.ts checks it).
+ */
+export function createServer(config = {}) {
+  return createViteServer(gateServerConfig(config));
+}
+
+/** `config` with watching and hot reload off, whatever the test set for its server. */
+export function gateServerConfig(config = {}) {
+  return { ...config, server: { ...config.server, watch: null, hmr: false } };
 }

@@ -7,7 +7,7 @@
 // its focus; ⌥↓ alone still opens the hover card, and a right-click its menu.
 // Dark and light screenshots of a drag. Nothing runs Git or an agent.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

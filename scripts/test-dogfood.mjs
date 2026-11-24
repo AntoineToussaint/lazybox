@@ -1,6 +1,6 @@
 import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

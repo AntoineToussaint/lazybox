@@ -4,7 +4,7 @@
 // checks), report, and decide at the gate from the board and from the inbox.
 // Every status and trust level on screen is the Runner's (here, the fake's
 // small copy of its derivation); the Go tests own the derivation itself.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

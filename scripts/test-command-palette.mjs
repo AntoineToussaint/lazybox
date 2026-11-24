@@ -6,7 +6,7 @@
 // front; and the palette in a detached chat window driving the main window.
 // Fake Runner; no agent is started or stopped.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit, chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

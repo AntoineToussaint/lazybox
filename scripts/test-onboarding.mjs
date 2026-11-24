@@ -2,7 +2,7 @@
 // install (shown once, its buttons work, reopened from Help), no welcome for an
 // existing user, and What's new after an update (shown once per release,
 // never stealing focus, reopened from Help).
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

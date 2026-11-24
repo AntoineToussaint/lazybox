@@ -7,7 +7,7 @@ import {collectPageErrors} from './fixtures/page-errors.mjs';
 // and only with Subscription rotation on do "Always switch automatically" and
 // the dialog's switch appear.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 const f=await startRunnerFixture();
 const now=Date.now(),reset=Math.floor(now/1000)+3*3600;
 const clock=seconds=>new Date(seconds*1000).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});

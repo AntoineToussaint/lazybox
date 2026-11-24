@@ -17,7 +17,7 @@
 // - A running command's output follows live; offline and pull to refresh.
 // - Every phone call carried a device credential and stayed on the allowlist.
 // Screenshots: .cache/remote-*.png at 390 px, dark and light.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, devices, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

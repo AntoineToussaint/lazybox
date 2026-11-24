@@ -9,7 +9,7 @@
 // runs; Settings → Browser, with Chromium missing (Install Chromium and its
 // output), off (Turn on) and off for one workspace; a phone width. Frames are
 // real JPEGs of little fixture pages. Chromium.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

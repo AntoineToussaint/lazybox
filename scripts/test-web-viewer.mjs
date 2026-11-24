@@ -6,7 +6,7 @@
 // be shown here and offers the browser; Settings → Web & links swaps the
 // default; a page moves to its own window and back; the history survives a
 // reload. Chromium; TEST_WEBKIT=1 runs WebKit.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

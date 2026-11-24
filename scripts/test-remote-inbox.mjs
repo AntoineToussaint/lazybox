@@ -4,7 +4,7 @@
 // replies from the phone, and the back gesture returns to the inbox. A
 // read-only phone sees everything and can send nothing. Phone widths 320 and
 // 390 keep everything on screen. Fake Runner; no agent runs.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, chromium, devices, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

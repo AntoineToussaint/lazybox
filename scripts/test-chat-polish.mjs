@@ -1,7 +1,7 @@
 // Fixture only: the compact chat header, live status, prompt recall, snippet
 // usage, equal workspace cards, the workspace home and the naming flow.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import { collectPageErrors } from './fixtures/page-errors.mjs';
 const f=await startRunnerFixture();
 const repos=['authority','cli','core','module-datasource','web-console'];

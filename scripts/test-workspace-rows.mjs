@@ -4,7 +4,7 @@
 // with its live status (never "Claude · model", which truncated to "C." at the
 // default sidebar width). Rows stay one fixed height, whatever they hold.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

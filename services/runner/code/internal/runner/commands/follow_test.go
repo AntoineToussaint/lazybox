@@ -64,6 +64,75 @@ func TestAFollowedPipeOutlivesARunnerRestart(t *testing.T) {
 	}
 }
 
+// A stop or a move to the background asked of a followed run reaches it even
+// if the Runner restarts before the run next asks: both are journalled, and
+// the next Runner asks them. Before, they lived only in memory.
+func TestRequestsToAFollowedRunOutliveARunnerRestart(t *testing.T) {
+	dir := t.TempDir()
+	m, err := New(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := m.Register(Spec{SessionID: "fixture", Title: "go test ./..."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, err := m.Register(Spec{SessionID: "fixture", Title: "npm run dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []*Command{stopped, moved} {
+		if _, err = c.Follow(context.Background(), FollowUpdate{PID: 42}, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = stopped.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	if err = moved.RequestBackground(); err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Detach(); err != nil {
+		t.Fatal(err)
+	}
+
+	next, err := New(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	for _, want := range []struct {
+		c          *Command
+		stop, move bool
+	}{{stopped, true, false}, {moved, false, true}} {
+		c, err := next.Get(want.c.Status().ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reply, err := c.Follow(context.Background(), FollowUpdate{PID: 42}, 0)
+		if err != nil || reply.Stop != want.stop || reply.Background != want.move {
+			t.Fatalf("%s after a restart: %+v %v", want.c.Status().Spec.Title, reply, err)
+		}
+	}
+	// Once the run moved, a later Runner does not ask it again.
+	c, _ := next.Get(moved.Status().ID)
+	if _, err = c.Follow(context.Background(), FollowUpdate{Background: true, PID: 42}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err = next.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	last, err := New(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer last.Close()
+	c, _ = last.Get(moved.Status().ID)
+	if reply, err := c.Follow(context.Background(), FollowUpdate{Background: true, PID: 42}, 0); err != nil || reply.Background || reply.Stop {
+		t.Fatalf("a request already answered was asked again: %+v %v", reply, err)
+	}
+}
+
 // A followed pipe whose `lazybox run` went silent (killed, say) is ended, so
 // it does not read "running" forever.
 func TestASilentFollowedPipeIsEnded(t *testing.T) {

@@ -130,7 +130,17 @@ type Output struct {
 	// Seq is the host's sequence number of this output (on "output"): the
 	// cursor a re-attaching Runner resumes after.
 	Seq uint64 `json:"seq,omitempty"`
+	// Request is what the Runner asked of a followed run (on "request"):
+	// requestStop or requestBackground. Recorded before it is asked, so the
+	// next Runner still asks it if this one restarts before the run polls.
+	Request string `json:"request,omitempty"`
 }
+
+// What the Runner asks of a followed run (Output.Request).
+const (
+	requestStop       = "stop"
+	requestBackground = "background"
+)
 
 type Command struct {
 	mu       sync.Mutex
@@ -254,6 +264,7 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 		var state Status
 		var host string
 		var seq uint64
+		var stopRequested, backgroundRequested bool
 		for cursor := uint64(0); cursor < spool.Count(); cursor++ {
 			record, err := spool.Next(context.Background(), cursor)
 			if err != nil {
@@ -276,6 +287,13 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 			if output.Type == "output" {
 				state.Offset = output.Offset + uint64(len(output.Data))
 				seq = max(seq, output.Seq)
+			}
+			if output.Type == "request" {
+				stopRequested = stopRequested || output.Request == requestStop
+				backgroundRequested = backgroundRequested || output.Request == requestBackground
+			}
+			if output.Status != nil && output.Status.Background {
+				backgroundRequested = false // The run moved: asked and answered.
 			}
 		}
 		if state.ID == "" {
@@ -301,7 +319,7 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 				m.Detach()
 				return nil, err
 			}
-			m.items[state.ID] = &Command{spool: spool, status: state, finished: make(chan struct{}), wake: make(chan struct{}), lastSeen: time.Now()}
+			m.items[state.ID] = &Command{spool: spool, status: state, finished: make(chan struct{}), wake: make(chan struct{}), lastSeen: time.Now(), stopRequested: stopRequested, backgroundRequested: backgroundRequested}
 			continue
 		}
 		if !state.Done {
@@ -753,9 +771,27 @@ func (c *Command) RequestBackground() error {
 	if !c.status.CanBackground() {
 		return errors.New("only a lazybox run still in the foreground can move to the background")
 	}
-	c.backgroundRequested = true
+	return c.requestLocked(requestBackground)
+}
+
+// requestLocked asks a followed run for request; it gets it when it next asks
+// (Follow). The request is recorded first, so a Runner restart in between
+// does not lose it. If recording fails it is still asked of the run, and the
+// error says a restart would lose it.
+func (c *Command) requestLocked(request string) error {
+	asked := &c.stopRequested
+	if request == requestBackground {
+		asked = &c.backgroundRequested
+	}
+	var err error
+	if !*asked {
+		if _, err = c.spool.AppendReserved(Output{Type: "request", Offset: c.status.Offset, Request: request}); err != nil {
+			err = fmt.Errorf("the run is asked, but a Runner restart before it asks would lose the request: %w", err)
+		}
+	}
+	*asked = true
 	c.wakeLocked()
-	return nil
+	return err
 }
 
 func (c *Command) wakeLocked() {
@@ -1072,8 +1108,7 @@ func (c *Command) CancelForegroundPipe() {
 	if !c.status.CanBackground() || c.backgroundRequested || c.detaching {
 		return
 	}
-	c.stopRequested = true
-	c.wakeLocked()
+	_ = c.requestLocked(requestStop)
 }
 
 func (c *Command) Cancel() error {
@@ -1093,10 +1128,8 @@ func (c *Command) Cancel() error {
 	case host == nil && process == nil && c.Status().Following:
 		// A `lazybox run` stops its own command when it next asks (FollowPipe).
 		c.mu.Lock()
-		c.stopRequested = true
-		c.wakeLocked()
-		c.mu.Unlock()
-		return nil
+		defer c.mu.Unlock()
+		return c.requestLocked(requestStop)
 	case host != nil:
 		// The host applies the command's grace period itself, so a stop
 		// in progress completes even if this Runner goes away.

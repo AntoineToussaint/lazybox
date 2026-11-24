@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { nativeOptions } from './options.js';
 import { SettingsWatch, asksBySettings, settingsNotInEffect } from './settings-effect.js';
-import { drift, settingsCases } from './settings-capture.js';
+import { drift, expectedSource, invalidCapture, settingsCases } from './settings-capture.js';
 import { loadFixture, workspace } from './settings-fixture.js';
 
 // What the bundled Claude Code prints for each case, as committed. These tests
@@ -20,6 +20,24 @@ test('the fixture holds every case the check captures, and the check names what 
   assert.equal(changed.length, 1);
   assert.match(changed[0], /^inline entry skipped \(permissions\):/);
   assert.equal(drift(loadFixture(), {}).length, settingsCases.length, 'a case the binary no longer prints is drift too');
+});
+
+test('--write saves only the settings warning, naming its case’s source, never a crash or a prompt', () => {
+  // Every committed case is a warning that names its own source.
+  for (const c of settingsCases) assert.equal(invalidCapture(c, real[c.name]), undefined, c.name);
+  const inline = settingsCases.find(c => !c.file)!, project = settingsCases.find(c => c.file === 'settings.json')!;
+  assert.equal(expectedSource(inline), '--settings (inline JSON)');
+  assert.equal(expectedSource(project), `${workspace}/.claude/settings.json`);
+  for (const [what, c, text] of [
+    ['a crash', inline, 'Segmentation fault (core dumped)'],
+    ['a sign-in prompt', inline, 'Not logged in · Please run /login'],
+    ['nothing at all', project, ''],
+    ['the warning for another source', project, real['inline did not load (permissions)']],
+  ] as const) {
+    const why = invalidCapture(c, text);
+    assert.ok(why, `${what} was accepted`);
+    assert.ok(why.includes(`"${c.name}"`), `${what}: the refusal names the case: ${why}`);
+  }
 });
 
 test('Claude’s settings_not_in_effect warning is read; other informational lines are not', () => {

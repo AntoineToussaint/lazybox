@@ -54,7 +54,24 @@ export function bundledClaude(): string | undefined {
 export function claudeVersion(binary: string): string {
   const run = spawnSync(binary, ['--version'], { encoding: 'utf8', timeout: CAPTURE_TIMEOUT_MS, env: { PATH: process.env.PATH } });
   if (run.error) throw new Error(`asking ${binary} its version: ${run.error.message}`);
-  return run.stdout.trim();
+  const version = run.stdout.trim();
+  if (run.status !== 0 || !version) throw new Error(`asking ${binary} its version: exit ${run.status ?? run.signal}, said ${JSON.stringify((run.stderr || run.stdout).trim().slice(0, 200))}`);
+  return version;
+}
+
+/** The source a case's warning must name: Lazybox's inline settings, or the workspace file the case broke. */
+export const expectedSource = (c: SettingsCase) => c.file ? `${workspace}/.claude/${c.file}` : '--settings (inline JSON)';
+
+/**
+ * Why a capture is not the settings warning (a crash, a sign-in prompt, an
+ * empty line), or undefined when it is: it starts with Claude's heading
+ * ("These settings …") and names its case's source. `--write` saves nothing
+ * while any capture fails this.
+ */
+export function invalidCapture(c: SettingsCase, text: string): string | undefined {
+  if (!text.startsWith('These settings')) return `"${c.name}" is not the settings warning: ${JSON.stringify(text.slice(0, 200))}`;
+  if (!text.includes(expectedSource(c))) return `"${c.name}" does not name ${expectedSource(c)}: ${JSON.stringify(text.slice(0, 200))}`;
+  return undefined;
 }
 
 /** What the binary prints for one case, with the scratch workspace written as <workspace>. */
@@ -88,6 +105,12 @@ function main(write: boolean): number {
   }
   const now = Object.fromEntries(settingsCases.map(c => [c.name, capture(binary, c)]));
   if (write) {
+    // Only the warning itself becomes the fixture: never a crash or a prompt.
+    const bad = settingsCases.map(c => invalidCapture(c, now[c.name])).filter((why): why is string => !!why);
+    if (bad.length) {
+      console.error(`not writing ${fileURLToPath(fixtureFile)}:\n  ${bad.join('\n  ')}`);
+      return 1;
+    }
     writeFileSync(fixtureFile, JSON.stringify({ claudeCode: claudeVersion(binary), warnings: now }, null, 2) + '\n');
     console.log(`wrote ${fileURLToPath(fixtureFile)}`);
     return 0;

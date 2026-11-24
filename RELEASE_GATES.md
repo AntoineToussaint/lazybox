@@ -32,7 +32,7 @@ worker's unit tests read. Starting the real binary takes as long as the
 machine allows, so it is a gate with its own deadline (and its own CI step),
 never a unit test: a unit test reads only committed files. Drift, a start
 that times out and a platform with no bundled binary fail it;
-`npm run test:claude-settings -- --write` rewrites the fixture.
+`npm run test:claude-settings -- --write` rewrites the fixture, and refuses to when a capture is not the warning naming its case's source (a crash, a sign-in prompt) or `--version` fails.
 
 The catalog covers core Go/TypeScript/contracts/worker checks, native desktop
 checks and all isolated UI fixtures, including continuity, scrolling, navigation,

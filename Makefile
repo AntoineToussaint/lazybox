@@ -62,7 +62,11 @@ build-web: deps
 	npm run build:web
 
 test: build-worker
-	cd $(GO_ROOT) && LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) LAZYBOX_V2_BROWSER_WORKER=$(abspath workers/browser/dist/main.js) $(GO_TEST) -timeout 6m ./...
+	@set -e; fixtures=$$(mktemp -d); trap 'rm -rf "$$fixtures"' EXIT; \
+	cd $(GO_ROOT); \
+	CGO_ENABLED=0 go build -o "$$fixtures/lazybox" ./cmd/lazybox; \
+	CGO_ENABLED=0 go build -o "$$fixtures/lazybox-runner" .; \
+	LAZYBOX_V2_REMOTE_TEST_BIN="$$fixtures" LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) LAZYBOX_V2_BROWSER_WORKER=$(abspath workers/browser/dist/main.js) $(GO_TEST) -timeout 6m ./...
 test-real: build-worker
 	cd $(GO_ROOT) && LAZYBOX_V2_REAL=1 LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -timeout 12m -v ./tests/integration -run TestReal
 

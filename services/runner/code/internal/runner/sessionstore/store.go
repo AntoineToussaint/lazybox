@@ -14,6 +14,9 @@ import (
 // Record contains references to credentials, never resolved environment values.
 // Previous links immutable attempts within one stable ConversationID.
 type Record struct {
+	// Native source point for retrying the first locally authored prompt of a fork.
+	ForkThread                                                       string `json:",omitempty"`
+	ForkTurn                                                         string `json:",omitempty"`
 	ForkedFrom                                                       string `json:",omitempty"`
 	ForkCursor                                                       uint64 `json:",omitempty"`
 	DisplayTitle                                                     string // Resolved conversation title; projections derive this from the root attempt or explicit rename.

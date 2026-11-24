@@ -1,4 +1,4 @@
-import { query, createSdkMcpServer, tool, type McpServerConfig, type Query, type SDKUserMessage, type PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import { forkSession, query, createSdkMcpServer, tool, type McpServerConfig, type Query, type SDKUserMessage, type PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
@@ -81,6 +81,11 @@ export function mcpServers(purpose: string, browser = false, call: typeof callRu
 async function open(options: any) {
   permission = options.permission || '';
   grants = (Array.isArray(options.grants) ? options.grants : []).map(restoreGrant).filter((g: Grant | undefined): g is Grant => !!g);
+  if (options.forkThread) {
+    if (!options.forkAfterTurn) throw new Error("A Claude fork requires a completed message");
+    const fork = await forkSession(options.forkThread, { upToMessageId: options.forkAfterTurn });
+    options = { ...options, resume: fork.sessionId };
+  }
   session = query({ prompt: input(), options: {
     ...nativeOptions(options, process.env),
     mcpServers: mcpServers(options.purpose, options.browser === true),

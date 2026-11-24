@@ -111,7 +111,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	defer cancel()
 	// The conversation's "always allow" choices so far: the new worker holds
 	// them (a worker started before grants ignores the field).
-	result, err := p.Call(setup, "open", map[string]any{"cwd": o.Cwd, "purpose": o.Purpose, "model": o.Model, "effort": o.Effort, "resume": o.Resume, "permission": o.Permission, "workflow": o.Workflow, "binary": a.Binary, "context": o.Context, "browser": o.Browser, "claudeAiConnectors": o.ClaudeAIConnectors, "grants": agent.GrantSpecs(o.Grants)})
+	result, err := p.Call(setup, "open", map[string]any{"cwd": o.Cwd, "purpose": o.Purpose, "model": o.Model, "effort": o.Effort, "resume": o.Resume, "forkThread": o.ForkThread, "forkAfterTurn": o.ForkAfterTurn, "permission": o.Permission, "workflow": o.Workflow, "binary": a.Binary, "context": o.Context, "browser": o.Browser, "claudeAiConnectors": o.ClaudeAIConnectors, "grants": agent.GrantSpecs(o.Grants)})
 	if err != nil {
 		p.Close()
 		return nil, err
@@ -123,6 +123,10 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	if err = json.Unmarshal(result, &response); err != nil {
 		p.Close()
 		return nil, err
+	}
+	if o.ForkThread != "" && (response.Reference == "" || response.Reference == o.ForkThread) {
+		p.Close()
+		return nil, errors.New("Claude worker did not create a separate conversation")
 	}
 	return &session{p: p, ref: response.Reference, ctx: ctx, tools: o.Tools, features: response.Features}, nil
 }

@@ -965,17 +965,19 @@ agent is told with the next message (through the same path as instruction
 updates) that files were reverted and must be re-read. In a Codex coding conversation, **Fork after this turn…** opens a separate
 conversation through a completed turn. The original can continue working while you open the fork.
 **Edit and restart here…** on a supported user prompt sends a revised prompt
-using the history before it. Confirming stops the previous continuation,
-which stays available in History. The source link opens the conversation at
+using the history before it. Click **Restart from here…** on a prompt, or press **Esc** twice in an empty composer and choose a prompt with the arrow keys and Enter. Codex and Claude support prompt restart. Choosing current files stops the previous continuation,
+which stays available in History. The picker searches older prompts as history loads. Before confirming, the dialog checks the native boundary and shows the repositories in the retained checkpoint. A skipped file disables isolated restart. Reopening the same prompt after a lost confirmation in this tab recovers the revised text and workspace choice. The source link opens the conversation at
 the original reply or prompt.
 
+See the [prompt restart implementation and roadmap](PROMPT_RESTART.md) for provider boundaries, file coverage and release verification.
+
 In a managed workspace, the dialog can create separate worktrees from the
-turn's saved files (after a fork, before a retry). Restart uses current files by default. The checkpoint is the base
+turn's saved files (after a fork, before a retry). Restart defaults to a separate workspace when available and lets the original conversation continue. The checkpoint is the base
 commit of each new branch, including any uncommitted files it captured.
 Ignored files are outside that snapshot. The Runner requires each recorded
 repository snapshot to be available and complete. **Use current workspace
 files** shares the live working directory with the source conversation.
-Branching requires a Codex installation with bounded thread forks. Turn
+Codex requires bounded thread forks. Claude uses the saved native assistant message at the end of a completed turn. Older Claude turns without this identifier cannot supply that boundary. Turn
 boundaries from a different native thread and retry prompts with attachments
 are currently unavailable.
 

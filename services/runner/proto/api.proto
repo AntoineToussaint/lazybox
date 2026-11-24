@@ -3050,7 +3050,11 @@ message SetReviewDispositionRequest {
   bool close_reviewers = 7;
 }
 message SetReviewAutoResolveRequest { string collection_id = 1; bool enabled = 2; }
-message TurnCheckpointsRequest { string session_id = 1; }
+message TurnCheckpointsRequest {
+  string session_id = 1;
+  // When selecting a prompt for restart, validate its native conversation boundary.
+  uint64 before_prompt_cursor = 2;
+}
 // One repository's checkpoint at a point of the conversation.
 message RepositoryCheckpoint {
   string member = 1;
@@ -3097,6 +3101,7 @@ message TurnCheckpoints {
   repeated CodeRevert reverts = 2;
   // A note for the agent waits for the next message.
   bool note_pending = 3;
+  optional string restart_boundary_error = 4;
 }
 message TurnChangesRequest { string session_id = 1; uint32 turn = 2; }
 message TurnFile {

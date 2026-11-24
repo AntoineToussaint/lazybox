@@ -3,6 +3,22 @@ import assert from 'node:assert/strict';
 import { NativeStatus, limitState } from './status.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 const message = (value: object) => value as SDKMessage;
+test('a completed root turn forks at its last assistant UUID and clears it before the next turn', () => {
+  const status = new NativeStatus();
+  const assistant = (uuid: string, parent_tool_use_id?: string) => status.normalize(message({
+    type: 'assistant', uuid, parent_tool_use_id, message: { content: [], model: 'fixture' },
+  }));
+  const end = (stop_reason: string) => status.normalize(message({ type: 'result', uuid: 'result-id', subtype: 'success', stop_reason }))
+    .find(event => event.type === 'turn_ended');
+  assistant('earlier');
+  assistant('last-root');
+  assistant('child-only', 'agent-tool');
+  assert.equal(end('end_turn')?.turnId, 'last-root');
+  assert.equal(end('end_turn')?.turnId, undefined);
+  assistant('unfinished');
+  assert.equal(end('tool_use')?.turnId, undefined);
+});
+
 test('child output and task completion cannot replace the main conversation', () => {
   const status = new NativeStatus();
   status.normalize(message({ type: 'system', subtype: 'init', session_id: 'root-native' }));

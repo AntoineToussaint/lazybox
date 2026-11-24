@@ -2,14 +2,17 @@ package runner
 
 import (
 	"context"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/sessionstore"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/codecheckpoints"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/engine"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/journal"
 )
 
@@ -134,5 +137,52 @@ func TestForkCheckpointWorkspaceLeavesSourceFilesAlone(t *testing.T) {
 	}
 	if current, err := os.ReadFile(filepath.Join(path, "notes.txt")); err != nil || string(current) != "present" {
 		t.Fatalf("source file = %q, %v", current, err)
+	}
+}
+
+func TestForkRetryRejectsIncompleteStartupRecord(t *testing.T) {
+	b := runtimeBench(t, t.TempDir(), t.TempDir())
+	defer b.Close()
+	ctx := context.Background()
+	id := conversationForkID("source", "", 1, false, "lost")
+	if err := b.History.Create(ctx, sessionstore.Record{ID: id, ConversationID: id, ForkedFrom: "source"}); err != nil {
+		t.Fatal(err)
+	}
+	if child, err := b.ForkConversation(ctx, "source", "", 1, false, "lost"); child != nil || err == nil || !strings.Contains(err.Error(), "failed to start") {
+		t.Fatalf("incomplete record returned %v, %v", child, err)
+	}
+}
+
+func TestLegacyChildRestartRecoversOriginalBoundary(t *testing.T) {
+	b := runtimeBench(t, t.TempDir(), t.TempDir())
+	defer b.Close()
+	makeExecution := func(id string, events ...agent.Event) *Execution {
+		t.Helper()
+		spool, err := journal.Open(filepath.Join(t.TempDir(), "events"), 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range events {
+			if _, err := spool.Append(ev); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e := &Execution{ID: id, spool: spool, Engine: &archivedRuntime{spool: spool, state: engine.Snapshot{Reference: id}}}
+		b.mu.Lock()
+		b.archives[id] = e
+		b.mu.Unlock()
+		t.Cleanup(func() { spool.Dispose() })
+		return e
+	}
+	parent := makeExecution("original", agent.Event{Type: "operation_accepted", OperationID: "one", Text: "first"}, agent.Event{Type: "turn_ended", SessionID: "original", TurnID: "native-turn", OperationID: "one", Status: "completed"}, agent.Event{Type: "operation_accepted", OperationID: "two", Text: "original prompt"})
+	child := makeExecution("child", agent.Event{Type: "operation_accepted", Text: "first"}, agent.Event{Type: "turn_ended", Status: "completed"}, agent.Event{Type: "operation_accepted", OperationID: "three", Text: "revised prompt"})
+	child.Saved.ForkedFrom, child.Saved.ForkCursor = parent.ID, 3
+	timeline, err := b.OpenTimeline(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	point, err := b.forkBoundary(context.Background(), child, timeline, "", 3, nil)
+	if err != nil || point.thread != parent.ID || point.turn != "native-turn" || point.operation != "three" || len(point.history) != 2 {
+		t.Fatalf("unexpected inherited boundary: %+v, %v", point, err)
 	}
 }

@@ -1,6 +1,6 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
-type Event = { type: string; agentId?: string; parentAgentId?: string; nativeId?: string; name?: string; agentKind?: string; status?: string; sessionId?: string; text?: string; data?: unknown; account?: { state: string; reason?: string; resetAt?: number; windows?: { name: string; usedPercent: number; resetAt?: number; durationMinutes?: number }[] } };
+type Event = { type: string; turnId?: string; agentId?: string; parentAgentId?: string; nativeId?: string; name?: string; agentKind?: string; status?: string; sessionId?: string; text?: string; data?: unknown; account?: { state: string; reason?: string; resetAt?: number; windows?: { name: string; usedPercent: number; resetAt?: number; durationMinutes?: number }[] } };
 // Inspection payloads must not exhaust the durable event budget. Tool execution
 // receives the original values; this bounds only the retained UI preview.
 function toolPreview(value:unknown):unknown {
@@ -66,6 +66,8 @@ export class NativeStatus {
   private forks = new Map<string, string>();
   private contexts = new Map<string, { model: string; used: number }>();
   private capacities = new Map<string, number>();
+  // The SDK forks at a transcript message UUID. Its result UUID is a separate event.
+  private forkPoint?: string;
   // Children whose text arrived as stream deltas since their last complete
   // message: that message's text was already emitted.
   private streamed = new Set<string>();
@@ -135,6 +137,7 @@ export class NativeStatus {
     } else if (m.type === 'auth_status' && m.error) {
       this.failure = 'auth_required'; emit({ type: 'failure', status: this.failure, account: { state: this.failure, reason: 'auth_status' } });
     } else if (m.type === 'assistant') {
+      if (!child) this.forkPoint = m.uuid;
       begin();
       const usage=m.message.usage;
       emit({type:'usage',agentId:child,parentAgentId:child?'root':undefined,data:{requestId:m.message.id,model:m.message.model,usage}});
@@ -179,8 +182,13 @@ export class NativeStatus {
         emit({ type: 'failure', status: state === 'unknown' ? 'provider_error' : state, account: { state, reason: typedCause(m) || m.subtype }, text: 'errors' in m ? m.errors.join('\n') : m.result });
       }
       if (!child) this.endTurn(emit);
-      emit({ type: 'turn_ended', status: m.is_error ? 'failed' : 'completed', data: { subtype: m.subtype, resultUUID: m.uuid } });
-      this.active = false; this.failure = '';
+      const turnId = !child && m.stop_reason === 'end_turn' ? this.forkPoint : undefined;
+      emit({ type: 'turn_ended', agentId: child, turnId, status: m.is_error ? 'failed' : 'completed', data: { subtype: m.subtype, resultUUID: m.uuid } });
+      if (!child) {
+        this.forkPoint = undefined;
+        this.active = false;
+        this.failure = '';
+      }
     } else if (m.type === 'system' && (m.subtype === 'task_started' || m.subtype === 'task_progress' || m.subtype === 'task_notification')) {
       if ('ambient' in m && m.ambient) return out;
       const old = this.tasks.get(m.task_id);

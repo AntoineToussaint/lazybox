@@ -116,7 +116,7 @@ func (e *Extensions) watchDiskScans(ctx context.Context, poll, interval, startup
 	e.mu.Unlock()
 	ready := time.Now().Round(0).Add(startupDelay)
 	var cancel context.CancelFunc
-	var done chan diskResult
+	var done chan diskOutcome
 	defer func() {
 		if cancel != nil {
 			cancel()
@@ -129,11 +129,20 @@ func (e *Extensions) watchDiskScans(ctx context.Context, poll, interval, startup
 		select {
 		case <-ctx.Done():
 			return
-		case page := <-done:
+		case outcome := <-done:
 			done = nil
+			if outcome.revoked {
+				// Turned off (or its grant taken away) while it ran: not a
+				// result. It runs again as soon as it is allowed again.
+				cancel = nil
+				state.Started = time.Time{}
+				save()
+				continue
+			}
 			if cancel != nil {
 				cancel()
 				cancel = nil
+				page := outcome.page
 				e.mu.Lock()
 				if page.Error != "" {
 					page.Scan.Pressure = state.Report.Scan.Pressure
@@ -176,7 +185,14 @@ func (e *Extensions) watchDiskScans(ctx context.Context, poll, interval, startup
 // diskScanRun is one scan under way.
 type diskScanRun struct {
 	cancel context.CancelFunc
-	result chan diskResult
+	result chan diskOutcome
+}
+
+// diskOutcome is how a scan ended: its page, or revoked when reloadLocked
+// cancelled it because its extension no longer allows scans.
+type diskOutcome struct {
+	page    diskResult
+	revoked bool
 }
 
 // startDiskScan starts a scan if the snapshot still allows one, deciding and
@@ -189,17 +205,19 @@ func (e *Extensions) startDiskScan(ctx context.Context, scan func(context.Contex
 		return nil
 	}
 	scanCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	run := &diskScanRun{cancel: cancel, result: make(chan diskResult, 1)}
+	run := &diskScanRun{cancel: cancel, result: make(chan diskOutcome, 1)}
 	e.diskScan = run
 	go func() {
 		defer cancel()
 		page := scan(scanCtx)
 		e.mu.Lock()
-		if e.diskScan == run {
+		// reloadLocked clears e.diskScan when it cancels the run.
+		revoked := e.diskScan != run
+		if !revoked {
 			e.diskScan = nil
 		}
 		e.mu.Unlock()
-		run.result <- page
+		run.result <- diskOutcome{page: page, revoked: revoked}
 	}()
 	return run
 }

@@ -206,9 +206,16 @@ function PhoneShell({ device, onForget }: { device: DeviceSession['device']; onF
   }, [loadCollections]);
   useWakeRefresh(refresh);
   const online = useOnline();
+  // Once per page, not once per client: a renewed credential gives a new
+  // client, and a re-sync then could race a preference just saved in Settings.
+  // One that could not reach the Runner is tried again with the next client.
+  const resynced = useRef(false);
+  useEffect(() => {
+    if (resynced.current) return; resynced.current = true;
+    void registerWorker().then(() => api.getPushSettings({}, { timeoutMs: 15000 })).then(settings => resyncPush(api, settings)).catch(() => { resynced.current = false; });
+  }, [api]);
   // The service worker shows pushes and opens their conversation here, without a reload.
   useEffect(() => {
-    void registerWorker().then(() => api.getPushSettings({}, { timeoutMs: 15000 })).then(settings => resyncPush(api, settings)).catch(() => undefined);
     const message = (event: MessageEvent) => {
       if (event.data?.type !== 'lazybox-open' || typeof event.data.url !== 'string') return;
       const target = new URL(event.data.url, location.origin);
@@ -216,7 +223,7 @@ function PhoneShell({ device, onForget }: { device: DeviceSession['device']; onF
     };
     navigator.serviceWorker?.addEventListener('message', message);
     return () => navigator.serviceWorker?.removeEventListener('message', message);
-  }, [api, go]);
+  }, [go]);
   // A banner whose conversation no longer waits (answered here or on the computer) leaves the lock screen.
   const inbox = useInbox();
   const waiting = useMemo(() => new Set(inbox.rows.filter(row => row.state === 'needs-input' || (row.state === 'failed' && row.unread)).map(row => row.key)), [inbox.rows]);

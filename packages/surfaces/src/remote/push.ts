@@ -115,9 +115,10 @@ export async function enablePush(api: RunnerClient, preferences: PhonePushPrefer
   return sendSubscription(api, subscription, preferences);
 }
 
-async function sendSubscription(api: RunnerClient, subscription: PushSubscription, preferences: PhonePushPreferences): Promise<PushSettings> {
+/** Hands the Runner the subscription; with no preferences, the Runner keeps the ones it has. */
+async function sendSubscription(api: RunnerClient, subscription: PushSubscription, preferences?: PhonePushPreferences): Promise<PushSettings> {
   const json = subscription.toJSON();
-  return api.setPushSettings({ subscription: { endpoint: json.endpoint || subscription.endpoint, p256dh: json.keys?.p256dh || '', auth: json.keys?.auth || '' }, preferences: wirePreferences(preferences) }, { timeoutMs: 15000 });
+  return api.setPushSettings({ subscription: { endpoint: json.endpoint || subscription.endpoint, p256dh: json.keys?.p256dh || '', auth: json.keys?.auth || '' }, ...(preferences ? { preferences: wirePreferences(preferences) } : {}) }, { timeoutMs: 15000 });
 }
 
 /** Turns notifications off on this phone and on the Runner. */
@@ -143,7 +144,8 @@ export async function resyncPush(api: RunnerClient, settings: PushSettings): Pro
   // Off on purpose (the person turned it off, or never on): nothing to repair.
   if (!subscription && !settings.subscribed) return undefined;
   subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }).catch(() => null);
-  return subscription ? sendSubscription(api, subscription, preferencesOf(settings)) : undefined;
+  // The subscription only: preferences are the person's, changed in Settings, never restated here.
+  return subscription ? sendSubscription(api, subscription) : undefined;
 }
 
 /** Closes the banners of conversations that no longer need the person (answered on the computer, say). */

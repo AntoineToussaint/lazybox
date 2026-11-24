@@ -284,6 +284,10 @@ try {
   await phone.close();
   await cdp.send('ServiceWorker.deliverPushMessage', { origin: `${origin}/`, registrationId: registrations.get(`${origin}/`), data: JSON.stringify(sent) });
   phone = await context.newPage(); phone.on('pageerror', e => errors.push(String(e)));
+  // This page's device credential lasts seconds, so it renews while the steps below run.
+  let signIns = 0;
+  await phone.route('**/remote/v1/session', async route => { const response = await route.fetch(); const body = await response.json(); body.expiresAt = Date.now() + 90_000 + 5_500; signIns++; await route.fulfill({ response, json: body }); });
+  const pushWritesBefore = f.mutations.filter(m => m.method === 'SetPushSettings').length;
   await phone.goto(`${origin}/?view=remote`);
   await expect(phone.getByRole('heading', { name: 'Inbox' })).toBeVisible();
   const shown = () => phone.evaluate(() => navigator.serviceWorker.getRegistration('/').then(r => r.getNotifications()).then(list => list.map(n => ({ title: n.title, body: n.body, tag: n.tag, url: n.data?.url }))));
@@ -312,6 +316,14 @@ try {
   await phone.getByRole('dialog', { name: 'Allow this?' }).getByRole('button', { name: 'Allow', exact: true }).click();
   await expect.poll(() => applies(b => b.approval?.requestId === 'a-force').length).toBe(1);
   await phone.getByRole('button', { name: 'Back to inbox' }).click();
+  // The page re-synced its push subscription once, however often its credential renewed, and sent
+  // the subscription only: the preferences saved in Settings are not written back over.
+  await expect.poll(() => signIns, { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
+  const resyncs = f.mutations.filter(m => m.method === 'SetPushSettings').slice(pushWritesBefore);
+  assert.equal(resyncs.length, 1, `one re-sync for the page, not one per credential (${resyncs.length})`);
+  assert.ok(resyncs[0].body.subscription?.endpoint, 'the re-sync hands over the subscription');
+  assert.equal(resyncs[0].body.preferences, undefined, 'the re-sync leaves the preferences as they are');
+  await phone.unroute('**/remote/v1/session');
 
   // ── Light, at 390, with requests waiting again.
   Object.assign(f.sessions.find(s => s.id === 'risky-session'), { status: 'waiting_approval', busy: false, pending: [{ type: 'approval', requestId: 'a-clean-2', text: 'Bash', providerDataJson: data({ input: { command: 'rm -rf dist' } }) }] });

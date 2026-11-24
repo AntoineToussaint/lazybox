@@ -38,6 +38,9 @@ try {
     const composer = chat.getByRole('textbox', { name: 'Message', exact: true });
     await expect(composer).toBeEnabled();
     const originalUrl = page.url();
+    // The owner's bearer is read from the fragment, then leaves the address bar and the history entry.
+    assert.doesNotMatch(originalUrl, /token=/, `${view}: the bearer is still in the address bar`);
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('runner-token')), fixture.token, `${view}: the tab keeps the bearer`);
     const drop = async (files, options = {}) => composer.evaluate((node, { files, options }) => {
       const dataTransfer = new DataTransfer();
       for (const file of files) dataTransfer.items.add(new File([new Uint8Array(file.bytes)], file.name, { type: file.type || '', lastModified: 123 }));
@@ -111,6 +114,10 @@ try {
     await expect(chat.getByRole('alert')).toContainText('cannot accept files');
     await expect(attached).toHaveCount(0);
     fixture.sessions[0].closed = false;
+    // A reload signs in from the tab's session storage, and the address bar stays clean.
+    await page.reload();
+    await expect(composer).toBeEnabled();
+    assert.doesNotMatch(page.url(), /token=/, `${view}: the bearer came back into the address bar`);
     await context.close();
   }
   const base = `http://127.0.0.1:${server.httpServer.address().port}`;

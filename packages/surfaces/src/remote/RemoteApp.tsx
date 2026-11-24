@@ -206,9 +206,16 @@ function PhoneShell({ device, onForget }: { device: DeviceSession['device']; onF
   }, [loadCollections]);
   useWakeRefresh(refresh);
   const online = useOnline();
+  // Once per page, not once per client: a renewed credential gives a new
+  // client, and a re-sync then could race a preference just saved in Settings.
+  // One that could not reach the Runner is tried again with the next client.
+  const resynced = useRef(false);
+  useEffect(() => {
+    if (resynced.current) return; resynced.current = true;
+    void registerWorker().then(() => api.getPushSettings({}, { timeoutMs: 15000 })).then(settings => resyncPush(api, settings)).catch(() => { resynced.current = false; });
+  }, [api]);
   // The service worker shows pushes and opens their conversation here, without a reload.
   useEffect(() => {
-    void registerWorker().then(() => api.getPushSettings({}, { timeoutMs: 15000 })).then(settings => resyncPush(api, settings)).catch(() => undefined);
     const message = (event: MessageEvent) => {
       if (event.data?.type !== 'lazybox-open' || typeof event.data.url !== 'string') return;
       const target = new URL(event.data.url, location.origin);
@@ -216,7 +223,7 @@ function PhoneShell({ device, onForget }: { device: DeviceSession['device']; onF
     };
     navigator.serviceWorker?.addEventListener('message', message);
     return () => navigator.serviceWorker?.removeEventListener('message', message);
-  }, [api, go]);
+  }, [go]);
   // A banner whose conversation no longer waits (answered here or on the computer) leaves the lock screen.
   const inbox = useInbox();
   const waiting = useMemo(() => new Set(inbox.rows.filter(row => row.state === 'needs-input' || (row.state === 'failed' && row.unread)).map(row => row.key)), [inbox.rows]);
@@ -232,7 +239,7 @@ function PhoneShell({ device, onForget }: { device: DeviceSession['device']; onF
   const offline = !!error && !info;
   return <>
     {route.screen === 'settings' ? <PhoneSettings device={device} pins={pins} onBack={() => go({})} onForget={onForget}/>
-      : route.session ? <PhoneConversation sessionId={route.session} commandId={route.command} device={device} collections={collections} go={go}/>
+      : route.session ? <PhoneConversation key={route.session} sessionId={route.session} commandId={route.command} device={device} collections={collections} go={go}/>
       : <PhoneInbox device={device} collections={collections} pins={pins} go={go} onRefresh={onRefresh}/>}
     {!online ? <div className="remote-offline" role="status"><Icon name="cloud" size={15}/>This phone is offline. What you see was loaded earlier.</div>
       : error && <div className="remote-offline" role="status"><span className="remote-spinner" aria-hidden="true"/>{offline ? 'Connecting to your computer…' : 'Can’t reach your computer · retrying'}<button type="button" onClick={refresh}>Retry now</button></div>}
@@ -249,7 +256,7 @@ function PhoneConversation({ sessionId, commandId, device, collections, go }: { 
   // An ended conversation is not in the live list; read it, and keep reading while it is shown.
   useEffect(() => {
     const control = new AbortController();
-    const load = () => void api.getSession({ sessionId }, { signal: control.signal, timeoutMs: 10000 }).then(result => { if (!control.signal.aborted) setFetched(result.session); }, failure => { if (!control.signal.aborted && !live) setError(ConnectError.from(failure).rawMessage); });
+    const load = () => void api.getSession({ sessionId }, { signal: control.signal, timeoutMs: 10000 }).then(result => { if (!control.signal.aborted && result.session?.id === sessionId) setFetched(result.session); }, failure => { if (!control.signal.aborted && !live) setError(ConnectError.from(failure).rawMessage); });
     load(); const timer = setInterval(load, 4000);
     return () => { control.abort(); clearInterval(timer); };
   }, [api, sessionId, !!live]);

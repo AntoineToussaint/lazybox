@@ -46,7 +46,7 @@ export function BrowserRequestCard({ request, api, onError, position, agentName 
     activate(row); return true;
   };
   useChatKeys(card, onKey);
-  useInitialFocus(card, '[data-row=once]');
+  useInitialFocus(card);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -59,7 +59,7 @@ export function BrowserRequestCard({ request, api, onError, position, agentName 
   };
   const keys = !position || position.index === 0;
   const origin = pageOrigin(view.url || view.origin);
-  return <article ref={card} className="request browser-request-card" data-kind={view.kind} aria-label={`Browser request: ${browserRequestHeading(view, agent)}`} onKeyDown={cardKeys}>
+  return <article ref={card} tabIndex={-1} className="request browser-request-card" data-kind={view.kind} aria-label={`Browser request: ${browserRequestHeading(view, agent)}`} onKeyDown={cardKeys}>
     <CardHead eyebrow={`Browser · ${EYEBROW[view.kind]}`} tool={origin ? (origin.secure ? 'https' : 'http — not secure') : undefined} position={position}/>
     <h3>{browserRequestHeading(view, agent)}</h3>
     {view.url && <p className="browser-request-url">

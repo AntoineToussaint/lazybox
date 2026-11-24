@@ -90,7 +90,7 @@ export function ConversationRequestCard({ request, api, session, onError, positi
     activate(row); return true;
   };
   useChatKeys(card, onKey);
-  useInitialFocus(card, '[data-row=start]');
+  useInitialFocus(card);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -107,7 +107,7 @@ export function ConversationRequestCard({ request, api, session, onError, positi
   const preview = briefPreview(view.brief);
   const editProfiles = profiles.some(p => p.id === view.profile) ? profiles : [{ id: view.profile, provider: view.provider, label: '' }, ...profiles];
   const submitEdit = () => { if (draft.title.trim()) void start(draft); };
-  return <article ref={card} className="request start-request-card" aria-label={`Start a conversation: ${view.title}`} onKeyDown={cardKeys}>
+  return <article ref={card} tabIndex={-1} className="request start-request-card" aria-label={`Start a conversation: ${view.title}`} onKeyDown={cardKeys}>
     <CardHead eyebrow="Start a conversation" tool={agentTitle(view.provider, profiles, 'Agent')} position={position}/>
     <h3>{agent} wants to start a conversation: <strong>{view.title}</strong></h3>
     {view.reason && <p className="repository-reason"><span>Why</span>{view.reason}</p>}

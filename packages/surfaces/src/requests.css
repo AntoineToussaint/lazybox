@@ -1,6 +1,9 @@
 /* The agent's questions and approvals (RequestCards.tsx). */
 .request.approval-card,.request.question-card{padding:16px 18px;background:var(--surface);border:1px solid var(--line-strong);border-radius:10px;margin-top:16px;box-shadow:0 1px 0 color-mix(in srgb,var(--shadow) calc(25% * var(--shadow-strength)),transparent)}
 .request.approval-card[data-risk]{border-color:var(--warn-line)}
+/* A card takes focus itself when it appears (request-parts.tsx); the ring shows only to the keyboard. */
+.request[tabindex="-1"]:focus{outline:none}
+.request[tabindex="-1"]:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .request.question-card{border-color:var(--accent-line)}
 .request-head{display:flex;align-items:center;gap:8px;min-width:0}
 .request-head .eyebrow{color:var(--warn)}

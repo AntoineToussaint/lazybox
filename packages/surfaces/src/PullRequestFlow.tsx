@@ -106,28 +106,42 @@ function CommitDialog({ workspaceId, repo, conversation, onClose, onDone }: { wo
   const draft = useAgentDraft(conversation);
   useEffect(() => openWithFocus(dialog.current), []);
   const all = selected.size === repo.files.length;
-  const submit = async (push: boolean) => {
+  // Once the commit is made, only the push is left to retry: committing again would fail (nothing to commit).
+  const [committed, setCommitted] = useState('');
+  const push = async (notice: string) => {
+    setError(''); setBusy('Pushing…');
+    try { const pushed = await api.pushWorkspaceBranch({ collectionId: workspaceId, member: repo.member }, { timeoutMs: 360000 }); onDone(`${notice} · pushed to ${pushed.upstream}`); }
+    catch (e) { setCommitted(notice); setError(`The push failed: ${errorText(e)}`); setBusy(''); }
+  };
+  const submit = async (andPush: boolean) => {
+    if (committed) { if (!busy) await push(committed); return; }
     if (busy || !message.trim() || !selected.size) return;
     setError(''); setBusy('Committing…');
+    let notice: string;
     try {
       const paths = all ? [] : commitPaths(repo.files.filter(file => selected.has(file.path)));
       const result = await api.commitWorkspaceChanges({ collectionId: workspaceId, member: repo.member, message, paths }, { timeoutMs: 150000 });
-      let notice = `Committed ${plural(result.files, 'file')} · ${result.commit.slice(0, 8)} ${result.subject}`;
-      if (push) { setBusy('Pushing…'); const pushed = await api.pushWorkspaceBranch({ collectionId: workspaceId, member: repo.member }, { timeoutMs: 360000 }); notice += ` · pushed to ${pushed.upstream}`; }
-      onDone(notice);
-    } catch (e) { setError(errorText(e)); setBusy(''); }
+      notice = `Committed ${plural(result.files, 'file')} · ${result.commit.slice(0, 8)} ${result.subject}`;
+    } catch (e) { setError(errorText(e)); setBusy(''); return; }
+    if (andPush) await push(notice); else onDone(notice);
   };
+  // Closing after the commit reports it (the changes list refreshes), even with the push left undone.
+  const close = () => committed ? onDone(committed) : onClose();
   const ask = () => void draft.ask('commit', repo.member, repo.files.filter(file => selected.has(file.path)).map(file => file.path)).then(value => { if (value) { setMessage(value); setDrafted(true); } }, () => {});
-  return <DraggableDialog ref={dialog} className="ship-dialog" aria-label={`Commit changes in ${repo.member}`} onCancel={event => { if (busy) event.preventDefault(); else onClose(); }}>
-    <DialogHeader><h2><Icon name="commit"/>Commit to <code>{repo.branch}</code></h2><button type="button" disabled={!!busy} aria-label="Close commit dialog" onClick={onClose}>×</button></DialogHeader>
+  return <DraggableDialog ref={dialog} className="ship-dialog" aria-label={`Commit changes in ${repo.member}`} onCancel={event => { if (busy) event.preventDefault(); else close(); }}>
+    <DialogHeader><h2><Icon name="commit"/>Commit to <code>{repo.branch}</code></h2><button type="button" disabled={!!busy} aria-label="Close commit dialog" onClick={close}>×</button></DialogHeader>
+    {committed ? <p role="status" className="ship-committed"><Icon name="check" size={13}/>{committed}. Not pushed yet.</p> : <>
     <fieldset className="ship-files" disabled={!!busy}>
       <legend><label><input type="checkbox" checked={all} ref={node => { if (node) node.indeterminate = !all && selected.size > 0; }} onChange={event => setSelected(event.target.checked ? new Set(repo.files.map(file => file.path)) : new Set())}/>{repo.member} · {selected.size} of {plural(repo.files.length, 'changed file')}</label></legend>
       <div>{repo.files.map(file => <label key={file.path}><input type="checkbox" checked={selected.has(file.path)} onChange={event => { const next = new Set(selected); if (event.target.checked) next.add(file.path); else next.delete(file.path); setSelected(next); }}/><code>{file.indexStatus + file.worktreeStatus}</code><span>{file.path}</span></label>)}</div>
     </fieldset>
     <label className="ship-field">Message<textarea data-autofocus value={message} rows={5} disabled={!!busy} onChange={event => { setMessage(event.target.value); setDrafted(false); }} onKeyDown={submitOnModEnter(() => void submit(false))} placeholder="Summarize the change in one line, then explain why"/></label>
     <div className="ship-assist"><AskAgentButton draft={draft} onAsk={ask}/>{drafted && <small>Written by the agent in {conversationName(conversation)} — edit as needed.</small>}{draft.error && <small className="ship-warning">{draft.error}</small>}</div>
+    </>}
     {error && <p role="alert" className="ship-error">{error}</p>}
-    <footer><small>{busy || (navigator.platform.startsWith('Mac') ? '⌘↩ commits' : 'Ctrl+Enter commits')}</small><button type="button" disabled={!!busy} onClick={onClose}>Cancel</button><button type="button" disabled={!!busy || !message.trim() || !selected.size} onClick={() => void submit(true)}>Commit &amp; push</button><button type="button" className="primary" disabled={!!busy || !message.trim() || !selected.size} onClick={() => void submit(false)}>Commit</button></footer>
+    {committed
+      ? <footer><small>{busy}</small><button type="button" disabled={!!busy} onClick={close}>Close</button><button type="button" className="primary" disabled={!!busy} onClick={() => void push(committed)}>Push again</button></footer>
+      : <footer><small>{busy || (navigator.platform.startsWith('Mac') ? '⌘↩ commits' : 'Ctrl+Enter commits')}</small><button type="button" disabled={!!busy} onClick={onClose}>Cancel</button><button type="button" disabled={!!busy || !message.trim() || !selected.size} onClick={() => void submit(true)}>Commit &amp; push</button><button type="button" className="primary" disabled={!!busy || !message.trim() || !selected.size} onClick={() => void submit(false)}>Commit</button></footer>}
   </DraggableDialog>;
 }
 

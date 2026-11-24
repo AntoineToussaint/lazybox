@@ -194,9 +194,17 @@ export function PeekHost({ navigation }: { navigation: PeekNavigation }) {
 
 function PeekOverlay({ state: { item, list }, navigation }: { state: PeekState; navigation: PeekNavigation }) {
   const dialog = useRef<HTMLDialogElement>(null), body = useRef<HTMLDivElement>(null);
-  const [resolved, setResolved] = useState<Resolved>({});
-  const [title, setTitle] = useState('');
-  useEffect(() => { setResolved({}); setTitle(''); }, [peekKey(item)]);
+  // What the content reported about its item, tagged with that item's key. A
+  // reset effect here would run after the content's own effects in the same
+  // commit and erase a report made on mount (a task whose conversation is
+  // already known), so "Open here" went to the wrong place. A report for an
+  // item no longer shown is dropped; one for another item is never read.
+  const key = peekKey(item);
+  const shownKey = useRef(key); shownKey.current = key;
+  const [reported, setReported] = useState<{ key: string; resolved?: Resolved; title?: string }>({ key });
+  const report = (change: { resolved?: Resolved; title?: string }) => { if (key === shownKey.current) setReported(last => ({ ...(last.key === key ? last : {}), key, ...change })); };
+  const resolved = reported.key === key ? reported.resolved || {} : {};
+  const title = reported.key === key ? reported.title || '' : '';
   useEffect(() => { dialog.current?.showModal(); body.current?.focus({ preventScroll: true }); }, []);
   const index = list.findIndex(value => peekKey(value) === peekKey(item));
   const previous = stepPeek(list, item, -1), next = stepPeek(list, item, 1);
@@ -228,7 +236,7 @@ function PeekOverlay({ state: { item, list }, navigation }: { state: PeekState; 
       <button type="button" className="icon-button" aria-label="Close peek" title="Close (Esc or Space)" onClick={closePeek}><Icon name="close" size={14}/></button>
     </DialogHeader>
     <div ref={body} className="peek-body" tabIndex={-1} data-peek-body="">
-      <PeekContent key={peekKey(item)} item={item} onResolved={setResolved} onTitle={setTitle} onPeek={to => go(to)}/>
+      <PeekContent key={key} item={item} onResolved={value => report({ resolved: value })} onTitle={value => report({ title: value })} onPeek={to => go(to)}/>
     </div>
     <footer className="peek-keys" aria-hidden="true">
       <span><kbd>←</kbd><kbd>→</kbd> previous · next</span>

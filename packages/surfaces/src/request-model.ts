@@ -121,6 +121,28 @@ export function approvalOf(data: Record<string, any>, requestText: string, root:
 }
 const safeHost = (url: string) => { try { return new URL(url).host; } catch { return url; } };
 
+/**
+ * An approval card's choices, in order, with the keys that pick them: a digit
+ * (its place) and a letter (y, a for the first "always", n). A request the
+ * agent marks default-to-no (Claude's defaultToNo) is never approved by one
+ * key: only Deny keeps a key, so no digit or letter picks an allow row.
+ */
+export type DecisionRow = { id: string; label: string; detail?: string; tone: 'allow' | 'always' | 'deny'; choice?: AlwaysChoice; digit?: string; key?: string };
+export function decisionRows(approval: Pick<Approval, 'always' | 'defaultToNo'>, agentName: string): DecisionRow[] {
+  const careful = approval.defaultToNo;
+  const rows: DecisionRow[] = [
+    { id: 'once', label: 'Allow once', key: 'y', tone: 'allow' },
+    ...approval.always.map((choice, i): DecisionRow => ({ id: `always:${choice.id}`, label: `Always allow ${choice.label}`, detail: choice.detail, key: i === 0 ? 'a' : undefined, tone: 'always', choice })),
+    { id: 'deny', label: 'Deny', detail: `Tell ${agentName} what to do instead`, key: 'n', tone: 'deny' },
+  ];
+  return rows.map((row, i) => careful && row.tone !== 'deny' ? { ...row, key: undefined } : careful ? row : { ...row, digit: i < 9 ? String(i + 1) : undefined });
+}
+/** The row a key picks, if any: its digit or its letter. */
+export function decisionForKey(rows: readonly DecisionRow[], key: string): DecisionRow | undefined {
+  const lower = key.toLowerCase();
+  return rows.find(row => row.digit === key || row.key === lower);
+}
+
 /** "this conversation", "this workspace": where an always choice applies. */
 export function scopeWords(scope: string): string {
   return ({ conversation: 'in this conversation', workspace: 'in this workspace', prefix: 'in this conversation', host: 'in Codex’s network policy' } as Record<string, string>)[scope] || '';

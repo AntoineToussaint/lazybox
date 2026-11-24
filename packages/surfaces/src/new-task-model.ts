@@ -47,6 +47,19 @@ export function rememberTask(previous: TaskChoices, used: Pick<TaskChoices, 'emp
 const TRAILING = new Set(['a', 'an', 'the', 'to', 'of', 'for', 'and', 'or', 'in', 'on', 'at', 'by', 'with', 'when', 'that', 'so', 'it', 'is', 'we', 'i', 'but', 'from', 'into', 'as', 'if', 'then']);
 
 /**
+ * Text whose paste was held (a link the Runner was asked about) goes in once
+ * it is known to be plain text. `at` is the box when it was pasted: unchanged
+ * since, the text replaces what was selected then. Typed in since, nothing
+ * typed is lost: the text goes where it was pasted while everything before
+ * that point is as it was, else at the caret now (`caret`), else at the end.
+ */
+export function insertPasted(current: string, at: { text: string; start: number; end: number }, text: string, caret?: number): string {
+  if (current === at.text) return current.slice(0, at.start) + text + current.slice(at.end);
+  const where = current.startsWith(at.text.slice(0, at.start)) ? at.start : caret === undefined ? current.length : Math.max(0, Math.min(caret, current.length));
+  return current.slice(0, where) + text + current.slice(where);
+}
+
+/**
  * A task's name from its first message: the first line, cut at a word to
  * about seven words, capitalized, ending on a word that carries meaning
  * ("fix the login redirect loop when the session expires" → "Fix the login

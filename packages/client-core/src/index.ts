@@ -132,13 +132,17 @@ export async function follow<T extends { cursor: bigint; heartbeat?: boolean }>(
   signal: AbortSignal, receive: (event: T) => void, status: (value: string) => void,
   failed?: (error: ConnectError) => void,
   initialCursor = 0n,
+  { delay = reconnectDelay }: { delay?: (failures: number) => number } = {},
 ) {
   let after = initialCursor;
   let firstAttempt = true;
+  // Failures in a row: the wait grows with them, and the first event resets them.
+  let failures = 0;
   while (!signal.aborted) {
     try {
       status(firstAttempt ? 'Connecting' : 'Reconnecting'); firstAttempt=false;
       for await (const event of open(after, signal)) {
+        failures = 0;
         if (event.heartbeat) { if (signal.aborted) return; status('Live'); continue; }
         if (event.cursor <= after) continue;
         if (event.cursor !== after + 1n) throw new ConnectError('Replay gap: retained cursor is not contiguous', Code.OutOfRange);
@@ -153,12 +157,24 @@ export async function follow<T extends { cursor: bigint; heartbeat?: boolean }>(
       // which the client adopts, so keep reconnecting from the same cursor.
       if ([Code.OutOfRange, Code.PermissionDenied, Code.FailedPrecondition, Code.ResourceExhausted, Code.NotFound].includes(code)) { status(String(error)); failed?.(ConnectError.from(error)); return; }
       status(`Disconnected: ${String(error)}`);
+      const wait = delay(++failures);
       await new Promise<void>(resolve => {
         const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); };
-        const timer = setTimeout(done, 1000); signal.addEventListener('abort', done, { once: true });
+        const timer = setTimeout(done, wait); signal.addEventListener('abort', done, { once: true });
       });
     }
   }
+}
+
+/**
+ * How long a live stream waits before its next reconnection, after `failures`
+ * failures in a row: about 1 s, doubling to at most 30 s, each wait between half
+ * and all of that (jitter), so the windows of one machine do not all knock on a
+ * restarting Runner in the same instant.
+ */
+export function reconnectDelay(failures: number, random: () => number = Math.random): number {
+  const ceiling = Math.min(30_000, 1000 * 2 ** Math.max(0, failures - 1));
+  return Math.round(ceiling / 2 + random() * ceiling / 2);
 }
 
 export function providerData(data: Uint8Array): any {

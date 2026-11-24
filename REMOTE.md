@@ -157,7 +157,9 @@ Runner ─ every 3 s: conversations ─▶ Notifier ─ new request / failure / 
   phone's kinds, quiet hours and time zone, last sent and last error. Revoking
   the device removes it; a push service's 404/410 clears it (only that
   subscription, so a newer one survives); the phone hands its current
-  subscription to the Runner at every start, so a rotated one heals itself.
+  subscription to the Runner once each time the app opens (not on each
+  credential renewal), so a rotated one heals itself. It sends the
+  subscription alone: the preferences set in Settings are never restated.
 - **What notifies** (`internal/remote/notify.go`) is the desktop's attention
   rule (`attention.ts`) ported: a request id the conversation did not have
   before, a turn into failure with new activity, a root turn ending. The first

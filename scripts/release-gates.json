@@ -117,6 +117,7 @@
     { "id": "code-run", "scope": "ui", "script": "test:code-run" },
     { "id": "docking", "scope": "ui", "script": "test:docking" },
     { "id": "reattach", "scope": "ui", "script": "test:reattach" },
+    { "id": "chat-window-failure", "scope": "ui", "script": "test:chat-window-failure" },
     { "id": "layout-keyboard", "scope": "ui", "script": "test:layout-keyboard" },
     { "id": "conversation-tabs", "scope": "ui", "script": "test:conversation-tabs" },
     { "id": "agents-visible", "scope": "ui", "script": "test:agents-visible" },

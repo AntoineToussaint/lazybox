@@ -1,6 +1,7 @@
 import type { CDPSession, Download, Locator, Page } from 'playwright-core';
 import type { ActParams, ActResult, Box, InputParams, PageState, Policy } from './protocol.js';
 import { judgeNavigation, originOf } from './policy.js';
+import { NavigationWatch, navigationWait } from './navigation-watch.js';
 import { capSnapshot, pageLine, quote, refLabels } from './snapshot.js';
 
 /** What a browser needs from the service that owns it. */
@@ -49,9 +50,6 @@ export function reason(error: unknown): string {
  * holds the agent-only rules: no typing into password fields, and asking
  * before a sign-in form is submitted.
  */
-/** How long a requested navigation may take to show its first sign, and then to commit (settle()). */
-const signWait = 3000, navigationWait = 10_000;
-
 export class AgentBrowser {
   /** Who acts now; navigations the person makes never ask. */
   actor: 'agent' | 'person' = 'agent';
@@ -71,24 +69,20 @@ export class AgentBrowser {
   private casting = false;
   private buttons = 0;
   private stateTimer?: NodeJS.Timeout;
-  /** The page asked to go somewhere since the action began (a link, a form submitted): settle() waits for it. */
-  private requested = false;
   private mainFrameId?: string;
+  /** What the running action does to the page (beginAction() to settle()). */
+  private watch?: NavigationWatch;
 
   constructor(readonly id: string, readonly page: Page, private cdp: CDPSession, private host: Host) {
     const main = () => page.mainFrame();
-    // Chromium says a navigation was requested while the click is still being handled, before any
-    // request leaves: a busy machine cannot delay it past settle()'s look, as it could the request.
-    // Only this tab's page counts: not a frame inside it, a new tab, or a download link.
-    // Page events reach this session only once its Page domain is on.
-    void cdp.send('Page.enable').then(() => cdp.send('Page.getFrameTree')).then(tree => { this.mainFrameId = tree.frameTree.frame.id; }).catch(() => {});
-    cdp.on('Page.frameRequestedNavigation', event => { if (this.mainFrameId && event.frameId === this.mainFrameId && event.disposition === 'currentTab') this.requested = true; });
-    page.on('request', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = true; this.wake(); this.changed(); } });
-    page.on('requestfailed', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = false; this.wake(); this.changed(); } });
-    page.on('load', () => { this.loading = false; this.wake(); this.changed(); });
+    // Page events (a requested navigation, NavigationWatch) reach this session only once its Page domain is on.
+    void this.readMainFrame();
+    page.on('request', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = true; this.changed(); } });
+    page.on('requestfailed', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = false; this.changed(); } });
+    page.on('load', () => { this.loading = false; this.changed(); });
     page.on('domcontentloaded', () => this.changed());
-    page.on('framenavigated', frame => { if (frame === main()) { this.navigated = true; this.wake(); void this.committed(frame.url()); } });
-    page.on('download', download => { this.wake(); void this.download(download); });
+    page.on('framenavigated', frame => { if (frame === main()) void this.committed(frame.url()); });
+    page.on('download', download => void this.download(download));
     page.on('dialog', dialog => {
       // A dialog would stall the agent; it is answered at once and logged.
       const kind = dialog.type(), message = dialog.message();
@@ -254,37 +248,30 @@ export class AgentBrowser {
     if (!answer?.allow) throw new Error(`The person did not allow submitting the sign-in form on ${origin || url}.`);
   }
 
-  /** Where the page is as an action begins; a navigation requested, signalled or committed from now on is that action's. */
+  /** Where the page is as an action begins; what it does to the page from now on is watched (NavigationWatch). */
   private beginAction(): string {
-    this.requested = false; this.signed = false; this.navigated = false;
+    this.watch?.dispose();
+    if (!this.mainFrameId) void this.readMainFrame();
+    this.watch = new NavigationWatch(this.page, this.cdp, this.mainFrameId, () => !!this.pendingSite);
     return this.page.url();
   }
 
-  /** A sign of where a requested navigation went (its request, its failure, its commit, its load, a
-   * download, the gate asking the person): recorded, and wakes a settle() waiting for one. */
-  wake() { this.signed = true; const waiting = this.waiting; this.waiting = undefined; waiting?.(); }
-  private waiting?: () => void;
-  /** A sign since the action began, so settle() does not wait for one that already came. */
-  private signed = false;
-  /** This tab's page committed a navigation since the action began (to the same address too). */
-  private navigated = false;
-  private nextSign(ms: number): Promise<void> {
-    return new Promise<void>(resolve => { const timer = setTimeout(resolve, ms); this.waiting = () => { clearTimeout(timer); resolve(); }; }).finally(() => { this.waiting = undefined; });
+  /** The gate began asking the person about a site: an action waiting on its navigation says so instead. */
+  askingPerson() { this.watch?.wake(); }
+
+  private async readMainFrame() {
+    try { await this.cdp.send('Page.enable'); this.mainFrameId = (await this.cdp.send('Page.getFrameTree')).frameTree.frame.id; } catch { /* read again at the next action */ }
   }
 
-  /** After an action that may navigate: wait for the next page, and say where the agent is. */
+  /** After an action that may navigate: wait for where it went, and say where the agent is. */
   private async settle(before: string): Promise<string> {
+    // A page's own script may navigate a moment after the action, without Chromium seeing it requested by it.
     await this.page.waitForTimeout(150);
-    const requested = this.requested;
-    this.requested = false;
-    // Asked to go somewhere, and nothing has shown yet (a page slow to leave): wait for the first sign of
-    // where it went: its request, its commit (the same address too), a download, a failure, the person
-    // being asked. Bounded: a navigation that never shows a sign costs this much, not more.
-    if (requested && !this.signed && !this.pendingSite) await this.nextSign(signWait);
-    // On its way (its request left) but not committed: the old page is still the loaded one, so wait for
-    // the commit, or the failure, a download or the person being asked, not for this page's load.
-    for (const end = Date.now() + navigationWait; this.loading && !this.navigated && !this.pendingSite && Date.now() < end;) await this.nextSign(end - Date.now());
-    if (this.navigated || this.page.url() !== before) await this.page.waitForLoadState('domcontentloaded', { timeout: navigationWait }).catch(() => {});
+    const watch = this.watch;
+    const committed = watch ? await watch.settle() : false;
+    watch?.dispose();
+    if (this.watch === watch) this.watch = undefined;
+    if (committed || this.page.url() !== before) await this.page.waitForLoadState('domcontentloaded', { timeout: navigationWait }).catch(() => {});
     const notes: string[] = [];
     if (this.page.url() !== before) notes.push(`Now on ${await this.where()}.`);
     if (this.pendingSite) notes.push(`Waiting for the person to allow ${this.pendingSite}; the page changes once they answer.`);

@@ -109,7 +109,10 @@ describe('browser service', () => {
   it('asks before a new origin, and leaves the page where it is when the person says no', async () => {
     await act({ action: 'navigate', url: `${sites.home}/` });
     runner.answers.site = () => ({ allow: false, reason: 'not now' });
-    const click = await act({ action: 'click', ref: refIn(await snapshot(), 'link "Other site"') });
+    const ref = refIn(await snapshot(), 'link "Other site"');
+    const started = Date.now();
+    const click = await act({ action: 'click', ref });
+    assert.ok(Date.now() - started < 2500, `a declined site answers at once, took ${Date.now() - started}ms`);
     assert.match(click.text, new RegExp(`The person did not allow ${sites.other}: not now\\.`));
     assert.equal(new URL(click.state.url).origin, sites.home);
     await assert.rejects(act({ action: 'navigate', url: `${sites.other}/other` }), new RegExp(`The person did not allow ${sites.other}: not now`));
@@ -186,7 +189,7 @@ describe('browser service', () => {
   });
 
   // A requested navigation that never changes this tab's address returns promptly, not after a timeout:
-  // a download, a form back to the same address.
+  // a download, a form back to the same address, a link answered with no content.
   it('returns promptly from a click whose navigation keeps the address', async () => {
     const timed = async (path: string, button: string) => {
       await act({ action: 'navigate', url: `${sites.home}${path}` });
@@ -195,7 +198,7 @@ describe('browser service', () => {
       return Date.now() - started;
     };
     // A link into a new tab is timed where popups are tested: it is folded into this page.
-    for (const [path, button] of [['/download', 'link "Get the report"'], ['/same', 'button "Search again"']]) {
+    for (const [path, button] of [['/download', 'link "Get the report"'], ['/same', 'button "Search again"'], ['/stay', 'link "Check again"']]) {
       const took = await timed(path, button);
       assert.ok(took < 2500, `${path}: the click took ${took} ms`);
     }

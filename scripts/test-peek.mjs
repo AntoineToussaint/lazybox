@@ -19,6 +19,8 @@ alphaSession.title='Harden the request handler';betaSession.title='Ship the rele
 const alphaEvents=fixture.openEvents(alphaSession.id);
 alphaEvents.push({type:'operation_accepted',text:'Make the handler time out after 30 seconds.'});
 alphaEvents.push({type:'message_delta',text:'Added a 30 second deadline to the handler and a test for it.'});
+// A mission task worked on in Alpha's conversation (step 10).
+const mission=fixture.missions.create('Ship the parser split');const task=fixture.missions.addTask(mission,'Split the lexer');fixture.missions.assign(mission,task,alphaSession,false);
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),logLevel:'warn',plugins:[react(),monacoVimCompat()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 await server.listen();
 let browser;
@@ -126,6 +128,17 @@ try{
  await expect(peek).toContainText('File preview');
  await expect(peek.locator('textarea, [contenteditable=true]')).toHaveCount(0);
  await page.keyboard.press('Escape');
+
+ // 10. A mission task whose conversation is already known when its peek opens: ⌘↵ opens that
+ // conversation (in Alpha), not the Missions page; what the peek learned on mount is kept.
+ await expect(betaLink).toHaveAttribute('aria-current','page');
+ await page.getByRole('navigation',{name:'Pages'}).getByRole('button',{name:'Missions',exact:true}).click();
+ const taskCard=page.locator(`.mission-card[data-task="${task.id}"]`);
+ await taskCard.focus();await page.keyboard.press('Space');
+ await expect(page.getByRole('dialog',{name:'Peek: Split the lexer'})).toBeVisible();
+ await page.keyboard.press('Meta+Enter');
+ await expect(page.locator('.peek-dialog')).toHaveCount(0);
+ await expect(alphaLink,'Open here went to the task’s conversation').toHaveAttribute('aria-current','page');
 
  // The rows' git line answered meanwhile (peek and the sidebar's poll share the window).
  await expect(nav.locator('.workspace-git[data-git-line]').first()).toBeVisible();

@@ -364,14 +364,12 @@ details.
 
 Beside the message box, one chip per running sub-agent or background command
 takes you to it; **All**, and the background-work button in the chat header,
-list everything that ran. Each kind is counted apart (*2 sub-agents · 17
-commands · 0 running · 1 failed*), newest first, sub-agents as a tree under
-who started them; older finished items fold behind **Show 12 earlier**, but
-anything running or failed always shows. **Clear finished** hides what ended
-from that list for this conversation (*Cleared 12 · Undo*), also after you
-reopen or resume it; the conversation keeps it, and running work always
-shows. A failure you looked at stays dismissed the same way. A conversation
-keeps its latest 256 sub-agents and commands: past that, the oldest finished
+list active sub-agents and background commands. Starting, running and
+waiting sub-agents count as active. Finished sub-agents remain in the
+conversation. Older finished commands fold behind **Show earlier**.
+**Clear finished** hides finished commands from the list for this
+conversation, with an option to undo. A failure you looked at stays
+dismissed. A conversation keeps its latest 256 sub-agents and commands: past that, the oldest finished
 ones leave, and the list says so. A background command (Claude's
 `run_in_background`) is not a sub-agent: it reads as what the agent said it
 does (*Generate the protobuf code*), whole, with what runs beneath it, and

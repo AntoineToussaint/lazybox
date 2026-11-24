@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/atomicfile"
 )
 
 // RefPrefix is the private namespace every checkpoint ref lives under.
@@ -210,23 +212,7 @@ func (m *Manager) save(r *Record) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(m.root, "."+r.Conversation+"-*.json")
-	if err != nil {
-		return err
-	}
-	if _, err = tmp.Write(data); err == nil {
-		err = tmp.Sync()
-	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
-	if err == nil {
-		err = os.Rename(tmp.Name(), m.file(r.Conversation))
-	}
-	if err != nil {
-		_ = os.Remove(tmp.Name())
-	}
-	return err
+	return atomicfile.WriteFile(m.file(r.Conversation), data)
 }
 
 func ref(conversation, name string) string { return RefPrefix + conversation + "/" + name }

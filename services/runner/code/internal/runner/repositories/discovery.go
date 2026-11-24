@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/atomicfile"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitidentity"
 )
 
@@ -176,20 +177,7 @@ func (s *FileCatalogStore) Save(c Catalog) error {
 	if len(data) > 4<<20 {
 		return errors.New("repository discovery catalog is too large")
 	}
-	f, err := os.CreateTemp(filepath.Dir(s.path), ".catalog-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
-	}
-	err = errors.Join(err, f.Close())
-	if err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), s.path)
+	return atomicfile.WriteFile(s.path, data)
 }
 
 // DirectoryScanner never follows descendant symlinks or enters repositories,

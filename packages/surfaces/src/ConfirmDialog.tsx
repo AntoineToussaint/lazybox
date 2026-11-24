@@ -26,10 +26,11 @@ export function ConfirmWarning({ title, children }: { title: ReactNode; children
  * (`check`). Cancel has the focus for a destructive choice, so Enter is
  * harmless; the confirm button is a deliberate danger (or primary) fill, and
  * a plain grey while it cannot be pressed. Confirming shows it working, and a
- * failure says why in the dialog without closing it. When it asks for two or
- * more boxes (`consents`, with `check`), a "Check all" button in the footer
+ * failure says why in the dialog without closing it. When `details` asks for
+ * two or more consents (`consents`), a "Check all" button in the footer
  * ticks every one while any is unticked and moves the focus to the confirm
- * button; it never confirms by itself.
+ * button; it never confirms by itself, and a held Enter does not carry on
+ * into the confirm button.
  */
 export function ConfirmDialog({ title, label, subject, subjectMeta, children, kept, details, consents = [], warning, check, status, error, confirm, working, tone = 'danger', cancelLabel = 'Cancel', closeLabel, canConfirm = true, focus, className = '', onClose, onConfirm }: {
   title: string;
@@ -45,7 +46,11 @@ export function ConfirmDialog({ title, label, subject, subjectMeta, children, ke
   kept?: ReactNode;
   /** More than one warning, each with its own checkbox (ConfirmWarning, ConfirmCheckbox). */
   details?: ReactNode | ((busy: boolean) => ReactNode);
-  /** The boxes `details` shows, so "Check all" can tick them with `check`. */
+  /**
+   * The consents `details` shows: boxes the action needs ticked, for "Check
+   * all". An optional choice (keep or delete something) is not one: it stays
+   * the person's, so it is left out.
+   */
   consents?: { checked: boolean; onChange(checked: boolean): void }[];
   /** The warning above `check` ("This conversation has an active session or command."). */
   warning?: ReactNode;
@@ -79,18 +84,15 @@ export function ConfirmDialog({ title, label, subject, subjectMeta, children, ke
   // Focus as soon as it opens: a menu that opened it gives the focus back to its trigger as it closes.
   useEffect(() => { dialog.current?.showModal(); dialog.current?.querySelector<HTMLElement>('footer [data-autofocus]')?.focus(); }, []);
   const allowed = canConfirm && (!check?.required || check.checked);
-  const boxes = check ? [...consents, check] : consents;
-  const canCheckAll = boxes.length > 1 && boxes.some(box => !box.checked);
+  const canCheckAll = consents.length > 1 && consents.some(box => !box.checked);
   const confirmButton = useRef<HTMLButtonElement>(null), cancelButton = useRef<HTMLButtonElement>(null);
-  // Check all hides itself once it has ticked every box: the focus goes on to
-  // confirm, as soon as the ticked boxes have enabled it (Cancel if they did not).
-  const focusConfirm = useRef(false);
-  useEffect(() => {
-    if (!focusConfirm.current) return;
-    focusConfirm.current = false;
-    (allowed ? confirmButton : cancelButton).current?.focus();
-  });
-  const checkAll = () => { focusConfirm.current = true; for (const box of boxes) if (!box.checked) box.onChange(true); };
+  // Check all hides itself once it has ticked every box: in the render that
+  // shows them ticked, the focus goes on to confirm, or to Cancel when
+  // something else still keeps it off. A count, so only a Check all moves it.
+  const [handOff, setHandOff] = useState(0);
+  const allowedNow = useRef(allowed); allowedNow.current = allowed;
+  useEffect(() => { if (handOff) (allowedNow.current ? confirmButton : cancelButton).current?.focus(); }, [handOff]);
+  const checkAll = () => { for (const box of consents) if (!box.checked) box.onChange(true); setHandOff(count => count + 1); };
   const run = async () => {
     if (pending.current || !allowed) return;
     pending.current = true; setBusy(true); setFailure('');
@@ -116,7 +118,10 @@ export function ConfirmDialog({ title, label, subject, subjectMeta, children, ke
     <footer>
       {canCheckAll && <button type="button" className="confirm-check-all" disabled={busy} onClick={checkAll}>Check all</button>}
       <button type="button" ref={cancelButton} data-autofocus={first === 'cancel' || undefined} disabled={busy} onClick={onClose}>{cancelLabel}</button>
-      <button type="button" ref={confirmButton} className={tone} data-autofocus={first === 'confirm' || undefined} disabled={busy || !allowed} onClick={() => void run()}>{busy ? working : confirm}</button>
+      <button type="button" ref={confirmButton} className={tone} data-autofocus={first === 'confirm' || undefined} disabled={busy || !allowed}
+        // Enter activates a button on keydown, so a held Enter repeats: the
+        // press that went to Check all, or to anything before, must not confirm.
+        onKeyDown={event => { if (event.key === 'Enter' && event.repeat) event.preventDefault(); }} onClick={() => void run()}>{busy ? working : confirm}</button>
     </footer>
   </DraggableDialog>;
 }

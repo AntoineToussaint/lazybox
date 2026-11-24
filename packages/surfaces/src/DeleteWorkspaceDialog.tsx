@@ -31,9 +31,9 @@ export function DeleteWorkspaceDialog({ workspace, onClose, onDeleted }: {
   // left here that nothing confirms stopped. The panel says which, and settles it.
   const unconfirmed = !!preview?.blocked && !settled;
   const canDelete = !!preview && !preview.blocked && (!dirty || discard) && (!active || stop);
-  // The boxes shown below, in their order, for Check all.
+  // What deleting needs ticked, for Check all. Deleting the artifacts too is
+  // a choice, not a consent: Check all leaves it to the person.
   const consents = [
-    ...(preview?.supportsKeepArtifacts ? [{ checked: deleteArtifacts, onChange: setDeleteArtifacts }] : []),
     ...(active ? [{ checked: stop, onChange: setStop }] : []),
     ...(!unconfirmed && dirty ? [{ checked: discard, onChange: setDiscard }] : []),
   ];

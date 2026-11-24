@@ -39,7 +39,7 @@ try{
  await expect(messages).toContainText('Done: read the README, wrote notes.txt and ran the check.');
  await expect(messages.locator('.tool-line').filter({hasText:'Read'}).filter({hasText:'README.md'}).first()).toBeVisible();
  await expect(messages.locator('.tool-line').filter({hasText:'notes.txt'}).first()).toContainText('Wrote');
- await expect(messages.locator('.tool-line').filter({hasText:'echo fake-tour-check'}).first()).toContainText('exit 0');
+ await expect(messages.locator('.tool-line').filter({hasText:'echo fake-tour-check'}).first()).toContainText('Ran');
  await expect(messages.getByRole('button',{name:/Updated the plan · 3\/3 done/})).toBeVisible();
  await expect(messages.getByRole('list',{name:'Plan'}).last().getByRole('listitem')).toHaveText([/Read the README/,/Write the notes/,/Run the check/]);
  await expect(messages).not.toContainText('private reasoning');
@@ -134,6 +134,30 @@ try{
  await page.getByRole('region',{name:'Agent programs'}).locator('.acp-agent').filter({hasText:'Team agent'}).getByRole('button',{name:'Remove'}).click();
  await expect.poll(()=>fixture.mutations.findLast(m=>m.method==='RemoveAcpAgent')?.body.id).toBe('team-agent');
  await expect(page.getByRole('region',{name:'Agent programs'}).locator('.acp-agent').filter({hasText:'Team agent'})).toHaveCount(0);
+ // ── Antigravity shares Gemini CLI's API key: a key set on Gemini CLI serves both, by name only.
+ fixture.acp.install('antigravity','1.2.0');
+ const programs=page.getByRole('region',{name:'Agent programs'});
+ await programs.getByRole('button',{name:'Check again'}).click();
+ const agy=programs.locator('.acp-agent').filter({hasText:'Google Antigravity'});
+ await expect(agy).toContainText('Ready');await expect(agy.locator('.acp-agent-shared')).toHaveCount(0);
+ await programs.getByRole('button',{name:'Change how Gemini CLI starts'}).click();
+ const geminiForm=programs.getByRole('form',{name:'Change Gemini CLI'});
+ await geminiForm.getByLabel('Environment').fill('GEMINI_API_KEY=gemini-secret-456');
+ await geminiForm.getByRole('button',{name:'Save'}).click();
+ await expect(programs.getByRole('status')).toContainText('Gemini CLI saved');
+ await expect(agy.locator('.acp-agent-shared')).toHaveText('Uses Gemini CLI’s GEMINI_API_KEY');
+ // Settings → Subscriptions groups them under Google, with each one's sign-in.
+ await page.getByRole('tab',{name:'Subscriptions',exact:true}).click();
+ const google=page.locator('#subscriptions-panel .shared-credentials');
+ await expect(google.locator('h3')).toHaveText('Google');
+ await expect(google.getByRole('listitem',{name:'Gemini CLI'})).toContainText('Its own GEMINI_API_KEY');
+ await expect(google.getByRole('listitem',{name:'Gemini CLI'}).locator('code')).toHaveText('gemini');
+ const agyCard=google.getByRole('listitem',{name:'Google Antigravity'});
+ await expect(agyCard.locator('.shared-credential-key')).toHaveText('Uses Gemini CLI’s GEMINI_API_KEY');
+ await expect(agyCard.locator('code')).toHaveText('agy acp --login');
+ await expect(agyCard.locator('.shared-credential-note')).toContainText('"modelProvider": "gemini"');
+ await expect(page.locator('body')).not.toContainText('gemini-secret-456');
+ await page.screenshot({path:'.cache/acp-shared-credentials.png'});
  assert.deepEqual(errors,[]);
- console.log('PASS: ACP agents labelled Preview (picker, Settings) and a failed launch-flag check shown in Settings; ACP conversation from the real adapter journal (tool lines, plan, command, reply, approval with the agent’s Always), Settings → Agents (installed with version, missing with install command, custom agent added/edited/removed, env values never shown), keyboard agent picker with icons. Fixture only.');
+ console.log('PASS: Antigravity shows Gemini CLI’s shared API key by name (Agents, Subscriptions → Google); ACP agents labelled Preview (picker, Settings) and a failed launch-flag check shown in Settings; ACP conversation from the real adapter journal (tool lines, plan, command, reply, approval with the agent’s Always), Settings → Agents (installed with version, missing with install command, custom agent added/edited/removed, env values never shown), keyboard agent picker with icons. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

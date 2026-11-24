@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/delivery"
 )
 
 // Plan approval and budgets (audits/2026-11-16/sota-agents.md §6.9, §6.11):
@@ -60,11 +62,13 @@ type (
 		Commit     string `json:"commit"`
 	}
 	PlanContract struct {
-		Artifact  string   `json:"artifact"`
-		Version   uint32   `json:"version"`
-		Workspace string   `json:"workspace"`
-		Digest    string   `json:"digest"`
-		Criteria  []string `json:"criteria"`
+		Artifact  string               `json:"artifact"`
+		Title     string               `json:"title,omitempty"`
+		Version   uint32               `json:"version"`
+		Workspace string               `json:"workspace"`
+		Digest    string               `json:"digest"`
+		Criteria  []string             `json:"criteria"`
+		Bindings  []delivery.Criterion `json:"bindings,omitempty"`
 	}
 	// PlanPayload is plan.proposed.
 	PlanPayload struct {

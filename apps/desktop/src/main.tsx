@@ -6,7 +6,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { fetch as nativeFetch } from '@tauri-apps/plugin-http';
 import { MissionWindow, AgentWindow, ArtifactExportContext, ArtifactWindow, OpenHtmlInBrowserContext, PREFERENCE_EVENT, WebWindow, WindowControls, WindowErrorBoundary, Workspace, configureContextMenus, configureExternalTerminal, configureSystemSounds, configureTitleBar, configureVoice, installLinkRouting, openInViewer, runMenuAction, useActionRevision, useNativeActionMenu, useRunnerLocator, type NativeMenuItem } from '@lazybox/surfaces';
 import type { AddComputerStep, RunnerDirectoryHost, RunnerListing, SshHost } from '@lazybox/platform';
-import type { AppHost, AppInfo, ChatReturn, AttentionDestination, AttentionHost, AvailableUpdate, FeedbackDiagnostics, NativeWebViews, RecognitionEvent, RecognizerLanguage, RecognizerStatus, SpeechVoice, SurfaceHost, SurfaceTarget, TitleBarInset, ViewStateStore, UpdateError, UpdateErrorKind, UpdateProgress, VoiceHost, WebViewEvent, WorkspaceHost, ZoomHost } from '@lazybox/platform';
+import type { AppHost, AppInfo, ChatReturn, AttentionDestination, AttentionHost, NotificationPermission, AvailableUpdate, FeedbackDiagnostics, NativeWebViews, RecognitionEvent, RecognizerLanguage, RecognizerStatus, SpeechVoice, SurfaceHost, SurfaceTarget, TitleBarInset, ViewStateStore, UpdateError, UpdateErrorKind, UpdateProgress, VoiceHost, WebViewEvent, WorkspaceHost, ZoomHost } from '@lazybox/platform';
 import { FirstRun } from './FirstRun';
 
 type Bootstrap = { url: string; token: string; workingDirectory: string; target: SurfaceTarget; viewKey: string; viewScope: string; viewRoot: string; applicationName: string; fixedWorkspaceId: string; kind: 'workspace' | 'chat' | 'console' | 'mission' | 'artifact' | 'web'; notice: string; viewState: Record<string,string> };
@@ -23,7 +23,11 @@ const fetchRunner: typeof globalThis.fetch = (input, init) => nativeFetch(input,
 const desktopAttention: AttentionHost = {
   notifyAttention: notice => invoke<void>('notify_attention', { notice: { title: notice.title, body: notice.body, destination: { collectionId: notice.collectionId, sessionId: notice.sessionId, runner: notice.runner || '' } } }),
   setAttentionBadge: count => invoke<void>('set_attention_badge', { count }),
-  notificationPermission: async () => 'granted',
+  // macOS decides (notifications_macos.rs): never assume it said yes.
+  notificationPermission: () => invoke<NotificationPermission>('notification_permission'),
+  requestNotificationPermission: () => invoke<NotificationPermission>('request_notification_permission'),
+  systemSettings: 'System Settings → Notifications → Lazybox',
+  askAtStart: true,
   onAttentionOpen(listener) {
     let disposed = false, stop: (() => void) | undefined;
     const take = async () => {
@@ -43,7 +47,8 @@ const desktopAttention: AttentionHost = {
  */
 const reset = invoke<void>('web_view_reset').catch(error => console.error('Could not reset web views', error));
 const desktopWebViews: NativeWebViews = {
-  show: async (id, url, frame, zoom) => { await reset; await invoke<void>('web_view_show', { id, url, frame, zoom }); },
+  show: async (id, url, frame, zoom, popout) => { await reset; await invoke<void>('web_view_show', { id, url, frame, zoom, popout: popout || null }); },
+  reclaim: popout => invoke<void>('web_view_reclaim', { popout }),
   hide: async id => { await reset; await invoke<void>('web_view_hide', { id }); },
   navigate: (id, url) => invoke<void>('web_view_navigate', { id, url }),
   action: (id, action) => invoke<void>('web_view_action', { id, action }),

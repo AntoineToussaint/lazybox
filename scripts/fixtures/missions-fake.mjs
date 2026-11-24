@@ -264,9 +264,15 @@ export function createMissionFake({ sessions, collections, events }) {
   };
   const setCost = (taskId, costUsd) => { for (const m of missions) for (const t of m.tasks) if (t.id === taskId) t.costUsd = costUsd; };
 
+  // Delivery outcomes (GetDeliveryOutcome), set by the test per lookup: the
+  // Runner serves one projection by conversation and by Mission task.
+  const deliveryOutcomes = new Map();
+  const setDelivery = (lookup, outcome) => deliveryOutcomes.set(lookup.sessionId ? 's:' + lookup.sessionId : `t:${lookup.missionId}/${lookup.taskId}`, outcome);
+
   /** One RPC, or undefined when it is not a mission RPC. */
   const handle = (method, body) => {
     switch (method) {
+      case 'GetDeliveryOutcome': { const o = deliveryOutcomes.get(body.sessionId ? 's:' + body.sessionId : `t:${body.missionId}/${body.taskId}`); return o ? { value: o } : refuse('no delivery contract'); }
       case 'ListMissions': return { value: { missions: [...missions].reverse().map(m => wire(m, false)) } };
       case 'GetMission': { const m = missions.find(v => v.id === body.missionId); return m ? { value: wire(m, true) } : { error: { code: 'not_found', message: 'mission not found' } }; }
       case 'CreateMission': { if (!body.title?.trim()) return refuse('a mission needs a title'); return { value: wire(create(body.title.trim(), body.brief || ''), true) }; }
@@ -285,5 +291,5 @@ export function createMissionFake({ sessions, collections, events }) {
     if (snippet) source = { kind: 'snippet', snippetKey: snippet.key };
     prompts.unshift({ text, conversationId: conversationOf(body.sessionId), collectionId: session?.collectionId || '', sessionId: body.sessionId, atUnixMillis: ms(), source, next });
   };
-  return { handle, missions, prompts, create, addTask, assign, recordRun, linkPullRequest, recordPullRequest, recordApply, spawnChild, agentMessage, reportChild, proposePlan, setBudget, setCost, addLease, addOverlap };
+  return { handle, setDelivery, missions, prompts, create, addTask, assign, recordRun, linkPullRequest, recordPullRequest, recordApply, spawnChild, agentMessage, reportChild, proposePlan, setBudget, setCost, addLease, addOverlap };
 }

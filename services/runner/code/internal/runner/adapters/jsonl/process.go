@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -281,7 +282,7 @@ func (p *Process) Call(ctx context.Context, method string, params any) (json.Raw
 	select {
 	case m := <-ch:
 		if len(m.Error) > 0 && string(m.Error) != "null" {
-			return nil, fmt.Errorf("adapter %s: %s", method, m.Error)
+			return nil, NewCallError(method, m.Error)
 		}
 		return m.Result, nil
 	case <-ctx.Done():
@@ -335,4 +336,113 @@ func (p *Process) Close() error {
 	case <-timer.C:
 		return errors.New("native process exit remains unconfirmed")
 	}
+}
+
+// CallError is the error an adapter answered a call with (a JSON-RPC error
+// object). It reads as the adapter's own words: its message, and the reason
+// in its data when the message alone is generic ("Internal error: model
+// claude-x not available"), never the raw object, which reaches the person.
+// Method, Code, Data and Raw stay for code that decides what to do with it;
+// a caller says which step failed (Codex and ACP name it when they did not
+// start).
+type CallError struct {
+	Method  string
+	Code    int
+	Message string
+	Data    json.RawMessage
+	// Raw is the error as the adapter sent it.
+	Raw json.RawMessage
+}
+
+// NewCallError reads an adapter's error answer to method. Each field is
+// read on its own, so one of an unexpected type keeps the others.
+func NewCallError(method string, raw json.RawMessage) *CallError {
+	e := &CallError{Method: method, Raw: append(json.RawMessage(nil), raw...)}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) == nil {
+		_ = json.Unmarshal(fields["message"], &e.Message)
+		var code float64
+		if json.Unmarshal(fields["code"], &code) == nil {
+			e.Code = int(code)
+		}
+		e.Data = fields["data"]
+	} else {
+		_ = json.Unmarshal(raw, &e.Message)
+	}
+	e.Message = strings.TrimSpace(e.Message)
+	return e
+}
+
+// Reason is what the adapter said in words, as one bounded line: its
+// message, with the reason its data gives when that adds something. Empty
+// when it said nothing readable (a bare code, an object of other fields).
+func (e *CallError) Reason() string {
+	message, detail := oneLine(e.Message), dataDetail(e.Data)
+	switch {
+	// Compared with what the person reads: a reason only a hidden line holds still shows.
+	case detail == "" || strings.Contains(strings.TrimSuffix(message, "…"), strings.TrimSuffix(detail, "…")):
+		return message
+	case message == "":
+		return detail
+	}
+	return message + ": " + detail
+}
+
+// Full is everything the adapter answered, for code that recognises a case
+// by a phrase anywhere in it: Reason and Error keep only what the person reads.
+func (e *CallError) Full() string { return e.Message + " " + string(e.Raw) }
+
+// Error is the reason. Without one, it names the call that failed, with
+// the code: most callers pass the error on as it is, and that is then the
+// only clue to which step it was.
+func (e *CallError) Error() string {
+	if reason := e.Reason(); reason != "" {
+		return reason
+	}
+	if e.Code != 0 {
+		return fmt.Sprintf("%s failed with no reason given (error %d)", e.Method, e.Code)
+	}
+	return e.Method + " failed with no reason given"
+}
+
+// FullText is everything an error says, a CallError's whole answer included:
+// what code matches phrases against.
+func FullText(err error) string {
+	var call *CallError
+	if errors.As(err, &call) {
+		return err.Error() + " " + call.Full()
+	}
+	return err.Error()
+}
+
+// dataDetail is the reason an error's data gives in words, when it gives
+// one: a string, or the string field ACP and JSON-RPC servers use.
+func dataDetail(data json.RawMessage) string {
+	var text string
+	if json.Unmarshal(data, &text) == nil {
+		return oneLine(text)
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return ""
+	}
+	for _, key := range []string{"details", "message", "reason", "error"} {
+		if json.Unmarshal(fields[key], &text) == nil && strings.TrimSpace(text) != "" {
+			return oneLine(text)
+		}
+	}
+	return ""
+}
+
+// detailLimit bounds the reason data adds: a stack trace or a stderr dump
+// stays in the adapter's log, not in the line the person reads.
+const detailLimit = 240
+
+func oneLine(text string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(text), "\n")
+	line = strings.TrimSpace(line)
+	if r := []rune(line); len(r) > detailLimit {
+		line = string(r[:detailLimit-1]) + "…"
+	}
+	return line
 }

@@ -217,6 +217,26 @@ try {
   await expect(pullRows).toHaveCount(0, {timeout: 12_000});
   await page.keyboard.press('Escape');
 
+  // 5b. Approved and green, but behind a base its repository requires it to match: GitHub calls it
+  // mergeable yet refuses the merge. The row offers Update branch (asked first, at the head shown), never Merge.
+  f.tracked.links.push(link({key: 'acme/web#94', workspace: 'beta', session: 'beta-session', checks: 'success', review: 'approved', mergeable: true, mergeableState: 'behind', title: 'Solution page'}));
+  await page.reload();
+  await inboxButton.click();
+  const behind = pullRows.filter({hasText: 'acme/web#94'});
+  await expect(behind).toContainText('acme/web#94 checks green · out of date with main');
+  await expect(behind.getByRole('button', {name: /Merge/})).toHaveCount(0);
+  await behind.getByRole('button', {name: 'Update branch…'}).click();
+  const askUpdate = behind.getByRole('group', {name: 'Confirm updating the branch'});
+  await expect(askUpdate).toContainText('Update #94 with main? GitHub merges main into its branch');
+  await behind.screenshot({path: '.cache/pull-requests-behind.png'});
+  await askUpdate.getByRole('button', {name: 'Update #94'}).click();
+  await expect.poll(() => sent('UpdatePullRequestBranch').length).toBe(1);
+  const update = sent('UpdatePullRequestBranch')[0].body;
+  assert.deepEqual({collection: update.collectionId, head: update.expectedHead, key: update.item?.key}, {collection: 'beta', head: 'sha-94', key: 'acme/web#94'});
+  // Updated, its checks run again: it no longer waits on the person.
+  await expect(pullRows.filter({hasText: 'acme/web#94'})).toHaveCount(0, {timeout: 12_000});
+  await page.keyboard.press('Escape');
+
   // 6. The phone: the same rows, thumb-sized, with Undo before a send.
   f.remote.tailscale = {...f.remote.tailscale, enabled: true, state: 'serving'};
   f.remote.phoneUrl = origin;

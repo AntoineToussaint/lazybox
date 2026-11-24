@@ -204,3 +204,16 @@ test('managed command frames never create a forked agent', () => {
   ] } }));
   assert.ok(result.some(event => event.type === 'tool_activity' && !event.agentId));
 });
+
+test('late progress and start notifications cannot restart a completed task', () => {
+  const status = new NativeStatus();
+  const task = { type: 'system', task_id: 't', tool_use_id: 'spawn', run_id: '002' };
+  status.normalize(message({ ...task, subtype: 'task_started', description: 'Audit' }));
+  status.normalize(message({ ...task, subtype: 'task_notification', status: 'completed', summary: 'Done' }));
+  for (const subtype of ['task_progress', 'task_started']) {
+    for (const run_id of ['002', undefined]) {
+      assert.deepEqual(status.normalize(message({ ...task, subtype, run_id, description: 'Audit' })), []);
+    }
+  }
+  assert.equal(status.normalize(message({ ...task, subtype: 'task_started', run_id: '003', description: 'Retry' }))[0].status, 'running');
+});

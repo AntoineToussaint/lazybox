@@ -158,10 +158,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 	if title == "" {
 		title = a.Agent.ID
 	}
-	env := append([]string(nil), o.Env...)
-	for _, name := range a.Agent.EnvNames() {
-		env = append(env, name+"="+a.Agent.Env[name])
-	}
+	env := append(append([]string(nil), o.Env...), a.Agent.LaunchEnv()...)
 	life, cancel := context.WithCancel(ctx)
 	var p *jsonl.Process
 	var err error
@@ -302,7 +299,7 @@ func (s *session) load(ctx context.Context, params map[string]any) (json.RawMess
 	select {
 	case m := <-loaded:
 		if present(m.Error) {
-			return nil, fmt.Errorf("adapter session/load: %s", m.Error)
+			return nil, jsonl.NewCallError("session/load", m.Error)
 		}
 		return m.Result, nil
 	case <-ctx.Done():
@@ -346,31 +343,14 @@ type authMethod struct {
 	Args        []string `json:"args"`
 }
 
-// rpcError is a JSON-RPC error an agent answered with.
-type rpcError struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data"`
-}
-
-// errorOf reads the JSON-RPC error out of a failed call ("adapter <method>: {…}").
-func errorOf(err error) (rpcError, bool) {
-	var e rpcError
-	text := err.Error()
-	if i := strings.Index(text, "{"); i >= 0 && json.Unmarshal([]byte(text[i:]), &e) == nil && (e.Code != 0 || e.Message != "") {
-		return e, true
-	}
-	return e, false
-}
-
 // authRequired is ACP's "Authentication required" error code.
 const authRequired = -32000
 
 // startupError says in plain words why an agent did not start: most often it
 // needs the person to sign in once, the way that agent signs in.
 func startupError(title, method string, err error, methods ...authMethod) error {
-	e, ok := errorOf(err)
-	if !ok {
+	var e *jsonl.CallError
+	if !errors.As(err, &e) {
 		return fmt.Errorf("%s did not start (%s): %w", title, method, err)
 	}
 	if e.Code == authRequired {
@@ -386,10 +366,10 @@ func startupError(title, method string, err error, methods ...authMethod) error 
 		}
 		return fmt.Errorf("%s needs you to sign in. %s", title, hint)
 	}
-	if e.Message == "" {
-		e.Message = fmt.Sprintf("error %d", e.Code)
+	if e.Reason() == "" {
+		return fmt.Errorf("%s did not start: %w", title, e) // the error names the step itself
 	}
-	return fmt.Errorf("%s did not start (%s): %s", title, method, e.Message)
+	return fmt.Errorf("%s did not start (%s): %w", title, method, e)
 }
 
 func (s *session) DurableState() json.RawMessage {

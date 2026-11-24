@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type 
 import { beginDrag, preventMouseDown } from './drag-gesture';
 import { Icon } from './Icons';
 import { CodeBlock } from './RichContent';
+import { elapsedLabel } from './live-status';
 import { useNow } from './LiveIndicator';
 import { titleWhenTruncated } from './truncated-title';
 import { activeSubagent, type Subagent, type SubagentStatus } from './subagent-model';
@@ -66,6 +67,7 @@ export function SubagentPanel() {
   const close = () => { view.closePanel(); const back = returnFocus.current; if (back instanceof HTMLElement && back.isConnected) back.focus(); };
   if (!agent) return <aside ref={host} className="subagent-panel" data-mode="float" aria-label="Sub-agent"><header ref={header} tabIndex={-1}><span>This sub-agent is no longer in the conversation’s history.</span><button type="button" className="icon-button" aria-label="Close sub-agent panel" onClick={close}><Icon name="close" size={14}/></button></header></aside>;
   const title = subagentTitle(agent, view);
+  const lastUpdate = agent.lastAt ?? agent.startedAt;
   const command = agent.kind === 'command', noun = command ? 'background command' : 'sub-agent';
 
   const clamp = (left: number, top: number) => {
@@ -137,6 +139,8 @@ export function SubagentPanel() {
     </header>
     <div className="subagent-panel-meta">
       <SubagentStats agent={agent} status={status} now={now}/>
+      {active && !command && lastUpdate !== undefined && now - lastUpdate >= 60_000 &&
+        <span title={new Date(lastUpdate).toLocaleString()}>Last update {elapsedLabel(now - lastUpdate)} ago</span>}
     </div>
     {active && agent.progress && <p className="subagent-progress">{agent.progress}</p>}
     <div className="subagent-panel-body" ref={body} tabIndex={0} aria-label={command ? 'Command and output' : 'Sub-agent timeline'} onScroll={event => { const node = event.currentTarget; following.current = node.scrollHeight - node.scrollTop - node.clientHeight < 32; }}>

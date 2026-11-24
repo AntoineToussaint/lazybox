@@ -703,7 +703,7 @@ func (b *Bench) startReview(ctx context.Context, req ReviewRequest, markStarted 
 	brief := reviews.Brief(reviews.BriefInput{Reviewer: label, Author: authorLabel, Conversation: sourceTitle, Goal: b.reviewGoal(source), Plan: workspacePlan,
 		Scope: scope.label, Diff: scope.diff, Files: scope.files, Evidence: b.reviewEvidence(source), Template: template, Focus: focus, Guidance: preset.Guidance + reviewCompletionInstructions(req.TemplateID)})
 	if contract != nil {
-		brief += fmt.Sprintf("\n\n## Approved Mission contract\n\nSpec %s, version %d, digest %s. Record what you verified for each criterion and any gaps.\n", contract.Artifact, contract.Version, contract.Digest)
+		brief += fmt.Sprintf("\n\n## Approved Mission contract\n\nSpec %s, version %d, digest %s. Record what you verified for each criterion and any gaps, and your verdict on each one with `lazybox delivery review <criterion> passed|failed`.\n", contract.Artifact, contract.Version, contract.Digest)
 		for _, criterion := range contract.Criteria {
 			brief += "\n> " + strings.ReplaceAll(criterion, "\n", "\n> ") + "\n"
 		}

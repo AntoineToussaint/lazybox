@@ -23,6 +23,8 @@ The board has four columns — **Ready**, **Working**, **Needs you**, **Done** �
 and each card shows the task's status, its trust, its evidence, the
 conversation working on it and whether that agent is alive.
 
+The board summary includes blocked, failed and canceled tasks. A canceled task stays in the original total. Select the task named below the summary to jump to its card. For approved plans with a pinned spec, expand **Acceptance criteria** under the outcome to review the agreed requirements.
+
 ## Evidence is recorded for you
 
 While a conversation works on a task, Lazybox attaches evidence to the task
@@ -32,6 +34,8 @@ without anyone asking:
   status, the full output and what the agent saw;
 - **commits** made through the PR loop;
 - **pull requests** explicitly delivered by the assigned conversation, and their **checks**. Run `lazybox link <PR URL>` in that conversation, or create the PR there with a supported tool such as `gh pr create`. Link it while the conversation has one active task so the Runner can identify the attempt. A workspace branch alone does not associate its PR with a mission. An ambiguous command or result needs an explicit link. When a task changes hands, the replacement attempt starts with its own evidence. Previously recorded workspace-only checks and earlier attempts remain in the expanded history. Verification requires a check observation after delivery to the current attempt.
+
+The collapsed task card and acceptance inbox show the latest run and the most recent unresolved failed run when they differ. A failure stays until a later run of the same command passes: a different passing command can test a different part of the work. Expand the card for the full history.
 
 Click a run to open its output in the console; click a pull request to open it
 on GitHub. Each delivered PR has its own chip. Linking another PR keeps existing check results visible.
@@ -116,3 +120,79 @@ Integration merges the reviewed commits into a dedicated workspace and runs the 
 Retry an interrupted request with its original key, plan and check. The Runner reconciles a recorded check from the command journal. If it cannot identify a check, it preserves the workspace and records the interruption as a failed candidate. A fresh key starts another candidate.
 
 Promotion is an explicit owner decision. It verifies the worker reviews, clean candidate commits and current accepted generation. The accepted manifest advances once. The next candidate starts from those accepted commits, which local Git refs retain. The original base worktrees remain available for planning. Publishing to upstream repositories is a separate operation.
+
+### Naming delivery criteria
+
+A structured spec can use `spec.v2` to give each acceptance criterion a stable ID and mark it required or optional. Start from `lazybox artifact template delivery-spec`, publish it with `lazybox artifact put spec.json --title "…"` (the Runner recognizes the schema), and pin its artifact version in the Mission plan. The artifact reader lists each criterion by ID and requirement level. The approval sheet and worker brief include the IDs and requirement levels.
+
+```json
+{
+  "schema": "spec.v2",
+  "problem": "Deliver an authenticated catalog",
+  "requirements": ["Persist and retrieve work items"],
+  "acceptanceCriteria": [
+    {"id": "storage", "expected": "Duplicate inserts retain one work item", "required": true},
+    {"id": "api", "expected": "An authorized client retrieves that item after restart", "required": true}
+  ]
+}
+```
+
+Existing spec.v1 plans continue to use text criteria.
+
+### Checking delivery criteria
+
+Run each criterion's check through `lazybox run`, naming the criterion:
+
+```bash
+lazybox run --needs generate -- codefly add service catalog
+lazybox run --check storage -- psql -f checks/storage.sql
+lazybox run --check api -- go test ./api -run TestAuthorized
+```
+
+| Run | Exit | Effect on the criterion |
+|---|---|---|
+| `--check` | 0 | passed |
+| `--check` | non-zero | failed |
+| `--needs` | non-zero | blocked: a prerequisite failed |
+| `--needs` | 0 | clears a blocked criterion; proves nothing else, so run its `--check` |
+| either | 126 or 127 (could not start) | blocked |
+| either | stopped (Stop in Lazybox, an interrupt) | marks an unrun criterion unverified; never erases a result |
+
+Only a `--check`, or a prerequisite that failed, replaces a criterion's result: a later `--needs` or a stopped rerun never clears an earlier failure or pass.
+
+A check waits for its result: it never moves to the background, and `--background` is refused. The run ends with one line saying what was recorded, for example `check storage: passed on candidate:3f2a… (“Catalog spec” v3)`, and `lazybox ls` repeats it.
+
+The candidate is the files the check ran on: each workspace repository's commit and any uncommitted changes, taken when the run starts. Checking before you commit is fine, but committing changes the candidate, so run the checks again on what you commit. A run whose files change while it runs (an edit or a commit) records nothing and says so. A check is refused before it runs when a workspace repository is not ready.
+
+A worker on a Mission task checks against the plan's approved contract. An ordinary conversation pins a published spec.v2 version first:
+
+```bash
+lazybox delivery bind spec-catalog@3
+```
+
+Each bind of a different version, even one bound before, starts a new attempt with no results yet; earlier results stay with the attempt they were checked in. A check is refused before it runs when no contract names its criterion, and in a conversation that works more than one Mission task at once. The Runner saves each result with the run's completion and records it once, including after a restart.
+
+### Reading the delivery outcome
+
+The Runner keeps one outcome per attempt and serves it everywhere: the Mission card and the acceptance inbox show it in one line, and the conversation shows it under its messages once a turn ends (open it for every criterion). From an agent, or from your terminal with `--mission ID --task ID`:
+
+```bash
+lazybox delivery status          # the verdict, what blocks it, each criterion's evidence
+lazybox delivery status --json   # the same, machine-readable
+```
+
+| Verdict | Means |
+|---|---|
+| Delivered | every required criterion passed on the workspace's current files |
+| Failing | a required check failed |
+| Blocked | a required criterion's prerequisite failed |
+| Incomplete | a required criterion is not yet proven on these files |
+| Unverified | nothing names required criteria (no spec, or a text-only spec.v1) |
+
+The verdict is for the workspace's current files, uncommitted changes included, read again on every lookup: right after a commit the new files read Incomplete until their checks run. The spec and each run are named by their titles (`lazybox run --title` names a run). Files nobody checked yet read Incomplete, and the files checked earlier are listed with their own verdicts. A failure a later check resolved stays in the evidence, marked resolved. Select a run to open its output; output the Runner no longer keeps says so. Accepting a task, or asking for changes, is shown beside the verdict and never changes it: accepting with a criterion still open leaves that gap visible.
+
+A reviewer of a contract-bound Mission review records its verdict on each criterion with `lazybox delivery review <criterion> passed|failed`. It counts for the files under review and is refused once the work has new commits.
+
+### Publishing a verdict
+
+`lazybox delivery publish` keeps the outcome as a report artifact (schema `delivery-outcome.v1`); `lazybox delivery publish --id ID` publishes the next version. Each version keeps the verdict it was published with: publish while blocked, repair, publish again, and the first version still reads Blocked. The reader shows a verdict per candidate with each criterion's state and evidence, and says which run outputs were no longer kept when it was published.

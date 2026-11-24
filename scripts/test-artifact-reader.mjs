@@ -30,6 +30,18 @@ const shellDoc = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: 
     '`example-tool login --profile dev`', '', 'Use `/mcp` in the agent.', '', '```sh', 'printf first', 'printf second', '```', '', '```json', '{}', '```'].join('\n') });
 const todo = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Tasks', kind: 'todo-list',
   content: JSON.stringify({ schema: 'todo-list.v1', items: [{ id: 'verify', text: 'Verify phone', status: 'todo' }] }) });
+const road = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Release map', kind: 'plan', format: 'json',
+  content: JSON.stringify({ schema: 'roadmap.v1', milestones: [
+    { id: 'alpha', title: 'Prototype', phase: 'Build', owner: 'Ada', status: 'accepted', deliverable: 'Prototype', dependsOn: [], definitionOfDone: ['Build passes'], evidence: ['Build 42'], openDecisions: [] },
+    { id: 'beta', title: 'Release', phase: 'Launch', owner: 'Lin', status: 'blocked', deliverable: 'Package available', dependsOn: ['alpha'], definitionOfDone: ['Installer tested'], evidence: [], openDecisions: ['Which signing key?'] },
+  ] }) });
+// A published delivery verdict (lazybox delivery publish): schema delivery-outcome.v1.
+const verdict = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Delivery outcome · spec spec-catalog v3', kind: 'report', format: 'json',
+  content: JSON.stringify({ schema: 'delivery-outcome.v1', contract: { artifact: 'spec-catalog', version: 3, schema: 'spec.v2', digest: 'sha256:spec', criteria: [] }, attempt: 'conversation:c/1', subject: { conversation: 'c' }, current: 'candidate:2a7f9c11', decision: 'accepted',
+    candidates: [{ candidate: 'candidate:2a7f9c11', current: true, verdict: 'blocked', criteria: [
+      { id: 'storage', expected: 'Duplicate inserts keep one item', required: true, state: 'passed', evidence: [{ id: 'run:e/1', source: 'command', reference: 'run:e/1', command: '1', exitCode: 0, assertion: 'passed', state: 'passed', output: 'available' }] },
+      { id: 'generate', expected: 'The catalog service is generated', required: true, state: 'blocked', evidence: [{ id: 'run:e/2', source: 'command', reference: 'run:e/2', command: '2', exitCode: 1, prerequisite: 'failed', state: 'blocked', output: 'unavailable' }] },
+    ] }] }) });
 const structuredDocs = [];
 for (const kind of ['plan', 'spec', 'report', 'notes', 'other']) {
   const content = await readFile(new URL('../services/runner/code/internal/runner/artifacts/templates/' + kind + '.json', import.meta.url), 'utf8');
@@ -79,7 +91,12 @@ try {
   await editMilestones.getByLabel('Phase', { exact: true }).fill('Verification');
   await editMilestones.getByRole('button', { name: 'Save roadmap' }).click();
   await expect(page.getByLabel('Version', { exact: true })).toHaveValue('2');
-  await expect(page.getByText('Phase: Verification', { exact: true })).toBeVisible();
+  const phase = page.getByRole('region', { name: 'Verification', exact: true });
+  await expect(phase.getByRole('heading', { name: 'Verification' })).toBeVisible();
+  await expect(phase).toContainText('0 of 1 accepted');
+  const checkpoint = phase.getByRole('article', { name: 'Deliver the first slice' });
+  await expect(checkpoint.getByRole('region', { name: 'Definition of done' })).toContainText('Verify the original regression.');
+  await expect(checkpoint).toContainText('Open');
   await expect(page.getByRole('button', { name: /Source review.*Structured report/ })).toBeVisible();
   await page.getByLabel('Artifact actions', { exact: true }).click();
   await page.getByText('Draft mission proposal in chat…').click();
@@ -88,25 +105,80 @@ try {
   await page.getByRole('button', { name: /Source design.*v1/ }).click();
   await expect(page.getByLabel('Version', { exact: true })).toHaveValue('1');
   await expect(page.getByRole('button', { name: /Roadmap · Implementation roadmap/ })).toBeVisible();
+  const relatedDraft = page.getByRole('complementary', { name: 'Agent companion' }).getByRole('textbox', { name: 'Message', exact: true });
+  await relatedDraft.fill('');
+  await page.getByRole('button', { name: 'Add to companion', exact: true }).click();
+  await expect(relatedDraft).toHaveValue(new RegExp(doc.id + ' --version 1'));
+  assert.equal((await relatedDraft.inputValue()).trim().split('\n').length, 1, 'the companion drafts only the pinned reference');
+  await relatedDraft.fill('');
+  await page.goto(standalone.replace(doc.id, road.id));
+  const launch = page.getByRole('article', { name: 'Release', exact: true });
+  await expect(launch).toContainText('Blocked');
+  await expect(launch).toContainText('Lin');
+  await expect(launch.getByRole('region', { name: 'Open decisions' })).toContainText('Which signing key?');
+  await launch.getByRole('link', { name: 'Prototype' }).click();
+  await expect(page.getByRole('heading', { name: 'Prototype', exact: true })).toBeFocused();
+  await expect(page.getByRole('region', { name: 'Verification evidence' })).toContainText('Build 42');
+  await page.goto(standalone.replace(doc.id, verdict.id));
+  await expect(page.getByRole('heading', { name: /Blocked on the workspace files when published \(2a7f9c11\)/ })).toBeVisible();
+  await expect(page.getByText('The technical verdict below is unchanged.')).toBeVisible();
+  await expect(page.getByRole('row').filter({ hasText: 'generate' })).toContainText('blocked run:e/2 (exit 1), output no longer kept');
+  await expect(page.getByRole('row').filter({ hasText: 'storage' })).toContainText('passed');
   for (const { record, field } of structuredDocs) {
     await page.goto(standalone.replace(doc.id, record.id));
     await expect(page.getByRole('heading', { name: field[0].toUpperCase() + field.slice(1), exact: true })).toBeVisible();
   }
+  const planPage = structuredDocs.find(item => item.record.kind === 'plan').record;
+  await page.goto(standalone.replace(doc.id, planPage.id));
+  await expect(page.getByRole('region', { name: 'Steps' }).locator('ol > li')).toHaveText(['Verify the build']);
+  await expect(page.getByRole('region', { name: 'Completion checks' })).toContainText('Smoke test passes');
   const structuredSpec = structuredDocs.find(item => item.record.kind === 'spec').record;
   await page.goto(standalone.replace(doc.id, structuredSpec.id));
+  await expect(page.getByRole('region', { name: 'Requirements', exact: true })).toContainText('Describe required behavior');
+  await expect(page.getByRole('region', { name: 'Acceptance criteria' })).toContainText('Describe an observable outcome');
   await page.getByLabel('Artifact actions', { exact: true }).click();
   await page.getByText('Create implementation roadmap…', { exact: true }).click();
   assert.ok((await roadmap.getByLabel('Milestone title').evaluateAll(nodes => nodes.map(node => node.value))).includes('Requirements'));
   await roadmap.getByRole('button', { name: 'Cancel' }).click();
+  const specSource = page.getByRole('textbox', { name: 'Artifact source', exact: true });
+  await page.getByRole('tab', { name: 'Source' }).click();
+  await page.getByRole('button', { name: 'Edit source' }).click();
+  const editedSpec = JSON.parse(await specSource.inputValue());
+  editedSpec.problem = 'Confirm the release on a second display';
+  await specSource.fill('{');
+  await page.getByRole('button', { name: 'Save version' }).click();
+  await expect(specSource).toHaveAttribute('aria-invalid', 'true');
+  await specSource.fill(JSON.stringify(editedSpec, null, 2));
+  await page.getByRole('tab', { name: 'Document' }).click();
+  await page.getByRole('tab', { name: 'Source' }).click();
+  await expect(specSource).toHaveValue(JSON.stringify(editedSpec, null, 2));
+  await page.getByRole('button', { name: 'Save version' }).click();
+  await expect(page.getByLabel('Version', { exact: true })).toHaveValue('2');
+  await expect(page.locator('.artifact-source-pane pre')).toContainText(editedSpec.problem);
+  await page.getByRole('button', { name: 'Edit source' }).click();
+  await specSource.fill(JSON.stringify({ ...editedSpec, problem: 'My unsaved revision' }));
+  fixture.artifacts.agentPut({ collectionId: 'alpha', artifactId: structuredSpec.id, content: JSON.stringify({ ...editedSpec, problem: 'A concurrent revision' }) });
+  await page.getByRole('button', { name: 'Save version' }).click();
+  await expect(page.getByRole('button', { name: 'View v3' })).toBeVisible();
+  await expect(specSource).toHaveValue(/My unsaved revision/);
+  await page.reload();
+  await page.getByRole('tab', { name: 'Source' }).click();
+  await expect(specSource).toHaveValue(/My unsaved revision/);
+  await expect(page.getByRole('button', { name: 'Save version' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Discard draft' }).click();
+  await expect(page.locator('.artifact-source-pane pre')).toContainText('A concurrent revision');
+  await page.getByLabel('Version', { exact: true }).selectOption('1');
+  await expect(page.getByRole('button', { name: 'Edit source' })).toHaveCount(0);
   await page.goto(standalone.replace(doc.id, todo.id));
   const checkbox = page.getByRole('checkbox', { name: 'Verify phone' });
   await expect(page.getByText('0 of 1 complete', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Draft remaining tasks in chat' }).click();
-  const taskChat = page.getByRole('complementary', { name: 'Artifact chat' });
+  const taskChat = page.getByRole('complementary', { name: 'Agent companion' });
+  await taskChat.getByRole('combobox', { name: 'Conversation' }).selectOption(session.id);
   const taskDraft = taskChat.getByRole('textbox', { name: 'Message', exact: true });
   await expect(taskDraft).toHaveValue(new RegExp(todo.id + ' --version 1[\\s\\S]*items marked todo'));
   await taskDraft.fill('');
-  await taskChat.getByRole('button', { name: 'Close artifact chat' }).click();
+  await taskChat.getByRole('button', { name: 'Close agent companion' }).click();
   await page.reload();
   await checkbox.click();
   await expect(page.getByLabel('Version', { exact: true })).toHaveValue('2');
@@ -125,23 +197,24 @@ try {
   await expect(preview.locator('script, iframe, [href], [src]')).toHaveCount(0);
   await expect(page.locator('iframe[title="HTML artifact preview"]')).toHaveAttribute('sandbox', '');
   await page.getByRole('tab', { name: 'Source' }).click();
-  await expect(page.locator('.artifact-html-source')).toContainText('<script>');
+  await expect(page.locator('.artifact-source-pane pre')).toContainText('<script>');
   await page.getByRole('tab', { name: 'Changes' }).click();
   await expect(page.getByRole('region', { name: 'Changes from v1 to v2' })).toContainText('Throughput');
   await page.getByRole('tab', { name: 'Preview' }).click();
   await page.getByLabel('Version', { exact: true }).selectOption('1');
   await expect(preview.getByText('Latency')).toHaveCount(1);
   await page.getByRole('tab', { name: 'Source' }).click();
-  await page.locator('.artifact-html-source').evaluate(node => {
+  await page.locator('.artifact-source-pane pre').evaluate(node => {
     const range = document.createRange();
     range.selectNodeContents(node);
     getSelection().removeAllRanges();
     getSelection().addRange(range);
   });
   const sendsBefore = fixture.mutations.filter(call => call.method === 'Apply').length;
-  await page.getByRole('button', { name: 'Discuss selection in chat' }).click();
-  const chat = page.getByRole('complementary', { name: 'Artifact chat' });
-  await expect(chat.getByRole('combobox', { name: 'Conversation' })).toHaveValue(session.id);
+  await page.getByRole('button', { name: 'Discuss selection with agent companion' }).click();
+  const chat = page.getByRole('complementary', { name: 'Agent companion' });
+  await expect(chat.getByRole('combobox', { name: 'Conversation' })).toHaveValue('');
+  await chat.getByRole('combobox', { name: 'Conversation' }).selectOption(session.id);
   const draft = chat.getByRole('textbox', { name: 'Message', exact: true });
   await expect(draft).toHaveValue(/--version 1[\s\S]*Selected excerpt:\n> .*Latency/);
   await expect(page.getByRole('separator', { name: 'Resize the chat' })).toBeVisible();
@@ -149,7 +222,7 @@ try {
   await expect(chat).toBeVisible();
   await expect(page.getByRole('separator', { name: 'Resize the chat' })).toBeHidden();
   await page.setViewportSize({ width: 1440, height: 900 });
-  await chat.getByRole('button', { name: 'Close artifact chat' }).click();
+  await chat.getByRole('button', { name: 'Close agent companion' }).click();
   await expect(chat).toHaveCount(0);
   await expect(page.getByLabel('Version', { exact: true })).toHaveValue('1');
   assert.equal(fixture.mutations.filter(call => call.method === 'Apply').length, sendsBefore, 'opening artifact chat must not send a prompt');
@@ -163,12 +236,12 @@ try {
   await page.getByRole('button', { name: 'Republish v1' }).click();
   await expect(page.getByLabel('Version', { exact: true })).toHaveValue('3');
   await page.getByRole('tab', { name: 'Source' }).click();
-  await expect(page.locator('.artifact-html-source')).toHaveText(htmlSource);
+  await expect(page.locator('.artifact-source-pane pre')).toHaveText(htmlSource);
 
   // An artifact without an originating conversation uses the workspace’s new-chat form.
   const standaloneNote = fixture.artifacts.agentPut({ collectionId: 'alpha', title: 'Workspace note', content: 'Notes for a new discussion.' });
   await page.goto(standalone.replace(doc.id, standaloneNote.id));
-  await page.getByRole('button', { name: 'Discuss in chat' }).click();
+  await page.getByRole('button', { name: 'Agent companion', exact: true }).click();
   await expect(chat.getByRole('combobox', { name: 'Conversation' })).toHaveValue('');
   await expect(chat).toContainText('The artifact reference will be added to your draft');
   assert.equal(fixture.mutations.filter(call => call.method === 'OpenSession').length, 0, 'the chat pane does not start an agent');
@@ -180,11 +253,11 @@ try {
 
   const noteDraft = await draft.inputValue();
   await draft.fill(noteDraft + '\n\nCould you check this?');
-  await chat.getByRole('button', { name: 'Close artifact chat' }).click();
+  await chat.getByRole('button', { name: 'Close agent companion' }).click();
   await expect(chat).toHaveCount(0);
-  await page.getByRole('button', { name: 'Discuss in chat' }).click();
+  await page.getByRole('button', { name: 'Agent companion', exact: true }).click();
   await expect(draft).toHaveValue(noteDraft + '\n\nCould you check this?');
-  await chat.getByRole('button', { name: 'Send message', exact: true }).click();
+  await draft.press('Enter');
   await expect.poll(() => fixture.mutations.filter(call => call.method === 'Apply' && call.body.message).length).toBe(sendsBefore + 1);
   const discussion = fixture.mutations.find(call => call.method === 'Apply' && call.body.message);
   assert.match(JSON.stringify(discussion.body.message), /Workspace note.*Could you check this/);
@@ -194,7 +267,8 @@ try {
   const reviewDoc = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Revision review', content: '## Scope\n\nKeep the original wording.' });
   await page.goto(standalone.replace(doc.id, reviewDoc.id));
   const reviewPage = page.getByRole('article', { name: 'Revision review' });
-  await reviewPage.getByRole('button', { name: 'Discuss in chat' }).click();
+  await reviewPage.getByRole('button', { name: 'Agent companion', exact: true }).click();
+  await chat.getByRole('combobox', { name: 'Conversation' }).selectOption(session.id);
   await expect(draft).toHaveValue(/Revision review/);
   await draft.fill('Could we make this clearer?');
   const publishReview = wording => fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, artifactId: reviewDoc.id, content: '## Scope\n\n' + wording });

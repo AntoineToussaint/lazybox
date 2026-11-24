@@ -33,6 +33,8 @@ push(-565000,{type:'turn_ended'});
 push(-560000,{type:'operation_accepted',text:'[Lazybox] Round 2 of 3. Claude changed files in turn 3 after your findings.',operationId:'review-ab12-round-2'});
 push(-559000,{type:'receipt'});
 ch.events.at(-1).receipt={operationId:'p9',delivery:'unknown_after_runner_restart'};
+const manualReview = 'Please address these 4 review comments on the workspace’s changes. Each names the file and lines.\n\n### 1. api/handler.go:42\n\nReturn the original error.';
+push(-558500,{type:'operation_accepted',text:manualReview,operationId:'manual-review'});
 push(-558000,{type:'operation_accepted',text:'Thanks, ship it.',operationId:'p2'});
 
 // Background work: two sub-agents and seventeen commands, described by the agent.
@@ -70,7 +72,13 @@ try{
 
  // ── Lazybox's messages are events: an icon and one line, never a "You" card.
  const yours=messages.locator('article.message.operation_accepted');
- await expect(yours).toHaveCount(2);
+ await expect(yours).toHaveCount(3);
+ const reviewBox=yours.getByRole('button',{name:'Open 4 review comments'});
+ await expect(reviewBox).toBeVisible();
+ await reviewBox.click();
+ await expect(page.getByRole('dialog',{name:'4 review comments'}).locator('pre')).toHaveText(manualReview);
+ await page.keyboard.press('Escape');
+ await expect(reviewBox).toBeFocused();
  await expect(yours.filter({hasText:'[Lazybox]'})).toHaveCount(0);
  await expect(yours.filter({hasText:'Please address'})).toHaveCount(0);
  const events=messages.locator('.system-event:not(.notice)');

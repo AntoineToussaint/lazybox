@@ -197,6 +197,20 @@ watchers").
 `lazybox artifact put|get|list` publishes and reads workspace artifacts
 (`ARTIFACTS.md`).
 
+`lazybox run --check CRITERION -- cmd` records the run as the check of a
+delivery criterion (exit 0 passes, any other exit fails), and `--needs
+CRITERION` as a prerequisite (a non-zero exit blocks it). Both wait for the
+result (no `--background`) and name the files they ran on, uncommitted
+changes included; `lazybox ls` repeats what each recorded. A run is checked
+against its Mission task's approved contract, or against the spec.v2 version
+`lazybox delivery bind <spec-id>@<version>` pinned to the conversation;
+without one it is refused before it runs (`docs/guides/missions.md`,
+"Checking delivery criteria"). `lazybox delivery status [--json]` shows the
+verdict, what blocks it and each criterion's evidence (`--mission ID --task
+ID` from your own terminal); `lazybox delivery publish [--id ID]` keeps it as
+a versioned report artifact; `lazybox delivery review <criterion>
+passed|failed` records a contract-bound reviewer's verdict.
+
 `lazybox process validate|show|explain EVENT|events|schema` checks the
 orchestration process file (`.lazybox/process.yaml`, see
 `ORCHESTRATION.md` §4) from files alone; with `--workspace` it asks the

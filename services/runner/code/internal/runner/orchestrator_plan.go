@@ -2,12 +2,12 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/delivery"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/artifacts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/telemetry"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
@@ -54,17 +54,18 @@ func (b *Bench) ProposePlan(ctx context.Context, session, operation, summary str
 		if err != nil {
 			return nil, nil, err
 		}
-		var spec struct {
-			Schema             string
-			AcceptanceCriteria []string
+		if doc.Kind != "spec" || doc.Format != "json" {
+			return nil, nil, fmt.Errorf("%w: the contract needs a structured spec", work.ErrRefused)
 		}
-		if doc.Kind != "spec" || doc.Format != "json" || json.Unmarshal([]byte(doc.Content), &spec) != nil || spec.Schema != "spec.v1" || len(spec.AcceptanceCriteria) == 0 {
-			return nil, nil, fmt.Errorf("%w: the contract needs a structured spec with acceptance criteria", work.ErrRefused)
+		spec, err := delivery.ContractFromSpec(artifactID, version, artifacts.Digest(doc.Content), doc.Content)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", work.ErrRefused, err)
 		}
-		if len(strings.Join(spec.AcceptanceCriteria, "\n")) > 4096 {
+		contract := &work.PlanContract{Artifact: artifactID, Title: doc.Title, Version: version, Workspace: c.e.CollectionID, Digest: spec.Digest, Criteria: spec.Lines(), Bindings: spec.Criteria}
+		if len(strings.Join(contract.Criteria, "\n")) > 4096 {
 			return nil, nil, fmt.Errorf("%w: mission acceptance criteria exceed 4 KiB", work.ErrRefused)
 		}
-		payload.Contract = &work.PlanContract{Artifact: artifactID, Version: version, Workspace: c.e.CollectionID, Digest: artifacts.Digest(doc.Content), Criteria: spec.AcceptanceCriteria}
+		payload.Contract = contract
 	}
 	for _, t := range tasks {
 		if t.Workspace == "pinned" {

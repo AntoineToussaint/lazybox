@@ -101,9 +101,45 @@ fn destination(
     (!destination.session_id.is_empty() && destination.valid()).then_some(destination)
 }
 
+/// Whether notifications go through macOS's notification center (a bundled
+/// app) rather than the plugin's deprecated path.
+fn native() -> bool {
+    #[cfg(target_os = "macos")]
+    return crate::notifications_macos::available();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 /// A click on a notification opens (or focuses) the main window and tells it
 /// which conversation to show.
+fn clicked(handle: &tauri::AppHandle, target: Option<Destination>) {
+    if let Some(target) = target
+        && let Ok(mut pending) = handle.state::<Attention>().pending.lock()
+    {
+        *pending = Some(target);
+    }
+    let app = handle.clone();
+    let _ = handle.run_on_main_thread(move || {
+        if let Err(error) = crate::host::open(&app, "main") {
+            crate::host::report(&app, error);
+        }
+        let _ = app.emit_to("main", "attention-open", ());
+    });
+}
+
 pub fn setup(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    if native() {
+        let handle = app.clone();
+        crate::notifications_macos::listen(move |extra| {
+            let extra = extra
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect();
+            clicked(&handle, destination(&extra));
+        });
+        return Ok(());
+    }
     let handle = app.clone();
     app.notification().on_action(move |performed| {
         if performed.action_id() != "tap" {
@@ -112,24 +148,61 @@ pub fn setup(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         let target = performed
             .notification()
             .and_then(|n| destination(n.extra()));
-        if let Some(target) = target
-            && let Ok(mut pending) = handle.state::<Attention>().pending.lock()
-        {
-            *pending = Some(target);
-        }
-        let app = handle.clone();
-        let _ = handle.run_on_main_thread(move || {
-            if let Err(error) = crate::host::open(&app, "main") {
-                crate::host::report(&app, error);
-            }
-            let _ = app.emit_to("main", "attention-open", ());
-        });
+        clicked(&handle, target);
     })?;
     Ok(())
 }
 
+/// Awaits the notification center's answer, which arrives on its own thread,
+/// without holding a thread meanwhile.
+#[cfg(target_os = "macos")]
+async fn answer<T: Send + 'static>(
+    wait: std::time::Duration,
+    ask: impl FnOnce(crate::notifications_macos::Answer<T>),
+) -> Result<T, String> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    ask(std::sync::Mutex::new(Some(send)));
+    match tokio::time::timeout(wait, receive).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) => Err("macOS did not answer.".into()),
+        Err(_) => Err("macOS did not answer in time.".into()),
+    }
+}
+
+/// What the system lets Lazybox show: granted, denied, or default (never
+/// asked). Only macOS's notification center asks; elsewhere it is granted.
 #[tauri::command]
-pub fn notify_attention(
+pub async fn notification_permission() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    if native() {
+        return answer(
+            std::time::Duration::from_secs(10),
+            crate::notifications_macos::permission,
+        )
+        .await;
+    }
+    Ok("granted".into())
+}
+
+/// Asks the system once; a prompt waits for the person.
+#[tauri::command]
+pub async fn request_notification_permission() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    if native() {
+        return answer(
+            std::time::Duration::from_secs(600),
+            crate::notifications_macos::request,
+        )
+        .await;
+    }
+    Ok("granted".into())
+}
+
+/// Shows a notification. On macOS the answer is the notification center's:
+/// a notification macOS refuses (not allowed for Lazybox) is an error the
+/// page shows, never a silent success.
+#[tauri::command]
+pub async fn notify_attention(
     app: tauri::AppHandle,
     state: tauri::State<'_, Attention>,
     notice: Notice,
@@ -139,6 +212,18 @@ pub fn notify_attention(
         .sequence
         .fetch_add(1, Ordering::Relaxed)
         .wrapping_add(1);
+    #[cfg(target_os = "macos")]
+    if native() {
+        let extra = [
+            ("collectionId", notice.destination.collection_id),
+            ("sessionId", notice.destination.session_id),
+            ("runner", notice.destination.runner),
+        ];
+        return answer(std::time::Duration::from_secs(10), move |send| {
+            crate::notifications_macos::show(id, &notice.title, &notice.body, &extra, send)
+        })
+        .await;
+    }
     app.notification()
         .builder()
         .id(id)

@@ -1,0 +1,14 @@
+{
+  "schema": "spec.v2",
+  "problem": "Describe the user need",
+  "requirements": [
+    "Describe required behavior"
+  ],
+  "acceptanceCriteria": [
+    {
+      "id": "observable-outcome",
+      "expected": "Describe an observable outcome a check can confirm",
+      "required": true
+    }
+  ]
+}

@@ -1097,12 +1097,24 @@ actions:
         if (request) receipts.set(request, receipt);
         return json(receipt);
       }
+      case 'UpdatePullRequestBranch': {
+        // GitHub merges the base into the branch: a new head, its checks run again.
+        mutations.push({method,body});
+        const l=tracked.links.find(x=>x.collectionId===body.collectionId&&x.item?.ref?.key===body.item?.key&&x.role!=='mentions');
+        if(!l)return error('not_found','this workspace does not deliver that pull request');
+        if(body.expectedHead!==l.item.pullRequest?.headSha)return error('failed_precondition',"GitHub: expected head sha didn't match current head ref.");
+        Object.assign(l.item.pullRequest,{headSha:l.item.pullRequest.headSha+'-updated',mergeableState:'clean',checks:'pending'});l.item.updatedAtUnixMillis=String(Date.now());
+        const [repo,number]=l.item.ref.key.split('#');
+        return json({githubRepository:repo,branch:l.item.pullRequest.head,found:true,number,title:l.item.title,url:l.item.url,state:'open',headSha:l.item.pullRequest.headSha,mergeableState:'clean',checksState:'pending'});
+      }
       case 'MergePullRequest': {
         if(body.item?.key){
           mutations.push({method,body});
           const l=tracked.links.find(x=>x.collectionId===body.collectionId&&x.item?.ref?.key===body.item.key&&x.role!=='mentions');
           if(!l)return error('not_found','this workspace does not deliver that pull request');
           if(body.expectedHead!==l.item.pullRequest?.headSha)return error('failed_precondition','GitHub: Head branch was modified. Review and try the merge again.');
+          // A repository that requires up-to-date branches refuses one behind its base.
+          if(l.item.pullRequest?.mergeableState==='behind')return error('failed_precondition','GitHub: Head branch is out of date. Review and try the merge again.');
           l.item.state={category:'merged',label:'Merged'};l.item.pullRequest.closedAtUnixMillis=String(Date.now());
           const [repo,number]=l.item.ref.key.split('#');
           return json({githubRepository:repo,branch:l.item.pullRequest.head,found:true,number,title:l.item.title,url:l.item.url,state:'merged',headSha:l.item.pullRequest.headSha});

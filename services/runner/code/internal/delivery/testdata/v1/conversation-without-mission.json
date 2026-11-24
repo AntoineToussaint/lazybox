@@ -1,0 +1,326 @@
+{
+  "schema": "delivery-fixture.v1",
+  "description": "A conversation with no Mission: the generator cannot run, an unrelated storage pass leaves it blocked, its rerun clears only that blocker, a bare exit 0 and a piped run prove nothing, and an asserted API check completes the delivery. The optional docs criterion never runs. A met prerequisite and a stopped rerun of the API check afterwards leave its pass in place.",
+  "spec": {
+    "schema": "spec.v2",
+    "problem": "Deliver an authenticated work catalog",
+    "requirements": [
+      "Persist and retrieve work items"
+    ],
+    "acceptanceCriteria": [
+      {
+        "id": "storage",
+        "expected": "Duplicate inserts retain one work item",
+        "required": true
+      },
+      {
+        "id": "generate",
+        "expected": "The catalog service is generated",
+        "required": true
+      },
+      {
+        "id": "api",
+        "expected": "An authorized client retrieves the item after restart",
+        "required": true
+      },
+      {
+        "id": "docs",
+        "expected": "The module guide describes the catalog",
+        "required": false
+      }
+    ]
+  },
+  "contract": {
+    "artifact": "spec-catalog",
+    "version": 3,
+    "schema": "spec.v2",
+    "digest": "sha256:catalog-spec-v3",
+    "criteria": [
+      {
+        "id": "storage",
+        "expected": "Duplicate inserts retain one work item",
+        "required": true
+      },
+      {
+        "id": "generate",
+        "expected": "The catalog service is generated",
+        "required": true
+      },
+      {
+        "id": "api",
+        "expected": "An authorized client retrieves the item after restart",
+        "required": true
+      },
+      {
+        "id": "docs",
+        "expected": "The module guide describes the catalog",
+        "required": false
+      }
+    ]
+  },
+  "candidates": [
+    {
+      "id": "candidate:927de552ccb5897c",
+      "revisions": {
+        "api": "a1b2c3d",
+        "catalog": "0f9e8d7"
+      }
+    }
+  ],
+  "observations": [
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex1/c1",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "conversation:conv-catalog/1",
+      "subject": {
+        "conversation": "conv-catalog"
+      },
+      "source": "command",
+      "reference": "run:ex1/c1",
+      "criterionId": "generate",
+      "exitCode": 1,
+      "prerequisite": "failed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex1/c2",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "conversation:conv-catalog/1",
+      "subject": {
+        "conversation": "conv-catalog"
+      },
+      "source": "command",
+      "reference": "run:ex1/c2",
+      "criterionId": "storage",
+      "exitCode": 0,
+      "assertion": "passed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex1/c3",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "conversation:conv-catalog/1",
+      "subject": {
+        "conversation": "conv-catalog"
+      },
+      "source": "command",
+      "reference": "run:ex1/c3",
+      "criterionId": "generate",
+      "exitCode": 0,
+      "assertion": "passed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex1/c4",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "conversation:conv-catalog/1",
+      "subject": {
+        "conversation": "conv-catalog"
+      },
+      "source": "command",
+      "reference": "run:ex1/c4",
+      "criterionId": "api",
+      "exitCode": 0
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex1/c5",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "conversation:conv-catalog/1",
+      "subject": {
+        "conversation": "conv-catalog"
+      },
+      "source": "command",
+      "reference": "run:ex1/c5",
+      "criterionId": "api",
+      "assertion": "passed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex1/c6",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "conversation:conv-catalog/1",
+      "subject": {
+        "conversation": "conv-catalog"
+      },
+      "source": "command",
+      "reference": "run:ex1/c6",
+      "criterionId": "api",
+      "exitCode": 0,
+      "assertion": "passed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "conversation:conv-catalog/1",
+      "subject": {
+        "conversation": "conv-catalog"
+      },
+      "source": "command",
+      "id": "run:ex1/c7",
+      "criterionId": "api",
+      "reference": "run:ex1/c7",
+      "exitCode": 0,
+      "prerequisite": "passed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "conversation:conv-catalog/1",
+      "subject": {
+        "conversation": "conv-catalog"
+      },
+      "source": "command",
+      "id": "run:ex1/c8",
+      "criterionId": "api",
+      "reference": "run:ex1/c8",
+      "exitCode": 130
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "conversation:conv-catalog/1",
+      "subject": {
+        "conversation": "conv-catalog"
+      },
+      "source": "command",
+      "id": "run:ex1/c9",
+      "criterionId": "docs",
+      "reference": "run:ex1/c9",
+      "exitCode": 0,
+      "prerequisite": "passed"
+    }
+  ],
+  "checkpoints": [
+    {
+      "after": 1,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:927de552ccb5897c",
+        "attempt": "conversation:conv-catalog/1"
+      },
+      "verdict": "blocked",
+      "criteria": {
+        "storage": "unrun",
+        "generate": "blocked",
+        "api": "unrun",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 2,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:927de552ccb5897c",
+        "attempt": "conversation:conv-catalog/1"
+      },
+      "verdict": "blocked",
+      "criteria": {
+        "storage": "passed",
+        "generate": "blocked",
+        "api": "unrun",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 3,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:927de552ccb5897c",
+        "attempt": "conversation:conv-catalog/1"
+      },
+      "verdict": "incomplete",
+      "criteria": {
+        "storage": "passed",
+        "generate": "passed",
+        "api": "unrun",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 4,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:927de552ccb5897c",
+        "attempt": "conversation:conv-catalog/1"
+      },
+      "verdict": "incomplete",
+      "criteria": {
+        "storage": "passed",
+        "generate": "passed",
+        "api": "unverified",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 5,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:927de552ccb5897c",
+        "attempt": "conversation:conv-catalog/1"
+      },
+      "verdict": "incomplete",
+      "criteria": {
+        "storage": "passed",
+        "generate": "passed",
+        "api": "unverified",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 6,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:927de552ccb5897c",
+        "attempt": "conversation:conv-catalog/1"
+      },
+      "verdict": "passed",
+      "criteria": {
+        "storage": "passed",
+        "generate": "passed",
+        "api": "passed",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 8,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:927de552ccb5897c",
+        "attempt": "conversation:conv-catalog/1"
+      },
+      "verdict": "passed",
+      "criteria": {
+        "storage": "passed",
+        "generate": "passed",
+        "api": "passed",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 9,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:927de552ccb5897c",
+        "attempt": "conversation:conv-catalog/1"
+      },
+      "verdict": "passed",
+      "criteria": {
+        "storage": "passed",
+        "generate": "passed",
+        "api": "passed",
+        "docs": "unverified"
+      }
+    }
+  ]
+}

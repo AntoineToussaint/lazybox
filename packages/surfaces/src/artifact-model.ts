@@ -10,6 +10,22 @@ export const kindLabel: Record<ArtifactKind, string> = { plan: 'Plan', report: '
 export const kindIcon: Record<ArtifactKind, string> = { plan: 'checklist', report: 'report', spec: 'spec', notes: 'notes', 'todo-list': 'checklist', other: 'file' };
 export const asKind = (value: string): ArtifactKind => (ARTIFACT_KINDS as readonly string[]).includes(value) ? value as ArtifactKind : 'other';
 
+/** A structured artifact's fields as Markdown sections. A named acceptance criterion (spec.v2) reads as its ID, requirement level and expectation. */
+export function structuredMarkdown(fields: Record<string, unknown>): string {
+  const entry = (value: unknown) => {
+    if (value && typeof value === 'object' && 'id' in value && 'expected' in value) {
+      const criterion = value as { id: unknown; expected: unknown; required?: unknown };
+      return `**${criterion.id}** (${criterion.required ? 'required' : 'optional'}): ${criterion.expected}`;
+    }
+    return typeof value === 'string' ? value : JSON.stringify(value);
+  };
+  return Object.entries(fields).filter(([name]) => name !== 'schema').map(([name, value]) => {
+    const title = name[0].toUpperCase() + name.slice(1).replace(/[A-Z]/g, letter => ' ' + letter.toLowerCase());
+    const text = Array.isArray(value) ? value.map(item => '- ' + entry(item)).join('\n') : entry(value);
+    return '## ' + title + '\n\n' + text;
+  }).join('\n\n');
+}
+
 const clean = (line: string) => line.replace(/[*_`~]|\[([^\]]*)\]\([^)]*\)/g, (_, text) => text ?? '').replace(/\s+/g, ' ').trim();
 
 /** The first ATX or setext heading outside code fences, else the first prose line, at most 120 characters. */
@@ -153,6 +169,10 @@ export function updatedLine(artifact: Artifact, now = Date.now()): string {
   return [`v${latest?.number ?? 1}`, versionOrigin(latest), when].filter(Boolean).join(' · ');
 }
 
+export function pinnedArtifactReference(artifact: Pick<Artifact, 'id' | 'title' | 'kind'>, version: number): string {
+  return `Artifact “${artifact.title}” (${kindLabel[asKind(artifact.kind)].toLowerCase()}, v${version}). Read it in full with \`lazybox artifact get ${artifact.id} --version ${version}\`.`;
+}
+
 /**
  * What "Send to agent" puts in a message box: the reference an agent can fetch
  * with the CLI, and a short outline so the person sees what they are sending.
@@ -168,7 +188,7 @@ export function agentReference(artifact: Pick<Artifact, 'id' | 'title' | 'kind' 
     if (!item || used + item.length > budget) continue;
     outline.push(item); used += item.length + 1;
   }
-  const lines = [`Artifact “${artifact.title}” (${kindLabel[asKind(artifact.kind)].toLowerCase()}, v${version}). Read it in full with \`lazybox artifact get ${artifact.id} --version ${version}\`.`];
+  const lines = [pinnedArtifactReference(artifact, version)];
   for (const input of artifact.links ?? []) {
     if (input.kind === 'artifact') lines.push(`Source ${input.role}: \`lazybox artifact get ${input.id} --version ${input.version}\`.`);
   }

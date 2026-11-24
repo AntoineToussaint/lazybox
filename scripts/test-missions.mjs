@@ -108,6 +108,9 @@ try {
   const card = title => panel.locator('.mission-card').filter({ has: page.getByRole('button', { name: title, exact: true }) });
   const column = key => panel.locator(`.column-${key}`);
   await expect(column('ready').locator('.mission-card')).toHaveCount(2);
+  await expect(panel.locator('.mission-summary')).toContainText('1 blocked · 0 of 2 done');
+  await panel.getByRole('button', {name: 'Blocked · Document the parser'}).click();
+  await expect(card('Document the parser')).toBeFocused();
   await expect(card('Document the parser').locator('.mission-status')).toHaveText('Blocked');
   await expect(card('Document the parser').locator('.mission-reason')).toHaveText('Waiting for “Split the parser”');
   await expect(card('Split the parser').locator('.trust-badge')).toHaveCount(0);
@@ -138,11 +141,30 @@ try {
   const taskSession = fixture.missions.missions[0].tasks[0].attempts[0].sessionId;
 
   // The agent's failing `lazybox run` attaches by itself; Open goes to its output.
-  const failing = fixture.startRun(taskSession, 'go test ./...', { exitCode: 1, outputBytes: '1468006', agentBytes: '2150', filter: 'go-test', outputPath: '/state/command-output/task/go-1.log' });
-  fixture.missions.recordRun(taskSession, { title: 'go test ./...', exitCode: 1, commandId: failing.id });
-  await expect(split.locator('.evidence-chip')).toContainText('go test ./... · exit 1', { timeout: 10_000 });
+  const command = 'go test ./... ' + './internal/example/reviewed-plan/... '.repeat(8).trim();
+  const failing = fixture.startRun(taskSession, command, { exitCode: 1, outputBytes: '1468006', agentBytes: '2150', filter: 'go-test', outputPath: '/state/command-output/task/go-1.log' });
+  fixture.missions.recordRun(taskSession, { title: command, exitCode: 1, commandId: failing.id });
+  await expect(split.locator('.evidence-chip')).toContainText(command + ' · exit 1', { timeout: 10_000 });
   await expect(split.locator('.evidence-chip.tone-fail')).toHaveCount(1);
+  const cardBounds = await split.boundingBox();
+  const chipBounds = await split.locator('.evidence-chip.tone-fail').boundingBox();
+  assert.ok(chipBounds.x + chipBounds.width <= cardBounds.x + cardBounds.width + 1, 'long evidence stays inside its task card');
   await expect(split.locator('.mission-flag')).toHaveText('Last run failed');
+
+  // Under an approved plan that pins a spec, the card leads with the delivery
+  // verdict: the same projection the inbox and the conversation show.
+  const mission = fixture.missions.missions[0], task = mission.tasks[0];
+  mission.plans.push({ id: 'plan-delivery', grantId: '', state: 'approved', summary: 'Catalog', tasks: [], created: {}, contract: { artifactId: 'spec-catalog', version: 3, digest: 'sha256:spec', acceptanceCriteria: ['[storage, required] Duplicate inserts keep one item', '[generate, required] The catalog service is generated', '[api, required] An authorized client reads the item'] } });
+  const run = (id, reference, fields) => ({ id, source: 'command', reference, commandId: reference.split('/')[1], output: 'available', ...fields });
+  const outcome = { contract: { artifactId: 'spec-catalog', version: 3, digest: 'sha256:spec', schema: 'spec.v2', criteria: [] }, attempt: 'attempt-1', conversationId: taskSession, missionId: mission.id, taskId: task.id, current: 'candidate:2', decision: '',
+    candidates: [{ candidate: 'candidate:2', current: true, verdict: 'blocked', criteria: [
+      { id: 'storage', expected: 'Duplicate inserts keep one item', required: true, state: 'passed', evidence: [run('run:s/1', `run:${taskSession}/storage-run`, { exitCode: 0, assertion: 'passed', state: 'passed' })] },
+      { id: 'generate', expected: 'The catalog service is generated', required: true, state: 'blocked', evidence: [run('run:s/2', `run:${taskSession}/${failing.id}`, { exitCode: 1, prerequisite: 'failed', state: 'blocked' })] },
+      { id: 'api', expected: 'An authorized client reads the item', required: true, state: 'unrun', evidence: [] },
+    ] }, { candidate: 'candidate:1', current: false, verdict: 'failed', criteria: [] }] };
+  fixture.missions.setDelivery({ missionId: mission.id, taskId: task.id }, outcome);
+  fixture.missions.setDelivery({ sessionId: taskSession }, outcome);
+  await expect(split.locator('.delivery-verdict')).toHaveText(/Blocked · generate blocked, api not run/, { timeout: 20_000 });
 
   // Reported done after a failing run: it asks for acceptance, but is only claimed.
   await split.getByRole('button', { name: 'Report done…' }).click();
@@ -168,6 +190,7 @@ try {
   await expect(awaiting.locator('.inbox-task')).toContainText('Split the parser');
   await expect(awaiting.locator('.inbox-task')).toContainText('Ship the parser split · “Split into lexer, parser and ast.”');
   await expect(awaiting.locator('.trust-badge')).toHaveText('Claimed');
+  await expect(awaiting.locator('.delivery-verdict')).toHaveText(/Blocked · generate blocked, api not run/, { timeout: 15_000 });
   await expect(inbox.locator('.agents-summary')).toHaveText('1 waiting for you');
 
   const reopenBoard = async () => {
@@ -175,7 +198,7 @@ try {
   };
   await reopenBoard();
   // A passing run makes it observed; checks passing on the PR verify it.
-  fixture.missions.recordRun(taskSession, { title: 'go test ./...', exitCode: 0 });
+  fixture.missions.recordRun(taskSession, { title: command, exitCode: 0 });
   await expect(split.locator('.trust-badge')).toHaveText('Observed', { timeout: 10_000 });
   await expect(split.locator('.mission-flag')).toHaveCount(0);
   fixture.missions.recordPullRequest('alpha', { number: 1216, head: 'abcd123', outcome: 'pass' });
@@ -186,10 +209,20 @@ try {
   await expect(split.locator('.evidence-chip').filter({ hasText: 'PR #12' })).toBeVisible();
   // A run chip opens that run's output in the console.
   await split.getByRole('button', { name: 'Split the parser', exact: true }).click();
-  await split.locator('.evidence-chip').filter({ hasText: 'exit 1' }).click();
+  await split.locator('.mission-evidence .evidence-chip').filter({ hasText: 'exit 1' }).click();
   await expect(page.locator('.panel-console')).toContainText('exit 1');
   await expect(page.getByRole('combobox', { name: 'Session', exact: true })).toHaveValue(taskSession);
   await page.screenshot({ path: '/tmp/lazybox-missions-verified.png' });
+  // The expanded card lists every criterion; a delivery evidence chip opens that run.
+  await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
+  const verdict = split.locator('details.delivery-verdict');
+  if (!(await verdict.isVisible())) await split.getByRole('button', { name: 'Split the parser', exact: true }).click();
+  await expect(verdict).toContainText('Open: generate (blocked), api (not run)');
+  await expect(verdict.locator('.delivery-criteria li')).toHaveCount(3);
+  await expect(verdict).toContainText('Earlier files: Failing');
+  await verdict.locator('.evidence-chip').filter({ hasText: 'blocked · prerequisite · exit 1' }).click();
+  await expect(page.locator('.panel-console')).toContainText('exit 1');
+  await page.screenshot({ path: '/tmp/lazybox-missions-delivery.png' });
 
   await page.getByRole('navigation', { name: 'Pages' }).getByRole('button', { name: 'Missions', exact: true }).click();
   // Accepted from the inbox: done, accepted; the dependent task is ready.
@@ -203,6 +236,9 @@ try {
   await expect(split.locator('.mission-status')).toHaveText('Done');
   await expect(split.locator('.trust-badge')).toHaveText('Accepted');
   await expect(card('Document the parser').locator('.mission-status')).toHaveText('Ready');
+  // Accepted with the generator still blocked: the decision is said, the gap stays.
+  outcome.decision = 'accepted';
+  await expect(split.locator('.delivery-verdict')).toHaveText(/Blocked · generate blocked, api not run · you accepted it/, { timeout: 15_000 });
   await expect(panel.locator('.mission-summary')).toHaveText('1 of 2 done');
   assert.ok(updates().some(u => u.accept?.taskId === fixture.missions.missions[0].tasks[0].id), 'accepted through the Runner');
 
@@ -245,7 +281,7 @@ try {
   await panel.locator('.mission-history summary').click();
   await expect(panel.locator('.mission-history li').first()).toContainText('You asked for changes on “Document the parser”');
   await expect(panel.locator('.mission-history')).toContainText('You accepted “Split the parser”');
-  await expect(panel.locator('.mission-history')).toContainText('Ran go test ./... · exit 1');
+  await expect(panel.locator('.mission-history')).toContainText('Ran ' + command + ' · exit 1');
 
   // A refusal says why, in the panel.
   fixture.missions.missions[0].tasks[1].gate = '';
@@ -293,6 +329,16 @@ try {
   const workspace = await reopened;
   await expect(workspace.locator('.panel-chat').getByRole('textbox', {name: 'Message', exact: true})).toBeVisible();
   await expect(workspace.getByRole('tab', {selected: true}).filter({hasText: /Split the parser/i})).toBeVisible();
+  // The conversation shows the same verdict, with no Mission view open.
+  // It is one line under the messages until opened.
+  const conversationVerdict = workspace.locator('.panel-chat details.delivery-verdict');
+  await expect(conversationVerdict.locator('summary')).toContainText('Blocked', { timeout: 15_000 });
+  await expect(conversationVerdict.locator('summary')).toContainText('Open: generate (blocked), api (not run)');
+  await expect(conversationVerdict.locator('summary')).toContainText('You accepted it; the verdict stands');
+  await expect(conversationVerdict.locator('.delivery-criteria')).toBeHidden();
+  await conversationVerdict.locator('summary').click();
+  await expect(conversationVerdict.locator('.delivery-criteria li')).toHaveCount(3);
+  await workspace.screenshot({ path: '/tmp/lazybox-missions-conversation-verdict.png' });
   console.log('missions: create, assign, evidence, report, accept and changes requested pass');
 } finally {
   await browser?.close();

@@ -47,7 +47,9 @@ test('the next actions follow the status: assign, report, accept', () => {
 
 test('a mission summary leads with what needs the person', () => {
   assert.equal(missionSummary(mission({})), 'No tasks yet');
-  assert.equal(missionSummary(mission({ tasks: [task({ status: 'needs_you' }), task({ status: 'working' }), task({ status: 'done' }), task({ status: 'canceled' })] })), '1 needs you · 1 working · 1 of 3 done');
+  assert.equal(missionSummary(mission({ tasks: [task({ status: 'needs_you' }), task({ status: 'working' }), task({ status: 'done' }), task({ status: 'canceled' })] })), '1 needs you · 1 working · 1 canceled · 1 of 4 done');
+  assert.equal(missionSummary(mission({ tasks: [task({ status: 'canceled' })] })), '1 canceled · 0 of 1 done');
+  assert.equal(missionSummary(mission({ tasks: [task({ status: 'blocked' }), task({ status: 'failed' })] })), '1 failed · 1 blocked · 0 of 2 done');
   assert.equal(missionSummary(mission({ canceled: true })), 'Canceled');
   assert.match(missionSummary(mission({ error: 'corrupt' })), /Unreadable/);
 });
@@ -90,4 +92,22 @@ test('a stale Mission review names its bound inputs', () => {
   assert.match(chip.title, /spec-sha/);
   assert.match(chip.title, /api candidate-sha/);
   assert.equal(liveLabel('reserved'), 'Reserved');
+});
+
+test('a passing storage check keeps the prior generator failure visible', () => {
+  const storage = evidence({ title: 'Storage smoke', exitCode: 0 });
+  const generator = evidence({ title: 'Generate service', outcome: 'fail', exitCode: 1 });
+  const earlier = evidence({ title: 'First generation attempt', outcome: 'fail', exitCode: 1 });
+  assert.deepEqual(headlineEvidence([storage, generator, earlier]), [storage, generator]);
+  assert.deepEqual(headlineEvidence([generator, earlier]), [generator]);
+});
+
+test('a passing rerun of the failed command clears its failure from the card', () => {
+  const rerun = evidence({ title: 'Generate service', exitCode: 0 });
+  const storage = evidence({ title: 'Storage smoke', exitCode: 0 });
+  const generator = evidence({ title: 'Generate service', outcome: 'fail', exitCode: 1 });
+  const migrate = evidence({ title: 'Migrate', outcome: 'fail', exitCode: 2 });
+  assert.deepEqual(headlineEvidence([rerun, storage, generator]), [rerun]);
+  assert.deepEqual(headlineEvidence([rerun, generator, migrate]), [rerun, migrate]);
+  assert.deepEqual(headlineEvidence([storage, evidence({ outcome: 'fail' }), evidence({})]), [storage, evidence({ outcome: 'fail' })]);
 });

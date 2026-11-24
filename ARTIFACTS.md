@@ -378,9 +378,10 @@ The page follows new versions by itself.
   the kind, the version, an outline of the headings, and the
   `lazybox artifact get ID` command so the agent can read the whole text. In
   its own window, **Discuss in chat** opens a resizable chat beside the
-  artifact and puts a reference to the selected version or excerpt in the
-  draft. It starts with the source conversation when available, and you can
-  switch to another conversation in the workspace or start one explicitly.
+  artifact. Its draft contains one line naming the artifact and the command
+  to read that revision. Selecting a passage also includes the quotation.
+  The companion starts a fresh conversation by default and remembers an
+  explicit conversation choice for that artifact.
   **Copy artifact reference** is also available in the artifact actions menu.
 - **Open in its own window** opens the page in its own native window on
   desktop (`open_artifact`, one window per artifact) or browser window on
@@ -424,7 +425,7 @@ The mission planner accepts proposed tasks and dependencies. Approving that prop
 
 Agents can publish a derived roadmap with `lazybox artifact put plan.md --title "Implementation roadmap" --kind plan --design ID@VERSION --review ID@VERSION`. Either input can be used alone. To continue work, update the saved plan by ID; later revisions keep its original inputs.
 
-Use `lazybox artifact template pr-walkthrough`, `incident-timeline`, or `release-checklist` for editable JSON starters. The first two use the report schema. The checklist uses the existing interactive to-do renderer. Fill in real evidence and publish the file with the normal artifact command.
+Use `lazybox artifact template pr-walkthrough`, `incident-timeline`, or `release-checklist` for editable JSON starters. The first two use the report schema. The checklist uses the existing interactive to-do renderer. `lazybox artifact template delivery-spec` starts a `spec.v2` spec whose acceptance criteria each carry a stable ID and a required flag; a Mission plan pinned to it keeps those IDs. A version records the schema its body declares, so a `spec.v2` version reads as `spec.v2`. `lazybox delivery publish` creates a report whose body is a delivery outcome (`delivery-outcome.v1`): the Runner validates it strictly, and the reader shows its verdict per candidate with a table of criteria and evidence. Fill in real evidence and publish the file with the normal artifact command.
 
 ## Known limits
 
@@ -484,3 +485,5 @@ folder or checkout, put **Run in your home folder** or **Run in the home
 checkout of REPO** directly before the block. The same destination
 instructions work with a standalone inline-code command. HTML previews and
 version comparisons remain display-only.
+
+The agent companion opens a fresh conversation by default, with the displayed revision and any selected excerpt in its draft. Selecting an existing workspace conversation explicitly continues its history. The companion remembers that choice per artifact. Enter in the detached reader uses the same configured send binding as workspace chat.

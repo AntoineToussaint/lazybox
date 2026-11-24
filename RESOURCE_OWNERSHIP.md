@@ -100,7 +100,11 @@ Each execution instead gets `<state>/agent-endpoints/<execution id>.json`
 (mode 0600: the Runner URL and a credential bound to that execution), named by
 `LAZYBOX_V2_ENDPOINT`. Any `LAZYBOX_V2_*` the Runner itself inherited is
 dropped from agent and command environments, so an owner endpoint exported in
-the Runner's shell does not leak through either.
+the Runner's shell does not leak through either. So is the Runner's Codefly
+service wiring (`CODEFLY*`: its Codefly credentials, its endpoints and its
+container recovery marker), as from workspace terminals: an agent's own
+`codefly` would otherwise refuse that marker as another process's, and the
+agent would hold the Runner's Codefly credentials. The same holds for the account probes the Runner runs with the person's provider CLIs. The Runner cannot tell a `CODEFLY_*` the person exported (such as `CODEFLY_HOME`) from Codefly's own, so agents lose those too, as terminals do: set them in shell startup files, or per command.
 
 The transport (`internal/transport/auth.go`, `agentRPCs`) accepts that
 credential for a bounded set of RPCs, including the ones `lazybox run` and `lazybox log`
@@ -114,7 +118,7 @@ uses on its own execution's workspace (`ListArtifacts`, `GetArtifact`,
 (`ListWorkspaceRepositories` for its own workspace, `RequestRepository` for
 its own execution, `WaitRepositoryRequest` for its own requests — asking,
 never adding; see [workspaces](WORKSPACES.md#when-an-agent-needs-another-repository)).
-The agent may also rename its own workspace display name with `RenameCollection`.
+The agent may also rename its own workspace display name with `RenameCollection`, pin a spec to its own conversation with `BindDelivery` (`lazybox delivery bind`), read and publish its own conversation's delivery outcome (`GetDeliveryOutcome`, `PublishDeliveryOutcome`, never by Mission task), and record its own review's verdicts with `RecordReviewCriterion` (refused unless it is that review's reviewer).
 Every RPC outside the allowlist, including any added later, answers `PermissionDenied`; a test
 walks the generated service description to keep that exhaustive. Comparisons are constant-time, and the credential never
 appears in an error, journal or response.

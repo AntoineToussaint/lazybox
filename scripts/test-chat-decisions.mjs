@@ -119,7 +119,7 @@ try{
  tool('sleep',{name:'Bash',status:'running',input:{command:'sleep 30'}});
  // Thinking is a quiet line; the plan a live checklist (only the latest one).
  const lines=page.locator('.tool-lines').first();
- await expect(lines.locator(':scope > .tool-line > .tool-line-row')).toHaveText([/Read 3 files, searched 1 pattern/,/Ran pnpm run checkexit 0/,/Ran pnpm test:e2eexit 1/,/Edited 2 files\+3 −1/,/Running sleep 30/]);
+ await expect(lines.locator(':scope > .tool-line > .tool-line-row')).toHaveText([/Read 3 files, searched 1 pattern/,/Ran pnpm run check/,/Ran pnpm test:e2eexit 1/,/Edited 2 files\+3 −1/,/Running sleep 30/]);
  await expect(lines.locator('.tool-line-problem')).toHaveText('Error: browser not installed');
  await expect(lines.locator('[data-tool-id=sleep] .tool-spinner')).toHaveCount(1);
  // A group opens to its calls, each with a path relative to the workspace.

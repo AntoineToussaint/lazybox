@@ -1005,6 +1005,10 @@ fn popout_window(
         });
     match built {
         Ok(window) => {
+            // Its Web panels' views are addressed to it by the token in its address.
+            if let Some((_, token)) = url.query_pairs().find(|(key, _)| key == "w") {
+                crate::viewer::register_popout(&token, &label);
+            }
             if let Ok(mut openers) = POPOUT_OPENERS.lock() {
                 openers.insert(label, opener.to_string());
             }
@@ -1158,10 +1162,21 @@ pub fn window_event(window: &tauri::Window, event: &WindowEvent) {
     }
     // Popped-out panel windows belong to their opener, not to the window layout.
     if window.label().starts_with("popout-") {
-        if matches!(event, WindowEvent::Destroyed)
-            && let Ok(mut openers) = POPOUT_OPENERS.lock()
-        {
-            openers.remove(window.label());
+        let app = window.app_handle();
+        match event {
+            // Closed by the person: the pages of its Web panels come home first.
+            WindowEvent::CloseRequested { .. } => {
+                if let Some(viewers) = app.try_state::<crate::viewer::Viewers>() {
+                    crate::viewer::reclaim(app, &viewers, window.label());
+                }
+            }
+            WindowEvent::Destroyed => {
+                if let Ok(mut openers) = POPOUT_OPENERS.lock() {
+                    openers.remove(window.label());
+                }
+                crate::viewer::forget_popout(window.label());
+            }
+            _ => {}
         }
         return;
     }
@@ -1610,6 +1625,10 @@ mod tests {
         assert!(is_popout_page(&url("tauri://localhost/popout.html")));
         assert!(is_popout_page(&url("http://localhost:1420/popout.html")));
         assert!(is_popout_page(&url("http://tauri.localhost/popout.html")));
+        // Its token, which names it to the Web panels' views, is part of its address.
+        assert!(is_popout_page(&url(
+            "tauri://localhost/popout.html?w=0b6f1c9e-8c0a-4f1e-9d2b-1a2b3c4d5e6f"
+        )));
         for value in [
             "https://example.com/popout.html",
             "http://localhost:1420/index.html",

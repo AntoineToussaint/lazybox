@@ -144,9 +144,15 @@ export function watchCLI({ source, directory, since, build = goBuildCLI, interva
   loop();
   return { async close() { stopped = true; clearTimeout(timer); await current; } };
 }
+/** The Tauri configuration a Working (or Dev) build merges over tauri.conf.json. */
+export function workingTauriConfig(paths) {
+  return { identifier: paths.identifier, productName: paths.productName, bundle: { macOS: { signingIdentity: '-' } } };
+}
 async function buildDesktop(source, paths, target) {
   await run('npm', ['run', 'build:ui', '-w', '@lazybox/desktop'], source);
-  await run(join(source, 'node_modules/.bin/tauri'), ['build', '--debug', '--bundles', 'app', '--config', JSON.stringify({ identifier: paths.identifier, productName: paths.productName })], join(source, 'apps/desktop'), { ...buildEnv, CARGO_TARGET_DIR: target });
+  // Signed ad hoc as a whole bundle, as a release build is (scripts/release/build.mjs): macOS grants
+  // notifications to a bundle's signed identity; a linker-signed executable alone has none to grant.
+  await run(join(source, 'node_modules/.bin/tauri'), ['build', '--debug', '--bundles', 'app', '--config', JSON.stringify(workingTauriConfig(paths))], join(source, 'apps/desktop'), { ...buildEnv, CARGO_TARGET_DIR: target });
   return join(target, 'debug/bundle/macos', paths.productName + '.app');
 }
 async function saveJSON(path, value) {
@@ -218,6 +224,7 @@ export async function acquireLock(path) {
 async function stage(environmentRoot, revision) {
   const unlock = await acquireLock(join(environmentRoot, 'stage.lock'));
   try {
+    await sweepFailedCandidates(environmentRoot);
     return await stageCandidate(environmentRoot, revision);
   } finally { await unlock(); }
 }
@@ -226,6 +233,44 @@ async function stageCandidate(environmentRoot, revision) {
   const destination = releasePath(environmentRoot, id), source = join(destination, 'source');
   await mkdir(destination, { recursive: true });
   console.log(`Staging ${id}; current working installation is unchanged.`);
+  try { return await buildCandidate(environmentRoot, revision, id, destination, source); }
+  catch (error) {
+    // Why the stage failed is what the person needs; a cleanup that also fails is only logged.
+    await pruneFailedCandidate(destination).catch(cleanup => console.error(`Could not remove the failed candidate's files: ${cleanup.message}`));
+    throw error;
+  }
+}
+
+/**
+ * Before a stage (under its lock): what earlier stages left that can never be
+ * promoted. A candidate without release.json failed or was interrupted (a
+ * Ctrl-C skips its own cleanup); the pinned release and the one before it
+ * are never touched.
+ */
+export async function sweepFailedCandidates(environmentRoot) {
+  const releases = join(environmentRoot, 'releases');
+  let pinned = {};
+  try { pinned = JSON.parse(await readFile(join(environmentRoot, 'working', 'current.json'), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  let entries = [];
+  try { entries = await readdir(releases); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  for (const id of entries) {
+    if (id === pinned.id || id === pinned.previous) continue;
+    const directory = join(releases, id);
+    try { await lstat(join(directory, 'release.json')); continue; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if ((await lstat(directory)).isDirectory()) await pruneFailedCandidate(directory);
+  }
+}
+
+/**
+ * A failed candidate keeps only its diagnostic gates.json (ENVIRONMENTS.md):
+ * its source, dependencies and app are gigabytes no promotion can use, and a
+ * day of failed stages filled the disk.
+ */
+export async function pruneFailedCandidate(destination) {
+  for (const entry of await readdir(destination)) if (entry !== 'gates.json') await rm(join(destination, entry), { recursive: true, force: true });
+}
+
+async function buildCandidate(environmentRoot, revision, id, destination, source) {
   const snippetAdapter=await buildSnippetAdapter(root);
   await copySource(root, source);
   await mkdir(join(source,'resources'),{recursive:true});
@@ -243,7 +288,8 @@ async function stageCandidate(environmentRoot, revision) {
   await run('npm', ['run', 'build:web'], source);
   await cp(app, join(destination, 'Lazybox.app'), { recursive: true, force: false, errorOnExist: true });
   const after = await digestTree(source);
-  if (before !== after) throw new Error('Validation modified the source snapshot; stage again after reviewing generated changes');
+  // The snapshot is removed with the failed candidate: say where to look instead.
+  if (before !== after) throw new Error('Validation modified the source snapshot (generated files are not current): run make check-generated in your repository, commit what it regenerates, and stage again');
   await saveJSON(join(destination, 'release.json'), { version: 2, id, revision, sourceDigest: after, appDigest: await digestTree(join(destination, 'Lazybox.app'), () => true), workerDigest: await digestTree(join(source, 'workers/claude-sdk/dist'), () => true), validatedAt: new Date().toISOString(), gateReceipt, liveGitHubVerified: false });
   console.log(`Candidate ready: ${id}\nPromote explicitly with: make promote RELEASE=${id}`);
   return id;

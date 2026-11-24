@@ -40,7 +40,7 @@ try {
     // Whether Lazybox is the app in front: a window in front shows a toast instead of a banner.
     window.__focused = true; document.hasFocus = () => window.__focused;
     window.Notification = class { static permission = 'granted'; static async requestPermission() { return 'granted'; }
-      constructor(title, options) { this.title = title; this.body = options?.body; this.tag = options?.tag; window.__notices.push(this); } close() {} };
+      constructor(title, options) { if (window.__refuse) { const why = window.__refuse; window.__refuse = ''; throw new Error(why); } this.title = title; this.body = options?.body; this.tag = options?.tag; window.__notices.push(this); } close() {} };
   });
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
   const inboxButton = page.locator('.inbox-action');
@@ -60,7 +60,8 @@ try {
   await expect(inboxButton).toHaveAccessibleName('Inbox, 4 conversations need attention', {timeout: 10_000});
   await expect.poll(() => page.evaluate(() => window.__notices.map(n => n.title).sort())).toEqual(['Approval needed · Bump dependencies', 'Failed · Deploy preview']);
   assert.equal(await page.evaluate(() => window.__notices.find(n => n.title.startsWith('Failed')).body), 'Beta release · A message could not be delivered to the agent');
-  await expect.poll(() => page.title()).toMatch(/^\(2\) /);
+  // The badge is the Inbox's number (4), not only the two that wait on an answer: what the person sees on the button.
+  await expect.poll(() => page.title()).toMatch(/^\(4\) /);
   assert.equal(await page.locator('.toast').count(), 0, 'a window in the background shows banners, not toasts');
   await page.evaluate(() => { window.__focused = true; });
 
@@ -155,6 +156,13 @@ try {
   await reviewToggle.check();
   await page.getByRole('button', {name: 'Send a test notification'}).click();
   await expect.poll(() => page.evaluate(() => window.__notices.at(-1).title)).toBe('Lazybox notifications are on');
+  // A notification the system refuses says so, here and until one goes through: never a silent success.
+  await page.evaluate(() => { window.__refuse = 'Notifications are not allowed for this application'; });
+  await page.getByRole('button', {name: 'Send a test notification'}).click();
+  await expect(page.locator('.notification-test [role="status"]')).toHaveText('Could not send: Notifications are not allowed for this application');
+  await expect(page.getByRole('alert').filter({hasText: 'The last notification was not shown'})).toContainText('Notifications are not allowed for this application');
+  await page.getByRole('button', {name: 'Send a test notification'}).click();
+  await expect(page.getByRole('alert').filter({hasText: 'The last notification was not shown'})).toHaveCount(0);
   await page.screenshot({path: '/tmp/lazybox-notification-settings.png'});
   await page.reload();
   await page.getByRole('button', {name: 'Settings', exact: true}).click();
@@ -170,6 +178,13 @@ try {
   // Lazybox is in front, so it is a toast in the window, not a system banner.
   await expect(page.locator('.toast[data-tone="review"]')).toContainText('Ready for review · Index the API', {timeout: 10_000});
   assert.equal(await page.evaluate(() => window.__notices.filter(n => n.title.startsWith('Ready for review')).length), 0);
+  // The badge (the tab title here, the Dock in the desktop app) is the Inbox button's number, finished turns to review included.
+  await expect.poll(() => page.evaluate(() => {
+    const shown = document.querySelector('.inbox-action .inbox-count')?.textContent || '';
+    return { shown, badge: /^\((\d+)\) /.exec(document.title)?.[1] || '' };
+  })).toEqual(expect.objectContaining({ badge: expect.stringMatching(/^[1-9]/) }));
+  const { shown, badge } = await page.evaluate(() => ({ shown: document.querySelector('.inbox-action .inbox-count')?.textContent || '', badge: /^\((\d+)\) /.exec(document.title)?.[1] || '' }));
+  assert.equal(badge, shown, 'the badge is the Inbox button\'s number');
   await page.locator('.toast[data-tone="review"]').getByRole('button', {name: /Ready for review/}).click();
   await expect(page.getByRole('combobox', {name: 'Session', exact: true})).toHaveValue('alpha-session');
 

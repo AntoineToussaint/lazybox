@@ -67,14 +67,13 @@ test('a console in view moves only when it may be taken over; one out of view po
   const news = { fresh: ['q1', 'q2'], candidates: [] };
   const front = { follow: true, place: 'front' as const, shown: { done: true }, sinceUse: idle };
   assert.equal(followRuns(news, front), undefined, 'quick runs leave a console in view alone');
-  assert.deepEqual(followRuns({ fresh: [], candidates: [{ id: 'long', runningFor: 1600, yours: false }] }, front), { commandId: 'long', open: false });
+  assert.deepEqual(followRuns({ fresh: [], candidates: [{ id: 'long', runningFor: 1600, yours: false }] }, front), { commandId: 'long' });
   assert.equal(followRuns({ fresh: [], candidates: [{ id: 'long', runningFor: 1600, yours: false }] }, { ...front, sinceUse: 5000 }), undefined);
-  for (const place of ['behind', 'away', 'none'] as const) {
-    assert.deepEqual(followRuns(news, { ...front, place }), { commandId: 'q2', open: false }, `${place}: points at the newest, never comes forward`);
+  for (const place of ['folded', 'behind', 'away', 'none'] as const) {
+    assert.deepEqual(followRuns(news, { ...front, place }), { commandId: 'q2' }, `${place}: points at the newest, never comes forward`);
     assert.deepEqual(followRuns({ fresh: [], candidates: [{ id: 'long', runningFor: 1600, yours: false }] }, { ...front, place }), undefined);
   }
-  assert.deepEqual(followRuns(news, { ...front, place: 'folded' }), { commandId: 'q2', open: false }, 'a folded console stays folded for quick runs');
-  assert.deepEqual(followRuns({ fresh: [], candidates: [{ id: 'long', runningFor: 1600, yours: false }] }, { ...front, place: 'folded' }), { commandId: 'long', open: true });
+  assert.deepEqual(followRuns(news, { ...front, place: 'folded' }), { commandId: 'q2' }, 'a folded console stays folded for quick runs');
   assert.equal(followRuns(news, { ...front, place: 'behind', follow: false }), undefined, 'Follow off: never switches by itself');
   assert.equal(followRuns({ fresh: [], candidates: [{ id: 'long', runningFor: 1600, yours: false }] }, { ...front, place: 'folded', follow: false }), undefined);
 });

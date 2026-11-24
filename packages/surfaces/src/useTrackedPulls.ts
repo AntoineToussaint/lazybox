@@ -30,7 +30,7 @@ export function useDismissedPulls() {
   }, [state, prefix]);
 }
 
-export type PullAction = 'send' | 'review' | 'merge';
+export type PullAction = 'send' | 'review' | 'update' | 'merge';
 export type PullActionResult = { ok: boolean; text: string };
 
 /**
@@ -46,6 +46,11 @@ export function usePullActions() {
     const link: ItemLink = pull.link;
     const ref = { provider: link.item?.ref?.provider || 'github', key: link.item?.ref?.key || '' };
     try {
+      if (action === 'update') {
+        // Pinned to the head the person saw, as a merge is. GitHub updates it in the background.
+        await api.updatePullRequestBranch({ collectionId: link.collectionId, number: BigInt(pull.number), expectedHead: link.item?.pullRequest?.headSha || '', item: ref }, { timeoutMs: 60_000 });
+        return { ok: true, text: `Updating #${pull.number} with ${link.item?.pullRequest?.base || 'its base'}; checks run again` };
+      }
       if (action === 'merge') {
         let method = 'squash';
         try { method = localStorage.getItem('lazybox:merge-method') || 'squash'; } catch { /* the default */ }

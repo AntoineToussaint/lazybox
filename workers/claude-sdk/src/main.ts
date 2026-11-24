@@ -8,7 +8,7 @@ import { exitAfter, readStream } from './stream.js';
 import { readQuota } from './usage.js';
 import { NativeStatus } from './status.js';
 import { CommandCatalog } from './catalog.js';
-import { contextSnapshot } from './context.js';
+import { contextReporter } from './context.js';
 import { SettingsApprovals, settingsServer, settingsServerName, updateSettingsTool } from './settings.js';
 import { alwaysChoices, covers, decide, offered, restoreGrant, type Grant } from './permissions.js';
 import { browserServer, browserServerName } from './browser.js';
@@ -16,6 +16,7 @@ import { generateTitle } from './title.js';
 import { ModelSwitch } from './model.js';
 import { messageContent } from './content.js';
 import { steerPriority, userMessage } from './steer.js';
+import { errorText } from './error-text.js';
 
 type Request = { id?: string; method?: string; params?: any; result?: any; error?: any };
 let session: Query | undefined;
@@ -36,7 +37,7 @@ const settingsApprovals = new SettingsApprovals();
 // The agent's own slash commands and models, said once per change.
 const catalog = new CommandCatalog();
 // The model of the following turns: a change during a turn waits for it to end.
-const models = new ModelSwitch((model, effort) => effort ? session!.applyFlagSettings({ model, effortLevel: effort }) : session!.setModel(model), (model, error) => process.stderr.write(`model ${model} not applied: ${String(error)}\n`));
+const models = new ModelSwitch((model, effort) => effort ? session!.applyFlagSettings({ model, effortLevel: effort }) : session!.setModel(model), (model, error) => process.stderr.write(`model ${model} not applied: ${errorText(error)}\n`));
 const sayCatalog = (value: ReturnType<CommandCatalog['fromChanged']>) => { if (value) event({ ...value, sessionId: reference }); };
 const send = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
 const event = (value: unknown) => send({ method: 'event', params: value });
@@ -124,7 +125,10 @@ async function open(options: any) {
 
 async function receive(q: Query) {
   const status = new NativeStatus();
-  let readingContext=false;
+  const reportContext = typeof q.getContextUsage === 'function' && contextReporter(
+    () => q.getContextUsage({ detail: 'summary' }),
+    data => event({ type: 'context', agentId: 'root', sessionId: reference, data }),
+  );
   const end = await readStream(q, message => {
     for (const normalized of status.normalize(message)) {
       // A turn the person interrupted ends with Claude's "error during
@@ -134,16 +138,16 @@ async function receive(q: Query) {
       if (!interrupts.pass(normalized)) continue;
       // A model change that waited for this turn applies before the next one is sent.
       if (normalized.type === 'turn_ended') void models.turnEnded();
-      event(normalized);
+      if (reportContext && normalized.type === 'context' && (!normalized.agentId || normalized.agentId === 'root')) {
+        reportContext(normalized.data);
+      } else {
+        event(normalized);
+      }
     }
     reference = status.reference || reference;
     if (message.type === 'system' && !('parent_tool_use_id' in message && message.parent_tool_use_id)) {
       if (message.subtype === 'init') sayCatalog(catalog.fromInitMessage(message));
       else if (message.subtype === 'commands_changed') sayCatalog(catalog.fromChanged(message.commands));
-    }
-    if(message.type==='result'&&!readingContext&&typeof q.getContextUsage==='function'){
-      readingContext=true;
-      void q.getContextUsage({detail:'summary'}).then(report=>event({type:'context',agentId:'root',sessionId:reference,data:contextSnapshot(report)})).catch(()=>{/* Older CLIs retain their last observed totals. */}).finally(()=>{readingContext=false;});
     }
   });
   // Nothing will read another message: say why, and exit (see exitAfter).
@@ -238,7 +242,7 @@ async function handle(request: Request) {
       }
       default: throw new Error('Unsupported worker operation');
     }
-  } catch (error) { send({ id: request.id, error: { message: String(error) } }); }
+  } catch (error) { send({ id: request.id, error: { message: errorText(error) } }); }
 }
 
 const reader = createInterface({ input: process.stdin, crlfDelay: Infinity });

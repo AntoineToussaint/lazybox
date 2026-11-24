@@ -9,23 +9,23 @@ import type { ItemLink } from '@lazybox/protocol';
  */
 
 /** Where a pull request stands, most urgent first. */
-export type PullStatus = 'checks-failed' | 'changes-requested' | 'conflicts' | 'ready' | 'checks-running' | 'waiting' | 'draft' | 'merged' | 'closed' | 'unread';
-export const statusOrder: readonly PullStatus[] = ['checks-failed', 'changes-requested', 'conflicts', 'ready', 'checks-running', 'waiting', 'draft', 'unread', 'merged', 'closed'];
+export type PullStatus = 'checks-failed' | 'changes-requested' | 'conflicts' | 'behind' | 'ready' | 'checks-running' | 'waiting' | 'draft' | 'merged' | 'closed' | 'unread';
+export const statusOrder: readonly PullStatus[] = ['checks-failed', 'changes-requested', 'conflicts', 'behind', 'ready', 'checks-running', 'waiting', 'draft', 'unread', 'merged', 'closed'];
 /** What the person can act on: the Inbox's rows and the panel's first group. */
-export const needsYou: ReadonlySet<PullStatus> = new Set(['checks-failed', 'changes-requested', 'conflicts', 'ready']);
+export const needsYou: ReadonlySet<PullStatus> = new Set(['checks-failed', 'changes-requested', 'conflicts', 'behind', 'ready']);
 
 export const statusLabel: Record<PullStatus, string> = {
-  'checks-failed': 'Checks failed', 'changes-requested': 'Changes requested', conflicts: 'Conflicts', ready: 'Ready to merge',
+  'checks-failed': 'Checks failed', 'changes-requested': 'Changes requested', conflicts: 'Conflicts', behind: 'Out of date', ready: 'Ready to merge',
   'checks-running': 'Checks running', waiting: 'Waiting for review', draft: 'Draft', merged: 'Merged', closed: 'Closed', unread: 'Not read yet',
 };
 /** The dot's tone, shared with the sidebar's pull request chip (workspace-git.css). */
 export type PullTone = 'failure' | 'changes' | 'success' | 'pending' | 'none' | 'draft' | 'merged' | 'closed';
 export const statusTone: Record<PullStatus, PullTone> = {
-  'checks-failed': 'failure', 'changes-requested': 'changes', conflicts: 'changes', ready: 'success', 'checks-running': 'pending',
+  'checks-failed': 'failure', 'changes-requested': 'changes', conflicts: 'changes', behind: 'changes', ready: 'success', 'checks-running': 'pending',
   waiting: 'none', draft: 'draft', merged: 'merged', closed: 'closed', unread: 'none',
 };
 export const statusIcon: Record<PullStatus, string> = {
-  'checks-failed': 'alert', 'changes-requested': 'review', conflicts: 'alert', ready: 'check', 'checks-running': 'working',
+  'checks-failed': 'alert', 'changes-requested': 'review', conflicts: 'alert', behind: 'refresh', ready: 'check', 'checks-running': 'working',
   waiting: 'pullRequest', draft: 'pullRequest', merged: 'merge', closed: 'close', unread: 'pullRequest',
 };
 
@@ -40,6 +40,9 @@ export function pullStatus(link: Pick<ItemLink, 'item'>): PullStatus {
   if (pr.draft || state === 'started') return 'draft';
   if (pr.checks === 'pending') return 'checks-running';
   const green = pr.checks === 'success' || pr.checks === 'none';
+  // Its repository requires branches to be up to date before merging, and this one is behind its
+  // base: GitHub calls it mergeable (no conflicts) but refuses the merge until the branch is updated.
+  if (green && pr.review !== 'review_required' && pr.mergeableState === 'behind') return 'behind';
   if (green && pr.review !== 'review_required' && (pr.mergeable || pr.mergeableState === 'clean' || pr.mergeableState === 'unstable' || pr.mergeableState === 'has_hooks')) return 'ready';
   return 'waiting';
 }
@@ -88,7 +91,7 @@ export function trackedPull(link: ItemLink): TrackedPull {
   const key = link.item?.ref?.key || '';
   const { repository, number } = refParts(key);
   const status = pullStatus(link);
-  const detail = status === 'checks-failed' ? failingDetail(link) || statusLabel[status] : status === 'waiting' ? waitingDetail(link) : statusLabel[status];
+  const detail = status === 'checks-failed' ? failingDetail(link) || statusLabel[status] : status === 'waiting' ? waitingDetail(link) : status === 'behind' ? outOfDate(link.item?.pullRequest?.base) : statusLabel[status];
   const tone = status === 'waiting' && link.item?.pullRequest?.checks === 'success' ? 'success' : statusTone[status];
   // An ended pull request is as old as its end; an open one, its last change.
   const closed = millis(link.item?.pullRequest?.closedAtUnixMillis);
@@ -141,11 +144,16 @@ export function pullWords(pull: Pick<TrackedPull, 'status' | 'detail'>): string 
   return (pull.status === 'waiting' ? pull.detail.replace(' · ', ', ') : statusLabel[pull.status]).toLowerCase();
 }
 
+/** "Out of date with main": a pull request behind a base its repository requires it to match. */
+export const outOfDate = (base?: string) => `Out of date with ${base || 'its base'}`;
+/** What updating a branch does, asked before it runs (the Inbox, the panel and the workspace card say the same). */
+export const updateConfirmation = (number: number | bigint, base?: string) => `Update #${number} with ${base || 'its base'}? GitHub merges ${base || 'the base'} into its branch, and its checks run again before it can merge.`;
+
 /** An Inbox row: a pull request that needs the person, with its prepared action. */
 export type PullInboxRow = TrackedPull & {
   /** What dismissing it hides: this status on this head. A new failure or review brings it back. */
   dismissKey: string;
-  action: 'send' | 'review' | 'merge' | 'open';
+  action: 'send' | 'review' | 'update' | 'merge' | 'open';
   line: string;
 };
 export function pullReactionKey(pull: TrackedPull): string {
@@ -164,8 +172,8 @@ export function pullInboxRows(links: readonly ItemLink[], dismissed: ReadonlySet
     if (!needsYou.has(pull.status) || pull.link.collectionDeleted) continue;
     const dismissKey = pullReactionKey(pull);
     if (dismissed.has(dismissKey)) continue;
-    const action = pull.status === 'checks-failed' ? 'send' : pull.status === 'changes-requested' ? 'review' : pull.status === 'ready' ? 'merge' : 'open';
-    const what = pull.status === 'checks-failed' ? `checks failed · ${pull.detail}` : pull.status === 'ready' ? 'approved · checks green' : statusLabel[pull.status].toLowerCase();
+    const action = pull.status === 'checks-failed' ? 'send' : pull.status === 'changes-requested' ? 'review' : pull.status === 'behind' ? 'update' : pull.status === 'ready' ? 'merge' : 'open';
+    const what = pull.status === 'checks-failed' ? `checks failed · ${pull.detail}` : pull.status === 'ready' ? 'approved · checks green' : pull.status === 'behind' ? `checks green · ${outOfDate(pull.link.item?.pullRequest?.base).replace(/^O/, 'o')}` : statusLabel[pull.status].toLowerCase();
     rows.push({ ...pull, dismissKey, action, line: `${pull.repository}#${pull.number} ${what}` });
   }
   return rows.sort(byUrgency);
@@ -185,7 +193,8 @@ export function agentName(provider: string | undefined): string {
 }
 
 /** The confirmation a write asks before it runs. */
-export function confirmation(pull: TrackedPull, action: 'send' | 'review' | 'merge', agent: string): string {
+export function confirmation(pull: TrackedPull, action: 'send' | 'review' | 'update' | 'merge', agent: string): string {
+  if (action === 'update') return updateConfirmation(pull.number, pull.link.item?.pullRequest?.base);
   if (action === 'send') return `Send the failing checks of #${pull.number} (${pull.detail}) to ${agent}?`;
   if (action === 'review') return `Import the review of #${pull.number} and send it to ${agent}?`;
   return `Merge #${pull.number} into ${pull.link.item?.pullRequest?.base || 'its base'}?`;

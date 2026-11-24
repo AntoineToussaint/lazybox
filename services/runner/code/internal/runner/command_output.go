@@ -23,6 +23,7 @@ import (
 // reaches running conversations as a one-line note with their next message.
 const workspaceBriefing = `## Your Lazybox workspace
 You work inside a Lazybox workspace: your working directory holds one or more repositories, each a git worktree on this workspace's branch. Read and change code there; ` + "`lazybox workspace repos`" + ` lists them with their paths.
+- When progress requires the person's decision, ask once using a blocking question tool if available, then wait for their answer. If a goal hook continues the turn while the same decision is pending, leave the action pending and work only on independent steps. Silence is not authorization.
 - When the person asks to rename this workspace, run ` + "`lazybox workspace rename \"DISPLAY NAME\"`" + `. This updates the sidebar name.
 - If the task needs a repository that is not in this workspace (another module, a library you must change, a sibling service), do not read or edit it elsewhere on disk. Ask for it: ` + "`lazybox workspace request-repo <name|owner/repo|path> --reason \"why you need it\"`" + `. The person adds it with one click; the command waits up to 90s and prints the new worktree's path, or their answer. If they have not answered yet, continue without it or end your turn: the answer comes to this conversation. Reading a dependency's published source (for example in the Go module cache or node_modules) to understand it is fine.
 - A repository may also have a home checkout: the person's own clone outside this workspace, which ` + "`lazybox workspace repos`" + ` (or ` + "`lazybox repo home <name>`" + `) shows. It is theirs and read-only for you: never edit files, commit, reset, stash, pull, switch branches or start servers there. You may read it and run read-only commands in it (git log, git status). Do your work in this workspace's worktrees.
@@ -40,7 +41,8 @@ Run tests, builds, linters, installs and other noisy commands as ` + "`lazybox r
 - Use ` + "`lazybox run --raw -- <command>`" + ` only when you must parse the exact output, such as a diff or JSON.
 - Commands get no input. Pass non-interactive flags (--yes, CI=1) rather than waiting for a prompt.
 - Servers and watchers never exit; start them with ` + "`lazybox run -- <command>`" + ` too, never with & or nohup. One still running after 20s that listens on a port or looks like a server (npm run dev, docker compose up, --watch) moves to the background, and lazybox run returns with its command id, URL, latest output and output file (` + "`--background`" + ` moves it at once). ` + "`lazybox ls`" + ` lists your commands; ` + "`lazybox stop ID`" + ` stops one.
-- If the workspace defines actions (the command tool's action "actions" lists them, with their URL), start its dev server with "start_action" instead: it gets the workspace's own port, and the user sees it in Run and Preview.`
+- If the workspace defines actions (the command tool's action "actions" lists them, with their URL), start its dev server with "start_action" instead: it gets the workspace's own port, and the user sees it in Run and Preview.
+- When your Mission task's approved spec, or a spec you bound with ` + "`lazybox delivery bind <spec-id>@<version>`" + `, names acceptance criteria, run the check for each as ` + "`lazybox run --check <criterion> -- <command>`" + ` and a step it depends on as ` + "`--needs <criterion>`" + `: the Runner records the result against the exact files it ran on, uncommitted changes included, so run the checks again after you commit. Before you report the work done, ` + "`lazybox delivery status`" + ` shows what is still open.`
 
 const documentStyle = `- Prefer Mermaid for workflows, state transitions, and service interactions. Show the entry point, important decisions, and any failure or retry paths that change the outcome.
 - Use tables for comparisons and checklists for procedures. Link to the code or docs that own the behavior, and record important decisions, assumptions, and what remains unverified.`
@@ -92,6 +94,21 @@ func (b *Bench) outputEnv(id string) string {
 // FinishPipe ends a pipe capture and keeps what a `lazybox run` gave its agent:
 // on the command, for the console, and in telemetry, to measure the savings.
 func (b *Bench) FinishPipe(c *commands.Command, cause error, signal string, report *commands.Report) error {
+	before := c.Status()
+	// A finish is retried by a CLI that did not hear back: the first one counts.
+	if before.Done {
+		return nil
+	}
+	// A check's observation is recorded first, then saved with the completion,
+	// so neither a full command journal nor a stop in between loses it.
+	if report != nil && before.Spec.Check != nil {
+		copied := *report
+		report = &copied
+		b.observeCheck(before, report, signal)
+		if report.Observation != nil {
+			b.recordObservation(commands.Status{ID: before.ID, Report: report})
+		}
+	}
 	if err := c.FinishPipeSignalled(cause, signal, report); err != nil {
 		return err
 	}

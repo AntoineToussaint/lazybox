@@ -58,7 +58,7 @@ test('a call reads as a person says it: verb, target, short facts', () => {
   const read = ran('Read', { file_path: `${ROOT}/src/front_door/mcp.py` }, 'a\nb\nc\n');
   assert.deepEqual(describeTool(read, ROOT), { verb: 'Read', target: 'src/front_door/mcp.py', code: true, file: `${ROOT}/src/front_door/mcp.py`, meta: ['3 lines'], problem: undefined });
   const check = ran('Bash', { command: 'pnpm run check', description: 'Run the checks' }, 'ok\n');
-  assert.deepEqual([describeTool(check).verb, describeTool(check).target, describeTool(check).meta], ['Ran', 'pnpm run check', ['exit 0', '4.2s']]);
+  assert.deepEqual([describeTool(check).verb, describeTool(check).target, describeTool(check).meta], ['Ran', 'pnpm run check', ['4.2s']]);
   const failing = ran('Bash', { command: 'pnpm test' }, [{ type: 'text', text: 'Exit code 2\nFAIL src/a.test.ts\n' }], { failed: true });
   const title = describeTool(failing);
   assert.deepEqual([title.meta, title.problem, failing.exitCode], [['exit 2', '4.2s'], 'FAIL src/a.test.ts', 2]);
@@ -129,7 +129,7 @@ test('the fold keeps the main agent’s calls as runs of lines between its words
   assert.deepEqual(whole.messages.map(m => m.type), ['operation_accepted', 'message_delta', 'tools', 'subagent', 'message_delta', 'tools']);
   const run = whole.messages[2].tools!;
   assert.deepEqual(run.map(t => [t.id, t.status]), [['a', 'completed'], ['b', 'completed']], 'a sub-agent’s calls are not the main agent’s');
-  assert.equal(describeTool(run[1]).meta.join(' '), 'exit 0 4.5s');
+  assert.equal(describeTool(run[1]).meta.join(' '), '4.5s');
   assert.equal(whole.messages[5].tools![0].status, 'unknown', 'a call the turn ended without is not called a success');
   // Any batching lands on the same messages, and never changes an earlier snapshot.
   let one = emptyTranscript(); const snapshots: string[] = [];
@@ -150,6 +150,8 @@ test('questions and approvals read the same for Claude and Codex', () => {
   const codexCommand = approvalOf({ threadId: 't', command: 'git push --force', cwd: '/w', always: [{ id: 'prefix', scope: 'prefix', label: 'commands starting with `git push`' }] }, 'item/commandExecution/requestApproval', '/w');
   assert.deepEqual([codexCommand.tool, codexCommand.command, codexCommand.risks.map(r => r.kind)], ['commandExecution', 'git push --force', ['discard', 'network']]);
   assert.deepEqual(risksOf('ls', [], ROOT), []);
+  assert.deepEqual(risksOf("/bin/zsh -lc 'cd lazybox && npm run test:telemetry'", [], ROOT), []);
+  assert.ok(risksOf("/bin/zsh -lc 'cat /etc/hosts'", [], ROOT).some(risk => risk.kind === 'outside' && risk.text.includes('/etc/hosts')));
   // Codex asking for more access: Allow only where the Runner says it can grant what was asked.
   assert.equal(approvalOf({}, 'item/permissions/requestApproval', '').acceptUnsupported, true);
   const access = approvalOf({ grantable: true, title: 'More access: network access', reason: 'needs the registry', always: [{ id: 'session', scope: 'conversation', label: 'network access' }] }, 'item/permissions/requestApproval', '/w');

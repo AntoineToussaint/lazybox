@@ -15,9 +15,18 @@ export function PullStatusIcon({ pull, size = 14 }: { pull: Pick<TrackedPull, 's
 
 /** Which reaction a pull request's state offers, if any. */
 export function reactionFor(pull: TrackedPull): PullAction | undefined {
-  return pull.status === 'checks-failed' ? 'send' : pull.status === 'changes-requested' ? 'review' : pull.status === 'ready' ? 'merge' : undefined;
+  return pull.status === 'checks-failed' ? 'send' : pull.status === 'changes-requested' ? 'review' : pull.status === 'behind' ? 'update' : pull.status === 'ready' ? 'merge' : undefined;
 }
-export const reactionLabel = (action: PullAction, agent: string) => action === 'send' ? `Send the failures to ${agent}` : action === 'review' ? 'Address the review' : 'Merge';
+export const reactionLabel = (action: PullAction, agent: string) => action === 'send' ? `Send the failures to ${agent}` : reactionParts[action].label;
+/** Each reaction's icon, short button label, panel key, full label (except send's, which names the agent) and its confirmation's words. */
+export const reactionParts: Record<PullAction, { icon: string; short: string; key: string; label: string; confirmName: string; confirmButton: string }> = {
+  send: { icon: 'send', short: 'Send failures', key: 's', label: 'Send the failures', confirmName: 'sending the failures', confirmButton: 'Send' },
+  review: { icon: 'review', short: 'Address review', key: 'r', label: 'Address the review', confirmName: 'addressing the review', confirmButton: 'Send' },
+  update: { icon: 'refresh', short: 'Update branch', key: 'u', label: 'Update the branch', confirmName: 'updating the branch', confirmButton: 'Update' },
+  merge: { icon: 'merge', short: 'Merge', key: 'm', label: 'Merge', confirmName: 'merge', confirmButton: 'Merge' },
+};
+/** A write to GitHub is the primary action and asks first. */
+export const writesToGitHub = (action: PullAction) => action === 'merge' || action === 'update';
 
 type Confirming = { key: string; eventKey: string; action: PullAction };
 
@@ -26,7 +35,8 @@ type Confirming = { key: string; eventKey: string; action: PullAction };
  * waiting on others, merged this week — and what conversations mentioned,
  * apart. Keyboard first: j/k move, Enter opens the workspace (at the
  * conversation that delivered it), s sends the failing checks, r addresses
- * the review, m merges, o opens it on GitHub; a write asks first.
+ * the review, u updates a branch behind its base, m merges, o opens it on
+ * GitHub; a write asks first.
  */
 export function PullRequestsPanel({ collections, onShowSession }: Pick<ModuleProps, 'collections' | 'onShowSession'>) {
   const tracked = useTrackedItems();
@@ -79,9 +89,7 @@ export function PullRequestsPanel({ collections, onShowSession }: Pick<ModulePro
     const pull = focused();
     if (event.key === 'j' || event.key === 'ArrowDown') { event.preventDefault(); move(1); }
     else if (event.key === 'k' || event.key === 'ArrowUp') { event.preventDefault(); move(-1); }
-    else if (pull && event.key === 's' && pull.status === 'checks-failed') { event.preventDefault(); ask(pull, 'send'); }
-    else if (pull && event.key === 'r' && pull.status === 'changes-requested') { event.preventDefault(); ask(pull, 'review'); }
-    else if (pull && event.key === 'm' && pull.status === 'ready') { event.preventDefault(); ask(pull, 'merge'); }
+    else if (pull && reactionFor(pull) && event.key === reactionParts[reactionFor(pull)!].key) { event.preventDefault(); ask(pull, reactionFor(pull)!); }
     else if (pull && event.key === 'o' && pull.url) { event.preventDefault(); window.open(pull.url, '_blank', 'noopener,noreferrer'); }
   };
   const section = (id: string, title: string, list: TrackedPull[], empty: ReactNode) => <section className={`pr-group group-${id}`} aria-labelledby={`pr-group-${id}`}>
@@ -132,14 +140,14 @@ function PullRow({ pull, now, workspace, agent, state, confirming, onOpen, onAsk
       <time className="pr-age" dateTime={pull.at ? new Date(pull.at).toISOString() : undefined}>{pull.at ? ageLabel(pull.at, now) : ''}</time>
     </button>
     <span className="pr-actions">
-      {reaction && <button type="button" className={reaction === 'merge' ? 'primary' : ''} disabled={busy} onClick={() => onAsk(reaction)} title={`${reactionLabel(reaction, agent)} (${reaction === 'send' ? 's' : reaction === 'review' ? 'r' : 'm'})`}>
-        <Icon name={reaction === 'merge' ? 'merge' : reaction === 'review' ? 'review' : 'send'} size={13}/><span>{reaction === 'send' ? 'Send failures' : reaction === 'review' ? 'Address review' : 'Merge'}</span>
+      {reaction && <button type="button" className={writesToGitHub(reaction) ? 'primary' : ''} disabled={busy} onClick={() => onAsk(reaction)} title={`${reactionLabel(reaction, agent)} (${reactionParts[reaction].key})`}>
+        <Icon name={reactionParts[reaction].icon} size={13}/><span>{reactionParts[reaction].short}</span>
       </button>}
       {pull.url && <a className="icon-button" href={pull.url} target="_blank" rel="noreferrer" aria-label={`Open ${pull.repository}#${pull.number} on GitHub`} title="Open on GitHub (o)"><Icon name="external" size={13}/></a>}
     </span>
-    {confirming && <div className="pr-confirm" role="group" aria-label={`Confirm ${confirming === 'merge' ? 'merge' : confirming === 'send' ? 'sending the failures' : 'addressing the review'}`}>
+    {confirming && <div className="pr-confirm" role="group" aria-label={`Confirm ${reactionParts[confirming].confirmName}`}>
       <span>{confirmation(pull, confirming, agent)}</span>
-      <button ref={confirmButton} type="button" className="primary" onClick={() => onConfirm(confirming)}>{confirming === 'merge' ? 'Merge' : 'Send'}</button>
+      <button ref={confirmButton} type="button" className="primary" onClick={() => onConfirm(confirming)}>{reactionParts[confirming].confirmButton}</button>
       <button type="button" onClick={onCancel}>Cancel</button>
     </div>}
     {busy && <p className="pr-note" role="status">{reactionWorking}</p>}

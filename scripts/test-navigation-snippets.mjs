@@ -178,7 +178,11 @@ try {
   await message.press("Control+b");
   await expect(alpha.locator(".workspace-link")).toBeFocused();
   await page.keyboard.press("ArrowDown");
-  await expect(page.getByRole("navigation", {name: "Workspace conversations"}).getByRole("button", {name: /Running: Codex Review/})).toBeFocused();
+  // Down from the workspace is its first conversation, whichever conversation is listed first now.
+  await expect.poll(() => page.evaluate(() => {
+    const first = document.querySelector('nav[aria-label="Workspace conversations"] .conversation-link');
+    return !!first && document.activeElement === first;
+  })).toBe(true);
   // The leader menu is configurable: add an entry, see it in the which-key card, use it.
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("tab", { name: "Shortcuts" }).click();

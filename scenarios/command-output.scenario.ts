@@ -39,8 +39,10 @@ export default scenario({
       press('Enter'),
       conv.receives('message', 'Run all the API tests'),
       conv.thinks(0.8),
-      caption('A long run takes over the idle console: every line, live'),
       conv.runs('go test ./...', { output: testLog(true), exit: 1, seconds: 5, description: 'Run all the API tests', console: { agentView: FAILURES, filter: 'go-test', outputBytes: 1_468_006 } }),
+      // The console stays folded until you open it (COMMAND_OUTPUT.md): a run never takes the screen by itself.
+      caption('The run waits in the folded console: open Command output to see every line'),
+      click(role('tab', 'Command output')),
       expect.visible(css('[data-testid="console-output"]', 'the console output')),
       expect.exactText(css('.command-panel .console-state [role=status]'), 'Failed · exit 1'),
       expect.visible(report),

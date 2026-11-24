@@ -116,20 +116,19 @@ export function consolePlace(page: WorkspacePage, putAway: boolean): ConsolePlac
   return group.minimized ? 'folded' : 'front';
 }
 
-export type Follow = { commandId: string; open: boolean };
+type Follow = { commandId: string };
 /**
  * What a listing changes. A console nobody can see (put away, behind another
  * tab, gone) points at the newest run, so opening it shows that one, and is
- * never brought forward. A folded console opens for a run that may take over.
+ * never brought forward. A folded console stays folded.
  * A console in view moves only when shouldTakeOver says so.
  */
 export function followRuns(news: RunNews, input: { follow: boolean; place: ConsolePlace; shown?: { done: boolean }; sinceUse: number }): Follow | undefined {
   if (!input.follow) return undefined;
   const candidate = news.candidates.at(-1);
-  if (input.place === 'front') return candidate && shouldTakeOver({ follow: true, shown: input.shown, sinceUse: input.sinceUse, run: { done: false, ...candidate } }) ? { commandId: candidate.id, open: false } : undefined;
-  if (input.place === 'folded' && candidate) return { commandId: candidate.id, open: true };
+  if (input.place === 'front') return candidate && shouldTakeOver({ follow: true, shown: input.shown, sinceUse: input.sinceUse, run: { done: false, ...candidate } }) ? { commandId: candidate.id } : undefined;
   const newest = news.fresh.at(-1);
-  return newest ? { commandId: newest, open: false } : undefined;
+  return newest ? { commandId: newest } : undefined;
 }
 
 /**

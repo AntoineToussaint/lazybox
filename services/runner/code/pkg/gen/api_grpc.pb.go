@@ -119,6 +119,10 @@ const (
 	RunnerService_RegisterPipe_FullMethodName                 = "/lazybox.bench.v1.RunnerService/RegisterPipe"
 	RunnerService_Publish_FullMethodName                      = "/lazybox.bench.v1.RunnerService/Publish"
 	RunnerService_FinishPipe_FullMethodName                   = "/lazybox.bench.v1.RunnerService/FinishPipe"
+	RunnerService_BindDelivery_FullMethodName                 = "/lazybox.bench.v1.RunnerService/BindDelivery"
+	RunnerService_GetDeliveryOutcome_FullMethodName           = "/lazybox.bench.v1.RunnerService/GetDeliveryOutcome"
+	RunnerService_PublishDeliveryOutcome_FullMethodName       = "/lazybox.bench.v1.RunnerService/PublishDeliveryOutcome"
+	RunnerService_RecordReviewCriterion_FullMethodName        = "/lazybox.bench.v1.RunnerService/RecordReviewCriterion"
 	RunnerService_ListCommands_FullMethodName                 = "/lazybox.bench.v1.RunnerService/ListCommands"
 	RunnerService_ClaimCommandShare_FullMethodName            = "/lazybox.bench.v1.RunnerService/ClaimCommandShare"
 	RunnerService_ReadCommand_FullMethodName                  = "/lazybox.bench.v1.RunnerService/ReadCommand"
@@ -139,6 +143,7 @@ const (
 	RunnerService_CreatePullRequest_FullMethodName            = "/lazybox.bench.v1.RunnerService/CreatePullRequest"
 	RunnerService_GetPullRequest_FullMethodName               = "/lazybox.bench.v1.RunnerService/GetPullRequest"
 	RunnerService_MergePullRequest_FullMethodName             = "/lazybox.bench.v1.RunnerService/MergePullRequest"
+	RunnerService_UpdatePullRequestBranch_FullMethodName      = "/lazybox.bench.v1.RunnerService/UpdatePullRequestBranch"
 	RunnerService_ListWorkspaceGitSummaries_FullMethodName    = "/lazybox.bench.v1.RunnerService/ListWorkspaceGitSummaries"
 	RunnerService_ListLinks_FullMethodName                    = "/lazybox.bench.v1.RunnerService/ListLinks"
 	RunnerService_LinkItem_FullMethodName                     = "/lazybox.bench.v1.RunnerService/LinkItem"
@@ -436,6 +441,19 @@ type RunnerServiceClient interface {
 	RegisterPipe(ctx context.Context, in *RegisterPipeRequest, opts ...grpc.CallOption) (*CommandStatus, error)
 	Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*CommandStatus, error)
 	FinishPipe(ctx context.Context, in *FinishPipeRequest, opts ...grpc.CallOption) (*CommandStatus, error)
+	// Pins a published spec.v2 revision to the caller's conversation, so its
+	// `lazybox run --check` and `--needs` runs record delivery observations.
+	// Binding another revision starts a new attempt (delivery.Store.Bind).
+	BindDelivery(ctx context.Context, in *BindDeliveryRequest, opts ...grpc.CallOption) (*DeliveryBinding, error)
+	// The delivery outcome of a conversation, or of a Mission task: the same
+	// projection (delivery.Project) through either lookup.
+	GetDeliveryOutcome(ctx context.Context, in *GetDeliveryOutcomeRequest, opts ...grpc.CallOption) (*DeliveryOutcome, error)
+	// Publishes the outcome as an immutable verdict snapshot: a report
+	// artifact (schema delivery-outcome.v1), or the next version of one.
+	PublishDeliveryOutcome(ctx context.Context, in *PublishDeliveryOutcomeRequest, opts ...grpc.CallOption) (*Artifact, error)
+	// A contract-bound reviewer's verdict on one criterion
+	// (`lazybox delivery review <criterion> passed|failed`).
+	RecordReviewCriterion(ctx context.Context, in *RecordReviewCriterionRequest, opts ...grpc.CallOption) (*RecordReviewCriterionResponse, error)
 	ListCommands(ctx context.Context, in *ListCommandsRequest, opts ...grpc.CallOption) (*ListCommandsResponse, error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -473,6 +491,9 @@ type RunnerServiceClient interface {
 	CreatePullRequest(ctx context.Context, in *CreatePullRequestRequest, opts ...grpc.CallOption) (*PullRequestStatus, error)
 	GetPullRequest(ctx context.Context, in *GetPullRequestRequest, opts ...grpc.CallOption) (*PullRequestStatus, error)
 	MergePullRequest(ctx context.Context, in *MergePullRequestRequest, opts ...grpc.CallOption) (*PullRequestStatus, error)
+	// Brings a tracked pull request up to date with its base, when its
+	// repository requires that before merging (mergeable_state "behind").
+	UpdatePullRequestBranch(ctx context.Context, in *UpdatePullRequestBranchRequest, opts ...grpc.CallOption) (*PullRequestStatus, error)
 	// The sidebar's git state, per workspace and repository: branch, ahead and
 	// behind its pushed branch and the default branch, uncommitted files, and the
 	// last pull request seen for the branch. Local Git only (no fetch); the pull
@@ -1799,6 +1820,46 @@ func (c *runnerServiceClient) FinishPipe(ctx context.Context, in *FinishPipeRequ
 	return out, nil
 }
 
+func (c *runnerServiceClient) BindDelivery(ctx context.Context, in *BindDeliveryRequest, opts ...grpc.CallOption) (*DeliveryBinding, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeliveryBinding)
+	err := c.cc.Invoke(ctx, RunnerService_BindDelivery_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) GetDeliveryOutcome(ctx context.Context, in *GetDeliveryOutcomeRequest, opts ...grpc.CallOption) (*DeliveryOutcome, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeliveryOutcome)
+	err := c.cc.Invoke(ctx, RunnerService_GetDeliveryOutcome_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) PublishDeliveryOutcome(ctx context.Context, in *PublishDeliveryOutcomeRequest, opts ...grpc.CallOption) (*Artifact, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Artifact)
+	err := c.cc.Invoke(ctx, RunnerService_PublishDeliveryOutcome_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) RecordReviewCriterion(ctx context.Context, in *RecordReviewCriterionRequest, opts ...grpc.CallOption) (*RecordReviewCriterionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordReviewCriterionResponse)
+	err := c.cc.Invoke(ctx, RunnerService_RecordReviewCriterion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *runnerServiceClient) ListCommands(ctx context.Context, in *ListCommandsRequest, opts ...grpc.CallOption) (*ListCommandsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListCommandsResponse)
@@ -2011,6 +2072,16 @@ func (c *runnerServiceClient) MergePullRequest(ctx context.Context, in *MergePul
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PullRequestStatus)
 	err := c.cc.Invoke(ctx, RunnerService_MergePullRequest_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) UpdatePullRequestBranch(ctx context.Context, in *UpdatePullRequestBranchRequest, opts ...grpc.CallOption) (*PullRequestStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PullRequestStatus)
+	err := c.cc.Invoke(ctx, RunnerService_UpdatePullRequestBranch_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3302,6 +3373,19 @@ type RunnerServiceServer interface {
 	RegisterPipe(context.Context, *RegisterPipeRequest) (*CommandStatus, error)
 	Publish(context.Context, *PublishRequest) (*CommandStatus, error)
 	FinishPipe(context.Context, *FinishPipeRequest) (*CommandStatus, error)
+	// Pins a published spec.v2 revision to the caller's conversation, so its
+	// `lazybox run --check` and `--needs` runs record delivery observations.
+	// Binding another revision starts a new attempt (delivery.Store.Bind).
+	BindDelivery(context.Context, *BindDeliveryRequest) (*DeliveryBinding, error)
+	// The delivery outcome of a conversation, or of a Mission task: the same
+	// projection (delivery.Project) through either lookup.
+	GetDeliveryOutcome(context.Context, *GetDeliveryOutcomeRequest) (*DeliveryOutcome, error)
+	// Publishes the outcome as an immutable verdict snapshot: a report
+	// artifact (schema delivery-outcome.v1), or the next version of one.
+	PublishDeliveryOutcome(context.Context, *PublishDeliveryOutcomeRequest) (*Artifact, error)
+	// A contract-bound reviewer's verdict on one criterion
+	// (`lazybox delivery review <criterion> passed|failed`).
+	RecordReviewCriterion(context.Context, *RecordReviewCriterionRequest) (*RecordReviewCriterionResponse, error)
 	ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -3339,6 +3423,9 @@ type RunnerServiceServer interface {
 	CreatePullRequest(context.Context, *CreatePullRequestRequest) (*PullRequestStatus, error)
 	GetPullRequest(context.Context, *GetPullRequestRequest) (*PullRequestStatus, error)
 	MergePullRequest(context.Context, *MergePullRequestRequest) (*PullRequestStatus, error)
+	// Brings a tracked pull request up to date with its base, when its
+	// repository requires that before merging (mergeable_state "behind").
+	UpdatePullRequestBranch(context.Context, *UpdatePullRequestBranchRequest) (*PullRequestStatus, error)
 	// The sidebar's git state, per workspace and repository: branch, ahead and
 	// behind its pushed branch and the default branch, uncommitted files, and the
 	// last pull request seen for the branch. Local Git only (no fetch); the pull
@@ -3954,6 +4041,18 @@ func (UnimplementedRunnerServiceServer) Publish(context.Context, *PublishRequest
 func (UnimplementedRunnerServiceServer) FinishPipe(context.Context, *FinishPipeRequest) (*CommandStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method FinishPipe not implemented")
 }
+func (UnimplementedRunnerServiceServer) BindDelivery(context.Context, *BindDeliveryRequest) (*DeliveryBinding, error) {
+	return nil, status.Error(codes.Unimplemented, "method BindDelivery not implemented")
+}
+func (UnimplementedRunnerServiceServer) GetDeliveryOutcome(context.Context, *GetDeliveryOutcomeRequest) (*DeliveryOutcome, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetDeliveryOutcome not implemented")
+}
+func (UnimplementedRunnerServiceServer) PublishDeliveryOutcome(context.Context, *PublishDeliveryOutcomeRequest) (*Artifact, error) {
+	return nil, status.Error(codes.Unimplemented, "method PublishDeliveryOutcome not implemented")
+}
+func (UnimplementedRunnerServiceServer) RecordReviewCriterion(context.Context, *RecordReviewCriterionRequest) (*RecordReviewCriterionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordReviewCriterion not implemented")
+}
 func (UnimplementedRunnerServiceServer) ListCommands(context.Context, *ListCommandsRequest) (*ListCommandsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListCommands not implemented")
 }
@@ -4013,6 +4112,9 @@ func (UnimplementedRunnerServiceServer) GetPullRequest(context.Context, *GetPull
 }
 func (UnimplementedRunnerServiceServer) MergePullRequest(context.Context, *MergePullRequestRequest) (*PullRequestStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method MergePullRequest not implemented")
+}
+func (UnimplementedRunnerServiceServer) UpdatePullRequestBranch(context.Context, *UpdatePullRequestBranchRequest) (*PullRequestStatus, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdatePullRequestBranch not implemented")
 }
 func (UnimplementedRunnerServiceServer) ListWorkspaceGitSummaries(context.Context, *WorkspaceGitSummariesRequest) (*WorkspaceGitSummaries, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListWorkspaceGitSummaries not implemented")
@@ -6127,6 +6229,78 @@ func _RunnerService_FinishPipe_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_BindDelivery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BindDeliveryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).BindDelivery(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_BindDelivery_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).BindDelivery(ctx, req.(*BindDeliveryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_GetDeliveryOutcome_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDeliveryOutcomeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).GetDeliveryOutcome(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_GetDeliveryOutcome_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).GetDeliveryOutcome(ctx, req.(*GetDeliveryOutcomeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_PublishDeliveryOutcome_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishDeliveryOutcomeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).PublishDeliveryOutcome(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_PublishDeliveryOutcome_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).PublishDeliveryOutcome(ctx, req.(*PublishDeliveryOutcomeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_RecordReviewCriterion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordReviewCriterionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).RecordReviewCriterion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_RecordReviewCriterion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).RecordReviewCriterion(ctx, req.(*RecordReviewCriterionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RunnerService_ListCommands_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListCommandsRequest)
 	if err := dec(in); err != nil {
@@ -6469,6 +6643,24 @@ func _RunnerService_MergePullRequest_Handler(srv interface{}, ctx context.Contex
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).MergePullRequest(ctx, req.(*MergePullRequestRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_UpdatePullRequestBranch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdatePullRequestBranchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).UpdatePullRequestBranch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_UpdatePullRequestBranch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).UpdatePullRequestBranch(ctx, req.(*UpdatePullRequestBranchRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -8799,6 +8991,22 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RunnerService_FinishPipe_Handler,
 		},
 		{
+			MethodName: "BindDelivery",
+			Handler:    _RunnerService_BindDelivery_Handler,
+		},
+		{
+			MethodName: "GetDeliveryOutcome",
+			Handler:    _RunnerService_GetDeliveryOutcome_Handler,
+		},
+		{
+			MethodName: "PublishDeliveryOutcome",
+			Handler:    _RunnerService_PublishDeliveryOutcome_Handler,
+		},
+		{
+			MethodName: "RecordReviewCriterion",
+			Handler:    _RunnerService_RecordReviewCriterion_Handler,
+		},
+		{
 			MethodName: "ListCommands",
 			Handler:    _RunnerService_ListCommands_Handler,
 		},
@@ -8869,6 +9077,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MergePullRequest",
 			Handler:    _RunnerService_MergePullRequest_Handler,
+		},
+		{
+			MethodName: "UpdatePullRequestBranch",
+			Handler:    _RunnerService_UpdatePullRequestBranch_Handler,
 		},
 		{
 			MethodName: "ListWorkspaceGitSummaries",

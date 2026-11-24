@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"google.golang.org/protobuf/proto"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,6 +175,15 @@ func TestOrchestratorHoldsNewAgentsWhileReviewIsFull(t *testing.T) {
 func nanos(v int64) *int64 { return &v }
 
 func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
+	for _, tc := range []struct{ name, content, want string }{
+		{"text", `{"schema":"spec.v1","problem":"Reconnect","requirements":["Restore history"],"acceptanceCriteria":["One row after reconnect"]}`, "One row after reconnect"},
+		{"named", `{"schema":"spec.v2","problem":"Reconnect","requirements":["Restore history"],"acceptanceCriteria":[{"id":"reconnect","expected":"One row after reconnect","required":true}]}`, "[reconnect, required] One row after reconnect"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testPinnedPlanSpawnsFromReviewedBaseline(t, tc.content, tc.want) })
+	}
+}
+
+func testPinnedPlanSpawnsFromReviewedBaseline(t *testing.T, content, want string) {
 	o := newOrchestration(t)
 	ctx := timeout(t)
 	source := history(t, "base")
@@ -194,7 +204,7 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 	o.grant(t, &pb.OrchestratorCeiling{MaxChildren: 2, PlanRequired: true})
 	orch, owner := bearer(ctx, o.orchKey), bearer(ctx, ownerToken)
 	req := &pb.ProposePlanRequest{SessionId: o.orch.ID, OperationId: "snapshot", Tasks: []*pb.PlanTask{{Key: "a", Title: "Worker", Workspace: "pinned"}, {Key: "b", Title: "Worker", Workspace: "pinned"}}}
-	spec, err := o.bench.Artifacts.Put(parent.ID, artifacts.Put{Title: "Acceptance", Kind: "spec", Format: "json", Content: `{"schema":"spec.v1","problem":"Reconnect","requirements":["Restore history"],"acceptanceCriteria":["One row after reconnect"]}`})
+	spec, err := o.bench.Artifacts.Put(parent.ID, artifacts.Put{Title: "Acceptance", Kind: "spec", Format: "json", Content: content})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +224,7 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Contract.GetVersion() != 1 || len(plan.Contract.GetAcceptanceCriteria()) != 1 || plan.Contract.Digest != artifacts.Digest(spec.Content) || len(plan.Baseline) != 1 || plan.Baseline[0].Commit != member.BaseCommit {
+	if plan.Contract.GetVersion() != 1 || len(plan.Contract.GetAcceptanceCriteria()) != 1 || plan.Contract.GetAcceptanceCriteria()[0] != want || plan.Contract.Digest != artifacts.Digest(spec.Content) || len(plan.Baseline) != 1 || plan.Baseline[0].Commit != member.BaseCommit {
 		t.Fatalf("proposal missing review inputs: %v", plan)
 	}
 	if _, err = o.bench.Artifacts.Put(parent.ID, artifacts.Put{ID: spec.ID, Content: strings.ReplaceAll(spec.Content, "One row", "Two rows")}); err != nil {
@@ -241,8 +251,31 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 		t.Fatalf("worker options: %v, %v", execution, err)
 	}
 	brief := <-o.fake.session(view.Spawned.SessionId).Applied
-	if !strings.Contains(brief.Text, "One row after reconnect") || strings.Contains(brief.Text, "Two rows after reconnect") {
+	if !strings.Contains(brief.Text, "\n- "+want) || strings.Contains(brief.Text, "Two rows after reconnect") {
 		t.Fatalf("wrong contract revision in child brief: %s", brief.Text)
+	}
+	// The worker's checks count against the approved contract, never a later revision.
+	pipe, err := o.client.RegisterPipe(owner, &pb.RegisterPipeRequest{SessionId: view.Spawned.SessionId, Title: "go test ./reconnect", Check: "reconnect"})
+	if !strings.HasPrefix(want, "[") {
+		if err == nil || !strings.Contains(err.Error(), "approved plan") {
+			t.Fatalf("checked a text-only contract: %v", err)
+		}
+	} else {
+		if err != nil {
+			t.Fatal(err)
+		}
+		done, err := o.client.FinishPipe(owner, &pb.FinishPipeRequest{CommandId: pipe.Id, Report: &pb.CommandReport{ExitCode: 0}})
+		if err != nil || !strings.HasPrefix(done.Delivery, "check reconnect: passed on candidate:") || !strings.Contains(done.Delivery, "v1)") {
+			t.Fatalf("finish: %v %v", done, err)
+		}
+		recorded := o.bench.Delivery.Observations()
+		last := recorded[len(recorded)-1]
+		if last.Subject.Mission != o.mission || last.Subject.Task != task || last.ContractDigest != plan.Contract.Digest || last.Attempt == "" || strings.HasPrefix(last.Attempt, "conversation:") {
+			t.Fatalf("observation outside the Mission attempt: %+v", last)
+		}
+		if _, err := o.client.BindDelivery(owner, &pb.BindDeliveryRequest{SessionId: view.Spawned.SessionId, ArtifactId: spec.ID, Version: 2}); err == nil {
+			t.Fatal("a Mission worker bound its own spec")
+		}
 	}
 	child, err := manager.Get(view.Spawned.CollectionId)
 	if err != nil {
@@ -260,10 +293,42 @@ func TestPinnedPlanSpawnsFromReviewedBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	reviewerBrief := briefOf(t, o.fake.session(review.Session.Id).Applied)
-	if !strings.Contains(reviewerBrief.Text, "Approved Mission contract") || !strings.Contains(reviewerBrief.Text, plan.Contract.Digest) || !strings.Contains(reviewerBrief.Text, "One row after reconnect") || strings.Contains(reviewerBrief.Text, "Unapproved local criteria") {
+	if !strings.Contains(reviewerBrief.Text, "Approved Mission contract") || !strings.Contains(reviewerBrief.Text, plan.Contract.Digest) || !strings.Contains(reviewerBrief.Text, want) || strings.Contains(reviewerBrief.Text, "Unapproved local criteria") {
 		t.Fatalf("wrong reviewer contract: %s", reviewerBrief.Text)
 	}
+	// The contract-bound reviewer's verdict on a criterion joins the worker's
+	// check in the task's outcome; only the reviewer may record one.
+	if _, err := o.client.RecordReviewCriterion(owner, &pb.RecordReviewCriterionRequest{SessionId: view.Spawned.SessionId, Criterion: "reconnect", Result: "passed"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("the worker recorded a review verdict: %v", err)
+	}
+	verdict, err := o.client.RecordReviewCriterion(owner, &pb.RecordReviewCriterionRequest{SessionId: review.Session.Id, Criterion: "reconnect", Result: "failed"})
+	if !strings.HasPrefix(want, "[") {
+		if err == nil {
+			t.Fatal("a review verdict on a text-only contract")
+		}
+	} else {
+		if err != nil || !strings.HasPrefix(verdict.Note, "review reconnect: failed on candidate:") {
+			t.Fatalf("review verdict: %v %v", verdict, err)
+		}
+		outcome, err := o.client.GetDeliveryOutcome(owner, &pb.GetDeliveryOutcomeRequest{MissionId: o.mission, TaskId: task})
+		if err != nil {
+			t.Fatal(err)
+		}
+		criterion := outcome.Candidates[0].Criteria[0]
+		if criterion.State != "failed" || len(criterion.Evidence) != 2 || criterion.Evidence[0].Source != "command" || criterion.Evidence[1].Source != "review" {
+			t.Fatalf("the review verdict is not in the outcome: %+v", outcome)
+		}
+		byWorker, err := o.client.GetDeliveryOutcome(owner, &pb.GetDeliveryOutcomeRequest{SessionId: view.Spawned.SessionId})
+		if err != nil || !proto.Equal(byWorker, outcome) {
+			t.Fatalf("the worker's outcome differs from the task's: %v\n%v\n%v", byWorker, outcome, err)
+		}
+	}
 	git(t, child.Members[0].Path, "commit", "--allow-empty", "-m", "new candidate head")
+	if strings.HasPrefix(want, "[") {
+		if _, err := o.client.RecordReviewCriterion(owner, &pb.RecordReviewCriterionRequest{SessionId: review.Session.Id, Criterion: "reconnect", Result: "passed"}); err == nil || !strings.Contains(err.Error(), "new commits") {
+			t.Fatalf("a verdict on work that moved on: %v", err)
+		}
+	}
 	reviewer := o.fake.session(review.Session.Id)
 	reviewer.Events <- agent.Event{Type: "turn_started"}
 	reviewer.Events <- agent.Event{Type: "turn_ended", Status: "completed"}

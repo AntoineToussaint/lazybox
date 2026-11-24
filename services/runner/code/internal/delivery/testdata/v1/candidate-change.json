@@ -1,0 +1,194 @@
+{
+  "schema": "delivery-fixture.v1",
+  "description": "Every required criterion passes on one candidate. A new catalog commit is another candidate: only the checks rerun on it count, so it is incomplete until the rest are repeated.",
+  "spec": {
+    "schema": "spec.v2",
+    "problem": "Deliver an authenticated work catalog",
+    "requirements": [
+      "Persist and retrieve work items"
+    ],
+    "acceptanceCriteria": [
+      {
+        "id": "storage",
+        "expected": "Duplicate inserts retain one work item",
+        "required": true
+      },
+      {
+        "id": "generate",
+        "expected": "The catalog service is generated",
+        "required": true
+      },
+      {
+        "id": "api",
+        "expected": "An authorized client retrieves the item after restart",
+        "required": true
+      },
+      {
+        "id": "docs",
+        "expected": "The module guide describes the catalog",
+        "required": false
+      }
+    ]
+  },
+  "contract": {
+    "artifact": "spec-catalog",
+    "version": 3,
+    "schema": "spec.v2",
+    "digest": "sha256:catalog-spec-v3",
+    "criteria": [
+      {
+        "id": "storage",
+        "expected": "Duplicate inserts retain one work item",
+        "required": true
+      },
+      {
+        "id": "generate",
+        "expected": "The catalog service is generated",
+        "required": true
+      },
+      {
+        "id": "api",
+        "expected": "An authorized client retrieves the item after restart",
+        "required": true
+      },
+      {
+        "id": "docs",
+        "expected": "The module guide describes the catalog",
+        "required": false
+      }
+    ]
+  },
+  "candidates": [
+    {
+      "id": "candidate:927de552ccb5897c",
+      "revisions": {
+        "api": "a1b2c3d",
+        "catalog": "0f9e8d7"
+      }
+    },
+    {
+      "id": "candidate:b2dbad522ff19132",
+      "revisions": {
+        "api": "a1b2c3d",
+        "catalog": "1a2b3c4"
+      }
+    }
+  ],
+  "observations": [
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex9/a1",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "attempt-9",
+      "subject": {
+        "conversation": "conv-worker",
+        "mission": "mission-catalog",
+        "task": "task-api"
+      },
+      "source": "command",
+      "reference": "run:ex9/a1",
+      "criterionId": "storage",
+      "exitCode": 0,
+      "assertion": "passed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex9/a2",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "attempt-9",
+      "subject": {
+        "conversation": "conv-worker",
+        "mission": "mission-catalog",
+        "task": "task-api"
+      },
+      "source": "command",
+      "reference": "run:ex9/a2",
+      "criterionId": "generate",
+      "exitCode": 0,
+      "assertion": "passed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex9/a3",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:927de552ccb5897c",
+      "attempt": "attempt-9",
+      "subject": {
+        "conversation": "conv-worker",
+        "mission": "mission-catalog",
+        "task": "task-api"
+      },
+      "source": "command",
+      "reference": "run:ex9/a3",
+      "criterionId": "api",
+      "exitCode": 0,
+      "assertion": "passed"
+    },
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex9/b1",
+      "contractDigest": "sha256:catalog-spec-v3",
+      "candidate": "candidate:b2dbad522ff19132",
+      "attempt": "attempt-9",
+      "subject": {
+        "conversation": "conv-worker",
+        "mission": "mission-catalog",
+        "task": "task-api"
+      },
+      "source": "command",
+      "reference": "run:ex9/b1",
+      "criterionId": "storage",
+      "exitCode": 0,
+      "assertion": "passed"
+    }
+  ],
+  "checkpoints": [
+    {
+      "after": 3,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:927de552ccb5897c",
+        "attempt": "attempt-9"
+      },
+      "verdict": "passed",
+      "criteria": {
+        "storage": "passed",
+        "generate": "passed",
+        "api": "passed",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 4,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:927de552ccb5897c",
+        "attempt": "attempt-9"
+      },
+      "verdict": "passed",
+      "criteria": {
+        "storage": "passed",
+        "generate": "passed",
+        "api": "passed",
+        "docs": "unrun"
+      }
+    },
+    {
+      "after": 4,
+      "scope": {
+        "contractDigest": "sha256:catalog-spec-v3",
+        "candidate": "candidate:b2dbad522ff19132",
+        "attempt": "attempt-9"
+      },
+      "verdict": "incomplete",
+      "criteria": {
+        "storage": "passed",
+        "generate": "unrun",
+        "api": "unrun",
+        "docs": "unrun"
+      }
+    }
+  ]
+}

@@ -56,6 +56,7 @@ type PullRequests interface {
 	PullRequestStatus(ctx context.Context, token, fullName, branch string) (PullRequestStatus, error)
 	CreatePullRequest(ctx context.Context, token, fullName string, pr NewPullRequest) (PullRequestStatus, error)
 	MergePullRequest(ctx context.Context, token, fullName string, number int64, method, expectedHead string) error
+	UpdatePullRequestBranch(ctx context.Context, token, fullName string, number int64, expectedHead string) error
 }
 
 func splitName(fullName string) (string, string, error) {
@@ -288,6 +289,34 @@ func (c *Client) CreatePullRequest(ctx context.Context, token, fullName string, 
 		return PullRequestStatus{}, writeError(err, response)
 	}
 	return c.describe(ctx, client, owner, name, created.GetNumber(), PullRequestStatus{DefaultBranch: repo.GetDefaultBranch()})
+}
+
+// UpdatePullRequestBranch brings a pull request up to date with its base
+// (GitHub merges the base into its branch), only if its head is still
+// expectedHead. A repository that requires up-to-date branches refuses to
+// merge one that is behind (mergeable_state "behind"). GitHub updates the
+// branch in the background; its checks then run again.
+func (c *Client) UpdatePullRequestBranch(ctx context.Context, token, fullName string, number int64, expectedHead string) error {
+	owner, name, err := splitName(fullName)
+	if err != nil {
+		return err
+	}
+	if number <= 0 || expectedHead == "" {
+		return errors.New("pull request number and reviewed head required")
+	}
+	client, err := c.client(token)
+	if err != nil {
+		return err
+	}
+	_, response, err := client.PullRequests.UpdateBranch(ctx, owner, name, int(number), sdk.UpdatePullRequestBranchRequest{ExpectedHeadSHA: &expectedHead})
+	var accepted *sdk.AcceptedError
+	if errors.As(err, &accepted) {
+		return nil
+	}
+	if err != nil {
+		return writeError(err, response)
+	}
+	return nil
 }
 
 // MergePullRequest merges only if the head is still expectedHead, so a push

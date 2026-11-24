@@ -7,13 +7,14 @@ import { Icon } from './Icons';
 import { SettingsGroup, SettingsHeader } from './settings-parts';
 import { playAlert, storeSoundFile, SYSTEM_SOUNDS, systemSoundsAvailable, useSoundSettings, type AlertSound, type SoundSettings, type SoundSource } from './sounds';
 import { ConfigFileStatus } from './ConfigFileStatus';
+import { notificationRefusal, onNotificationRefusal, reportRefusal } from './attention-alerts';
 import { writeConfig } from './config-writer';
 
 export const notificationOptions: { key: keyof NotificationPreferences; label: string; detail: string }[] = [
   { key: 'needsInput', label: 'Needs input', detail: 'An agent asks a question or waits for an approval.' },
   { key: 'failed', label: 'Failed', detail: 'A provider failure, a message that could not be delivered, or a turn a Runner restart interrupted.' },
   { key: 'review', label: 'Ready for review', detail: 'An agent finished its turn.' },
-  { key: 'badge', label: 'Dock badge', detail: 'Show on the app icon how many conversations need input.' },
+  { key: 'badge', label: 'Dock badge', detail: 'Show on the app icon the Inbox count: what needs you, pull requests and tasks included.' },
 ];
 const sounds: { key: 'soundNeedsYou' | 'soundDone'; sound: AlertSound; label: string; detail: string }[] = [
   { key: 'soundNeedsYou', sound: 'request', label: 'Needs you', detail: 'An agent asks a question, waits for an approval, or fails.' },
@@ -28,20 +29,30 @@ export function NotificationSettings() {
   const save = (next: NotificationPreferences) => { keep(next); void writeConfig({ file: 'settings', notifications: next }); };
   const [permission, setPermission] = useState<NotificationPermission>();
   const [status, setStatus] = useState('');
-  useEffect(() => { void host?.notificationPermission?.().then(setPermission).catch(() => setPermission('unsupported')); }, [host]);
+  // Read again when the window comes back: the person may have just changed it in the system's settings.
+  useEffect(() => {
+    const read = () => void host?.notificationPermission?.().then(setPermission).catch(() => setPermission('unsupported'));
+    read();
+    window.addEventListener('focus', read);
+    return () => window.removeEventListener('focus', read);
+  }, [host]);
+  const [refusal, setRefusal] = useState(notificationRefusal);
+  useEffect(() => onNotificationRefusal(() => setRefusal(notificationRefusal())), []);
   const supported = !!host?.notifyAttention;
   const test = async () => {
     try {
       await host!.notifyAttention!({ key: 'lazybox-test', title: 'Lazybox notifications are on', body: 'You will be told when a conversation needs you.', collectionId: '', sessionId: '' });
-      setStatus('Sent. If nothing appeared, check this app in your system notification settings.');
-    } catch (error) { setStatus(`Could not send: ${String(error)}`); }
+      reportRefusal('');
+      setStatus(host?.systemSettings ? 'Sent: macOS accepted it.' : 'Sent. If nothing appeared, check this app in your system notification settings.');
+    } catch (error) { reportRefusal(error); setStatus(`Could not send: ${String(error).replace(/^Error: /, '')}`); }
   };
   return <section className="notification-settings" aria-labelledby="notification-settings-title">
     <SettingsHeader id="notification-settings-title" title="Notifications" description="Lazybox tells you when a conversation you are not looking at needs you: a small toast while Lazybox is in front, a system notification when it is not. Every conversation, notified or not, is in the Inbox."/>
     <ConfigFileStatus name="settings" what="These settings" section="notifications"/>
     {!supported && <p className="settings-error tone-note" role="note">This window does not send notifications; the main Lazybox window does.</p>}
-    {permission === 'denied' && <p className="settings-error" role="alert">Notifications are blocked for this site. Allow them in your browser’s site settings, then come back.</p>}
-    {permission === 'default' && host?.requestNotificationPermission && <p className="settings-error tone-note">Your browser asks before showing notifications. <button onClick={() => void host.requestNotificationPermission!().then(setPermission)}>Allow notifications</button></p>}
+    {permission === 'denied' && <p className="settings-error" role="alert">{host?.systemSettings ? `Lazybox is not allowed to notify you. Allow it in ${host.systemSettings}, then come back.` : 'Notifications are blocked for this site. Allow them in your browser’s site settings, then come back.'}</p>}
+    {permission !== 'denied' && refusal && <p className="settings-error" role="alert">The last notification was not shown: {refusal}{host?.systemSettings ? ` Check ${host.systemSettings}.` : ''}</p>}
+    {permission === 'default' && host?.requestNotificationPermission && <p className="settings-error tone-note">{host.systemSettings ? 'macOS asks once before Lazybox can notify you.' : 'Your browser asks before showing notifications.'} <button onClick={() => void host.requestNotificationPermission!().then(setPermission)}>Allow notifications</button></p>}
     <SettingsGroup title="Notify me when">
       {notificationOptions.map(option => <label key={option.key} className="settings-row notification-option">
         <span className="settings-row-text"><span className="settings-row-label">{option.label}</span><small>{option.detail}</small></span>

@@ -312,6 +312,10 @@ The shared documents guidance asks agents to prefer Mermaid for workflows,
 state transitions and service interactions, use tables and checklists where
 they help, and record sources, assumptions and verification.
 
+The workspace briefing asks coding agents to use a blocking question when a
+decision is needed. A goal continuation while that decision is pending leaves
+the action waiting for the person's answer.
+
 An agent's briefing is a list of sections, each with an ID and a version
 (`runner/briefing.go`): the person's Settings → Agents text (`settings`) and
 its provider part (`provider`), the Runner's own sections (`workspace`, `run`,
@@ -477,9 +481,9 @@ and `${LAZYBOX_V2_CLI}` as `lazybox`.
   conversation and bounded, but the system may also clear the temp directory
   on its own. A Codex agent that changes `TMPDIR` writes where the Runner does
   not look.
-- The console opens only for runs it sees start while the session is viewed:
-  it polls every 1.5 s, so a run that starts while switching sessions is in
-  the list but does not open the panel.
+- New runs appear in the command list. The console stays folded until you
+  select **Command output** or **Open in console**. An open console can
+  follow new runs.
 - The compact view is built from the first 32 MiB of each stream. The console
   and the file keep everything.
 - Commands needing a terminal (TUIs, password prompts) are out of scope; the

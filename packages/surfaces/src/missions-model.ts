@@ -66,12 +66,14 @@ export function awaitingRows(missions: readonly Mission[]): AwaitingRow[] {
 export function missionSummary(mission: Mission): string {
   if (mission.error) return 'Unreadable: ' + mission.error;
   if (mission.canceled) return 'Canceled';
-  const tasks = mission.tasks.filter(t => t.status !== 'canceled');
+  const tasks = mission.tasks;
   if (!tasks.length) return 'No tasks yet';
-  const count = (key: ColumnKey) => tasks.filter(t => columnOf(t.status) === key).length;
-  const needs = count('needs'), working = count('working'), done = tasks.filter(t => t.status === 'done').length;
-  const parts = [needs && `${needs} need${needs === 1 ? 's' : ''} you`, working && `${working} working`, `${done} of ${tasks.length} done`].filter(Boolean);
-  return parts.join(' · ');
+  const count = (status: string) => tasks.filter(t => t.status === status).length;
+  const needs = count('needs_you') + count('claimed_done');
+  const working = tasks.filter(t => columnOf(t.status) === 'working').length;
+  const failed = count('failed'), blocked = count('blocked'), canceled = count('canceled');
+  return [failed && `${failed} failed`, blocked && `${blocked} blocked`, needs && `${needs} need${needs === 1 ? 's' : ''} you`,
+    working && `${working} working`, canceled && `${canceled} canceled`, `${count('done')} of ${tasks.length} done`].filter(Boolean).join(' · ');
 }
 
 const short = (sha: string) => sha.slice(0, 7);
@@ -99,13 +101,23 @@ export function evidenceChip(e: MissionEvidence): { mark: string; label: string;
   return { mark, label: e.title || e.ref, tone, title: e.ref };
 }
 
-/** Keep the latest checks for each PR. Show its delivery marker until checks arrive. */
+/**
+ * Keep the latest checks for each PR, and show its delivery marker until checks arrive.
+ * Keep the newest unresolved command failure beside the latest run: a failure stays
+ * until a later run of the same command passes, since another passing command can test a different part of the work.
+ */
 export function headlineEvidence(evidence: readonly MissionEvidence[]): MissionEvidence[] {
-  const seen = new Set<string>(), out: MissionEvidence[] = [];
+  const seen = new Set<string>(), passed = new Set<string>(), out: MissionEvidence[] = [];
   const prKey = (e: MissionEvidence) => `pr:${e.repository.toLowerCase()}#${e.number}`;
   const current = evidence.filter(e => !e.historical);
   const checked = new Set(current.filter(e => e.kind === 'pr' && !e.ref.startsWith('pr-link:')).map(prKey));
+  let failure = false;
   for (const e of current) {
+    if (e.kind === 'run' && e.outcome === 'fail' && !failure && !(e.title && passed.has(e.title))) {
+      failure = true;
+      if (seen.has('run')) { out.push(e); continue; }
+    }
+    if (e.kind === 'run' && e.outcome === 'pass' && e.title) passed.add(e.title);
     const key = e.kind === 'pr' ? prKey(e) : e.kind;
     if (seen.has(key) || (e.kind === 'pr' && e.ref.startsWith('pr-link:') && checked.has(key))) continue;
     seen.add(key);

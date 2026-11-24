@@ -326,6 +326,18 @@ const (
 	// RunnerServiceFinishPipeProcedure is the fully-qualified name of the RunnerService's FinishPipe
 	// RPC.
 	RunnerServiceFinishPipeProcedure = "/lazybox.bench.v1.RunnerService/FinishPipe"
+	// RunnerServiceBindDeliveryProcedure is the fully-qualified name of the RunnerService's
+	// BindDelivery RPC.
+	RunnerServiceBindDeliveryProcedure = "/lazybox.bench.v1.RunnerService/BindDelivery"
+	// RunnerServiceGetDeliveryOutcomeProcedure is the fully-qualified name of the RunnerService's
+	// GetDeliveryOutcome RPC.
+	RunnerServiceGetDeliveryOutcomeProcedure = "/lazybox.bench.v1.RunnerService/GetDeliveryOutcome"
+	// RunnerServicePublishDeliveryOutcomeProcedure is the fully-qualified name of the RunnerService's
+	// PublishDeliveryOutcome RPC.
+	RunnerServicePublishDeliveryOutcomeProcedure = "/lazybox.bench.v1.RunnerService/PublishDeliveryOutcome"
+	// RunnerServiceRecordReviewCriterionProcedure is the fully-qualified name of the RunnerService's
+	// RecordReviewCriterion RPC.
+	RunnerServiceRecordReviewCriterionProcedure = "/lazybox.bench.v1.RunnerService/RecordReviewCriterion"
 	// RunnerServiceListCommandsProcedure is the fully-qualified name of the RunnerService's
 	// ListCommands RPC.
 	RunnerServiceListCommandsProcedure = "/lazybox.bench.v1.RunnerService/ListCommands"
@@ -386,6 +398,9 @@ const (
 	// RunnerServiceMergePullRequestProcedure is the fully-qualified name of the RunnerService's
 	// MergePullRequest RPC.
 	RunnerServiceMergePullRequestProcedure = "/lazybox.bench.v1.RunnerService/MergePullRequest"
+	// RunnerServiceUpdatePullRequestBranchProcedure is the fully-qualified name of the RunnerService's
+	// UpdatePullRequestBranch RPC.
+	RunnerServiceUpdatePullRequestBranchProcedure = "/lazybox.bench.v1.RunnerService/UpdatePullRequestBranch"
 	// RunnerServiceListWorkspaceGitSummariesProcedure is the fully-qualified name of the
 	// RunnerService's ListWorkspaceGitSummaries RPC.
 	RunnerServiceListWorkspaceGitSummariesProcedure = "/lazybox.bench.v1.RunnerService/ListWorkspaceGitSummaries"
@@ -893,6 +908,19 @@ type RunnerServiceClient interface {
 	RegisterPipe(context.Context, *connect.Request[gen.RegisterPipeRequest]) (*connect.Response[gen.CommandStatus], error)
 	Publish(context.Context, *connect.Request[gen.PublishRequest]) (*connect.Response[gen.CommandStatus], error)
 	FinishPipe(context.Context, *connect.Request[gen.FinishPipeRequest]) (*connect.Response[gen.CommandStatus], error)
+	// Pins a published spec.v2 revision to the caller's conversation, so its
+	// `lazybox run --check` and `--needs` runs record delivery observations.
+	// Binding another revision starts a new attempt (delivery.Store.Bind).
+	BindDelivery(context.Context, *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error)
+	// The delivery outcome of a conversation, or of a Mission task: the same
+	// projection (delivery.Project) through either lookup.
+	GetDeliveryOutcome(context.Context, *connect.Request[gen.GetDeliveryOutcomeRequest]) (*connect.Response[gen.DeliveryOutcome], error)
+	// Publishes the outcome as an immutable verdict snapshot: a report
+	// artifact (schema delivery-outcome.v1), or the next version of one.
+	PublishDeliveryOutcome(context.Context, *connect.Request[gen.PublishDeliveryOutcomeRequest]) (*connect.Response[gen.Artifact], error)
+	// A contract-bound reviewer's verdict on one criterion
+	// (`lazybox delivery review <criterion> passed|failed`).
+	RecordReviewCriterion(context.Context, *connect.Request[gen.RecordReviewCriterionRequest]) (*connect.Response[gen.RecordReviewCriterionResponse], error)
 	ListCommands(context.Context, *connect.Request[gen.ListCommandsRequest]) (*connect.Response[gen.ListCommandsResponse], error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -930,6 +958,9 @@ type RunnerServiceClient interface {
 	CreatePullRequest(context.Context, *connect.Request[gen.CreatePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	GetPullRequest(context.Context, *connect.Request[gen.GetPullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	MergePullRequest(context.Context, *connect.Request[gen.MergePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
+	// Brings a tracked pull request up to date with its base, when its
+	// repository requires that before merging (mergeable_state "behind").
+	UpdatePullRequestBranch(context.Context, *connect.Request[gen.UpdatePullRequestBranchRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	// The sidebar's git state, per workspace and repository: branch, ahead and
 	// behind its pushed branch and the default branch, uncommitted files, and the
 	// last pull request seen for the branch. Local Git only (no fetch); the pull
@@ -1845,6 +1876,30 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("FinishPipe")),
 			connect.WithClientOptions(opts...),
 		),
+		bindDelivery: connect.NewClient[gen.BindDeliveryRequest, gen.DeliveryBinding](
+			httpClient,
+			baseURL+RunnerServiceBindDeliveryProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("BindDelivery")),
+			connect.WithClientOptions(opts...),
+		),
+		getDeliveryOutcome: connect.NewClient[gen.GetDeliveryOutcomeRequest, gen.DeliveryOutcome](
+			httpClient,
+			baseURL+RunnerServiceGetDeliveryOutcomeProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("GetDeliveryOutcome")),
+			connect.WithClientOptions(opts...),
+		),
+		publishDeliveryOutcome: connect.NewClient[gen.PublishDeliveryOutcomeRequest, gen.Artifact](
+			httpClient,
+			baseURL+RunnerServicePublishDeliveryOutcomeProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("PublishDeliveryOutcome")),
+			connect.WithClientOptions(opts...),
+		),
+		recordReviewCriterion: connect.NewClient[gen.RecordReviewCriterionRequest, gen.RecordReviewCriterionResponse](
+			httpClient,
+			baseURL+RunnerServiceRecordReviewCriterionProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("RecordReviewCriterion")),
+			connect.WithClientOptions(opts...),
+		),
 		listCommands: connect.NewClient[gen.ListCommandsRequest, gen.ListCommandsResponse](
 			httpClient,
 			baseURL+RunnerServiceListCommandsProcedure,
@@ -1963,6 +2018,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceMergePullRequestProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("MergePullRequest")),
+			connect.WithClientOptions(opts...),
+		),
+		updatePullRequestBranch: connect.NewClient[gen.UpdatePullRequestBranchRequest, gen.PullRequestStatus](
+			httpClient,
+			baseURL+RunnerServiceUpdatePullRequestBranchProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("UpdatePullRequestBranch")),
 			connect.WithClientOptions(opts...),
 		),
 		listWorkspaceGitSummaries: connect.NewClient[gen.WorkspaceGitSummariesRequest, gen.WorkspaceGitSummaries](
@@ -2717,6 +2778,10 @@ type runnerServiceClient struct {
 	registerPipe                 *connect.Client[gen.RegisterPipeRequest, gen.CommandStatus]
 	publish                      *connect.Client[gen.PublishRequest, gen.CommandStatus]
 	finishPipe                   *connect.Client[gen.FinishPipeRequest, gen.CommandStatus]
+	bindDelivery                 *connect.Client[gen.BindDeliveryRequest, gen.DeliveryBinding]
+	getDeliveryOutcome           *connect.Client[gen.GetDeliveryOutcomeRequest, gen.DeliveryOutcome]
+	publishDeliveryOutcome       *connect.Client[gen.PublishDeliveryOutcomeRequest, gen.Artifact]
+	recordReviewCriterion        *connect.Client[gen.RecordReviewCriterionRequest, gen.RecordReviewCriterionResponse]
 	listCommands                 *connect.Client[gen.ListCommandsRequest, gen.ListCommandsResponse]
 	claimCommandShare            *connect.Client[gen.CommandRequest, gen.ClaimCommandShareResponse]
 	readCommand                  *connect.Client[gen.ReadCommandRequest, gen.ReadCommandResponse]
@@ -2737,6 +2802,7 @@ type runnerServiceClient struct {
 	createPullRequest            *connect.Client[gen.CreatePullRequestRequest, gen.PullRequestStatus]
 	getPullRequest               *connect.Client[gen.GetPullRequestRequest, gen.PullRequestStatus]
 	mergePullRequest             *connect.Client[gen.MergePullRequestRequest, gen.PullRequestStatus]
+	updatePullRequestBranch      *connect.Client[gen.UpdatePullRequestBranchRequest, gen.PullRequestStatus]
 	listWorkspaceGitSummaries    *connect.Client[gen.WorkspaceGitSummariesRequest, gen.WorkspaceGitSummaries]
 	listLinks                    *connect.Client[gen.ListLinksRequest, gen.Links]
 	linkItem                     *connect.Client[gen.LinkItemRequest, gen.Links]
@@ -3342,6 +3408,26 @@ func (c *runnerServiceClient) FinishPipe(ctx context.Context, req *connect.Reque
 	return c.finishPipe.CallUnary(ctx, req)
 }
 
+// BindDelivery calls lazybox.bench.v1.RunnerService.BindDelivery.
+func (c *runnerServiceClient) BindDelivery(ctx context.Context, req *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error) {
+	return c.bindDelivery.CallUnary(ctx, req)
+}
+
+// GetDeliveryOutcome calls lazybox.bench.v1.RunnerService.GetDeliveryOutcome.
+func (c *runnerServiceClient) GetDeliveryOutcome(ctx context.Context, req *connect.Request[gen.GetDeliveryOutcomeRequest]) (*connect.Response[gen.DeliveryOutcome], error) {
+	return c.getDeliveryOutcome.CallUnary(ctx, req)
+}
+
+// PublishDeliveryOutcome calls lazybox.bench.v1.RunnerService.PublishDeliveryOutcome.
+func (c *runnerServiceClient) PublishDeliveryOutcome(ctx context.Context, req *connect.Request[gen.PublishDeliveryOutcomeRequest]) (*connect.Response[gen.Artifact], error) {
+	return c.publishDeliveryOutcome.CallUnary(ctx, req)
+}
+
+// RecordReviewCriterion calls lazybox.bench.v1.RunnerService.RecordReviewCriterion.
+func (c *runnerServiceClient) RecordReviewCriterion(ctx context.Context, req *connect.Request[gen.RecordReviewCriterionRequest]) (*connect.Response[gen.RecordReviewCriterionResponse], error) {
+	return c.recordReviewCriterion.CallUnary(ctx, req)
+}
+
 // ListCommands calls lazybox.bench.v1.RunnerService.ListCommands.
 func (c *runnerServiceClient) ListCommands(ctx context.Context, req *connect.Request[gen.ListCommandsRequest]) (*connect.Response[gen.ListCommandsResponse], error) {
 	return c.listCommands.CallUnary(ctx, req)
@@ -3440,6 +3526,11 @@ func (c *runnerServiceClient) GetPullRequest(ctx context.Context, req *connect.R
 // MergePullRequest calls lazybox.bench.v1.RunnerService.MergePullRequest.
 func (c *runnerServiceClient) MergePullRequest(ctx context.Context, req *connect.Request[gen.MergePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error) {
 	return c.mergePullRequest.CallUnary(ctx, req)
+}
+
+// UpdatePullRequestBranch calls lazybox.bench.v1.RunnerService.UpdatePullRequestBranch.
+func (c *runnerServiceClient) UpdatePullRequestBranch(ctx context.Context, req *connect.Request[gen.UpdatePullRequestBranchRequest]) (*connect.Response[gen.PullRequestStatus], error) {
+	return c.updatePullRequestBranch.CallUnary(ctx, req)
 }
 
 // ListWorkspaceGitSummaries calls lazybox.bench.v1.RunnerService.ListWorkspaceGitSummaries.
@@ -4167,6 +4258,19 @@ type RunnerServiceHandler interface {
 	RegisterPipe(context.Context, *connect.Request[gen.RegisterPipeRequest]) (*connect.Response[gen.CommandStatus], error)
 	Publish(context.Context, *connect.Request[gen.PublishRequest]) (*connect.Response[gen.CommandStatus], error)
 	FinishPipe(context.Context, *connect.Request[gen.FinishPipeRequest]) (*connect.Response[gen.CommandStatus], error)
+	// Pins a published spec.v2 revision to the caller's conversation, so its
+	// `lazybox run --check` and `--needs` runs record delivery observations.
+	// Binding another revision starts a new attempt (delivery.Store.Bind).
+	BindDelivery(context.Context, *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error)
+	// The delivery outcome of a conversation, or of a Mission task: the same
+	// projection (delivery.Project) through either lookup.
+	GetDeliveryOutcome(context.Context, *connect.Request[gen.GetDeliveryOutcomeRequest]) (*connect.Response[gen.DeliveryOutcome], error)
+	// Publishes the outcome as an immutable verdict snapshot: a report
+	// artifact (schema delivery-outcome.v1), or the next version of one.
+	PublishDeliveryOutcome(context.Context, *connect.Request[gen.PublishDeliveryOutcomeRequest]) (*connect.Response[gen.Artifact], error)
+	// A contract-bound reviewer's verdict on one criterion
+	// (`lazybox delivery review <criterion> passed|failed`).
+	RecordReviewCriterion(context.Context, *connect.Request[gen.RecordReviewCriterionRequest]) (*connect.Response[gen.RecordReviewCriterionResponse], error)
 	ListCommands(context.Context, *connect.Request[gen.ListCommandsRequest]) (*connect.Response[gen.ListCommandsResponse], error)
 	// Takes a terminal run shared with a conversation (`lazybox log --to`) for
 	// one composer: true for the first caller only, so the run is added once.
@@ -4204,6 +4308,9 @@ type RunnerServiceHandler interface {
 	CreatePullRequest(context.Context, *connect.Request[gen.CreatePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	GetPullRequest(context.Context, *connect.Request[gen.GetPullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	MergePullRequest(context.Context, *connect.Request[gen.MergePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error)
+	// Brings a tracked pull request up to date with its base, when its
+	// repository requires that before merging (mergeable_state "behind").
+	UpdatePullRequestBranch(context.Context, *connect.Request[gen.UpdatePullRequestBranchRequest]) (*connect.Response[gen.PullRequestStatus], error)
 	// The sidebar's git state, per workspace and repository: branch, ahead and
 	// behind its pushed branch and the default branch, uncommitted files, and the
 	// last pull request seen for the branch. Local Git only (no fetch); the pull
@@ -5115,6 +5222,30 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(runnerServiceMethods.ByName("FinishPipe")),
 		connect.WithHandlerOptions(opts...),
 	)
+	runnerServiceBindDeliveryHandler := connect.NewUnaryHandler(
+		RunnerServiceBindDeliveryProcedure,
+		svc.BindDelivery,
+		connect.WithSchema(runnerServiceMethods.ByName("BindDelivery")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceGetDeliveryOutcomeHandler := connect.NewUnaryHandler(
+		RunnerServiceGetDeliveryOutcomeProcedure,
+		svc.GetDeliveryOutcome,
+		connect.WithSchema(runnerServiceMethods.ByName("GetDeliveryOutcome")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServicePublishDeliveryOutcomeHandler := connect.NewUnaryHandler(
+		RunnerServicePublishDeliveryOutcomeProcedure,
+		svc.PublishDeliveryOutcome,
+		connect.WithSchema(runnerServiceMethods.ByName("PublishDeliveryOutcome")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceRecordReviewCriterionHandler := connect.NewUnaryHandler(
+		RunnerServiceRecordReviewCriterionProcedure,
+		svc.RecordReviewCriterion,
+		connect.WithSchema(runnerServiceMethods.ByName("RecordReviewCriterion")),
+		connect.WithHandlerOptions(opts...),
+	)
 	runnerServiceListCommandsHandler := connect.NewUnaryHandler(
 		RunnerServiceListCommandsProcedure,
 		svc.ListCommands,
@@ -5233,6 +5364,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceMergePullRequestProcedure,
 		svc.MergePullRequest,
 		connect.WithSchema(runnerServiceMethods.ByName("MergePullRequest")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceUpdatePullRequestBranchHandler := connect.NewUnaryHandler(
+		RunnerServiceUpdatePullRequestBranchProcedure,
+		svc.UpdatePullRequestBranch,
+		connect.WithSchema(runnerServiceMethods.ByName("UpdatePullRequestBranch")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceListWorkspaceGitSummariesHandler := connect.NewUnaryHandler(
@@ -6083,6 +6220,14 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServicePublishHandler.ServeHTTP(w, r)
 		case RunnerServiceFinishPipeProcedure:
 			runnerServiceFinishPipeHandler.ServeHTTP(w, r)
+		case RunnerServiceBindDeliveryProcedure:
+			runnerServiceBindDeliveryHandler.ServeHTTP(w, r)
+		case RunnerServiceGetDeliveryOutcomeProcedure:
+			runnerServiceGetDeliveryOutcomeHandler.ServeHTTP(w, r)
+		case RunnerServicePublishDeliveryOutcomeProcedure:
+			runnerServicePublishDeliveryOutcomeHandler.ServeHTTP(w, r)
+		case RunnerServiceRecordReviewCriterionProcedure:
+			runnerServiceRecordReviewCriterionHandler.ServeHTTP(w, r)
 		case RunnerServiceListCommandsProcedure:
 			runnerServiceListCommandsHandler.ServeHTTP(w, r)
 		case RunnerServiceClaimCommandShareProcedure:
@@ -6123,6 +6268,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceGetPullRequestHandler.ServeHTTP(w, r)
 		case RunnerServiceMergePullRequestProcedure:
 			runnerServiceMergePullRequestHandler.ServeHTTP(w, r)
+		case RunnerServiceUpdatePullRequestBranchProcedure:
+			runnerServiceUpdatePullRequestBranchHandler.ServeHTTP(w, r)
 		case RunnerServiceListWorkspaceGitSummariesProcedure:
 			runnerServiceListWorkspaceGitSummariesHandler.ServeHTTP(w, r)
 		case RunnerServiceListLinksProcedure:
@@ -6744,6 +6891,22 @@ func (UnimplementedRunnerServiceHandler) FinishPipe(context.Context, *connect.Re
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.FinishPipe is not implemented"))
 }
 
+func (UnimplementedRunnerServiceHandler) BindDelivery(context.Context, *connect.Request[gen.BindDeliveryRequest]) (*connect.Response[gen.DeliveryBinding], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.BindDelivery is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) GetDeliveryOutcome(context.Context, *connect.Request[gen.GetDeliveryOutcomeRequest]) (*connect.Response[gen.DeliveryOutcome], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.GetDeliveryOutcome is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) PublishDeliveryOutcome(context.Context, *connect.Request[gen.PublishDeliveryOutcomeRequest]) (*connect.Response[gen.Artifact], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.PublishDeliveryOutcome is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) RecordReviewCriterion(context.Context, *connect.Request[gen.RecordReviewCriterionRequest]) (*connect.Response[gen.RecordReviewCriterionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.RecordReviewCriterion is not implemented"))
+}
+
 func (UnimplementedRunnerServiceHandler) ListCommands(context.Context, *connect.Request[gen.ListCommandsRequest]) (*connect.Response[gen.ListCommandsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ListCommands is not implemented"))
 }
@@ -6822,6 +6985,10 @@ func (UnimplementedRunnerServiceHandler) GetPullRequest(context.Context, *connec
 
 func (UnimplementedRunnerServiceHandler) MergePullRequest(context.Context, *connect.Request[gen.MergePullRequestRequest]) (*connect.Response[gen.PullRequestStatus], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.MergePullRequest is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) UpdatePullRequestBranch(context.Context, *connect.Request[gen.UpdatePullRequestBranchRequest]) (*connect.Response[gen.PullRequestStatus], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.UpdatePullRequestBranch is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) ListWorkspaceGitSummaries(context.Context, *connect.Request[gen.WorkspaceGitSummariesRequest]) (*connect.Response[gen.WorkspaceGitSummaries], error) {

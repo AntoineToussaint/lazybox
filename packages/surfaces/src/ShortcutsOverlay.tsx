@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useBackdropDismiss } from './dismiss';
+import { restoreFocus } from './pending-focus';
 import { actionDefinitions, actionEnabled, actionGroups, bindings, displayBinding, runAction, type ActionDefinition } from './actions';
 import { fuzzyMatch } from './fuzzy';
 import { Icon } from './Icons';
@@ -41,7 +42,8 @@ export function ShortcutsOverlay({ keymap, onClose }: { keymap: Keymap; onClose(
   useEffect(() => {
     dialog.current?.showModal(); input.current?.focus();
     const previous = returnFocus.current;
-    return () => { if (restore.current && previous?.isConnected) requestAnimationFrame(() => previous.focus?.({ preventScroll: true })); };
+    // A focus the chosen action asked for (a panel, a conversation) wins over giving it back.
+    return () => { if (restore.current) requestAnimationFrame(() => restoreFocus(previous)); };
   }, []);
   const rows = useMemo(() => shortcutRows(keymap), [keymap]);
   const shown = query.trim() ? rows.filter(row => fuzzyMatch(query, row.title) || row.keys.some(keys => keys.join(' ').toLowerCase().includes(query.trim().toLowerCase()))) : rows;

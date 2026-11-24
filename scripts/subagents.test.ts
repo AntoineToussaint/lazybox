@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyTranscript, foldTranscript, type Transcript } from '../packages/surfaces/src/transcript-model.ts';
 import { describeGroup, describeTool } from '../packages/surfaces/src/tool-lines.ts';
-import { SUBAGENT_LIMIT, actionLabel, agentElapsed, ancestry, backgroundCommands, canStopSubagent, commandTitle, currentAction, endsWithTurn, finishedWork, hiddenFromWork, mergedStatus, resultPreview, statusWord, stepRows, subagentLabel, subagentTree, tokenLabel, toolTotal, type Subagent } from '../packages/surfaces/src/subagent-model.ts';
+import { SUBAGENT_LIMIT, actionLabel, agentElapsed, ancestry, backgroundCommands, canStopSubagent, commandTitle, currentAction, panelAgent, endsWithTurn, finishedWork, hiddenFromWork, mergedStatus, resultPreview, statusWord, stepRows, subagentLabel, subagentTree, tokenLabel, toolTotal, type Subagent } from '../packages/surfaces/src/subagent-model.ts';
 import { noteStops } from '../packages/surfaces/src/tool-stops.ts';
 
 let cursor = 0n;
@@ -323,7 +323,7 @@ test('a timeline reads as the chat\'s tool lines: reads grouped, a file read aga
   assert.equal(describeGroup(rereads.item as never).text, 'Reading /tmp/rev.diff ×2', 'a run with the running call says so');
   assert.deepEqual(rereads.ids, ['r6', 'r7'], 'the running call is found in its row');
   // Under a second says nothing.
-  assert.deepEqual(describeTool((bash.item as { entry: never }).entry).meta, ['exit 0']);
+  assert.deepEqual(describeTool((bash.item as { entry: never }).entry).meta, []);
   assert.equal(stepRows(t.subagents.byId[child].items), rows, 'rows are computed once per timeline');
 });
 
@@ -565,4 +565,17 @@ test('retained managed command events remain one command instead of a sub-agent 
   const command = t.messages.flatMap(message => message.tools || []).find(tool => tool.id === id);
   assert.equal(command?.output, 'Completed successfully.');
   assert.deepEqual(describeTool(command!).meta, []);
+});
+
+test('an open task panel follows the spawn once the provider links the two IDs', () => {
+  const task = 'claude-task:research', spawn = 'claude-tool:call';
+  const t = fold(emptyTranscript(),
+    record(1, {type: 'agent_status', agentId: task, status: 'running', name: 'Access model document research'}),
+    record(2, {type: 'tool_activity', data: call('call', 'Agent', 'running', {input: {description: 'Research', prompt: 'Read the document'}})}),
+    record(3, {type: 'agent_status', agentId: task, status: 'running', data: {toolUseId: 'call'}}),
+    record(4, {type: 'message_delta', agentId: task, text: 'Found the document'}),
+  );
+  assert.deepEqual(subagentTree(t.subagents).map(row => row.agent.id), [spawn]);
+  assert.equal(panelAgent(t.subagents, task)?.id, spawn);
+  assert.equal(panelAgent(t.subagents, task)?.items.length, 1);
 });

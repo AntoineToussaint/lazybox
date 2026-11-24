@@ -1,3 +1,4 @@
+import { errorText } from './error-text.js';
 /** Why the SDK stream ended, as the failure the worker reports before it exits. */
 export type StreamEnd = { type: 'failure'; status: 'provider_process_exit' | 'sdk_error'; text: string };
 
@@ -11,7 +12,7 @@ export async function readStream<T>(stream: AsyncIterable<T>, each: (message: T)
     for await (const message of stream) each(message);
     return { type: 'failure', status: 'provider_process_exit', text: 'SDK stream ended' };
   } catch (error) {
-    return { type: 'failure', status: 'sdk_error', text: String(error) };
+    return { type: 'failure', status: 'sdk_error', text: errorText(error) };
   }
 }
 

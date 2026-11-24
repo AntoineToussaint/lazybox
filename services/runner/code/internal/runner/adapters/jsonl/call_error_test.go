@@ -1,0 +1,70 @@
+package jsonl
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+)
+
+// Regression: a failed model change read `adapter model: {"message":"Error:
+// API error: 429 …"}` in the conversation's banner. The person reads the
+// adapter's own words; the method, code and data stay for code.
+func TestAnAdaptersErrorReadsAsItsMessage(t *testing.T) {
+	raw := json.RawMessage(`{"code":-32000,"message":"API error: 429 This request would exceed your account's rate limit. Please try again later","data":{"retry":30}}`)
+	err := error(NewCallError("model", raw))
+	if got := err.Error(); got != "API error: 429 This request would exceed your account's rate limit. Please try again later" {
+		t.Fatalf("reads %q", got)
+	}
+	var call *CallError
+	if !errors.As(fmt.Errorf("changing the model: %w", err), &call) || call.Method != "model" || call.Code != -32000 || string(call.Data) != `{"retry":30}` {
+		t.Fatalf("code lost what it decides on: %+v", call)
+	}
+	for name, tc := range map[string]struct{ raw, want string }{
+		// ACP's internal errors put the reason in data.
+		"generic message, reason in data": {`{"code":-32603,"message":"Internal error","data":{"details":"model claude-x not available"}}`, "Internal error: model claude-x not available"},
+		"reason as a string":              {`{"code":-32603,"message":"Internal error","data":"model claude-x not available"}`, "Internal error: model claude-x not available"},
+		"data that repeats the message":   {`{"message":"Rate limited","data":{"message":"Rate limited"}}`, "Rate limited"},
+		"a code of another type":          {`{"code":"E_RATE","message":"Rate limited"}`, "Rate limited"},
+		"a string error":                  {`"busy"`, "busy"},
+		"nothing to read":                 {`{"code":-1}`, "turn failed with no reason given (error -1)"},
+		"not an error object":             {`42`, "turn failed with no reason given"},
+		"a bare code":                     {`{"code":-32601}`, "turn failed with no reason given (error -32601)"},
+		"a stack trace in data":           {`{"message":"Internal error","data":"TypeError: x is undefined\n    at a (b.js:1)\n    at c (d.js:2)"}`, "Internal error: TypeError: x is undefined"},
+	} {
+		if got := NewCallError("turn", json.RawMessage(tc.raw)).Error(); got != tc.want {
+			t.Errorf("%s: reads %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// A long reason in data is cut to one bounded line: the rest stays in the log.
+func TestALongReasonIsOneBoundedLine(t *testing.T) {
+	long := strings.Repeat("x", 1000)
+	got := NewCallError("turn", json.RawMessage(`{"message":"Internal error","data":"`+long+`"}`)).Error()
+	if n := len([]rune(got)); n > len("Internal error: ")+detailLimit || !strings.HasSuffix(got, "…") {
+		t.Fatalf("%d runes: %q", n, got[:40])
+	}
+}
+
+// The person reads one bounded line; code matching phrases reads everything.
+func TestTheReasonIsOneLineButMatchersSeeEverything(t *testing.T) {
+	long := strings.Repeat("rate limited ", 30)
+	if got := NewCallError("turn", json.RawMessage(`{"message":"`+long+`","data":{"message":"`+long+`"}}`)).Error(); strings.Count(got, "rate limited") > 30 || strings.Contains(got, ": rate") {
+		t.Fatalf("a long message repeated in data is said twice: %q", got)
+	}
+	trace := NewCallError("turn", json.RawMessage(`{"message":"TypeError: x is undefined\n    at a (b.js:1)\n    at c (d.js:2)"}`))
+	if got := trace.Error(); got != "TypeError: x is undefined" {
+		t.Fatalf("a multi-line message: %q", got)
+	}
+	// A phrase on a later line of the message: the person reads the first, matchers read all.
+	hidden := NewCallError("open", json.RawMessage(`{"message":"failed to open\nChromium is not installed"}`))
+	if !strings.Contains(FullText(fmt.Errorf("opening: %w", hidden)), "is not installed") || strings.Contains(hidden.Error(), "is not installed") {
+		t.Fatalf("matchers miss what the person does not read: %q / %q", FullText(hidden), hidden.Error())
+	}
+	// A reason in data that only a hidden line of the message repeats still shows.
+	if got := NewCallError("turn", json.RawMessage(`{"message":"Internal error\nmodel claude-x not available","data":"model claude-x not available"}`)).Error(); got != "Internal error: model claude-x not available" {
+		t.Fatalf("the cause was dropped: %q", got)
+	}
+}

@@ -170,15 +170,37 @@ func (b *Bench) removeAgentEndpoint(id string) error {
 	return nil
 }
 
+// runnerWiring reports a variable that configures this Runner rather than the
+// person's environment: LAZYBOX_V2_* (its state, config, or an owner endpoint
+// from the shell that started it) and CODEFLY* (the service wiring Codefly
+// gives the Runner: its credentials, its endpoints and its container recovery
+// marker, which a `codefly` an agent runs would refuse as another process's).
+// Workspace terminals drop the same (terminals.Environment).
+func runnerWiring(entry string) bool {
+	return strings.HasPrefix(entry, "LAZYBOX_V2_") || strings.HasPrefix(entry, "CODEFLY")
+}
+
+// childEnv is this process's environment without the Runner's wiring: the base
+// of anything the Runner starts on the person's behalf (agents, account
+// probes, provider CLIs).
+func childEnv() []string {
+	env := make([]string, 0, 64)
+	for _, entry := range os.Environ() {
+		if !runnerWiring(entry) {
+			env = append(env, entry)
+		}
+	}
+	return env
+}
+
 // executionEnv is the Lazybox part of every agent's and managed command's
 // environment: this Runner's CLI first on PATH, the execution's own endpoint
-// file, its identity and its output directory. Any LAZYBOX_V2_* inherited from
-// the Runner's own environment (its state, config, or an owner endpoint from
-// the shell that started it) is dropped first.
+// file, its identity and its output directory. The Runner's own wiring
+// (runnerWiring) is dropped first.
 func (b *Bench) executionEnv(base []string, id, collectionID string) []string {
 	env := make([]string, 0, len(base)+4)
 	for _, entry := range base {
-		if !strings.HasPrefix(entry, "LAZYBOX_V2_") {
+		if !runnerWiring(entry) {
 			env = append(env, entry)
 		}
 	}

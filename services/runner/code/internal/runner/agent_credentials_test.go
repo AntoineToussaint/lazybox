@@ -51,11 +51,18 @@ func envValue(env []string, key string) (string, int) {
 
 // The owner's endpoint file holds the bearer that can approve, answer and
 // delete. No agent or managed command may be pointed at it, even when the
-// Runner itself was started from a shell that exports it.
+// Runner itself was started from a shell that exports it. Nor do they inherit
+// the Runner's Codefly service wiring: its credentials, its endpoints and its
+// container recovery marker, which made every `codefly` an agent ran refuse
+// to start ("container recovery marker does not belong to this process").
 func TestAgentsAndCommandsNeverSeeTheOwnerEndpoint(t *testing.T) {
 	owner := "/owner/state/endpoint.json"
 	t.Setenv("LAZYBOX_V2_ENDPOINT", owner)
 	t.Setenv("LAZYBOX_V2_STATE", "/owner/state")
+	t.Setenv("CODEFLY_CONTAINER_RECOVERY_SCOPE", "4242:v2:runner:ns")
+	t.Setenv("CODEFLY_AGENT_TOKEN", "runner-codefly-secret")
+	t.Setenv("CODEFLY_PROCESS_GROUP_AUTH", "runner-group-secret")
+	t.Setenv("CODEFLY__ENDPOINT__LAZYBOX_V2__RUNNER__CONNECT__CONNECT", "http://localhost:1")
 	state := t.TempDir()
 	b, err := New(Config{State: state, OutputFallbackRoot: t.TempDir(), Address: "http://127.0.0.1:1"})
 	if err != nil {
@@ -72,6 +79,9 @@ func TestAgentsAndCommandsNeverSeeTheOwnerEndpoint(t *testing.T) {
 		for _, entry := range env {
 			if strings.Contains(entry, owner) || strings.Contains(entry, filepath.Join(state, "endpoint.json")) || strings.HasPrefix(entry, "LAZYBOX_V2_STATE=") {
 				t.Fatalf("%s env exposes the owner: %q", name, entry)
+			}
+			if strings.HasPrefix(entry, "CODEFLY") {
+				t.Fatalf("%s env inherits the Runner's Codefly wiring: %q", name, entry)
 			}
 		}
 		path, n := envValue(env, "LAZYBOX_V2_ENDPOINT")
@@ -107,6 +117,19 @@ func TestAgentsAndCommandsNeverSeeTheOwnerEndpoint(t *testing.T) {
 	}
 	if strings.Contains(string(out), owner) || strings.Contains(string(out), f.Token) {
 		t.Fatal("managed command env exposes the owner endpoint or a credential")
+	}
+	if strings.Contains(string(out), "CODEFLY") {
+		t.Fatal("managed command env inherits the Runner's Codefly wiring")
+	}
+	// Account probes run the person's provider CLIs with the same environment.
+	probe, err := b.profileEnv(accounts.Profile{ID: "codex-default", Provider: "codex", Isolation: "inherited"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range probe {
+		if strings.HasPrefix(entry, "CODEFLY") || strings.HasPrefix(entry, "LAZYBOX_V2_") {
+			t.Fatalf("an account probe inherits %q", entry)
+		}
 	}
 }
 

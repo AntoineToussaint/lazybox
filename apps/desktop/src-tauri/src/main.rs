@@ -9,6 +9,8 @@ mod feedback;
 mod host;
 mod layout;
 mod links;
+#[cfg(target_os = "macos")]
+mod notifications_macos;
 mod placement;
 mod release;
 mod runners;
@@ -160,6 +162,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             host::dock_web,
             viewer::web_view_show,
             viewer::web_view_hide,
+            viewer::web_view_reclaim,
             viewer::web_view_navigate,
             viewer::web_view_zoom,
             viewer::web_view_action,
@@ -186,6 +189,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             attention::notify_attention,
             attention::take_attention_destination,
             attention::set_attention_badge,
+            attention::notification_permission,
+            attention::request_notification_permission,
             terminal::terminal_apps,
             terminal::open_terminal,
             sounds::play_system_sound,

@@ -551,12 +551,18 @@ how you arrange it:
   a terminal its shell, Files and the Editor keep sharing one workbench
   (opening a file from Files or a chat goes to the Editor in that window). A chat opens
   instead in its own native window, which survives the main window, as
-  before; a Web panel uses its own **Move to a new window** (its native view
-  belongs to one window, so it is not popped out or dropped into a popped-out
-  group). Popped-out groups come back docked when the page loads again. A Web
-  panel's native view steps aside while a tab is dragged and under a group
-  floating over it, and follows its panel when the dock moves, maximizes or
-  floats it.
+  before. A Web panel goes too, its page with it: its native view moves into
+  the panel's window (`Webview::reparent`, `viewer.rs`), history, scroll and
+  forms intact, and is measured there (`native-web-view.ts` places each view
+  in the document its panel is in). The window is named to the host by the
+  token in its `popout.html?w=` address, and only the window that opened it can
+  move views into it. Putting the group back, or closing its window, brings
+  the pages home first, hidden, so they show again where the panels land. (Its
+  ⋯ **Move to a new window** still opens a Web window of its own, which
+  survives the main window.) Popped-out groups come back docked when the page
+  loads again. A Web panel's native view steps aside while a tab is dragged
+  and under a group floating over it, and follows its panel when the dock
+  moves, maximizes or floats it.
 - **Putting a window back.** Every panel in a window of its own goes back the
   same ways, to where it was: its group and place among the tabs, else beside
   the groups it sat next to with the same side and share, else beside the

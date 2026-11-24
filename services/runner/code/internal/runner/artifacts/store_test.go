@@ -2,6 +2,7 @@ package artifacts
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -497,7 +498,7 @@ func TestRoadmapPinsWorkspaceInputAcrossEditsAndRestart(t *testing.T) {
 
 func TestEngineeringStartersPublishAsSupportedTypes(t *testing.T) {
 	s, _ := open(t, t.TempDir())
-	for name, kind := range map[string]string{"incident-timeline": "report", "pr-walkthrough": "report", "release-checklist": "todo-list"} {
+	for name, kind := range map[string]string{"incident-timeline": "report", "pr-walkthrough": "report", "release-checklist": "todo-list", "delivery-spec": "spec"} {
 		content, err := Template(name)
 		if err != nil {
 			t.Fatal(err)
@@ -505,6 +506,10 @@ func TestEngineeringStartersPublishAsSupportedTypes(t *testing.T) {
 		doc, err := s.Put("alpha", Put{Title: name, Content: content})
 		if err != nil || doc.Kind != kind || doc.Format != "json" {
 			t.Fatal(name, doc, err)
+		}
+		var header struct{ Schema string }
+		if json.Unmarshal([]byte(content), &header) != nil || doc.Versions[0].Schema != header.Schema {
+			t.Fatal(name, "recorded", doc.Versions[0].Schema)
 		}
 	}
 }

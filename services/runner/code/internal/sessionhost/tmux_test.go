@@ -217,3 +217,23 @@ func TestLocalBackendRecordsWhatItHosts(t *testing.T) {
 		t.Fatalf("unexpected description %+v", d)
 	}
 }
+
+// A tmux server a person can open windows in never holds the Runner's
+// credentials or Codefly wiring.
+func TestTmuxEnvironmentDropsTheRunnersWiring(t *testing.T) {
+	t.Setenv("LAZYBOX_V2_ENDPOINT", "/owner/endpoint.json")
+	t.Setenv("CODEFLY_AGENT_TOKEN", "runner-codefly-secret")
+	t.Setenv("CODEFLY_CONTAINER_RECOVERY_SCOPE", "4242:v2:runner:ns")
+	t.Setenv("TMUX", "/tmp/other,1,0")
+	t.Setenv("KEEP_ME", "yes")
+	kept := false
+	for _, entry := range tmuxEnv() {
+		if strings.HasPrefix(entry, "LAZYBOX_V2_") || strings.HasPrefix(entry, "CODEFLY") || strings.HasPrefix(entry, "TMUX=") {
+			t.Fatalf("tmux inherits %q", entry)
+		}
+		kept = kept || entry == "KEEP_ME=yes"
+	}
+	if !kept {
+		t.Fatal("the person's own environment was dropped")
+	}
+}

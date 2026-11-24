@@ -33,7 +33,7 @@ Lazybox finds the agents installed on the Runner's computer. Open
 | Agent | Installed with |
 | --- | --- |
 | Gemini CLI | `npm install -g @google/gemini-cli` |
-| Google Antigravity | [Install Antigravity CLI](https://antigravity.google/docs/cli/tutorial/) |
+| Google Antigravity | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` ([Antigravity CLI and ACP](https://antigravity.google/docs/cli/acp)) |
 | Hermes Agent | [Install Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) with ACP support |
 | Goose | `brew install block-goose-cli` |
 | OpenCode | `npm install -g opencode-ai` |
@@ -49,11 +49,27 @@ Each agent runs on **its own sign-in**: run it once in your terminal (`gemini`,
 account. If an agent is not signed in, starting a conversation says so and
 names the ways that agent signs in.
 
-For **Google Antigravity**, run `agy acp --login` on the Runner to use your
-Google subscription, or edit Antigravity’s Environment and set
-`GEMINI_API_KEY` to your existing Gemini API key. For **Hermes Agent**, run
-`hermes model` to choose and authenticate its model provider. New conversations
-use those credentials through `agy acp` and `hermes acp`, respectively.
+**Google Antigravity** shares Gemini CLI's API key. When Antigravity has no
+`GEMINI_API_KEY` of its own, Lazybox starts it with the `GEMINI_API_KEY` set in
+Gemini CLI's Environment (**Edit** on Gemini CLI), so one key serves both. A
+key set on Antigravity itself wins. Lazybox passes `GEMINI_API_KEY` only:
+Antigravity ignores `GOOGLE_API_KEY`. Antigravity uses a key only when
+`~/.gemini/antigravity-cli/settings.json` sets `"modelProvider": "gemini"`, and
+Lazybox does not edit that file for you
+([Antigravity's authentication docs](https://antigravity.google/docs/install?tab=cli)).
+To sign in with your Google account instead, run `agy acp --login` on the
+Runner. Antigravity keeps its own Google sign-in. The first time it starts, it
+can import Gemini CLI's sign-in
+([migration](https://antigravity.google/docs/cli/gcli-migration)), and after
+that the two are separate. **Settings →
+Subscriptions** groups the two under **Google**. For each one it shows where
+its key comes from (names only, never values) and the command that signs it in.
+
+For **Hermes Agent**, run `hermes model` to choose and authenticate its model
+provider; new conversations use it through `hermes acp`. Neither Antigravity
+nor Hermes has been run through a real conversation
+in Lazybox yet ([runtime evidence](../../RUNTIME_EVIDENCE.md)), so both are
+**Preview**, like every ACP agent.
 
 ## Start a conversation
 
@@ -105,8 +121,9 @@ ACP bridges only if you need them.
 
 ## What differs from Claude and Codex
 
-- **One account per agent**: its own sign-in. Lazybox's named subscriptions
-  and automatic switching at a limit are for Claude and Codex.
+- **One account per agent**: its own sign-in. The exception is Antigravity,
+  which uses Gemini CLI's API key when it has none of its own. Lazybox's named
+  subscriptions and automatic switching at a limit are for Claude and Codex.
 - **No steering**: a message sent while the agent works waits until its turn
   ends (or **Send now** stops the turn first).
 - **Questions** an agent asks in its own words arrive as its message; answer

@@ -1,0 +1,61 @@
+{
+  "schema": "delivery-fixture.v1",
+  "description": "A spec.v1 contract has text criteria and no IDs. Nothing can be attributed to them, so it stays unverified even when a check reports a pass, until a spec.v2 version binds the criteria.",
+  "spec": {
+    "schema": "spec.v1",
+    "problem": "Reconnect",
+    "requirements": [
+      "Restore history"
+    ],
+    "acceptanceCriteria": [
+      "One row after reconnect"
+    ]
+  },
+  "contract": {
+    "artifact": "spec-reconnect",
+    "version": 1,
+    "schema": "spec.v1",
+    "digest": "sha256:reconnect-spec-v1",
+    "criteria": null,
+    "legacy": [
+      "One row after reconnect"
+    ]
+  },
+  "candidates": [
+    {
+      "id": "candidate:c5781c6b29dd44af",
+      "revisions": {
+        "api": "5e6f7a8"
+      }
+    }
+  ],
+  "observations": [
+    {
+      "schema": "delivery-observation.v1",
+      "id": "run:ex2/c1",
+      "contractDigest": "sha256:reconnect-spec-v1",
+      "candidate": "candidate:c5781c6b29dd44af",
+      "attempt": "attempt-2",
+      "subject": {
+        "conversation": "conv-reconnect"
+      },
+      "source": "command",
+      "reference": "run:ex2/c1",
+      "criterionId": "reconnect",
+      "exitCode": 0,
+      "assertion": "passed"
+    }
+  ],
+  "checkpoints": [
+    {
+      "after": 1,
+      "scope": {
+        "contractDigest": "sha256:reconnect-spec-v1",
+        "candidate": "candidate:c5781c6b29dd44af",
+        "attempt": "attempt-2"
+      },
+      "verdict": "unverified",
+      "criteria": {}
+    }
+  ]
+}

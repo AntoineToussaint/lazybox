@@ -49,11 +49,22 @@ func (a *archivedRuntime) Settings() json.RawMessage {
 }
 func (a *archivedRuntime) Close() error { return nil }
 func profileBinding(p accounts.Profile) string {
-	// Account location/references are identity; renewable token contents are not.
+	// Account location/references are identity; renewable token contents are
+	// not. The saved format is unchanged, so an earlier Runner still reads it.
 	p.Label = ""
 	data, _ := json.Marshal(p)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// sameAccount reports whether p is still the account a conversation saved
+// as binding. A name is not the account: the first rename records the
+// original name in EnrollmentLabel (accounts.RenameProfile), which a
+// conversation started before the rename did not save.
+func sameAccount(p accounts.Profile, binding string) bool {
+	unnamed := p
+	unnamed.EnrollmentLabel = nil
+	return binding != "" && (binding == profileBinding(p) || binding == profileBinding(unnamed))
 }
 func (b *Bench) restore(r sessionstore.Record) (*Execution, error) {
 	// Use an immutable read view; recovery must never append to an old execution.
@@ -166,7 +177,7 @@ func (b *Bench) Resume(ctx context.Context, id string, processesStopped bool) (*
 	if profile.ID == "" || profile.Provider != saved.Provider {
 		return nil, errors.New("original account profile is unavailable")
 	}
-	if saved.ProfileBindings[state.Profile] == "" || profileBinding(profile) != saved.ProfileBindings[state.Profile] {
+	if !sameAccount(profile, saved.ProfileBindings[state.Profile]) {
 		return nil, errors.New("saved account configuration changed; reconcile before resuming")
 	}
 	if saved.Options.Gateway != nil && saved.GatewayID != "metered" {

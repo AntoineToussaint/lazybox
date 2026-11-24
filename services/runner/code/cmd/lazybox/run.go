@@ -52,7 +52,10 @@ type runOptions struct {
 	session, title, outputDir string
 	// collection and to make a workspace run (see pipeTarget).
 	collection, to string
-	raw            bool
+	// check or needs names the delivery criterion this run checks or is a
+	// prerequisite of (delivery.go).
+	check, needs string
+	raw          bool
 	// grace is how long a command runs before it may go on in the background
 	// (zero selects defaultGrace); wait keeps it in the foreground until it
 	// exits (--wait); background moves it as soon as it has started
@@ -97,11 +100,13 @@ func runVerb(ctx context.Context, endpointPath string, args []string, stdout, st
 	flags.StringVar(&o.title, "title", "", "console title (default: the command line)")
 	flags.StringVar(&o.outputDir, "output-dir", os.Getenv("LAZYBOX_V2_OUTPUT_DIR"), "directory for full-output files (default: the session's, set by the Runner; else system temp)")
 	flags.BoolVar(&o.raw, "raw", false, "give the agent the full output instead of the compact view")
+	flags.StringVar(&o.check, "check", "", "record this run as the check of a delivery criterion: exit 0 passes, any other exit fails (see lazybox delivery)")
+	flags.StringVar(&o.needs, "needs", "", "record this run as a prerequisite of a delivery criterion: a non-zero exit blocks it (see lazybox delivery)")
 	wait := &waitFlag{o: &o}
 	flags.Var(wait, "wait", "keep a server or watcher in the foreground until it exits; --wait=DURATION waits that long before moving it to the background (default 20s)")
 	flags.BoolVar(&o.background, "background", false, "move the command to the background as soon as it has started (it keeps running; lazybox stop ID ends it)")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: lazybox run [--title T] [--raw] [--wait[=DURATION] | --background] [--to CONVERSATION] -- COMMAND [ARGS...]")
+		fmt.Fprintln(stderr, "Usage: lazybox run [--title T] [--raw] [--check CRITERION | --needs CRITERION] [--wait[=DURATION] | --background] [--to CONVERSATION] -- COMMAND [ARGS...]")
 		fmt.Fprintln(stderr, "A command still running after 20s that listens on a TCP port or looks like a server or watcher (npm run dev, docker compose up, --watch, …) goes on in the background: lazybox run returns with its id, port and output file.")
 		flags.PrintDefaults()
 	}
@@ -115,6 +120,16 @@ func runVerb(ctx context.Context, endpointPath string, args []string, stdout, st
 	}
 	if o.wait && o.background {
 		return errors.New("--wait and --background contradict each other")
+	}
+	if o.check != "" && o.needs != "" {
+		return errors.New("a run is either the --check or a --needs of one criterion")
+	}
+	if o.check != "" || o.needs != "" {
+		// A check's result is what the agent waits for: it never moves to the background.
+		if o.background {
+			return errors.New("--check and --needs wait for the result; they cannot go --background")
+		}
+		o.wait = true
 	}
 	var c console
 	var unavailable error
@@ -150,9 +165,22 @@ func runCommand(ctx context.Context, c console, unavailable error, o runOptions,
 	request, targetErr := target.request(title)
 	if request != nil && request.SessionId != "" {
 		request.CreatesPullRequest = workitems.CreatesPullRequestArgv(argv)
+		request.Check, request.Needs = o.check, o.needs
 	}
 	if o.to != "" && targetErr != nil {
 		return targetErr // refused before running anything
+	}
+	// Evidence that cannot be recorded is refused before the run, not lost after it.
+	checked := o.check != "" || o.needs != ""
+	if checked && (c == nil || targetErr != nil || target.workspace()) {
+		cause := unavailable
+		if cause == nil {
+			cause = targetErr
+		}
+		if target.workspace() {
+			cause = errors.New("--check and --needs record a conversation's evidence: run them from its agent")
+		}
+		return fmt.Errorf("not run: %w", cause)
 	}
 	s := &sink{}
 	if target.workspace() {
@@ -174,8 +202,15 @@ func runCommand(ctx context.Context, c console, unavailable error, o runOptions,
 		if o.to != "" {
 			return fmt.Errorf("not shared, nothing was run: %w", err) // a wrong --to is fixed before the run, not after
 		}
+		if checked {
+			return fmt.Errorf("not run: %w", err) // a wrong criterion or a missing binding is fixed before the run
+		}
+	} else if checked && r.Msg.Check == "" {
+		// An older Runner ignores the criterion: the run would prove nothing.
+		_, _ = c.FinishPipe(ctx, connect.NewRequest(&pb.FinishPipeRequest{CommandId: r.Msg.Id, CaptureError: "not run: the Runner records no delivery checks"}))
+		return errors.New("not run: this Runner records no delivery checks; update Lazybox")
 	} else {
-		s.ctx, s.console, s.id = ctx, c, r.Msg.Id
+		s.ctx, s.console, s.id, s.checked = ctx, c, r.Msg.Id, checked
 	}
 
 	started := time.Now()
@@ -205,7 +240,7 @@ func runCommand(ctx context.Context, c console, unavailable error, o runOptions,
 	if target.workspace() {
 		summary.AgentView = boundView(view.String())
 	}
-	s.finish(summary)
+	s.finish(summary, f.signal)
 	if target.workspace() {
 		// The person already saw every line; say where the run went.
 		fmt.Fprintln(stderr, workspaceNote(title, o.to, summary, s.id, s.publishErr))
@@ -216,6 +251,9 @@ func runCommand(ctx context.Context, c console, unavailable error, o runOptions,
 	}
 	if published == nil && s.publishErr != nil {
 		fmt.Fprintf(&view, "[lazybox] not shown in the Lazybox console: %v\n", s.publishErr)
+	}
+	if s.delivery != "" {
+		fmt.Fprintf(&view, "[lazybox] %s\n", s.delivery)
 	}
 	_, _ = stdout.Write(view.Bytes()) // the command's own status matters more than a closed stdout
 	if code != 0 {
@@ -318,10 +356,14 @@ type sink struct {
 	id         string
 	offset     uint64
 	publishErr error
-	file       *os.File
-	path       string
-	total      int64
-	out, err   buffer
+	// checked: the run is a --check or --needs; delivery is what the Runner
+	// recorded for it, said after the run's report.
+	checked  bool
+	delivery string
+	file     *os.File
+	path     string
+	total    int64
+	out, err buffer
 	// tail is the end of both streams as they arrived, for the report of a
 	// run that goes on in the background.
 	tail []byte
@@ -378,7 +420,12 @@ func (w streamWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (s *sink) finish(r *pb.CommandReport) {
+// finishRetry is how long a --check or --needs run keeps offering its
+// completion to a Runner that does not answer (a restart): its evidence is
+// recorded only once the Runner has it. Other runs offer it once.
+var finishRetry = time.Minute
+
+func (s *sink) finish(r *pb.CommandReport, signal string) {
 	if s.console == nil {
 		return
 	}
@@ -386,10 +433,25 @@ func (s *sink) finish(r *pb.CommandReport) {
 	if s.publishErr != nil {
 		cause = s.publishErr.Error()
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
-	defer cancel()
-	if _, err := s.console.FinishPipe(ctx, connect.NewRequest(&pb.FinishPipeRequest{CommandId: s.id, CaptureError: cause, Report: r})); err != nil && s.publishErr == nil {
+	request := connect.NewRequest(&pb.FinishPipeRequest{CommandId: s.id, CaptureError: cause, Report: r, Signal: signal})
+	var status *connect.Response[pb.CommandStatus]
+	var err error
+	for deadline := time.Now().Add(finishRetry); ; time.Sleep(2 * time.Second) {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
+		status, err = s.console.FinishPipe(ctx, request)
+		cancel()
+		code := connect.CodeOf(err)
+		if err == nil || !s.checked || code == connect.CodeNotFound || code == connect.CodePermissionDenied || code == connect.CodeInvalidArgument || time.Now().After(deadline) {
+			break
+		}
+	}
+	if err != nil && s.publishErr == nil {
 		s.publishErr = err
+	}
+	if err == nil {
+		s.delivery = status.Msg.Delivery
+	} else if s.checked {
+		s.delivery = "delivery evidence not recorded: the Runner did not confirm the run's completion (" + err.Error() + ")"
 	}
 }
 

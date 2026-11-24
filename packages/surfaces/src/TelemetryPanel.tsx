@@ -1,7 +1,9 @@
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useId, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import type { ContextSnapshot, TelemetryReport } from '@lazybox/protocol';
 import {useRunner} from './RunnerContext';
+import type { TranscriptMessage } from './transcript-model';
+import { describeToolBrief } from './tool-lines';
 import './telemetry.css';
 import { contextLevel, dollars, percentLabel, unpricedHelp, unpricedLine, usageBreakdown, type UsageBreakdown } from './usage-model';
 
@@ -11,7 +13,49 @@ const percentage=(n?:bigint,capacity?:bigint)=>n===undefined||!capacity||capacit
 const labels:Record<string,string>={uncached_input:'Uncached input',cached_input:'Cached input',reasoning_output:'Reasoning output',other_output:'Other output',messages:'Messages',system_tools:'System tools',mcp_tools:'MCP tools',system_prompt:'System prompt',skills:'Skills',memory_files:'Memory files',mcp_instructions:'MCP server instructions',mcp_server_instructions:'MCP server instructions',autocompact_buffer:'Compaction reserve',free_space:'Free space',mcp_tools_deferred:'MCP tools',system_tools_deferred:'System tools'};
 // Chart series colours are theme tokens (chart-1 … chart-7), readable in light and dark.
 const colors:Record<string,string>={uncached_input:'var(--chart-1)',cached_input:'var(--chart-2)',reasoning_output:'var(--chart-3)',other_output:'var(--chart-4)',messages:'var(--chart-1)',system_tools:'var(--chart-2)',mcp_tools:'var(--chart-3)',system_prompt:'var(--chart-4)',skills:'var(--chart-5)',memory_files:'var(--chart-6)',mcp_server_instructions:'var(--chart-7)'};
-function ContextView({context:c,showAgent}:{context:ContextSnapshot;showAgent:boolean}){
+const textSize = (bytes: number) => bytes < 1000 ? `${bytes} B` : bytes < 1_000_000
+ ? `${Number((bytes / 1000).toFixed(1))} kB` : `${Number((bytes / 1_000_000).toFixed(1))} MB`;
+
+function ObservedContributors({messages}:{messages:readonly TranscriptMessage[]}) {
+ const groups = useMemo(() => {
+  type Item = { key: string; label: string; bytes: number; preview: string };
+  const grouped = new Map<string, {name:string; bytes:number; largest:Item[]}>();
+  const encoder = new TextEncoder();
+  function add(name: string, item: Item) {
+   const group = grouped.get(name) ?? {name, bytes:0, largest:[]};
+   group.bytes += item.bytes;
+   group.largest.push(item);
+   group.largest.sort((a,b) => b.bytes - a.bytes);
+   if (group.largest.length > 5) group.largest.pop();
+   grouped.set(name, group);
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+   const message = messages[i];
+   if (message.compaction) break;
+   if (message.text && (message.type === 'operation_accepted' || message.type === 'message_delta')) {
+    const name = message.type === 'message_delta' ? 'Assistant replies' : 'Your messages';
+    add(name, {key:message.id, label:message.text.trim().split('\n',1)[0].slice(0,100),
+     bytes:encoder.encode(message.text).length, preview:message.text.slice(0,500)});
+   }
+   for (const tool of message.tools || []) {
+    if (!tool.output) continue;
+    const title = describeToolBrief(tool);
+    add('Tool outputs', {key:message.id+'/'+tool.id, label:[title.verb,title.target].filter(Boolean).join(' '),
+     bytes:tool.outputBytes ?? encoder.encode(tool.output).length, preview:tool.output.slice(0,500)});
+   }
+  }
+  return [...grouped.values()].sort((a,b)=>b.bytes-a.bytes);
+ },[messages]);
+ if (!groups.length) return null;
+ return <section className="context-contributors" aria-label="Transcript size"><strong>Transcript size</strong>
+  {groups.map(group=><details key={group.name}><summary><span>{group.name}</span><small>{textSize(group.bytes)}</small></summary>
+   <div className="context-items">{group.largest.map(item=><details key={item.key}><summary><span>{item.label}</span><small>{textSize(item.bytes)}</small></summary><pre>{item.preview}</pre></details>)}</div>
+  </details>)}
+  <p className="telemetry-note">Loaded text since the last observed compaction. Token counts by category are unavailable.</p>
+ </section>;
+}
+
+function ContextView({context:c,showAgent,messages}:{context:ContextSnapshot;showAgent:boolean;messages?:readonly TranscriptMessage[]}){
  const percent=percentage(c.used,c.capacity);
  const used=c.categories.filter(row=>row.kind==='used'||row.included);
  const deferred=c.categories.filter(row=>row.kind==='deferred');
@@ -23,16 +67,17 @@ function ContextView({context:c,showAgent}:{context:ContextSnapshot;showAgent:bo
  const categoryTotal=used.reduce((sum,row)=>sum+Number(row.tokens??0n),0);
  const usedPercent=Math.max(0,Math.min(100,percent??0));
  const reservePercent=Math.max(0,Math.min(100-usedPercent,percentage(reserve,c.capacity)??0));
+ const categoryRows = <div className="context-rows">{rows.map(row=><details className="context-category" key={row.name}><summary className="context-row"><span className="context-swatch" style={{background:row.color}}/><span>{row.name} <span className="context-chevron">›</span></span><span title={`${number(row.tokens)} tokens`}>{short(row.tokens)}</span><span>{percentLabel(percentage(row.tokens,c.capacity))}</span></summary><div className="context-details">{row.details?.length ? row.details.map((d,i)=><div key={i}><span>{d.name}</span><span title={`${number(d.tokens)} tokens`}>{short(d.tokens)}</span></div>) : <p>{row.name==='Free space'?'Window capacity minus used context and compaction reserve.':row.name==='Compaction reserve'?'Space reserved by the provider for compaction; it is not used context.':'The provider has not reported item-level detail for this category.'}</p>}</div></details>)}</div>;
  return <section className="context-card" aria-label={showAgent?(c.agent==='root'?'Main agent context':`${c.agent} context`):'Context breakdown'}>
   {showAgent&&<h4>{c.agent==='root'?'Main agent':c.agent}</h4>}
   <div className="context-total"><strong>{percent===undefined?'Context usage':`${percentLabel(percent)} used`}</strong><span title={`${number(c.used)} / ${number(c.capacity)} tokens`}>{short(c.used)} <span>/ {short(c.capacity)}</span></span></div>
   <div className="context-meter" role="meter" aria-label="Context used" aria-valuemin={0} aria-valuemax={c.capacity===undefined?undefined:Number(c.capacity)} aria-valuenow={c.used===undefined?undefined:Number(c.used)} aria-valuetext={`${number(c.used)} of ${number(c.capacity)} tokens`}>
-   {used.length&&categoryTotal>0?used.map(row=><span key={row.name} title={`${labels[row.name]||row.name}: ${number(row.tokens)} tokens`} style={{width:`${usedPercent*Number(row.tokens??0n)/categoryTotal}%`,background:colors[row.name]||'var(--text-muted)'}}/>):<span style={{width:`${usedPercent}%`,background:'var(--chart-1)'}}/>}
+   {c.source!=='sdk_token_breakdown'&&used.length&&categoryTotal>0?used.map(row=><span key={row.name} title={`${labels[row.name]||row.name}: ${number(row.tokens)} tokens`} style={{width:`${usedPercent*Number(row.tokens??0n)/categoryTotal}%`,background:colors[row.name]||'var(--text-muted)'}}/>):<span style={{width:`${usedPercent}%`,background:'var(--chart-1)'}}/>}
    <span title="Compaction reserve" style={{width:`${reservePercent}%`,background:'var(--chart-muted)'}}/>
   </div>
-  <div className="context-rows">{rows.map(row=><details className="context-category" key={row.name}><summary className="context-row"><span className="context-swatch" style={{background:row.color}}/><span>{row.name} <span className="context-chevron">›</span></span><span title={`${number(row.tokens)} tokens`}>{short(row.tokens)}</span><span>{percentLabel(percentage(row.tokens,c.capacity))}</span></summary><div className="context-details">{row.details?.length ? row.details.map((d,i)=><div key={i}><span>{d.name}</span><span title={`${number(d.tokens)} tokens`}>{short(d.tokens)}</span></div>) : <p>{row.name==='Free space'?'Window capacity minus used context and compaction reserve.':row.name==='Compaction reserve'?'Space reserved by the provider for compaction; it is not used context.':'The provider has not reported item-level detail for this category.'}</p>}</div></details>)}</div>
+  {messages && <ObservedContributors messages={messages}/>}
+  {c.source==='sdk_token_breakdown' ? <details className="context-request"><summary>Latest request details</summary><p className="telemetry-note">Token types from the latest Codex request.</p>{categoryRows}</details> : categoryRows}
   {!used.length&&<p className="telemetry-note">Category breakdown not reported.</p>}
-  {c.source==='sdk_token_breakdown'&&<p className="telemetry-note">Token types from the latest Codex request.</p>}
   {!!deferred.length&&<div className="context-deferred"><div className="context-section-label">Deferred tools <span>Outside context</span></div>{deferred.map(row=><details className="context-category" key={row.name}><summary className="context-row"><span className="context-swatch"/><span>{labels[row.name]||row.name.replaceAll('_',' ')} <span className="context-chevron">›</span></span><span title={`${number(row.tokens)} tokens`}>{short(row.tokens)}</span><span>—</span></summary><div className="context-details">{row.details?.length?row.details.map((d,i)=><div key={i}><span>{d.name}</span><span>{short(d.tokens)}</span></div>):<p>Individual tool sizes not reported by the provider.</p>}</div></details>)}</div>}
   <footer className="context-source">{c.model&&<span>{c.model}</span>}<span title={c.observedAt?new Date(c.observedAt).toLocaleString():undefined}>{c.source==='sdk_summary_estimate'?'Provider estimate':'Provider report'}{c.observedAt?` · ${new Date(c.observedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`:''}</span></footer>
  </section>;
@@ -98,7 +143,7 @@ export function openUsage(executionId:string,part:'context'|'cost'):boolean{retu
  * (the chat header's chip), it shows nothing until the conversation has usage:
  * an empty grey meter says nothing (`data-empty` hides it; `/context` still opens it).
  */
-export function TelemetryPanel({workspaceId,executionId,conversationId,compact=false}:{workspaceId?:string;executionId?:string;conversationId?:string;compact?:boolean}){
+export function TelemetryPanel({workspaceId,executionId,conversationId,messages,compact=false}:{messages?:readonly TranscriptMessage[];workspaceId?:string;executionId?:string;conversationId?:string;compact?:boolean}){
  const {api,info,error:connectionError}=useRunner();
  const [report,setReport]=useState<TelemetryReport>(),[error,setError]=useState(''),[open,setOpen]=useState(false),[asked,setAsked]=useState(false);
  const id=useId(),popover=useRef<HTMLDivElement>(null);
@@ -134,7 +179,7 @@ export function TelemetryPanel({workspaceId,executionId,conversationId,compact=f
  const costLabel=known.length?dollars(usage.nanos):groups.length?'Not priced':'—';
  const content=<>
   {error&&!connectionError&&<p role="status" className="telemetry-note">Usage unavailable; retrying automatically.</p>}
-  {contexts.map(c=><ContextView key={`${c.scope?.execution}:${c.scope?.attempt}:${c.agent}`} context={c} showAgent={contexts.length>1}/>)}
+  {contexts.map(c=><ContextView key={`${c.scope?.execution}:${c.scope?.attempt}:${c.agent}`} context={c} messages={open && c.scope?.execution===executionId && c.agent==='root' && (c.scope?.provider==='codex'||c.source==='sdk_token_breakdown') ? messages : undefined} showAgent={contexts.length>1}/>)}
   {!contexts.length&&<p className="telemetry-note">{report?'Context usage not reported yet.':'Loading context…'}</p>}
   <details className="token-cost" ref={costDetails}><summary><span>Token cost</span>{usage.unpriced.length>0&&known.length>0&&<span className="token-cost-partial" title="Some usage has no price; open for which model and why">Partly priced</span>}<strong>{costLabel}</strong></summary><div className="token-cost-body">
    <p className="telemetry-note">API-equivalent estimate, separate from subscription allowance and billed spend.</p>

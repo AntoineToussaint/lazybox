@@ -23,6 +23,8 @@ import { useOpenConversation } from './AgentMessages';
 import { budgetLine, overlapsOfTask, permissionLabel, reviewHeld, usd } from './orchestration-model';
 import { MissionLeases, MissionMessages, MissionTabs, MissionTimeline, type MissionTab } from './MissionViews';
 import { ReviewPlanButton } from './PlanSheet';
+import { DeliveryVerdict } from './DeliveryVerdict';
+import { useDeliveryOutcome } from './useDeliveryOutcome';
 import './missions.css';
 
 const message = (error: unknown) => ConnectError.from(error).rawMessage || String(error);
@@ -103,6 +105,7 @@ type BoardProps = { missionId: string; collections: Collection[]; viewState?: Vi
 function MissionBoard({ missionId, collections, viewState, onShowSession, onShowPanel }: BoardProps) {
   const missions = useMissions();
   const mission = useMissionDetail(missionId, missions.put);
+  const boardRef = useRef<HTMLDivElement>(null);
   const [adding, setAdding] = useState(false);
   const [tab, setTab] = useState<MissionTab>(() => (readPreference(viewState, tabKey) as MissionTab) || 'board');
   const chooseTab = (next: MissionTab) => { setTab(next); try { writePreference(viewState, tabKey, next); } catch { /* a convenience */ } };
@@ -130,13 +133,27 @@ function MissionBoard({ missionId, collections, viewState, onShowSession, onShow
     if (e.kind === 'run' && e.commandId) onShowPanel?.('console', { collectionId: e.collectionId || task.attempt?.collectionId || '', sessionId: e.sessionId || task.attempt?.sessionId || '', commandId: e.commandId });
     else if (e.url) window.open(e.url, '_blank', 'noopener');
   };
+  const attention = mission.tasks.find(t => t.gate && t.status === 'needs_you')
+    || mission.tasks.find(t => ['failed', 'needs_you', 'changes_requested', 'blocked'].includes(t.status));
   const goals = new Map(mission.goals.map(g => [g.id, g.title]));
-  return <div className="mission-board" data-mission={mission.id}>
+  // A delivery verdict exists only under an approved plan that pins a spec.
+  const contracted = mission.plans.some(p => p.state === 'approved' && !!p.contract);
+  return <div ref={boardRef} className="mission-board" data-mission={mission.id}>
     <div className="mission-head">
       <div className="mission-title"><h3>{mission.title}</h3>
         <span className="mission-process" title={`Process ${mission.process}, pinned when the mission started (${mission.processDigest}). A report asks you to accept the task; only you can.`}>{mission.process === 'solo-pair' ? 'One agent per task' : mission.process} · you accept each task</span>
       </div>
       {!firstTask && <p className="mission-summary" role="status">{missionSummary(mission)}</p>}
+      {tab === 'board' && attention && !mission.canceled && !mission.error && <div className="mission-next-decision">
+        <button type="button" className="link-button" onClick={() => boardRef.current?.querySelector<HTMLElement>(`[data-task="${CSS.escape(attention.id)}"]`)?.focus()}>
+          {statusLabel[attention.status]} · {attention.title}
+        </button>
+        <span>{attention.reason}</span>
+      </div>}
+      {mission.plans.filter(p => p.state === 'approved' && p.contract?.acceptanceCriteria.length).map(p =>
+        <details className="mission-brief" key={p.id}><summary>Acceptance criteria · {p.summary || 'Approved plan'}</summary>
+          <ul>{p.contract!.acceptanceCriteria.map((line, i) => <li key={i}>{line}</li>)}</ul>
+        </details>)}
       {mission.brief && <details className="mission-brief"><summary>Brief</summary><p>{mission.brief}</p></details>}
       {mission.error && <p className="missions-notice tone-warn">{mission.error}</p>}
     </div>
@@ -161,8 +178,9 @@ function MissionBoard({ missionId, collections, viewState, onShowSession, onShow
       {columns.map(column => <section key={column.key} className={`mission-column column-${column.key}`} aria-labelledby={`column-${mission.id}-${column.key}`}>
         <h4 id={`column-${mission.id}-${column.key}`}>{column.title}<span>{board[column.key].length}</span></h4>
         {!board[column.key].length && <p className="mission-column-empty">{column.empty}</p>}
-        <ul>{board[column.key].map(task => <TaskCard key={task.id} task={task} goal={goals.get(task.goalId)} now={now} collections={collections} titles={mission.tasks} orchestrators={mission.grants} overlaps={overlapsOfTask(mission, task.id)}
+        <ul>{board[column.key].map(task => <TaskCard key={task.id} task={task} missionId={mission.id} contracted={contracted} goal={goals.get(task.goalId)} now={now} collections={collections} titles={mission.tasks} orchestrators={mission.grants} overlaps={overlapsOfTask(mission, task.id)}
           onOpen={() => openConversation(task)} onEvidence={e => openEvidence(task, e)}
+          onDeliveryEvidence={commandId => onShowPanel?.('console', { collectionId: task.attempt?.collectionId || '', sessionId: task.attempt?.sessionId || '', commandId })}
           onAssign={() => setDialog({ kind: 'assign', task })} onReport={() => setDialog({ kind: 'report', task })}
           onAccept={() => void change({ case: 'accept', value: { taskId: task.id, note: '' } }, `Accepted “${task.title}”.`).catch(() => {})}
           onReject={() => setDialog({ kind: 'reject', task })} onCancel={() => setDialog({ kind: 'cancel', task })}
@@ -209,9 +227,9 @@ function AddTask({ onAdd, onClose, mission }: { mission: Mission; onAdd(title: s
   </form>;
 }
 
-type CardProps = { task: MissionTask; goal?: string; now: number; collections: Collection[]; titles: MissionTask[]; orchestrators: Mission['grants']; overlaps: ReturnType<typeof overlapsOfTask>; onOpen(): void; onEvidence(e: MissionEvidence): void; onAssign(): void; onReport(): void; onAccept(): void; onReject(): void; onCancel(): void; onNotice(text: string): void; onError(text: string): void };
+type CardProps = { task: MissionTask; missionId: string; contracted: boolean; onDeliveryEvidence(commandId: string): void; goal?: string; now: number; collections: Collection[]; titles: MissionTask[]; orchestrators: Mission['grants']; overlaps: ReturnType<typeof overlapsOfTask>; onOpen(): void; onEvidence(e: MissionEvidence): void; onAssign(): void; onReport(): void; onAccept(): void; onReject(): void; onCancel(): void; onNotice(text: string): void; onError(text: string): void };
 
-function TaskCard({ task, goal, now, collections, titles, orchestrators, overlaps, onOpen, onEvidence, onAssign, onReport, onAccept, onReject, onCancel, onNotice, onError }: CardProps) {
+function TaskCard({ task, missionId, contracted, onDeliveryEvidence, goal, now, collections, titles, orchestrators, overlaps, onOpen, onEvidence, onAssign, onReport, onAccept, onReject, onCancel, onNotice, onError }: CardProps) {
   const [expanded, setExpanded] = useState(false);
   const actions = taskActions(task);
   const attempt = task.attempt;
@@ -220,6 +238,7 @@ function TaskCard({ task, goal, now, collections, titles, orchestrators, overlap
   const label: Record<string, string> = { assign: task.attempts.length ? 'Assign again…' : 'Assign…', report: 'Report done…', accept: 'Accept', reject: 'Ask for changes…', open: 'Open conversation' };
   const run: Record<string, () => void> = { assign: onAssign, report: onReport, accept: onAccept, reject: onReject, open: onOpen };
   const blockedBy = task.blockedBy.map(id => titles.find(t => t.id === id)?.title || id);
+  const outcome = useDeliveryOutcome(contracted && attempt ? { missionId, taskId: task.id } : undefined);
   return <li className={`mission-card status-${task.status}`} data-task={task.id} tabIndex={0} {...peekProps({ kind: 'mission-task', taskId: task.id, title: task.title })} aria-label={`${task.title}, ${statusLabel[task.status] || task.status}${task.trust ? ', ' + trustLabel[task.trust] : ''}`}>
     <div className="mission-card-head">
       <button type="button" className="mission-card-title" aria-expanded={expanded} onClick={() => setExpanded(v => !v)}><strong>{task.title}</strong></button>
@@ -237,6 +256,7 @@ function TaskCard({ task, goal, now, collections, titles, orchestrators, overlap
         <Icon name="subagent" size={11}/>{orchestrators.find(g => g.conversationId === attempt.parentConversationId)?.title || 'Orchestrator'}<small>{attempt.role || 'worker'}</small></span>}
     </div>
     <p className="mission-reason">{task.reason}</p>
+    {outcome && <DeliveryVerdict outcome={outcome} compact={!expanded} onEvidence={e => onDeliveryEvidence(e.commandId)}/>}
     {attempt && <button type="button" className="mission-conversation" disabled={!attempt.sessionId || attempt.live === 'missing' || attempt.live === 'reserved'} onClick={onOpen} title={attempt.live === 'reserved' ? 'The worker conversation is being prepared' : attempt.sessionId ? 'Open the conversation working on this task' : 'This conversation was deleted'}>
       <Icon name="chat" size={13}/><span className="mission-conversation-title">{attempt.title || 'Conversation'}</span>
       {workspace && <span className="mission-conversation-where">{workspace}</span>}
@@ -245,7 +265,7 @@ function TaskCard({ task, goal, now, collections, titles, orchestrators, overlap
     {chips.length > 0 && <ul className="mission-evidence" aria-label="Evidence">{chips.map(e => {
       const chip = evidenceChip(e);
       const actionable = (e.kind === 'run' && !!e.commandId) || !!e.url;
-      return <li key={e.ref + e.atUnixMillis}><button type="button" className={`evidence-chip tone-${chip.tone}`} title={chip.title + (actionable ? '\n\n' + (e.kind === 'run' ? 'Open its output' : 'Open on GitHub') : '')} disabled={!actionable} onClick={() => onEvidence(e)}><span aria-hidden="true">{chip.mark}</span>{e.historical ? 'History · ' : ''}{chip.label}<time>{ago(e.atUnixMillis, now)}</time></button></li>;
+      return <li key={e.ref + e.atUnixMillis}><button type="button" className={`evidence-chip tone-${chip.tone}`} title={chip.label + '\n' + chip.title + (actionable ? '\n\n' + (e.kind === 'run' ? 'Open its output' : 'Open on GitHub') : '')} disabled={!actionable} onClick={() => onEvidence(e)}><span aria-hidden="true">{chip.mark}</span><span className="evidence-label">{e.historical ? 'History · ' : ''}{chip.label}</span><time>{ago(e.atUnixMillis, now)}</time></button></li>;
     })}</ul>}
     {expanded && <div className="mission-card-detail">
       {task.brief && <><h5>Brief</h5><p className="mission-card-brief">{task.brief}</p></>}

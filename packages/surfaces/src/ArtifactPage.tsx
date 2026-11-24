@@ -1,4 +1,8 @@
+import { RoadmapDocument, roadmapOutline } from './RoadmapDocument';
+import { specOrPlanDocument } from './artifact-sections';
+import { deliveryOutcomeMarkdown } from './delivery-model';
 import { roadmapMarkdown, typedMissionPlan, type Roadmap } from './roadmap';
+import { ArtifactSource, useArtifactSourceDraft } from './ArtifactSource';
 import { artifactFormat } from './artifact-formats';
 import { ArtifactExportContext, documentSnapshot, exportDocumentHTML, type DocumentHeading } from './artifact-export';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
@@ -7,7 +11,7 @@ import { ActionMenu } from './ActionMenu';
 import { RoadmapDialog, CreateIssueDialog, DeleteArtifactDialog, DiffStats, DiffView, SaveToRepositoryDialog } from './ArtifactDialogs';
 import { artifactsChanged, errorText, restoreArtifacts, retireArtifact } from './artifact-client';
 import { TodoList, todoMarkdown, todoProgress } from './TodoList';
-import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, roadmapMissionPlan, slug, versionOrigin } from './artifact-model';
+import { ARTIFACT_KINDS, agentReference, ago, asKind, kindIcon, kindLabel, lineDiff, pinnedArtifactReference, roadmapMissionPlan, slug, structuredMarkdown, versionOrigin } from './artifact-model';
 import { extractToc, readingMinutes, tocOutline, withoutRepeatedTitle } from './artifact-reader';
 import { DocumentBody, RenderedDiff, TableOfContents, useScrollSpy } from './ArtifactReader';
 import { openArtifact, revealMessage } from './artifact-events';
@@ -72,13 +76,14 @@ const fullDate = (unixMillis: bigint | number) => new Date(Number(unixMillis)).t
 type RelatedPage = { id: string; version?: number };
 
 export function ArtifactPage(props: Props) {
+  const { connection } = useRunner();
   const [trail, setTrail] = useState<RelatedPage[]>([]);
   const current = trail.at(-1);
   const back = () => setTrail(pages => pages.slice(0, -1));
   const navigate = (next: RelatedPage, fromVersion: number) => setTrail(pages => [
     ...pages.slice(0, -1), { id: current?.id ?? props.artifactId, version: fromVersion }, next,
   ]);
-  return <ArtifactDocument {...props} key={current?.id ?? props.artifactId}
+  return <ArtifactDocument {...props} key={JSON.stringify([connection.baseUrl, props.collectionId, current?.id ?? props.artifactId])}
     artifactId={current?.id ?? props.artifactId} summary={current ? undefined : props.summary}
     focus={current ? { version: current.version, pinned: true, at: trail.length } : props.focus}
     onBack={trail.length > 1 ? back : props.onBack} onDeleted={trail.length > 1 ? back : props.onDeleted}
@@ -86,7 +91,7 @@ export function ArtifactPage(props: Props) {
 }
 
 function ArtifactDocument({ collectionId, artifactId, summary, collection, onBack, onShowSession, conversationId, conversationTitle, onDeleted, onDiscuss, chatOpen, standalone, focus, onRelated }: Props & { onRelated(target: RelatedPage, fromVersion: number): void }) {
-  const { api } = useRunner();
+  const { api, info, connection } = useRunner();
   const host = useContext(ArtifactHostContext);
   const saveArtifactExport = useContext(ArtifactExportContext);
   const savePending = useRef(false);
@@ -128,6 +133,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
   const [view, setView] = useState<'document' | 'source' | 'changes'>('document');
   const [diffMode, setDiffModeState] = useState<'rendered' | 'text'>(() => remembered(DIFF_KEY) === 'text' ? 'text' : 'rendered');
   const setDiffMode = (mode: 'rendered' | 'text') => { setDiffModeState(mode); remember(DIFF_KEY, mode); };
+  const [sourceDraft, setSourceDraft] = useArtifactSourceDraft(info ? info.runnerId || connection.baseUrl : '', collectionId, artifactId);
   const [base, setBase] = useState(0); // 0 compares with the previous version
   const [contents, setContents] = useState(() => new Map<number, string>());
   // History is closed until the person opens it; this window remembers the choice.
@@ -227,20 +233,21 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
     const parsed = JSON.parse(content);
     return parsed.schema === 'roadmap.v1' ? parsed : undefined;
   }, [artifact?.kind, structured, content]);
+  const fieldDocument = useMemo(() => {
+    if (!structured || !content || (artifact?.kind !== 'spec' && artifact?.kind !== 'plan')) return;
+    return specOrPlanDocument(JSON.parse(content));
+  }, [artifact?.kind, structured, content]);
   const project = (body: string) => {
     if (!structured || !body) return body;
     if (artifact?.kind === 'todo-list') return todoMarkdown(body);
     const parsed = JSON.parse(body);
     if (artifact?.kind === 'plan' && parsed.schema === 'roadmap.v1') return roadmapMarkdown(parsed);
-    const fields = parsed as Record<string, string | string[]>;
-    return Object.entries(fields).filter(([name]) => name !== 'schema').map(([name, value]) => {
-      const title = name[0].toUpperCase() + name.slice(1).replace(/[A-Z]/g, letter => ' ' + letter.toLowerCase());
-      const text = Array.isArray(value) ? value.map(entry => '- ' + entry).join('\n') : value;
-      return '## ' + title + '\n\n' + text;
-    }).join('\n\n');
+    if (artifact?.kind === 'report' && parsed.schema === 'delivery-outcome.v1') return deliveryOutcomeMarkdown(parsed);
+    const typed = body === content ? fieldDocument : specOrPlanDocument(parsed);
+    return typed?.markdown ?? structuredMarkdown(parsed);
   };
-  const currentText = useMemo(() => content === undefined ? undefined : project(content), [content, structured, artifact?.kind]);
-  const previousText = useMemo(() => baseContent === undefined ? undefined : project(baseContent), [baseContent, structured, artifact?.kind]);
+  const currentText = useMemo(() => content === undefined ? undefined : project(content), [content, fieldDocument, structured, artifact?.kind]);
+  const previousText = useMemo(() => baseContent === undefined ? undefined : project(baseContent), [baseContent, content, fieldDocument, structured, artifact?.kind]);
   const diff = useMemo(() => view === 'changes' && currentText !== undefined && previousText !== undefined ? lineDiff(previousText, currentText) : [], [view, currentText, previousText]);
   const version = versions.find(v => v.number === shown);
   const latest = versions.at(-1);
@@ -261,7 +268,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
   // ("(final)", a subtitle), is hidden and the artifact's title shows (repeatsTitle).
   const { Preview, extension, mime, label: formatLabel } = artifactFormat(artifact?.format ?? '');
   const reading = useMemo(() => content === undefined || !artifact ? undefined : structured ? currentText : Preview ? content : withoutRepeatedTitle(content, artifact.title), [content, currentText, structured, artifact?.title, Preview]);
-  const headings = useMemo(() => reading === undefined || Preview ? [] : extractToc(reading), [reading, Preview]);
+  const headings = useMemo(() => roadmap ? roadmapOutline(roadmap) : reading === undefined || Preview ? [] : extractToc(reading), [reading, Preview, roadmap]);
   const outline = useMemo(() => tocOutline(headings), [headings]);
   const active = useScrollSpy(scroller, view === 'document' ? outline.map(entry => entry.id) : []);
   useEffect(() => {
@@ -312,11 +319,11 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
       requestAnimationFrame(() => moreMenu.current?.querySelector('summary')?.focus());
     } catch (e) { setError(errorText(e)); }
   };
-  const saveRevision = async (body: string, message: string) => {
-    if (republishing) return;
+  const saveRevision = async (body: string, message: string, expectedVersion = latestNumber) => {
+    if (republishing) return false;
     setRepublishing(true);
     try {
-      const saved = await api.putArtifact({ collectionId, artifactId, content: body, expectedVersion: latestNumber }, { timeoutMs: 10000 });
+      const saved = await api.putArtifact({ collectionId, artifactId, content: body, expectedVersion }, { timeoutMs: 10000 });
       setContents(current => new Map(current).set(saved.contentVersion, saved.content));
       setArtifact(saved);
       setDiscussionVersion(undefined);
@@ -325,7 +332,8 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
       setBase(0);
       artifactsChanged(collectionId);
       say(message);
-    } catch (e) { setError(errorText(e)); }
+      return true;
+    } catch (e) { setError(errorText(e)); return false; }
     finally { setRepublishing(false); }
   };
   const showSuccessor = () => {
@@ -399,11 +407,13 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
     revealMessage({ sessionId: message.sessionId, messageId: message.messageId });
   };
   const openFile = () => { if (filePath && workbench) workbench.open(filePath, { focus: true }); };
-  const discussionReference = () => {
-    const reference = agentReference(artifact, currentText ?? '', 1200, shown);
+  const discussionReference = (compact = false) => {
+    const reference = compact
+      ? pinnedArtifactReference(artifact, shown) + '\n\n'
+      : agentReference(artifact, currentText ?? '', 1200, shown);
     return excerpt ? `${reference}Selected excerpt:\n${excerpt.split('\n').map(line => `> ${line}`).join('\n')}\n\n` : reference;
   };
-  const sendToAgent = (text = discussionReference()) => {
+  const sendToAgent = (text = discussionReference(!!onDiscuss)) => {
     if (onDiscuss) {
       if (!discussionVersion && shown) {
         setDiscussionVersion(shown);
@@ -421,7 +431,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
   const pick = (number: number) => { setSelected(number === latestNumber ? 0 : number); setBase(0); };
   const compare = (number: number) => { pick(number); setView('changes'); if (!wide) setHistoryOpen(false); };
   const minutes = reading === undefined || Preview ? 0 : readingMinutes(reading);
-  const discussLabel = chatOpen ? (excerpt ? 'Add selection to chat' : 'Add to chat') : (excerpt ? 'Discuss selection in chat' : 'Discuss in chat');
+  const discussLabel = chatOpen ? (excerpt ? 'Add selection to companion' : 'Add to companion') : (excerpt ? 'Discuss selection with agent companion' : 'Agent companion');
   const progress = artifact.kind === 'todo-list' && content ? todoProgress(content) : undefined;
   const historyLabel = `History · ${versions.length} version${versions.length === 1 ? '' : 's'}`;
 
@@ -439,17 +449,17 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
       </div>
       <div className="artifact-segmented" role="tablist" aria-label="View">
         <button type="button" role="tab" aria-selected={view === 'document'} onClick={() => setView('document')}>{Preview ? 'Preview' : 'Document'}</button>
-        {(Preview || structured) && <button type="button" role="tab" aria-selected={view === 'source'} onClick={() => setView('source')}>Source</button>}
+        <button type="button" role="tab" aria-selected={view === 'source'} onClick={() => { if (!selected && sourceDraft) setSelected(sourceDraft.version); setView('source'); }}>Source</button>
         <button type="button" role="tab" aria-selected={view === 'changes'} disabled={versions.length < 2 && shown <= 1} onClick={() => setView('changes')}>Changes</button>
       </div>
       <div className="artifact-page-actions">
         <span className="artifact-status" role="status" aria-live="polite">{status}</span>
         <button type="button" className="artifact-tool artifact-history-toggle" aria-expanded={historyOpen} aria-label={historyLabel} aria-keyshortcuts="H" title={`${historyLabel} (H)`} onClick={() => setHistoryOpen(!historyOpen)}><Icon name="history" size={15}/><span className="artifact-tool-label">History</span><span className="artifact-count">{versions.length}</span></button>
         <button type="button" className={onDiscuss ? "artifact-tool artifact-discuss" : "artifact-tool"}
-          aria-label={onDiscuss ? discussLabel : (excerpt ? 'Send selection to agent' : 'Send to agent')}
+          aria-label={onDiscuss ? discussLabel : (conversationId ? (excerpt ? 'Send selection to agent' : 'Send to agent') : 'Copy artifact reference')}
           onMouseDown={event => { if (excerpt) event.preventDefault(); }} onClick={() => sendToAgent()}
-          title={onDiscuss ? 'Open chat and add this reference to its draft' : conversationId ? `Put a reference in the message box of “${conversationTitle || 'the conversation'}” (not sent)` : 'Copy a reference an agent can read'}>
-          <Icon name={onDiscuss ? 'chat' : 'send'} size={14}/><span className="artifact-tool-label">{onDiscuss ? discussLabel : excerpt ? 'Send selection' : 'Send to agent'}</span>
+          title={onDiscuss ? 'Open the agent companion with this version in its draft' : conversationId ? `Put a reference in the message box of “${conversationTitle || 'the conversation'}” (not sent)` : 'Copy a reference an agent can read'}>
+          <Icon name={onDiscuss ? 'chat' : 'send'} size={14}/><span className={onDiscuss ? 'artifact-companion-label' : 'artifact-tool-label'}>{onDiscuss ? (chatOpen ? 'Add to companion' : 'Agent companion') : conversationId ? (excerpt ? 'Send selection' : 'Send to agent') : 'Copy reference'}</span>
         </button>
         <ActionMenu label="Export" className="artifact-export-menu" summary={<><Icon name="download" size={14}/><span className="artifact-tool-label">Export</span></>}>
           <button type="button" disabled={exportContent === undefined} onClick={() => void copy(exportContent ?? '', `Copied ${formatLabel}.`)}><Icon name="copy"/><span>{Preview ? 'Copy HTML source' : 'Copy as Markdown'}</span></button>
@@ -515,7 +525,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
     <div className="artifact-page-body">
       <main className="artifact-main">
         <div ref={scroller} className="artifact-scroll">
-          {view !== 'changes' ? <div className={`doc-layout${outline.length ? ' has-toc' : ''}`}>
+          {view !== 'changes' ? <div className={`doc-layout${view === 'document' && outline.length ? ' has-toc' : ''}`}>
             <div className="doc-column">
               <header className="doc-title-block">
                 {(artifact.trackedPath || artifact.trackingProblem) && <div className="doc-eyebrow">
@@ -533,9 +543,9 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
                   <label className="doc-version" title="Choose a version"><span aria-hidden="true">v{shown}{shown === latestNumber ? ' · latest' : ''}</span>
                     <select aria-label="Version" value={shown} onChange={event => pick(Number(event.target.value))}>{[...versions].reverse().map(v => <option key={v.number} value={v.number}>v{v.number}{v.number === latestNumber ? ' · latest' : ` · ${ago(v.createdAtUnixMillis)}`}</option>)}</select>
                     <Icon name="chevron" size={11}/></label>
-                  {minutes > 0 && <><span className="doc-dot" aria-hidden="true"/><span>{minutes} min read</span></>}
+                  {view === 'document' && minutes > 0 && <><span className="doc-dot" aria-hidden="true"/><span>{minutes} min read</span></>}
                   {/* Where the outline has no room beside the text, it is one click away instead. */}
-                  {outline.length > 0 && <ActionMenu label="On this page" className="doc-contents-menu" summary={<><Icon name="checklist" size={12}/><span>On this page</span></>}>
+                  {view === 'document' && outline.length > 0 && <ActionMenu label="On this page" className="doc-contents-menu" summary={<><Icon name="checklist" size={12}/><span>On this page</span></>}>
                     {outline.map(entry => <button key={entry.id} type="button" className={entry.level > Math.min(...outline.map(e => e.level)) ? 'is-sub' : undefined} onClick={() => requestAnimationFrame(() => scroller.current?.querySelector<HTMLElement>(`#${CSS.escape(entry.id)}`)?.scrollIntoView({ block: 'start' }))}><span>{entry.text}</span></button>)}
                   </ActionMenu>}
                 </div>
@@ -556,9 +566,12 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
                   agentReference(artifact, '', 0, shown) + 'Work through the items marked todo in this revision. Check the latest version before starting each item and record completed work using the same item IDs.'
                 )}>{onDiscuss || (conversationId && onShowSession) ? 'Draft remaining tasks in chat' : 'Copy remaining tasks brief'}</button>}
               </div>}
-              <div key={`${artifact.id}:${shown}:${view}`} ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <pre className="artifact-html-source">{content}</pre> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : <DocumentBody markdown={reading} headings={headings} scroller={scroller} onReviewShell={reviewShell}/>}</div>
+              <div key={`${artifact.id}:${shown}:${view}`} ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <ArtifactSource content={content ?? ''} language={structured ? 'json' : Preview ? 'html' : 'markdown'}
+                version={shown} latest={latestNumber} editable={!!collection && collection.state !== 'deleted' && collection.state !== 'deleting' && !artifact.retired && !artifact.trackedPath} saving={republishing}
+                draft={sourceDraft} onDraft={setSourceDraft} onPick={setSelected}
+                onSave={(body, expectedVersion) => saveRevision(body, 'Saved a new version.', expectedVersion)}/> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : roadmap ? <RoadmapDocument plan={roadmap} headings={headings} scroller={scroller} onReviewShell={reviewShell}/> : <DocumentBody markdown={reading} sections={fieldDocument?.sections} headings={headings} scroller={scroller} onReviewShell={reviewShell}/>}</div>
             </div>
-            {outline.length > 0 && <aside className="doc-toc-rail"><TableOfContents entries={outline} active={active} scroller={scroller}/></aside>}
+            {view === 'document' && outline.length > 0 && <aside className="doc-toc-rail"><TableOfContents entries={outline} active={active} scroller={scroller}/></aside>}
           </div>
             : <div className="artifact-changes">
               <div className="artifact-changes-bar">

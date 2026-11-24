@@ -1,5 +1,6 @@
 import { useDisplayDetail } from './display-detail';
 import { agentIcon, agentTitle } from './providers';
+import { PendingFocus, trackFocus } from './pending-focus';
 import { conversationProvider, conversationTitle } from './conversation-model';
 import { LeaderMenu } from './LeaderMenu';
 import { WorkspaceNavigator } from './WorkspaceNavigator';
@@ -17,7 +18,7 @@ import { RunnerDirectoryProvider, RunnerScope, useRunnerDirectory, useRunnerIden
 import { elsewhere, localTarget, OWN_RUNNER, type RunnerTarget } from './runner-directory';
 import { AppearanceSync } from './appearance/AppearanceSync';
 import { UserThemeSync } from './appearance/useUserThemes';
-import { consolePlace, followConsole, noteConsoleUse, readFollowRuns, useRunFollowing } from './console-follow';
+import { consolePlace, noteConsoleUse, readFollowRuns, useRunFollowing } from './console-follow';
 import { requestTerminal } from './TerminalPanel';
 import { writeWhenReady } from './home-shell';
 import { AccountNotices } from './AccountNotices';
@@ -181,6 +182,7 @@ const AGENTS_PREFERENCE = 'workspace.sidebar-agents';
 const readAgentsChoice = (viewState?: ViewStateStore): SidebarAgents | undefined => { try { const value = readPreference(viewState, AGENTS_PREFERENCE); return isSidebarAgents(value) ? value : undefined; } catch { return undefined; } };
 
 function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = emptyTarget(), host, onOpenViewer, onTargetChange, reveal, ownWindows = true }: ViewProps) {
+  const webPopouts = !!host?.webViews?.reclaim;
   const keyboardHint = useKeyboardNavigation(viewState);
   const keymap = useKeymap(viewState);
   const { api, info, error: connectionError, slow: runnerSlow, authFailed, refresh: refreshRunner, restart } = useRunner();
@@ -278,7 +280,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   // Conversations are tabs (preview and regular, ⇧⌘T, related ones beside their parent): useConversationTabs.ts.
   const tabs = useConversationTabs({
     livePage, layout: () => current.current, changePage, commit: next => commit(next), closePanel: panel => closePanel(panel), scope: workspaceID, tabs: tabsOn, store: viewState,
-    shown: (id, how) => { setSettings(false); setMobilePanelId(id); if (how === 'focus') focusAfter.current = { panel: id }; else revealAfter.current = id; },
+    shown: (id, how) => { setSettings(false); setMobilePanelId(id); if (how === 'focus') focusAfter.ask({ panel: id }); else revealAfter.current = id; },
     title: target => conversationTitle(info?.sessions.find(session => session.id === target.sessionId)) || 'Conversation',
     announce: text => dock.current?.announce(text), error: setError,
   });
@@ -339,11 +341,10 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   // A run starting in the viewed session is offered to the console, which moves
   // to it only when nobody is reading it and never comes forward over another
   // tab (console-follow.ts). Put away, it stays away. Focus stays put.
-  useRunFollowing(api, page.selection.sessionId, () => ({ follow: readFollowRuns(sessionStore), place: consolePlace(livePage(), isConsolePutAway()), shown: livePage().selection.commandId }), ({ commandId, open }) => {
+  useRunFollowing(api, page.selection.sessionId, () => ({ follow: readFollowRuns(sessionStore), place: consolePlace(livePage(), isConsolePutAway()), shown: livePage().selection.commandId }), ({ commandId }) => {
     const live = livePage();
     if (!live || locked || live.selection.sessionId !== page.selection.sessionId) return;
-    const output = followConsole(live);
-    changePage({ ...(open && output ? activatePanel(live, output.id) : live), selection: { ...live.selection, commandId } });
+    changePage({ ...live, selection: { ...live.selection, commandId } });
   });
   // A new conversation opens in a tab: the page needs room for one, or a preview tab to show it in.
   const canShowNewSession = shownPanels(page).some(p => isChatTab(p) && p.preview) || allPanels(page).length < PANEL_LIMIT;
@@ -380,20 +381,27 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const dockKey = (kind: string) => `${viewState?.root || viewState?.key}:dock:${kind}`;
   const rememberedDock = (kind: string): DockSide => { try { const side = viewState?.getItem(dockKey(kind)); return isDockSide(side) ? side : defaultDock(kind); } catch { return defaultDock(kind); } };
   // Focus follows a panel that moved or was asked for, or returns to the conversation when one closes.
-  const focusAfter = useRef<{ panel: string } | 'content' | null>(null);
+  // This view's own request (pending-focus.ts): focus moved elsewhere while it waits drops it. It runs
+  // when asked and after each layout change, once what it needs is shown; until then it keeps waiting.
+  const [focusRequest] = useState(() => new PendingFocus<{ panel: string } | 'content'>());
+  useEffect(() => trackFocus(focusRequest), [focusRequest]);
+  const runFocus = useRef(() => {});
+  runFocus.current = () => {
+    const request = focusRequest.waiting; if (!request) return;
+    // The conversation in view: a chat tab behind another one has a message box too.
+    const composer = () => [...document.querySelectorAll<HTMLElement>('.page-layout .panel-chat textarea:not(:disabled)')].find(box => box.getClientRects().length > 0);
+    if (request === 'content' ? !composer() : !dock.current?.hasPanel(request.panel)) return;
+    if (!focusRequest.take(request)) return;
+    if (request !== 'content') dock.current?.focusPanel(request.panel); else composer()?.focus({ preventScroll: true });
+  };
+  const focusAfter = useMemo(() => ({ ask: (request: { panel: string } | 'content') => { focusRequest.ask(request); requestAnimationFrame(() => runFocus.current()); } }), [focusRequest]);
   /** A panel navigated to (a conversation opened): a maximized group gives it the zoom, without taking the focus. */
   const revealAfter = useRef('');
   useEffect(() => {
     const reveal = revealAfter.current; revealAfter.current = '';
     if (reveal) dock.current?.reveal(reveal);
-    // Kept until it runs: the dock reporting its settled sizes changes the layout again within the frame.
-    const request = focusAfter.current; if (!request) return;
-    const frame = requestAnimationFrame(() => {
-      if (focusAfter.current === request) focusAfter.current = null;
-      if (request !== 'content') { dock.current?.focusPanel(request.panel); return; }
-      // The conversation in view: a chat tab behind another one has a message box too.
-      [...document.querySelectorAll<HTMLElement>('.page-layout .panel-chat textarea:not(:disabled)')].find(box => box.getClientRects().length > 0)?.focus({ preventScroll: true });
-    });
+    // The dock reporting its settled sizes changes the layout again within the frame: run after it.
+    const frame = requestAnimationFrame(() => runFocus.current());
     return () => cancelAnimationFrame(frame);
   }, [layout]);
   /** Show the page's panel of this kind, or dock a new one where this kind was last docked (or beside the group ⌘\ asked from). */
@@ -412,7 +420,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       const panel = existing || { id: crypto.randomUUID(), kind, binding: { mode: 'follow' as const }, detached: false };
       const without = existing ? removeFromPage(live, existing.id) : live;
       if (!changePage({ ...without, layout: splitBeside(without.layout, placement.group, panel, placement.side === 'right' ? 'right' : 'bottom') })) return '';
-      setSettings(false); setMobilePanelId(panel.id); focusAfter.current = { panel: panel.id };
+      setSettings(false); setMobilePanelId(panel.id); focusAfter.ask({ panel: panel.id });
       return panel.id;
     }
     const shown = kind === 'files' || kind === 'editor' ? showCodePanel(live, kind, rememberedDock(kind), () => crypto.randomUUID()) : showPanel(live, kind, rememberedDock(kind), () => crypto.randomUUID());
@@ -518,7 +526,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     if (!changePage({ ...without, layout: insertDocked(without.layout, { ...panel }, side) })) return;
     if (panel.kind === 'console') putConsoleAway(false);
     try { viewState?.setItem(dockKey(panel.kind), side); } catch { /* the side is a convenience */ }
-    focusAfter.current = { panel: panel.id };
+    focusAfter.ask({ panel: panel.id });
   };
   const closePanel = (panel: Panel) => {
     if (panel.detached) return;
@@ -537,7 +545,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     if (!changePage(next)) return;
     if (panel.kind === 'console') putConsoleAway(true);
     const front = isChatTab(panel) && group ? groupOf(next, group.panels.find(value => value.id !== panel.id)?.id || '')?.active : undefined;
-    focusAfter.current = front ? { panel: front } : 'content';
+    focusAfter.ask(front ? { panel: front } : 'content');
   };
   const setMinimized = (groupID: string, minimized: boolean) => {
     const live = livePage();
@@ -580,7 +588,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     if (!target || sidebarKinds.has(kind)) return;
     const multiple = !!registry[kind]?.multiple;
     const existing = multiple ? undefined : kind === 'chat' ? tabFor(live, live.selection) || shownPanels(live).find(isChatTab) : shownPanels(live).find(panel => panel.kind === kind && !panel.detached);
-    if (existing && target.panels.some(panel => panel.id === existing.id)) { changePage(activatePanel(live, existing.id)); focusAfter.current = { panel: existing.id }; return; }
+    if (existing && target.panels.some(panel => panel.id === existing.id)) { changePage(activatePanel(live, existing.id)); focusAfter.ask({ panel: existing.id }); return; }
     if (!existing && allPanels(live).length >= PANEL_LIMIT) { setError(`This page already has ${PANEL_LIMIT} panels; close one to add ${sentence(registry[kind]?.title || kind)}.`); return; }
     const panel: Panel = existing || { id: crypto.randomUUID(), kind, binding: { mode: 'follow' }, detached: false };
     if (!changePage(addToGroup(existing ? removeFromPage(live, existing.id) : live, groupID, panel))) return;
@@ -588,7 +596,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     if (kind === 'web') requestWebPage(panel.id, '');
     if (kind === 'terminal' && workspaceID) requestTerminal(workspaceID);
     setSettings(false); setMobilePanelId(panel.id);
-    focusAfter.current = { panel: panel.id };
+    focusAfter.ask({ panel: panel.id });
     dock.current?.announce(`${existing ? 'Moved' : 'Opened'} ${titleOf(panel)} here`);
   };
   /** A chat to its own native window (the host's), pinned to its conversation. */
@@ -616,12 +624,12 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     const anchor = tabFor(live, live.selection) || chats[0], group = anchor && groupOf(live, anchor.id);
     const docked = !!group && groups(live.layout).some(value => value.id === group.id);
     // Already beside it, or alone in its group: it is brought forward where it is.
-    if (already && (!group?.panels.includes(already) || group.panels.length < 2)) { if (changePage(withSelection(activatePanel(live, already.id), target))) { setSettings(false); setMobilePanelId(already.id); focusAfter.current = { panel: already.id }; } return; }
+    if (already && (!group?.panels.includes(already) || group.panels.length < 2)) { if (changePage(withSelection(activatePanel(live, already.id), target))) { setSettings(false); setMobilePanelId(already.id); focusAfter.ask({ panel: already.id }); } return; }
     if (!already && allPanels(live).length >= PANEL_LIMIT) { setError(`This page already has ${PANEL_LIMIT} panels; close one to open a conversation ${side === 'right' ? 'beside' : 'below'}.`); return; }
     const panel: Panel = already ? { ...already, preview: undefined } : { id: crypto.randomUUID(), kind: 'chat', binding: { mode: 'pinned', target: { ...target, commandId: '' } }, detached: false };
     const without = already ? removeFromPage(live, already.id) : live;
     if (!changePage(withSelection({ ...without, layout: docked ? splitBeside(without.layout, group!.id, panel, side) : insertDocked(without.layout, panel, side, 0.5) }, target))) return;
-    setSettings(false); setMobilePanelId(panel.id); focusAfter.current = { panel: panel.id };
+    setSettings(false); setMobilePanelId(panel.id); focusAfter.ask({ panel: panel.id });
   };
   /**
    * A conversation of another workspace (or another Runner) opens on its own
@@ -678,7 +686,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     try {
       await chatHost.dockChat(panel.id);
       const back = returnDetached(current.current, panel.id);
-      if (back && commit({ ...back.layout, selectedPage: back.page })) { setSettings(false); focusAfter.current = { panel: panel.id }; }
+      if (back && commit({ ...back.layout, selectedPage: back.page })) { setSettings(false); focusAfter.ask({ panel: panel.id }); }
     }
     catch (error) { setError(String(error)); }
     finally { setPending(''); }
@@ -694,7 +702,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     const shown = reason === 'put-back';
     const back = returnDetached(current.current, panelId);
     if (back) {
-      if (commit({ ...back.layout, selectedPage: shown ? back.page : current.current.selectedPage }) && shown) { setSettings(false); focusAfter.current = { panel: panelId }; }
+      if (commit({ ...back.layout, selectedPage: shown ? back.page : current.current.selectedPage }) && shown) { setSettings(false); focusAfter.ask({ panel: panelId }); }
       return;
     }
     // Saved with another workspace's pages: this window shows a different one now.
@@ -704,7 +712,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       const other = saved ? returnDetached(repairLayout(retireMonitor(parseLayout(saved, agentsChoice.current)), agentsChoice.current, previews), panelId) : undefined;
       if (!other) return;
       viewState.setItem(workspaceKey(collectionId), JSON.stringify({ ...other.layout, selectedPage: shown ? other.page : other.layout.selectedPage }));
-      if (shown) { setSettings(false); select({ collectionId, sessionId: '', commandId: '' }); focusAfter.current = { panel: panelId }; }
+      if (shown) { setSettings(false); select({ collectionId, sessionId: '', commandId: '' }); focusAfter.ask({ panel: panelId }); }
     } catch (error) { setError(`Could not put the chat back: ${String(error)}`); }
   };
   useEffect(() => chatHost?.onChatReturn?.(request => chatReturned.current(request)), [chatHost]);
@@ -801,8 +809,9 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     title: titleOf,
     canClose: panel => !panel.detached,
     close: closePanel,
-    // A Web panel has its own window (its ⋯ → Move to a new window): its native view belongs to one window.
-    canOpenWindow: panel => panel.kind === 'chat' ? !!chatHost && !!resolveTarget(panel, page.selection).sessionId : panel.kind !== 'web' && !narrow,
+    // A Web panel opens in a window like any panel where its page moves with it (native views, native-web-view.ts);
+    // a browser's frame would reload there, so it keeps its own Move to a new window.
+    canOpenWindow: panel => panel.kind === 'chat' ? !!chatHost && !!resolveTarget(panel, page.selection).sessionId : (panel.kind !== 'web' || webPopouts) && !narrow,
     openWindow: (panel, handle) => {
       if (panel.kind === 'chat') { void detach(panel); return; }
       void handle.popout(panel.id).then(opened => { if (!opened) setError('The new window was blocked. Allow pop-ups for Lazybox and try again.'); });
@@ -815,7 +824,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         const without = removeFromPage(livePage(), panel.id);
         // The group stays (it still has tabs): the panel goes beside it.
         changePage({ ...without, layout: splitBeside(without.layout, groupID, panel, side === 'right' ? 'right' : 'bottom') });
-        focusAfter.current = { panel: panel.id };
+        focusAfter.ask({ panel: panel.id });
         return;
       }
       setBeside({ group: groupID, side, title: titleOf(panel) });
@@ -891,7 +900,8 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       ]),
       command('layout.add', 'New tab in the active group…', 'Layout', () => group && openAddMenu(group.id), () => docked && canAdd(group), keymap['layout.add']),
       command('layout.reset', 'Reset layout to default', 'Layouts', () => applyLayout(builtinPresets.find(value => value.id === DEFAULT_PRESET)!), () => workspaceOpen && !locked),
-      command('layout.reset-all', 'Reset the layout and shortcuts', 'Layouts', () => resetEverything(), () => workspaceOpen, keymap['layout.reset-all']),
+      // The way back from any page, Settings and Missions included: it shows the reset workspace.
+      command('layout.reset-all', 'Reset the layout and shortcuts', 'Layouts', () => resetEverything(), () => true, keymap['layout.reset-all']),
       ...[...builtinPresets, ...savedLayouts].map(preset => command(`layout.preset:${preset.id}`, `Layout: ${preset.name}`, 'Layouts', () => applyLayout(preset), () => workspaceOpen && !locked)),
       ...Object.entries(registry).map(([kind, module]) => command(`panel.show:${kind}`, `Show ${module.title}`, 'Panels', () => kind === 'terminal' ? showTerminal() : kind === 'chat' ? showSession(livePage().selection) : kind === 'artifacts' ? showWorkspaceArtifacts() : kind === 'agents' ? void bringBackAgents() : void showModule(kind), () => !locked && workspaceOpen && (kind !== 'terminal' || terminalReady))),
     ];
@@ -932,7 +942,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       return;
     }
     if (!changePage(moved.page)) return;
-    focusAfter.current = { panel: panel.id };
+    focusAfter.ask({ panel: panel.id });
     handle.announce(moved.how === 'joined' ? `Moved ${name} into the ${other} group` : moved.how === 'swapped' ? `Swapped ${name} with ${other}` : `Moved ${name} to a new group ${{ left: 'on the left', right: 'on the right', up: 'above', down: 'below' }[direction]}`);
   };
   const directional = (prefix: 'focus' | 'move' | 'resize', run: (direction: LayoutDirection, argument?: unknown) => void) => Object.fromEntries(layoutDirections.map(direction => [`layout.${prefix}-${direction}`, { run: (argument?: unknown) => run(direction, argument), enabled: prefix === 'focus' ? docked : hasActive }]));
@@ -943,7 +953,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     ...directional('resize', (direction, argument) => dock.current?.resize(direction, !!(argument as { repeat?: boolean } | undefined)?.repeat)),
     ...tabSlots,
     'layout.add': { run: () => { const group = dock.current?.activeGroup(); if (group) openAddMenu(group.id); }, enabled: () => hasActive() && canAdd(dock.current?.activeGroup()) },
-    'layout.reset-all': { run: () => resetEverything(), enabled: () => workspaceOpen },
+    'layout.reset-all': { run: () => resetEverything(), enabled: () => true },
   } as Parameters<typeof useActions>[0]);
   /** Whether a group has a `+`: not the sidebar (its panels are the workspace list), and not a group in a window of its own. */
   const canAdd = (group?: { panels: Panel[]; location: string }) => !!group && group.location !== 'popout' && !group.panels.every(panel => sidebarKinds.has(panel.kind));
@@ -957,7 +967,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
    */
   const resetEverything = () => {
     // A retained layout that could not be read is kept as saved, so Undo can put it back untouched.
-    const before = { layout: current.current, workspace: workspaceID, sidebar: sidebarWidth, agents: agentsChoice.current, locked, error, saved: locked ? viewState?.getItem(key) : undefined };
+    const before = { surface, layout: current.current, workspace: workspaceID, sidebar: sidebarWidth, agents: agentsChoice.current, locked, error, saved: locked ? viewState?.getItem(key) : undefined };
     dock.current?.restore();
     const restoreKeys = resetKeymap(viewState);
     saveSidebarWidth(SIDEBAR_DEFAULT);
@@ -969,12 +979,14 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       const live = livePage(), next = dedupeChats(applyTemplate(live, builtinPresets.find(value => value.id === DEFAULT_PRESET)!.layout, () => crypto.randomUUID()), live.selection);
       changePage(next);
     }
-    focusAfter.current = 'content';
+    focusAfter.ask('content');
     showToast({ id: 'layout:reset-all', tone: 'info', title: 'Layout and shortcuts reset', body: 'The default layout and keys are back.', timeout: 10000,
       button: { label: 'Undo', run: () => {
         restoreKeys();
         saveSidebarWidth(before.sidebar);
         chooseAgents(before.agents);
+        // Back to the page the reset was run from (Settings, Missions).
+        setSurface(before.surface);
         // Another workspace shown since: its layout is not the one that was reset.
         if (shownWorkspace.current !== before.workspace) return;
         if (!before.locked) { commit(before.layout); return; }
@@ -1043,7 +1055,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       editing={editing} canOpenWorkspaceWindow={!!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId}
       layoutMenu={workspaceOpen && !narrow && <>
         <PanelsMenu menu={panelsMenu} registry={registry} shown={kindsShown} beside={beside?.title} disabled={kind => locked || (kind === 'terminal' && !terminalReady)}
-          onShow={kind => { if (kind === 'terminal') showTerminal(); else if (kind === 'chat' && !beside) showSession(page.selection); else if (kind === 'artifacts') showWorkspaceArtifacts(); else { const id = kind === 'agents' ? bringBackAgents() : showModule(kind); if (id) focusAfter.current = { panel: id }; } }}
+          onShow={kind => { if (kind === 'terminal') showTerminal(); else if (kind === 'chat' && !beside) showSession(page.selection); else if (kind === 'artifacts') showWorkspaceArtifacts(); else { const id = kind === 'agents' ? bringBackAgents() : showModule(kind); if (id) focusAfter.ask({ panel: id }); } }}
           onClose={() => setBeside(undefined)}/>
         <LayoutMenu menu={layoutMenu} current={templateOf(page)} saved={savedLayouts} broken={layoutFiles.broken} folder={layoutFiles.folder} cycleKey={keymap['layout.cycle'] ? displayBinding(bindings(keymap['layout.cycle'])[0]).join('') : undefined}
           icons={kindIcons} disabled={locked || !!pending} onApply={applyLayout} onSave={saveLayout}
@@ -1105,7 +1117,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
           {narrow
             ? mobilePanel ? <MobilePanel host={panelHosts.hostFor(mobilePanel)} title={titleOf(mobilePanel)} onClose={mobilePanel.kind === 'chat' || mobilePanel.detached ? undefined : () => closePanel(mobilePanel)}/> : <p className="module-empty">Your conversations are open in separate windows.</p>
             : <DockLayout ref={dock} page={page} hostFor={panelHosts.hostFor} titleOf={titleOf} badgeOf={badgeOf} iconOf={iconOf} imageOf={panel => liveTitles[panel.id]?.icon} canClose={groupCommands.canClose}
-              sidebarWidth={sidebarWidth} onSidebarWidth={saveSidebarWidth} popoutUrl={POPOUT_URL}
+              sidebarWidth={sidebarWidth} onSidebarWidth={saveSidebarWidth} popoutUrl={POPOUT_URL} webPopouts={webPopouts}
               closeLabel={(panel, title) => layout.pages.length > 1 && shownPanels(page).length === 1 && !page.detached.length && shownPanels(page)[0].id === panel.id ? `Close ${title} page` : `Close ${title} panel`}
               locked={locked} onArrange={next => { if (locked) return; const live = livePage(); changePage(followFrontTab(live, { ...live, ...next })); }}
               agentOf={panel => {

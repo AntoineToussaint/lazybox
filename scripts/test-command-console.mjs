@@ -1,11 +1,5 @@
-// The console opens when a `lazybox run` starts in the viewed session and keeps
-// running, and labels the run with what its agent received. Put away by the
-// user (hidden, closed with ×, or from the keyboard), it stays away through
-// later runs until they open it again, and every way of closing it has a way
-// back. It never cycles by itself: quick runs are offered ("5 newer"), a long
-// run takes over only a finished run nobody used for 30 s, a run never brings
-// its tab forward, "Follow new runs" off stops it moving at all, and its
-// header stays one row.
+// Runs stay in the command list until the user opens the console.
+// An open console can follow new runs while the user is idle.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
@@ -28,7 +22,7 @@ try {
   const chat = page.locator('[data-panel-id="alpha-work-chat"]');
   const composer = chat.getByRole('textbox', { name: 'Message', exact: true });
   await expect(composer).toBeEnabled();
-  // Command output is a dock group, minimized to its tab until a run starts: its tab opens it,
+  // Command output is a dock group, minimized to its tab until the person opens it: its tab opens it,
   // its group menu minimizes it.
   const output = page.locator('.dv-groupview').filter({ has: page.locator('[data-kind="console"]') });
   const minimized = () => output.evaluate(node => node.classList.contains('dock-group-minimized'));
@@ -41,12 +35,16 @@ try {
   await expect.poll(lists, { timeout: 5000 }).toBeGreaterThan(baseline + 1);
   await expect.poll(minimized).toBe(true);
 
-  // A run starts while the user is typing and keeps running: the console opens on it, the composer keeps focus.
+  // A run starts while the user is typing and keeps running: the console stays folded until explicitly opened.
   await composer.click(); await composer.fill('typing while the agent runs tests');
   const run = fixture.streamCommand('alpha-session', 'go test ./...');
   run.startedAtUnixMillis = String(Date.now() - 150_000);
   run.write('=== RUN   TestParse\n');
-  await expect.poll(minimized, { timeout: 8000 }).toBe(false);
+  const starting = lists();
+  await expect.poll(lists, { timeout: 8000 }).toBeGreaterThan(starting + 2);
+  await expect.poll(minimized).toBe(true);
+  await expect(composer).toBeFocused();
+  await show.click();
   await expect(page.locator('.command-panel select')).toHaveValue(run.id);
   run.report = { exitCode: 1, outputBytes: '1468006', agentBytes: '2150', filter: 'go-test', outputPath: '/state/command-output/alpha-session/go-1.log' };
   run.finish(1);
@@ -54,7 +52,6 @@ try {
   await expect(report).toContainText('Exit 1 · the agent got a 2.1 KiB summary of 1.4 MiB (go-test filter)');
   await expect(page.locator('.command-panel select')).toHaveValue(run.id);
   await expect(page.locator('.command-panel .console-state [role=status]')).toHaveText('Failed · exit 1');
-  await expect(composer).toBeFocused();
   await expect(composer).toHaveValue('typing while the agent runs tests');
   await expect(page.locator('.command-panel select option:checked')).toContainText(/2 min/);
   const commandTime = page.locator('.command-history-time');
@@ -151,6 +148,7 @@ try {
   // An agent fires five quick runs while the person reads a finished one: the console stays, and offers them.
   {
     const { view, picker, chip, folded } = await fresh();
+    await view.getByRole('tab', { name: 'Command output', exact: true }).click();
     const reading = longRun('go build ./...');
     await expect.poll(folded, { timeout: 8000 }).toBe(false);
     await expect(picker).toHaveValue(reading.id);
@@ -186,6 +184,7 @@ try {
   // A long run starting while the person scrolled the output in the last 30 s: no takeover, the chip offers it.
   {
     const { view, picker, chip, folded } = await fresh();
+    await view.getByRole('tab', { name: 'Command output', exact: true }).click();
     const reading = longRun('cargo test', 400);
     await expect.poll(folded, { timeout: 8000 }).toBe(false);
     await expect(picker).toHaveValue(reading.id);
@@ -279,7 +278,7 @@ try {
 
   assert.equal(fixture.mutations.length, 0, 'opening the console must not mutate execution');
   assert.equal(errors.length, 0, errors.join('\n'));
-  console.log('PASS: the console opens for a long run without taking focus, labels the run with what its agent received, stays put away (hidden, closed with ×, or from the keyboard) until the user opens it again, offers quick runs instead of cycling through them, takes over only a finished run nobody used, never brings its tab forward, stays put with Follow new runs off, and keeps its header to one row. Explicitly fake RPC fixture.');
+  console.log('PASS: the console stays folded for a long run until explicitly opened, labels the run with what its agent received, stays put away (hidden, closed with ×, or from the keyboard) until the user opens it again, offers quick runs instead of cycling through them, takes over only a finished run nobody used, never brings its tab forward, stays put with Follow new runs off, and keeps its header to one row. Explicitly fake RPC fixture.');
 } finally {
   await browser?.close(); await server.close(); await fixture.close();
 }

@@ -59,11 +59,15 @@ var builtinBriefings = []builtinBriefing{
 		{version: 6, since: "takes over its terminal", note: "If your managed command tool offers the interactive action, use it with the command argv for a workspace login. The person reviews the command and enters credentials in its terminal. The tool returns the exit status."},
 		{version: 7, since: "Repeat the destination before every command", note: "For terminal buttons, repeat the destination in each paragraph: run in the home checkout of <repository>: `<command>`, or run in your home folder: `<command>`. Put prerequisites and ordering on separate lines. If confirmation is needed, offer one command at a time. For destructive commands, direct the person to Paste in terminal so they can review before pressing Return."},
 		{version: 8, since: "lazybox workspace rename", note: "When the person asks to rename this workspace, use `lazybox workspace rename \"DISPLAY NAME\"` to update its sidebar name."},
+		{version: 9, since: "ask once using a blocking question tool", note: "When progress requires the person's decision, ask once using a blocking question tool if available, then wait for their answer. If a goal hook continues the turn while the same decision is pending, leave the action pending and work only on independent steps. Silence is not authorization."},
 	}},
 	{id: "run", text: runBriefing, changes: []briefingChange{
 		{version: 1, since: "## Running commands in Lazybox", note: "Run tests, builds and other noisy commands as `lazybox run -- <command>`: the person sees the full output; you get a compact view that keeps the failures."},
 		{version: 2, since: `"start_action"`, note: "If the workspace defines actions, start its dev server with the command tool's \"start_action\": it gets the workspace's own port, and the person sees it in Run and Preview."},
 		{version: 3, since: "never with & or nohup", note: "Start servers and watchers with `lazybox run -- <command>` too, never with & or nohup: one still running after 20s moves to the background (`lazybox ls` lists your commands, `lazybox stop ID` stops one)."},
+		{version: 4, since: "lazybox run --check <criterion>", note: "When your Mission task's approved spec or a spec you bound (`lazybox delivery bind <spec-id>@<version>`) names criteria, run each check as `lazybox run --check <criterion> -- <command>`, and a step it depends on with `--needs <criterion>`."},
+		{version: 5, since: "uncommitted changes included", note: "A check's result counts for the exact files it ran on, uncommitted changes included: run the checks again after you commit."},
+		{version: 6, since: "lazybox delivery status", note: "Before you report work done, `lazybox delivery status` shows the delivery verdict and which criteria are still open."},
 	}},
 	{id: "documents", text: documentsBriefing, changes: []briefingChange{
 		{version: 1, since: "lazybox artifact put", note: "Publish plans, specs and reports you write for the person as Lazybox artifacts: `lazybox artifact put <file|-> --title \"…\" --kind plan|spec|report|notes|other`, and each revision as a new version with `--id ID`."},

@@ -285,12 +285,13 @@ func (w *TmuxWindow) server() []string {
 
 // tmuxEnv is the environment of a tmux client this process runs: its own,
 // without what would point tmux at another server or leak the Runner's
-// credentials into a server a person can open new windows in.
+// credentials (LAZYBOX_V2_*, and the Codefly service wiring CODEFLY*) into a
+// server a person can open new windows in.
 func tmuxEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
-		if k == "TMUX" || k == "TMUX_PANE" || strings.HasPrefix(k, "LAZYBOX_V2_") {
+		if k == "TMUX" || k == "TMUX_PANE" || strings.HasPrefix(k, "LAZYBOX_V2_") || strings.HasPrefix(k, "CODEFLY") {
 			continue
 		}
 		env = append(env, kv)

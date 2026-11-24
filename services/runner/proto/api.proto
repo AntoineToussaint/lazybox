@@ -187,6 +187,19 @@ service RunnerService {
   rpc RegisterPipe(RegisterPipeRequest) returns (CommandStatus);
   rpc Publish(PublishRequest) returns (CommandStatus);
   rpc FinishPipe(FinishPipeRequest) returns (CommandStatus);
+  // Pins a published spec.v2 revision to the caller's conversation, so its
+  // `lazybox run --check` and `--needs` runs record delivery observations.
+  // Binding another revision starts a new attempt (delivery.Store.Bind).
+  rpc BindDelivery(BindDeliveryRequest) returns (DeliveryBinding);
+  // The delivery outcome of a conversation, or of a Mission task: the same
+  // projection (delivery.Project) through either lookup.
+  rpc GetDeliveryOutcome(GetDeliveryOutcomeRequest) returns (DeliveryOutcome);
+  // Publishes the outcome as an immutable verdict snapshot: a report
+  // artifact (schema delivery-outcome.v1), or the next version of one.
+  rpc PublishDeliveryOutcome(PublishDeliveryOutcomeRequest) returns (Artifact);
+  // A contract-bound reviewer's verdict on one criterion
+  // (`lazybox delivery review <criterion> passed|failed`).
+  rpc RecordReviewCriterion(RecordReviewCriterionRequest) returns (RecordReviewCriterionResponse);
   rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
   // Takes a terminal run shared with a conversation (`lazybox log --to`) for
   // one composer: true for the first caller only, so the run is added once.
@@ -224,6 +237,9 @@ service RunnerService {
   rpc CreatePullRequest(CreatePullRequestRequest) returns (PullRequestStatus);
   rpc GetPullRequest(GetPullRequestRequest) returns (PullRequestStatus);
   rpc MergePullRequest(MergePullRequestRequest) returns (PullRequestStatus);
+  // Brings a tracked pull request up to date with its base, when its
+  // repository requires that before merging (mergeable_state "behind").
+  rpc UpdatePullRequestBranch(UpdatePullRequestBranchRequest) returns (PullRequestStatus);
   // The sidebar's git state, per workspace and repository: branch, ahead and
   // behind its pushed branch and the default branch, uncommitted files, and the
   // last pull request seen for the branch. Local Git only (no fetch); the pull
@@ -842,6 +858,19 @@ message AcpAgentInfo {
   // flags Lazybox starts it with: a sentence for Settings, empty when they
   // are all named or it was not checked. A hint; the agent may still start.
   string launch_problem = 8;
+  // The agent whose credentials it uses when it has none of its own
+  // ("gemini" for Antigravity); empty when it shares none.
+  string shares_credentials_with = 9;
+  // The names it takes from that agent now, because that agent has them and
+  // it does not. Their values never leave the Runner.
+  repeated string inherited_env_names = 10;
+  // The names it takes from that agent when it has none of its own
+  // ("GEMINI_API_KEY"): which of either agent's names are the shared key.
+  repeated string shared_env_names = 13;
+  // The command that signs a built-in agent in on the Runner ("agy acp
+  // --login"), and what else its credentials need; empty when unknown.
+  string sign_in_command = 11;
+  string credentials_note = 12;
 }
 message AcpEnvVar {
   string name = 1;
@@ -1004,6 +1033,13 @@ message MergePullRequestRequest {
   string expected_head = 5;
   // A tracked pull request this workspace delivers, on any branch; member may then be empty.
   ItemRef item = 6;
+}
+message UpdatePullRequestBranchRequest {
+  string collection_id = 1; int64 number = 2;
+  // The head the person saw; GitHub refuses the update if the branch moved since.
+  string expected_head = 3;
+  // The tracked pull request this workspace delivers.
+  ItemRef item = 4;
 }
 message PullRequestCheck {
   string name = 1;
@@ -1880,6 +1916,117 @@ message RegisterPipeRequest {
   string share_with = 4;
   // The CLI recognized actual argv as a PR create command. Display titles can be customized.
   bool creates_pull_request = 5;
+  // The delivery criterion this run checks (`lazybox run --check ID`): exit 0
+  // records an asserted pass, any other exit a failed assertion. Refused unless
+  // the conversation's Mission contract or bound spec names the criterion.
+  string check = 6;
+  // The criterion this run is a prerequisite of (`lazybox run --needs ID`): a
+  // non-zero exit records a failed prerequisite. At most one of check and needs.
+  string needs = 7;
+}
+message BindDeliveryRequest {
+  string session_id = 1;
+  string artifact_id = 2;
+  uint32 version = 3;
+}
+// Exactly one lookup: session_id (that conversation), or mission_id and task_id.
+message GetDeliveryOutcomeRequest {
+  string session_id = 1;
+  string mission_id = 2;
+  string task_id = 3;
+}
+message PublishDeliveryOutcomeRequest {
+  string session_id = 1;
+  string mission_id = 2;
+  string task_id = 3;
+  // The verdict snapshot to publish a new version of; empty for a new one.
+  string artifact_id = 4;
+}
+message RecordReviewCriterionRequest {
+  string session_id = 1;
+  string criterion = 2;
+  // "passed" or "failed".
+  string result = 3;
+}
+message RecordReviewCriterionResponse {
+  // What was recorded, as a person reads it.
+  string note = 1;
+}
+message DeliveryCriterion {
+  string id = 1;
+  string expected = 2;
+  bool required = 3;
+}
+message DeliveryContract {
+  string artifact_id = 1;
+  uint32 version = 2;
+  string digest = 3;
+  // "spec.v2"; a "spec.v1" contract has no named criteria.
+  string schema = 4;
+  repeated DeliveryCriterion criteria = 5;
+  // The spec artifact's title when the revision was pinned.
+  string title = 6;
+}
+// One observation as a person reads it. command_id names the managed command
+// whose output is the evidence; it is read through that command.
+message DeliveryEvidence {
+  string id = 1;
+  // "command", "review".
+  string source = 2;
+  string reference = 3;
+  string command_id = 4;
+  optional int32 exit_code = 5;
+  string assertion = 6;
+  string prerequisite = 7;
+  // What this observation alone says: passed, failed, blocked or unverified.
+  string state = 8;
+  // "available" or "unavailable": whether the command's full output is still kept.
+  string output = 9;
+  // What ran: the command's title.
+  string title = 10;
+}
+message DeliveryCriterionOutcome {
+  string id = 1;
+  string expected = 2;
+  bool required = 3;
+  // passed, failed, blocked, unverified or unrun.
+  string state = 4;
+  // Every observation on this candidate, in the order recorded.
+  repeated DeliveryEvidence evidence = 5;
+}
+message DeliveryCandidateOutcome {
+  string candidate = 1;
+  // The workspace holds these files now.
+  bool current = 2;
+  // passed, failed, blocked, incomplete or unverified.
+  string verdict = 3;
+  repeated DeliveryCriterionOutcome criteria = 4;
+}
+// delivery.Outcome on the wire.
+message DeliveryOutcome {
+  DeliveryContract contract = 1;
+  string attempt = 2;
+  string conversation_id = 3;
+  string mission_id = 4;
+  string task_id = 5;
+  // The workspace's candidate now; empty when it cannot be read.
+  string current = 6;
+  // The person's decision on the outcome: "accepted", "rejected" or empty.
+  string decision = 7;
+  // Newest first: the current candidate, then each one checked.
+  repeated DeliveryCandidateOutcome candidates = 8;
+}
+message DeliveryBinding {
+  string conversation = 1;
+  // The attempt the conversation's checks now count for.
+  string attempt = 2;
+  string artifact_id = 3;
+  uint32 version = 4;
+  string digest = 5;
+  // Each criterion as "[id, required|optional] expected".
+  repeated string criteria = 6;
+  // The spec artifact's title when it was bound.
+  string title = 7;
 }
 message PublishRequest {
   string command_id = 1;
@@ -1966,6 +2113,12 @@ message CommandStatus {
   int64 started_at_unix_millis = 19;
   // The command's process (the session host's program, or a `lazybox run`'s), when known.
   int32 pid = 20;
+  // What a finished --check or --needs run recorded, or why it was not recorded.
+  string delivery = 21;
+  // The criterion a --check or --needs run counts for, as the Runner resolved
+  // it at registration: a CLI that asked for one and reads none is talking to
+  // a Runner that records no delivery evidence.
+  string check = 22;
 }
 message ListCommandsRequest {
   // The execution's own commands, and the runs of its workspace.
@@ -4449,4 +4602,6 @@ message PlanContract {
   string collection_id = 3;
   string digest = 4;
   repeated string acceptance_criteria = 5;
+  // The spec artifact's title when the plan pinned it.
+  string title = 6;
 }

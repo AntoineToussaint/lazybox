@@ -23,13 +23,15 @@ import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, u
 import { flushSync } from 'react-dom';
 import { type CommandStatus, type Session } from '@lazybox/protocol';
 import type { SurfaceTarget, ViewStateStore } from '@lazybox/platform';
-import { readDraft, writeDraft } from './view-state';
+import { readDraft, writeDraft, writePreference } from './view-state';
 import { RunnerProvider, useRunner, type RunnerConnection } from './RunnerContext';
 import { AttentionScope, PanelShownContext, useMarkViewed } from './useAttention';
 import { conversationName } from './conversation-model';
 import { useComposeRequests } from './compose';
 import { queuedMessages } from './transcript-model';
 export type { RunnerConnection } from './RunnerContext';
+import { DeliveryVerdict } from './DeliveryVerdict';
+import { useDeliveryOutcome } from './useDeliveryOutcome';
 import './style.css';
 import './chat-header.css';
 import { awaitingFirstMessage } from './agent-status';
@@ -67,7 +69,7 @@ import { continuationPrompt } from './continuation-prompt';
 import { ConfirmDialog } from './ConfirmDialog';
 import type { TranscriptMessage } from './transcript-model';
 import { MessageArea } from './MessageArea';
-import { SubscriptionControls } from './SubscriptionSwitch';
+import { continuationKey, SubscriptionControls } from './SubscriptionSwitch';
 import { Composer } from './Composer';
 import { ComposerInfo } from './ComposerInfo';
 import { ConsoleWindow, EventLog, SessionCommands } from './SessionCommands';
@@ -520,6 +522,8 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const codeRuns = useMemo(() => sessionID && !assistant && mode === 'agent' ? new CodeRuns(api, sessionID) : null, [api, sessionID, assistant, mode]);
   useEffect(() => codeRuns?.attach(), [codeRuns]);
   const openCommand = onOpenCommand || (showCommands ? (commandId: string) => { setCommand(commandId); setCommandsOpen(true); } : onOpenViewer ? (commandId: string) => void onOpenViewer(sessionID, commandId) : undefined);
+  // The conversation's delivery verdict (its bound spec or Mission task), refreshed as each turn ends.
+  const delivery = useDeliveryOutcome(sessionID && !assistant ? { sessionId: sessionID } : undefined, transcript.turnRunning);
   // A Run request goes as its own message, beside any draft: at once, or queued behind the turn in progress.
   const sendRunRequest = async (text: string, reportId?: string): Promise<'sent' | 'drafted'> => {
     const ready = !!session && !session.closed && (!session.fault || limited || continuesAfterError);
@@ -580,8 +584,9 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     if (firstMessage) {
       const operationId = crypto.randomUUID();
       try {
-        await api.apply({ sessionId: opened.session.id, operationId,
+        const receipt = await api.apply({ sessionId: opened.session.id, operationId,
           operation: { case: 'message', value: { text: firstMessage, attachments: [] } } }, { timeoutMs: 30_000 });
+        if (receipt.error || receipt.delivery === 'failed') throw new Error(receipt.error || 'Message delivery failed.');
       } catch (error) {
         writeDraft(viewState, opened.session.id, { text: firstMessage, files: [], operationId });
         transferError = `Codex could not confirm the handoff. The context is saved in the draft. ${humanError(error)}`;
@@ -590,6 +595,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     setSession(undefined); setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
     setSessionID(opened.session.id); onSessionChange?.(opened.session.id); refresh();
     if (transferError) showMenuNotice(transferError);
+    else if (firstMessage) writePreference(viewState, continuationKey(source), opened.session.id);
   };
   const openBranch = async () => {
     if (!branchMessage || !branchSelection) return;
@@ -623,10 +629,10 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     setSession(undefined); setCommands([]); setCommand(''); setFiles([]); setMissingFiles([]); setUncertainSend(''); sendAttempt.current = null; setError('');
     setSessionID(opened.session.id); onSessionChange?.(opened.session.id); refresh();
   };
-  const openBranchSource = async (id: string, cursor: bigint) => {
+  const openLinkedConversation = async (id: string, cursor: bigint) => {
     try {
       const { session: source } = await api.getSession({ sessionId: id });
-      if (!source) throw new Error('The source conversation is no longer available.');
+      if (!source) throw new Error('The linked conversation is no longer available.');
       if (!onOpenHandoff?.({ collectionId: source.collectionId, sessionId: source.id, commandId: '' })) {
         setSessionID(source.id); onSessionChange?.(source.id);
       }
@@ -678,8 +684,8 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const title = <ConversationTitle api={api} session={session} sessionID={sessionID} realTitle={realTitle} suggestedTitle={titleFromMessage(firstPrompt)} firstMessage={firstPrompt} firstMessageLoading={!!transcript.partial} branch={branch}
     onRenamed={renamed => { setSession(renamed); refresh(); }} onError={setError}/>;
   const status = <><ChatStatus session={session} live={live}/><BrowsingBadge session={session} agentName={agentName} onShow={onShowBrowser}/><SubagentAttention/></>;
-  const inspection = <><BackgroundWorkButton/><SessionInspection sessionID={sessionID} session={session} activity={transcript.activity} activityTruncated={transcript.activityTruncated}/></>;
-  const stats: HeaderStats = { background: <BackgroundWorkButton/>, usage: <TelemetryPanel executionId={sessionID} conversationId={session?.conversationId} compact/>, tools: <ToolActivity sessionId={sessionID} events={transcript.activity} truncated={transcript.activityTruncated}/>,
+  const inspection = <><BackgroundWorkButton/><SessionInspection messages={transcript.messages} sessionID={sessionID} session={session} activity={transcript.activity} activityTruncated={transcript.activityTruncated}/></>;
+  const stats: HeaderStats = { background: <BackgroundWorkButton/>, usage: <TelemetryPanel messages={transcript.messages} executionId={sessionID} conversationId={session?.conversationId} compact/>, tools: <ToolActivity sessionId={sessionID} events={transcript.activity} truncated={transcript.activityTruncated}/>,
     artifacts: session?.collectionId ? <ArtifactsChip collectionId={session.collectionId} sessionId={sessionID} conversationId={session.conversationId} title={realTitle}/> : undefined };
   const detailButton = sessionID && <button type="button" className="session-detail-button" title="Cycle conversation activity detail" onClick={() => activity.cycle()}>
     <Icon name="activity" size={13}/> {ACTIVITY_LABELS[activity.detail].label}
@@ -749,14 +755,15 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
               ? 'The new worktrees start at the saved repository checkpoint. Ignored files are excluded.'
               : 'This uses the current workspace files.'}
           </ConfirmDialog>}
-          {session?.forkedFromSessionId && <button type="button" className="text-button" onClick={() => void openBranchSource(session.forkedFromSessionId, session.forkedFromCursor)}>
+          {session?.forkedFromSessionId && <button type="button" className="text-button" onClick={() => void openLinkedConversation(session.forkedFromSessionId, session.forkedFromCursor)}>
             Open previous conversation
           </button>}
           <CodeRunContext.Provider value={codeRuns}><MessageArea onBranch={allowStart && !assistant && session?.provider === 'codex'
             ? (entry, sideQuestion) => { setBranchSelection({ message: entry, source: sessionID, requestKey: crypto.randomUUID(), sideQuestion }); setRetryDraft(sideQuestion ? "" : entry.text); setBranchFromCheckpoint(entry.type !== 'operation_accepted' && !!session.collectionId && !!onOpenHandoff); } : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             enableFullAccess={session?.provider === 'codex' && !session.closed && session.capabilities?.livePermission && session.permission !== 'yolo' && session.workflow !== 'plan' && !assistant ? () => changePermission('yolo') : undefined}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
-            subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
+            subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onOpenContinuation={id => void openLinkedConversation(id, 0n)} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>
+          {delivery && !transcript.turnRunning && <DeliveryVerdict outcome={delivery} folded onEvidence={openCommand ? e => openCommand(e.commandId) : undefined}/>}
           {!transcript.error && <LiveBar api={api} session={session} sessionID={sessionID} live={live} disconnected={disconnected} activity={transcript.activity} viewState={viewState} onInterrupt={() => void interrupt()}
             onOpenCommand={openCommand} onOpenFile={session?.collectionId ? openFile : undefined}/>}
           {!transcript.error && !disconnected && <QueuedMessages session={session} queued={queued} turnRunning={transcript.turnRunning} live={live} agentName={agentName} activity={transcript.activity} delivery={queuedDelivery} sendNowKey={sendNowKey}/>}

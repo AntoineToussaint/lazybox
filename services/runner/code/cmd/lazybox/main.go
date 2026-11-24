@@ -140,6 +140,11 @@ func run() error {
 			return genconnect.NewRunnerServiceClient(newHTTPClient(address.Token), address.URL), nil
 		})
 	}
+	if args[0] == "delivery" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return deliveryVerb(ctx, *endpointPath, args[1:], os.Stdout, os.Stderr)
+	}
 	if args[0] == "artifact" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()

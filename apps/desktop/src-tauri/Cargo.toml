@@ -27,6 +27,9 @@ tauri-plugin-dialog = "=2.8.4"
 tauri-plugin-notification = "=2.8.0"
 tauri-plugin-updater = "=2.14.0"
 base64 = "0.22"
+# The notification center answers on its own threads: a oneshot and a timeout
+# await it without holding a blocking thread (src/attention.rs). Tauri's runtime.
+tokio = { version = "1", default-features = false, features = ["sync", "time"] }
 
 [dev-dependencies]
 glob = "0.3"
@@ -37,7 +40,7 @@ glob = "0.3"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSData", "NSDictionary", "NSError", "NSString", "NSURL", "NSLocale", "NSSet", "NSArray", "NSEnumerator", "NSOperation", "NSObjCRuntime", "NSUserDefaults", "NSGeometry"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSData", "NSDictionary", "NSError", "NSString", "NSURL", "NSLocale", "NSSet", "NSArray", "NSEnumerator", "NSOperation", "NSObjCRuntime", "NSUserDefaults", "NSGeometry", "NSBundle"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSView", "NSResponder", "NSWindow", "NSButton", "NSControl", "NSGraphics", "NSWorkspace"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKSnapshotConfiguration"] }
 # Voice (src/voice.rs): dictation with the Speech framework on-device, the
@@ -45,6 +48,10 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std"
 objc2-speech = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-avf-audio", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionTask", "SFSpeechRecognitionResult", "SFSpeechRecognitionMetadata", "SFTranscription", "SFSpeechRecognitionTaskHint"] }
 objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "block2", "AVAudioEngine", "AVAudioNode", "AVAudioIONode", "AVAudioFormat", "AVAudioBuffer", "AVAudioTime", "AVAudioTypes", "AVSpeechSynthesis"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
+# Notifications (src/notifications_macos.rs): UNUserNotificationCenter, which
+# asks for permission and reports what macOS did, unlike the deprecated
+# NSUserNotification path tauri-plugin-notification takes (it drops errors).
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "bitflags", "UNError", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSettings", "UNNotificationResponse", "UNNotification", "UNNotificationTrigger", "UNNotificationSound"] }
 
 [features]
 default = ["custom-protocol"]

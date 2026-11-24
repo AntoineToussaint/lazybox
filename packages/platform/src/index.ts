@@ -20,6 +20,10 @@ export type AttentionHost = {
   onAttentionOpen?(listener: (destination: AttentionDestination) => void): () => void;
   notificationPermission?(): Promise<NotificationPermission>;
   requestNotificationPermission?(): Promise<NotificationPermission>;
+  /** Where the person allows or blocks notifications for this app, when the system owns it ("System Settings → Notifications → Lazybox"); absent in a browser. */
+  systemSettings?: string;
+  /** Ask for permission at start, while undecided: the system prompts once and remembers (macOS). A browser only asks after a click. */
+  askAtStart?: boolean;
 };
 /** A region of the window in CSS pixels, from its top-left corner. */
 export type WindowRect = { x: number; y: number; width: number; height: number };
@@ -121,8 +125,12 @@ export type WebViewEvent =
 export type NativeWebViews = {
   /** Moves the view to `frame` and shows it. With a `url` (its panel's first show)
    * it is created on that page, or taken there if it exists on another; an empty
-   * `url` only moves it. */
-  show(id: string, url: string, frame: WebViewFrame, zoom: number): Promise<void>;
+   * `url` only moves it. `popout` is the token of the popped-out panel window
+   * the panel is in now (its `popout.html?w=` address): the view moves there,
+   * page and all, and `frame` was measured in that window. */
+  show(id: string, url: string, frame: WebViewFrame, zoom: number, popout?: string): Promise<void>;
+  /** A popped-out panel window is about to close: its views come back to this window, hidden, page and all. */
+  reclaim?(popout: string): Promise<void>;
   hide(id: string): Promise<void>;
   navigate(id: string, url: string): Promise<void>;
   action(id: string, action: 'reload' | 'stop' | 'focus' | 'close'): Promise<void>;

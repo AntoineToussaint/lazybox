@@ -7,6 +7,7 @@ import type { MenuItem } from './context-menu-model';
 import { messageItems, messageRole, promptBefore, type MessageMenuDetail } from './chat-context-menu';
 import { SnippetChip, useSnippetParts } from './SnippetPrompt';
 import { RichContent } from './RichContent';
+import { CardBox, TextViewer } from './AttachmentBox';
 import { SentAttachments } from './AttachmentThumbnail';
 import './message-list.css';
 import type { FileLink } from './file-reference';
@@ -41,7 +42,15 @@ const ownSummary = (text: string) => { const line = text.trim().replace(/\s+/g, 
  */
 function PersonText({ text, quoted, onOpenFile }: { text: string; quoted: boolean; onOpenFile?(reference: FileLink, how: OpenModifiers): void }) {
   const parts = quoted ? splitItemContext(text) : undefined;
-  const snippets = useSnippetParts(quoted && !parts ? text : '');
+  const findings = quoted && !parts && /^(?:Please address this review comment|Please address these (\d+) review comments) on the workspace’s changes\./.exec(text);
+  const [open, setOpen] = useState(false);
+  const snippets = useSnippetParts(quoted && !parts && !findings ? text : '');
+  if (findings && text.includes('\n\n### 1. ')) {
+    const count = findings[1] || '1';
+    const title = count === '1' ? '1 review comment' : count + ' review comments';
+    return <><CardBox icon="review" variant="sent" title={title} subtitle="Review findings" label={'Open ' + title} onOpen={() => setOpen(true)}/>
+      {open && <TextViewer name={title} text={text} language="Markdown" details="Review findings" onClose={() => setOpen(false)}/>}</>;
+  }
   if (snippets) return <>{snippets.map((part, i) => typeof part === 'string'
     ? <RichContent key={i} text={part} onOpenFile={onOpenFile}/>
     : <SnippetChip key={i} snippet={part}/>)}</>;

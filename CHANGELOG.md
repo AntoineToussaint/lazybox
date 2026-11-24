@@ -40,9 +40,12 @@ leave out.
 - **Help, in the app** Help → Documentation opens the guides offline, with search; a first-run welcome shows the five keys that matter. Help → Send feedback writes a report you read first, and uploads nothing.
 - **Codex, tested** Lazybox is tested with Codex 0.164 to 0.169; another version says so in one line at the start of a conversation instead of failing silently.
 - **ACP agents are a preview** Gemini CLI, Goose and the other ACP agents are marked Preview in New conversation and Settings, and Settings → Agents says when an installed agent does not take the flag Lazybox starts it with. An agent's own commands, such as /compact, are in the / menu.
+- **Google Antigravity and Hermes Agent** Both are ACP agents in New conversation and Settings → Agents, started with agy acp and hermes acp. Install either with the command Settings shows. Like every ACP agent, both are Preview.
+- **One Gemini key for Gemini CLI and Antigravity** When Antigravity has no API key of its own, it starts with the GEMINI_API_KEY set on Gemini CLI. A key set on Antigravity wins. Settings → Subscriptions groups the two under Google and shows where each key comes from and how each signs in, never the key itself.
 
 ### Claude and your accounts
 
+- **Renaming a subscription keeps its conversations** Conversations on a renamed subscription resume again. They had stopped with "saved account configuration changed; reconcile before resuming".
 - **Continue in Codex when Claude hits its limit** The limit card offers available accounts and can open a fresh Codex conversation in the same workspace with a draft to review.
 - **An Anthropic API key for Claude** Settings → Agents & workspaces → Claude takes an Anthropic API key, the way Anthropic documents for apps built on its Agent SDK. Lazybox keeps it on your Mac and only ever shows its last four characters; the section also says what Claude agents sign in with now.
 - **Switching accounts is an extension** At a limit, the card offers Switch to another of your accounts, or waiting for the reset. Switching by itself is the Subscription rotation extension in Settings → Extensions; for Claude it says plainly that Anthropic's terms may not allow it. If you had automatic switching on, Lazybox turned the extension on for you, with your settings. An account you sign in to while a conversation runs can be chosen there too.
@@ -51,6 +54,14 @@ leave out.
 - **Subscriptions grouped by provider** Settings → Subscriptions, the switch dialog, the limit card and the account pickers list your subscriptions under Claude, Codex and each ACP agent, the current one first, then the available ones, then by name; a limited one says when it is back. The limit card offers only the conversation's own provider, and the subscription in a conversation's header opens Switch subscription.
 
 ### Workspaces and tabs
+
+- **The agent browser follows a slow page** A click that sends the page elsewhere is waited for even when the page is slow to leave, so the agent learns where it landed instead of reading the page it left.
+- **A Web panel opens in its own window** In the desktop app, Open in new window (or a drag into a panel window already open) takes the page with it, history, scroll and forms intact. Put it back or close that window and the page comes back the same way.
+- **The Dock shows the Inbox count** The badge on the app icon is the Inbox button's number, pull requests and tasks included, not only conversations waiting for an answer.
+- **Notifications that reach you, or say why not** On macOS, Lazybox asks permission once and posts through macOS's current notification system; Settings → Notifications shows what macOS decided and why a notification was refused, instead of reporting success for notifications macOS dropped.
+- **Focus stays where you put it** A conversation that opens a moment after you start a task (on another Runner, say) no longer takes the keyboard back if you have already moved on.
+- **Delete a damaged workspace** A workspace whose Git link or registration is missing (its .git was removed, Git pruned it, or the .git names a deleted worktree) can be deleted once you agree to discard its files. This also works when the workspace folder is inside another Git repository. Branches are kept, and a .git that points anywhere else still blocks deletion.
+- **Mission progress** The board counts canceled and blocked tasks, links to the next task needing attention, and shows acceptance criteria from approved plans.
 
 - **Mission evidence after a handoff** Each assignment tracks its own delivered PRs. The board and inbox show each PR’s checks separately, and the timeline links conversations you can still open.
 - **Pull requests belong to the task that delivered them** Mission tasks receive PR checks after the assigned conversation links or creates the pull request. Sharing a workspace no longer attaches its PR checks to other tasks.
@@ -123,6 +134,7 @@ leave out.
 
 ### Pull requests and issues
 
+- **Update a pull request that is behind** When a repository requires branches to be up to date and a pull request is behind its base, the Inbox, the Pull requests panel and the workspace's pull request card offer Update branch instead of a Merge GitHub would refuse. It asks first, updates only the head you saw, and the checks run again. A refused merge now shows why.
 - **Review feedback on GitHub** When there is nothing eligible to send to the agent, the Inbox points you to the review on GitHub.
 - **Every pull request tracked** The pull requests your agents open, push or link are tracked, with a pill in the header and one badge per sidebar row: checks failed, changes requested or ready to merge.
 - **A Pull requests panel** Needs you, Waiting on others, Merged this week. Send the failing checks or the review comments to the agent in one click, always after your confirmation.
@@ -131,6 +143,8 @@ leave out.
 - **Keys act on the row you are on** A pull request action that finishes after you moved to another row leaves you there, so m or Enter on that row never acts on the previous one.
 
 ### Artifacts
+
+- **Work beside an artifact** Open Agent companion from the reader, inspect structured documents by type, or edit the latest source and save a new version.
 
 - **Versioned artifacts** Track a plan or a report from a message, a file or an agent; each update is a version you can compare with the last.
 - **Found from anywhere** A card in the conversation, a count in the chat header, ⌘K across every workspace, and All workspaces in the Artifacts panel.

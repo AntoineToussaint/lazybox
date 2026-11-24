@@ -121,7 +121,7 @@ func TestANewConversationIsUpToDateAndRecordsItsVersions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "9" {
+	if saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "10" {
 		t.Fatalf("versions not recorded at the start: %v", saved.Briefing)
 	}
 	if !strings.Contains(saved.Context, "--provider codex") || !strings.Contains(saved.Context, "never changes its provider") || !strings.Contains(saved.Context, "only starts copies of yourself") {
@@ -165,7 +165,7 @@ func TestAnOldConversationHearsWhatLazyboxAddedOnceWithItsNextMessage(t *testing
 	}
 	journaled(t, e, `"briefing_updated"`, `"operationId":"m1"`, `"status":"features"`, `"conversations":"2"`, `with any agent`)
 	saved, err := b.History.Get(t.Context(), e.ID)
-	if err != nil || saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "9" {
+	if err != nil || saved.Briefing["conversations"] != "2" || saved.Briefing["workspace"] != "10" {
 		t.Fatalf("the versions it now has are durable: %v %v", err, saved.Briefing)
 	}
 
@@ -190,8 +190,8 @@ func TestAConversationBehindHearsOnlyTheChangesItMissed(t *testing.T) {
 		t.Fatalf("sections %v", u.Sections)
 	}
 	lines := strings.Split(strings.TrimPrefix(u.Text, briefingPreamble+"\n"), "\n")
-	if len(lines) != 8 || !strings.Contains(lines[6], "blocking question tool") || !strings.Contains(lines[3], "interactive action") || !strings.Contains(lines[4], "repeat the destination") {
-		t.Fatalf("workspace versions 3 to 9 and the conversation line, one line each:\n%s", u.Text)
+	if len(lines) != 9 || !strings.Contains(lines[7], "agentInput") || !strings.Contains(lines[6], "blocking question tool") || !strings.Contains(lines[3], "interactive action") || !strings.Contains(lines[4], "repeat the destination") {
+		t.Fatalf("workspace versions 3 to 10 and the conversation line, one line each:\n%s", u.Text)
 	}
 	if want := "`\"" + filepath.Join(b.Config.CLIDir, "lazybox") + "\"`"; !strings.Contains(lines[0], want) {
 		t.Fatalf("a note names this Runner's CLI: %q", lines[0])
@@ -214,9 +214,9 @@ func TestDecisionWaitUpdateReachesExistingConversations(t *testing.T) {
 	versions["workspace"] = "8"
 	asIfStartedBefore(t, b, e, e.Saved.Context, versions)
 	update := b.BriefingUpdate(e)
-	if !slices.Equal(update.Sections, []string{"workspace"}) || strings.Count(update.Text, "\n- ") != 1 ||
+	if !slices.Equal(update.Sections, []string{"workspace"}) || strings.Count(update.Text, "\n- ") != 2 || !strings.Contains(update.Text, "interactive_write") ||
 		!strings.Contains(update.Text, "ask once using a blocking question tool") || !strings.Contains(update.Text, "Silence is not authorization") {
-		t.Fatalf("expected just the decision-wait guidance, got %q", update.Text)
+		t.Fatalf("expected decision-wait and terminal input guidance, got %q", update.Text)
 	}
 }
 

@@ -6,16 +6,22 @@ import type { AddressInfo } from 'node:net';
  * works on), `other` (a second origin) and `forbidden` (a loopback port no
  * policy allows). Nothing leaves the machine.
  */
-export type Sites = { home: string; other: string; forbidden: string; ports: { home: number; other: number; forbidden: number }; close(): Promise<void> };
+export type Sites = {
+  home: string; other: string; forbidden: string; ports: { home: number; other: number; forbidden: number };
+  /** Every path and query the other site was asked for, in order. */
+  otherRequests: string[];
+  close(): Promise<void>;
+};
 
 const page = (title: string, body: string) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${body}</body></html>`;
 
 /** `delay`: the reply comes this many ms late (a slow server). */
 type Reply = { status?: number; headers?: Record<string, string>; body: string; delay?: number };
 
-async function serve(handler: (path: string, query: URLSearchParams) => Reply): Promise<{ server: Server; port: number }> {
+async function serve(handler: (path: string, query: URLSearchParams) => Reply, seen?: string[]): Promise<{ server: Server; port: number }> {
   const server = createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://fixture');
+    seen?.push(url.pathname + url.search);
     const reply = handler(url.pathname, url.searchParams);
     setTimeout(() => {
       res.writeHead(reply.status || 200, { 'content-type': 'text/html; charset=utf-8', ...reply.headers });
@@ -28,7 +34,8 @@ async function serve(handler: (path: string, query: URLSearchParams) => Reply): 
 
 export async function startSites(): Promise<Sites> {
   const forbidden = await serve(() => ({ body: page('Forbidden', '<h1>Private service</h1>') }));
-  const other = await serve(() => ({ body: page('Other site', '<h1>Other origin page</h1>') }));
+  const otherRequests: string[] = [];
+  const other = await serve(() => ({ body: page('Other site', '<h1>Other origin page</h1>') }), otherRequests);
   const otherURL = `http://127.0.0.1:${other.port}`, forbiddenURL = `http://127.0.0.1:${forbidden.port}`;
   const home = await serve((path, query): Reply => {
     switch (path) {
@@ -41,6 +48,14 @@ export async function startSites(): Promise<Sites> {
       // once, but its request leaves only after this handler, well past a fixed short look.
       case '/signin-slow': return { body: page('Sign in', `<form action="/welcome"><label>Email <input name="email"></label><button>Sign in</button></form><script>addEventListener('beforeunload', () => { const end = Date.now() + 400; while (Date.now() < end); });</script>`) };
       case '/welcome': return { body: page('Welcome', '<h1>Signed in</h1>') };
+      // A password shown as text (a "show password" toggle): only its autocomplete says what it holds.
+      case '/signin-shown': return { body: page('Sign in', `<form action="/welcome"><label>Password <input type="text" autocomplete="current-password" name="password" style="font: 40px monospace; width: 600px; height: 80px; color: black; background: white"></label><button>Sign in</button></form>`) };
+      // A password field with a "show password" toggle that turns it into a text field.
+      case '/signin-toggle': return { body: page('Sign in', `<form action="/welcome"><label>Password <input type="password" name="password" style="font: 40px monospace; width: 600px; height: 80px; color: black; background: white"></label><button type="button" onclick="const f = this.form.password; f.type = f.type === 'password' ? 'text' : 'password'">Show password</button></form>`) };
+      // A sign-in a script submits well after the click: once a slow check answers.
+      case '/signin-late': return { body: page('Sign in', `<form action="/welcome"><label>Password <input type="password" name="password"></label><button type="button" onclick="setTimeout(() => this.form.requestSubmit(), 1000)">Continue</button></form>`) };
+      // A sign-in a script submits: a plain button calling form.submit(), and a link calling requestSubmit().
+      case '/signin-scripted': return { body: page('Sign in', `<form action="/welcome"><label>Email <input name="email"></label><label>Password <input type="password" name="password"></label><button type="button" onclick="this.form.submit()">Continue</button> <a href="#" onclick="document.forms[0].requestSubmit(); return false">Sign in with a link</a></form>`) };
       // The usual sign-in: the form posts, the server redirects, and the next page is slow to answer.
       case '/signin-redirect': return { body: page('Sign in', '<form method="post" action="/session"><label>Email <input name="email"></label><button>Sign in</button></form>') };
       case '/session': return { status: 302, headers: { location: '/dashboard' }, body: '' };
@@ -60,6 +75,11 @@ export async function startSites(): Promise<Sites> {
       case '/popup': return { body: page('Popup', '<a href="/form" target="_blank">Open in a new window</a>') };
       case '/fetch-forbidden': return { body: page('Fetch', `<p id="out">pending</p><script>fetch('${forbiddenURL}/').then(() => out.textContent = 'reached', () => out.textContent = 'refused')</script>`) };
       case '/redirect-forbidden': return { status: 302, headers: { location: `${forbiddenURL}/` }, body: '' };
+      // A redirect to the other site carrying something it must not receive unless the person allows it.
+      case '/redirect-other': return { status: 302, headers: { location: `${otherURL}/other?d=SECRET` }, body: '' };
+      // A page that moves itself to the other site, with no one pressing anything.
+      case '/moves-itself': return { body: page('Moving', `<p>Moving on</p><script>setTimeout(() => { location.href = '${otherURL}/other?moved'; }, 100)</script>`) };
+      case '/link-other': return { body: page('Link', `<a href="${otherURL}/other?clicked" style="display: block; width: 400px; height: 200px">Go to the other site</a>`) };
       case '/long': return { body: page('Long', `<div style="height:3000px">Top</div><p>Bottom</p>`) };
       case '/alert': return { body: page('Alert', `<script>alert('hello')</script><p>After the alert</p>`) };
       default: return { status: 404, body: page('Not found', 'Not found') };
@@ -67,7 +87,7 @@ export async function startSites(): Promise<Sites> {
   });
   return {
     home: `http://127.0.0.1:${home.port}`, other: otherURL, forbidden: forbiddenURL,
-    ports: { home: home.port, other: other.port, forbidden: forbidden.port },
+    ports: { home: home.port, other: other.port, forbidden: forbidden.port }, otherRequests,
     close: async () => { for (const s of [home, other, forbidden]) { s.server.closeAllConnections(); await new Promise(resolve => s.server.close(resolve)); } },
   };
 }

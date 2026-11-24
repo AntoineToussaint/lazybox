@@ -36,6 +36,29 @@ export function refLabels(snapshot: string): Map<string, string> {
   return labels;
 }
 
+/**
+ * A text field's line with its value: `- textbox "Password" [ref=e6]: hunter2`
+ * (the role, its quoted name, its flags and ref, then the value).
+ */
+const filledTextbox = /^(\s*- textbox(?: "(?:[^"\\]|\\.)*")?((?: \[[^\]]*\])*)):\s.*$/;
+
+/** The text fields of a snapshot that show a value, by line and ref. */
+export function filledTextboxes(snapshot: string): { line: number; ref: string }[] {
+  const fields: { line: number; ref: string }[] = [];
+  snapshot.split('\n').forEach((text, line) => {
+    const match = filledTextbox.exec(text);
+    const ref = match && /\[ref=(\w+)\]/.exec(match[2])?.[1];
+    if (ref) fields.push({ line, ref });
+  });
+  return fields;
+}
+
+/** A text field's line without its value: the agent sees that it is filled, never with what. */
+export function hiddenValue(line: string): string {
+  const match = filledTextbox.exec(line);
+  return match ? `${match[1]}: "(password hidden)"` : line;
+}
+
 /** The header of every page-reading result. */
 export function pageLine(title: string, url: string): string {
   return title ? `"${title}" — ${url}` : url;

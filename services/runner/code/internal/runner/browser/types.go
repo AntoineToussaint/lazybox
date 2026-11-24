@@ -11,6 +11,9 @@ type PageState struct {
 	CanGoForward   bool   `json:"canGoForward"`
 	ViewportWidth  int    `json:"viewportWidth"`
 	ViewportHeight int    `json:"viewportHeight"`
+	// Origin is the site the agent may act on without asking: one the person
+	// allowed, or went to themselves. Empty when there is none.
+	Origin string `json:"origin,omitempty"`
 }
 
 // Box is where an action happened, in the page's CSS pixels.

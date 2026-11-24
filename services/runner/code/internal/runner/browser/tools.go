@@ -195,13 +195,9 @@ func (m *Manager) run(ctx context.Context, b *conv, action string, a toolArgs) (
 			if last == "" {
 				return "Your browser is open on a blank page. Go somewhere with browser_navigate.", nil, nil
 			}
-			// Reopened after it closed underneath the agent: back where it was.
+			// Reopened after it closed underneath the agent: back where it was,
+			// if that site is still allowed; permitted asks otherwise.
 			target = last
-			if u, err := url.Parse(last); err == nil {
-				m.mu.Lock()
-				b.once = Origin(u)
-				m.mu.Unlock()
-			}
 		}
 		u, err := m.permitted(ctx, b, target, a.Reason)
 		if err != nil {

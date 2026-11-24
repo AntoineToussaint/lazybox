@@ -50,6 +50,16 @@ func fakeService() {
 		return <-ch
 	}
 	page := map[string]string{}
+	// origin is the site the page may stay on without asking, as the real
+	// service reports it: where the agent was allowed to go, or the person went.
+	origin := map[string]string{}
+	originOf := func(raw string) string {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		return u.Scheme + "://" + u.Host
+	}
 	// One request at a time, like a page does; asks wait on their own replies.
 	var pmu sync.Mutex
 	for in.Scan() {
@@ -78,13 +88,29 @@ func fakeService() {
 			defer pmu.Unlock()
 			browser, _ := m.Params["browser"].(string)
 			state := func() map[string]any {
-				return map[string]any{"url": page[browser], "title": "Fake " + page[browser], "viewportWidth": 1280, "viewportHeight": 800}
+				return map[string]any{"url": page[browser], "title": "Fake " + page[browser], "viewportWidth": 1280, "viewportHeight": 800, "origin": origin[browser]}
+			}
+			moved := func(to string) {
+				page[browser] = to
+				write(map[string]any{"method": "state", "params": map[string]any{"browser": browser, "state": state()}})
 			}
 			reply := func(v any) { write(map[string]any{"id": m.ID, "result": v}) }
 			switch m.Method {
 			case "open", "input":
 				if page[browser] == "" {
 					page[browser] = "about:blank"
+				}
+				switch m.Params["text"] {
+				case "page-navigates-itself":
+					// A script on the page moves it while the person holds the browser.
+					moved("https://moved.example/")
+				case "page-asks-site":
+					// The page navigates itself before the person's first input: the service asks.
+					var r struct{ Allow bool }
+					_ = json.Unmarshal(ask("site", map[string]any{"browser": browser, "url": "https://asked.example/x", "origin": "https://asked.example"}), &r)
+					if r.Allow {
+						page[browser], origin[browser] = "https://asked.example/x", "https://asked.example"
+					}
 				}
 				reply(state())
 			case "screencast":
@@ -97,6 +123,7 @@ func fakeService() {
 				switch action {
 				case "navigate":
 					page[browser], _ = m.Params["url"].(string)
+					origin[browser] = originOf(page[browser])
 					write(map[string]any{"method": "state", "params": map[string]any{"browser": browser, "state": state()}})
 					reply(map[string]any{"text": "Page: " + page[browser], "summary": "Opened " + page[browser], "state": state()})
 				case "click":
@@ -106,9 +133,10 @@ func fakeService() {
 						var r struct{ Allow bool }
 						_ = json.Unmarshal(ask("site", map[string]any{"browser": browser, "url": "https://other.example/x", "origin": "https://other.example"}), &r)
 						if r.Allow {
-							page[browser] = "https://other.example/x"
+							page[browser], origin[browser] = "https://other.example/x", "https://other.example"
 						}
 					}
+
 					if ref == "download" {
 						var r struct {
 							Allow bool
@@ -123,6 +151,11 @@ func fakeService() {
 				default:
 					reply(map[string]any{"text": action + " done", "summary": action, "state": state()})
 				}
+			case "close":
+				// The page is gone: reopened, the browser starts blank.
+				delete(page, browser)
+				delete(origin, browser)
+				reply(map[string]any{})
 			default:
 				reply(map[string]any{})
 			}

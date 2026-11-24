@@ -621,16 +621,19 @@ func (m *Manager) event(method string, params json.RawMessage) {
 	}
 }
 
-// pageLocked records what the page shows. The person's own navigation counts
-// as their choice of site, so the agent may go on there once given back.
+// pageLocked records what the page shows. A site the person went to
+// themselves counts as their choice, so the agent may go on there once given
+// back. Only the service tells which navigation the person started
+// (PageState.Origin): a page that moved itself while they held the browser (a
+// script, a meta refresh) is no choice of theirs, whatever its address.
 func (m *Manager) pageLocked(b *conv, page PageState) {
 	b.page = page
 	if page.URL != "" && page.URL != "about:blank" {
 		b.lastURL = page.URL
-		if b.controller == "person" {
-			if u, err := url.Parse(page.URL); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-				b.once = Origin(u)
-			}
+	}
+	if b.controller == "person" && page.Origin != "" {
+		if u, err := url.Parse(page.Origin); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+			b.once = Origin(u)
 		}
 	}
 }
@@ -662,12 +665,11 @@ func (m *Manager) serve(p *jsonl.Process, msg jsonl.Message) {
 			_ = p.Reply(msg.ID, map[string]any{"allow": false, "reason": "not a web page"})
 			return
 		}
+		// The service asks only about navigations the person did not make: one
+		// the page makes on its own while they hold the browser is asked about
+		// like the agent's, never granted for holding it.
 		m.mu.Lock()
-		person := b.controller == "person"
-		if person {
-			b.once = Origin(u)
-		}
-		allowed := person || m.allowedLocked(b, u)
+		allowed := m.allowedLocked(b, u)
 		m.mu.Unlock()
 		if allowed {
 			_ = p.Reply(msg.ID, map[string]any{"allow": true})

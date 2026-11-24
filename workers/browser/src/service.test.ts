@@ -3,6 +3,7 @@ import { after, before, describe, it } from 'node:test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { chromium } from 'playwright-core';
 import { BrowserService, type Runner } from './service.js';
 import { refIn, startSites, type Sites } from './fixture.js';
 import type { ActParams, Policy } from './protocol.js';
@@ -20,6 +21,26 @@ class FakeRunner implements Runner {
     const end = Date.now() + ms;
     while (!check()) { if (Date.now() > end) throw new Error('timed out waiting'); await new Promise(r => setTimeout(r, 25)); }
   }
+}
+
+/** A row of a JPEG's pixels, [r, g, b] each, decoded by Chromium itself. */
+async function pixelRow(jpeg: string, x: number, y: number, width: number): Promise<number[][]> {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    return await page.evaluate(async ({ jpeg, x, y, width }) => {
+      const image = new Image();
+      image.src = 'data:image/jpeg;base64,' + jpeg;
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width; canvas.height = image.height;
+      const context = canvas.getContext('2d')!;
+      context.drawImage(image, 0, 0);
+      const data = context.getImageData(x, y, width, 1).data, row: number[][] = [];
+      for (let i = 0; i < data.length; i += 4) row.push([data[i], data[i + 1], data[i + 2]]);
+      return row;
+    }, { jpeg, x: Math.round(x), y: Math.round(y), width });
+  } finally { await browser.close(); }
 }
 
 describe('browser service', () => {
@@ -147,6 +168,66 @@ describe('browser service', () => {
     await service.open({ browser: 'c1', profile, policy });
   });
 
+  // Regression: request interception does not see redirect hops, and the site was asked about only once the
+  // redirect had landed: the other site had the request, and what it carried, before the person answered.
+  it('asks before following a redirect to another site, which gets nothing if the person declines', async () => {
+    await act({ action: 'navigate', url: `${sites.home}/` });
+    const before = sites.otherRequests.length, pages = () => sites.otherRequests.slice(before).filter(path => path !== '/favicon.ico');
+    let reachedWhenAsked: string[] | undefined;
+    runner.answers.site = () => { reachedWhenAsked = pages(); return { allow: false, reason: 'not there' }; };
+    await assert.rejects(act({ action: 'navigate', url: `${sites.home}/redirect-other` }), new RegExp(`The person did not allow ${sites.other}: not there`));
+    assert.deepEqual(reachedWhenAsked, [], 'the other site was reached before the person answered');
+    assert.deepEqual(pages(), []);
+    assert.equal(runner.asked('site').at(-1).url, `${sites.other}/other?d=SECRET`);
+    assert.equal(new URL((await service.open({ browser: 'c1', profile, policy })).url).origin, sites.home);
+    runner.answers.site = () => { reachedWhenAsked = pages(); return { allow: true }; };
+    const allowed = await act({ action: 'navigate', url: `${sites.home}/redirect-other` });
+    assert.match(allowed.text, /Opened "Other site"/);
+    assert.deepEqual(reachedWhenAsked, []);
+    assert.deepEqual(pages(), ['/other?d=SECRET']);
+  });
+
+  // Regression: the person's browsing made every site the page reached the agent's, a page that moved itself
+  // included: the agent then went on there without asking.
+  it("takes as the agent's only the sites the person went to themselves", async () => {
+    await act({ action: 'navigate', url: `${sites.home}/` });
+    await act({ action: 'navigate', url: `${sites.home}/moves-itself`, actor: 'person' });
+    await act({ action: 'wait_for', text: 'Other origin page', actor: 'person' });
+    assert.equal((await service.open({ browser: 'c1', profile, policy })).origin, sites.home);
+    const asked = runner.asked('site').length;
+    runner.answers.site = () => ({ allow: false });
+    await assert.rejects(act({ action: 'navigate', url: `${sites.other}/other?again` }), /did not allow/);
+    assert.equal(runner.asked('site').length, asked + 1);
+    runner.answers.site = () => ({ allow: true });
+    // A link the person clicks is their choice.
+    await act({ action: 'navigate', url: `${sites.home}/link-other`, actor: 'person' });
+    await service.input({ browser: 'c1', type: 'mouse_down', x: 100, y: 50, button: 'left' });
+    await service.input({ browser: 'c1', type: 'mouse_up', x: 100, y: 50, button: 'left' });
+    await act({ action: 'wait_for', text: 'Other origin page', actor: 'person' });
+    assert.equal((await service.open({ browser: 'c1', profile, policy })).origin, sites.other);
+    await act({ action: 'navigate', url: `${sites.other}/other?again` });
+    assert.equal(runner.asked('site').length, asked + 1);
+  });
+
+  // Regression (review of the above): the page that moved itself was not the agent's, but the agent could still
+  // read it and act on it without being asked once the person gave the browser back.
+  it('asks before the agent acts on a page that moved itself to another site', async () => {
+    await act({ action: 'navigate', url: `${sites.home}/` });
+    await act({ action: 'navigate', url: `${sites.home}/moves-itself`, actor: 'person' });
+    await act({ action: 'wait_for', text: 'Other origin page', actor: 'person' });
+    const asked = runner.asked('site').length;
+    runner.answers.site = () => ({ allow: false, reason: 'not that one' });
+    await assert.rejects(act({ action: 'snapshot' }), new RegExp(`The person did not allow ${sites.other}: not that one; the browser left that page`));
+    assert.equal(runner.asked('site').length, asked + 1);
+    assert.equal((await service.open({ browser: 'c1', profile, policy })).url, 'about:blank');
+    // Allowed, the agent goes on there.
+    await act({ action: 'navigate', url: `${sites.home}/moves-itself`, actor: 'person' });
+    await act({ action: 'wait_for', text: 'Other origin page', actor: 'person' });
+    runner.answers.site = () => ({ allow: true });
+    assert.match((await act({ action: 'snapshot' })).text, /Other origin page/);
+    assert.equal(runner.asked('site').length, asked + 2);
+  });
+
   it('refuses a download the person declines, and saves one they allow', async () => {
     await act({ action: 'navigate', url: `${sites.home}/download` });
     const link = refIn(await snapshot(), 'link "Get the report"');
@@ -177,6 +258,104 @@ describe('browser service', () => {
     runner.answers.sign_in = () => ({ allow: true });
     const signedIn = await act({ action: 'click', ref: refIn(page, 'button "Sign in"') });
     assert.match(signedIn.text, /Now on "Welcome"/);
+    runner.answers.sign_in = () => ({ allow: false });
+  });
+
+  // Regression: the snapshot shows a field's value, so a password the person typed during Take over reached
+  // the agent as `textbox "Password": hunter2`.
+  it('never shows the agent a password the person typed', async () => {
+    await act({ action: 'navigate', url: `${sites.home}/signin` });
+    let page = await snapshot();
+    await act({ action: 'click', ref: refIn(page, 'textbox "Password"'), actor: 'person' });
+    await service.input({ browser: 'c1', type: 'text', text: 'hunter2' });
+    page = await snapshot();
+    assert.ok(!page.includes('hunter2'), page);
+    assert.match(page, /textbox "Password" .*\[ref=\w+\]: "\(password hidden\)"/);
+    await act({ action: 'type', ref: refIn(page, 'textbox "Email"'), text: 'ada@example.com' });
+    assert.match(await snapshot(), /textbox "Email" .*\[ref=\w+\]: ada@example.com/, 'other fields keep their value');
+    await assert.rejects(act({ action: 'wait_for', text: 'hunter2', timeoutMs: 300 }), /Timed out/);
+    // A shown password is plain text on the page: its autocomplete says what it holds.
+    await act({ action: 'navigate', url: `${sites.home}/signin-shown` });
+    page = await snapshot();
+    const field = await act({ action: 'click', ref: refIn(page, 'textbox "Password"'), actor: 'person' });
+    await service.input({ browser: 'c1', type: 'text', text: 'hunter2' });
+    const shown = await act({ action: 'snapshot', withSnapshot: true });
+    assert.ok(!shown.text.includes('hunter2'), shown.text);
+    await assert.rejects(act({ action: 'type', ref: refIn(page, 'textbox "Password"'), text: 'x' }), /password field/);
+    // The screenshot masks it: where the text is, every pixel is the mask's magenta.
+    const shot = await act({ action: 'screenshot' }), box = field.box!;
+    const row = await pixelRow(shot.image!.data, box.x + 10, box.y + box.height / 2, 150);
+    assert.ok(row.every(([r, g, b]) => r > 200 && g < 80 && b > 200), `unmasked pixels: ${JSON.stringify(row.filter(([r, g, b]) => !(r > 200 && g < 80 && b > 200)).slice(0, 5))}`);
+  });
+
+  // Regression (review): a "show password" toggle turned the field into type=text, and its value reached the
+  // agent's snapshot and screenshot, and the agent could type into it.
+  it('keeps a password secret after the page shows it as text', async () => {
+    await act({ action: 'navigate', url: `${sites.home}/signin-toggle` });
+    const page = await snapshot();
+    const field = await act({ action: 'click', ref: refIn(page, 'textbox "Password"'), actor: 'person' });
+    await service.input({ browser: 'c1', type: 'text', text: 'hunter2' });
+    await act({ action: 'click', ref: refIn(page, 'button "Show password"'), actor: 'person' });
+    const shown = await snapshot();
+    assert.ok(!shown.includes('hunter2'), shown);
+    assert.match(shown, /textbox "Password" .*: "\(password hidden\)"/);
+    await assert.rejects(act({ action: 'type', ref: refIn(shown, 'textbox "Password"'), text: 'x' }), /password field/);
+    const shot = await act({ action: 'screenshot' }), box = field.box!;
+    const row = await pixelRow(shot.image!.data, box.x + 10, box.y + box.height / 2, 150);
+    assert.ok(row.every(([r, g, b]) => r > 200 && g < 80 && b > 200), `unmasked pixels: ${JSON.stringify(row.filter(([r, g, b]) => !(r > 200 && g < 80 && b > 200)).slice(0, 5))}`);
+  });
+
+  // Regression (review): the guard was disarmed when the action returned, so a script that submitted the form a
+  // moment later (after a slow check) sent the password without asking.
+  it('asks before a sign-in form the agent\'s action submits late', async () => {
+    const fill = async () => {
+      await act({ action: 'navigate', url: `${sites.home}/signin-late` });
+      const page = await snapshot();
+      await act({ action: 'click', ref: refIn(page, 'textbox "Password"'), actor: 'person' });
+      await service.input({ browser: 'c1', type: 'text', text: 'hunter2' });
+      return page;
+    };
+    let page = await fill(), asked = runner.asked('sign_in').length;
+    const clicked = await act({ action: 'click', ref: refIn(page, 'button "Continue"') });
+    assert.equal(new URL(clicked.state.url).pathname, '/signin-late');
+    await runner.until(() => runner.asked('sign_in').length === asked + 1);
+    // Declined: the form stays unsent; the next look at the page is still the sign-in.
+    assert.equal(new URL((await act({ action: 'snapshot' })).state.url).pathname, '/signin-late');
+    runner.answers.sign_in = () => ({ allow: true });
+    page = await fill(); asked = runner.asked('sign_in').length;
+    await act({ action: 'click', ref: refIn(page, 'button "Continue"') });
+    await act({ action: 'wait_for', text: 'Signed in' });
+    assert.equal(runner.asked('sign_in').length, asked + 1);
+    runner.answers.sign_in = () => ({ allow: false });
+  });
+
+  // Regression: only Enter and real submit buttons were checked, so Space on the button, NumpadEnter, and a
+  // script that submits the form sent the person's password without asking.
+  it('asks before any way the agent submits a sign-in form the person filled', async () => {
+    const fill = async (path: string) => {
+      await act({ action: 'navigate', url: `${sites.home}${path}` });
+      const page = await snapshot();
+      await act({ action: 'click', ref: refIn(page, 'textbox "Password"'), actor: 'person' });
+      await service.input({ browser: 'c1', type: 'text', text: 'hunter2' });
+      return page;
+    };
+    const ways: [string, string, (page: string) => Promise<unknown>][] = [
+      ['NumpadEnter in the password field', '/signin', () => act({ action: 'press', key: 'NumpadEnter' })],
+      ['Space on the sign-in button', '/signin', async () => { await act({ action: 'press', key: 'Tab' }); return act({ action: 'press', key: 'Space' }); }],
+      ['a plain button whose script calls form.submit()', '/signin-scripted', page => act({ action: 'click', ref: refIn(page, 'button "Continue"') })],
+      ['a link whose script calls requestSubmit()', '/signin-scripted', page => act({ action: 'click', ref: refIn(page, 'link "Sign in with a link"') })],
+    ];
+    for (const [way, path, submit] of ways) {
+      const page = await fill(path), asked = runner.asked('sign_in').length;
+      await assert.rejects(submit(page), /did not allow submitting the sign-in form/, way);
+      assert.equal(runner.asked('sign_in').length, asked + 1, way);
+      assert.equal(new URL((await service.open({ browser: 'c1', profile, policy })).url).pathname, path, `${way}: the form was not sent`);
+    }
+    runner.answers.sign_in = () => ({ allow: true });
+    const page = await fill('/signin-scripted'), asked = runner.asked('sign_in').length;
+    const submitted = await act({ action: 'click', ref: refIn(page, 'button "Continue"') });
+    assert.match(submitted.text, /Now on "Welcome"/);
+    assert.equal(runner.asked('sign_in').length, asked + 1);
     runner.answers.sign_in = () => ({ allow: false });
   });
 

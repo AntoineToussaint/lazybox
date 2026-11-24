@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path';
 import { chromium, type BrowserContext, type Page, type Request, type Route } from 'playwright-core';
 import type { ActParams, CloseParams, CloseProfileParams, InputParams, OpenParams, Policy, ScreencastParams } from './protocol.js';
 import { AgentBrowser, reason, shortURL, type Host } from './browser.js';
+import { signInGuardScript, signInHeldBinding } from './sign-in-guard.js';
 import { judgeURL, originOf } from './policy.js';
 import { GateProxy } from './proxy.js';
 
@@ -86,6 +87,7 @@ export class BrowserService {
     const cdp = await profile.context.newCDPSession(page);
     const browser = new AgentBrowser(p.browser, page, cdp, this.host(profile));
     this.browsers.set(p.browser, browser); this.byPage.set(page, browser); profile.browsers.add(browser); profile.lastActive = browser;
+    await browser.start();
     page.on('crash', () => { this.forget(browser, 'The page crashed'); void page.close().catch(() => {}); });
     page.on('close', () => this.forget(browser, 'The page closed'));
     return browser.state();
@@ -140,6 +142,8 @@ export class BrowserService {
       throw new Error(launchProblem(error));
     }
     await profile.context.route('**/*', route => this.gate(profile, route));
+    await profile.context.exposeBinding(signInHeldBinding, source => { const browser = this.byPage.get(source.page); if (browser) browser.signInHeld(source.frame); });
+    await profile.context.addInitScript(signInGuardScript);
     profile.context.on('page', page => void this.opened(profile, page));
     profile.context.on('close', () => {
       for (const browser of profile.browsers) this.forget(browser, profile.closing ? 'The browser closed' : 'The browser stopped unexpectedly');
@@ -177,18 +181,10 @@ export class BrowserService {
     }
     if (mainFrame) {
       profile.lastActive = browser;
+      // The agent's page asks before a new origin. The person's navigation never asks; whether it makes its
+      // origin the agent's is decided when it commits (the person may not have started it).
       const origin = originOf(url);
-      if (origin && origin !== browser.origin && browser.actor === 'agent') {
-        browser.pendingSite = origin; browser.askingPerson(); browser.changed();
-        let answer: { allow?: boolean; reason?: string } | undefined;
-        try { answer = await this.runner.request('site', { browser: browser.id, url, origin }); } catch { answer = undefined; }
-        finally { browser.pendingSite = ''; browser.changed(); }
-        if (!answer?.allow) {
-          browser.denial = { origin, reason: answer?.reason || '' };
-          return refuse();
-        }
-      }
-      if (origin) browser.origin = origin;
+      if (origin && origin !== browser.origin && browser.actor === 'agent' && !(await browser.allowSite(url, origin))) return refuse();
     }
     return route.continue().catch(() => {});
   }

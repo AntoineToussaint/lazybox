@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"flag"
 	"os"
 	"path/filepath"
 	"slices"
@@ -245,5 +246,14 @@ func TestArtifactRoadmapInputFlags(t *testing.T) {
 	links := f.puts[0].Links
 	if len(links) != 2 || links[0].Role != "design" || links[0].Version != 2 || links[1].Id != "review" || links[1].Version != 4 {
 		t.Fatal(links)
+	}
+}
+
+func TestAnArgumentAfterDoubleDashIsPositionalEvenWithADash(t *testing.T) {
+	f := flag.NewFlagSet("revoke", flag.ContinueOnError)
+	asJSON := f.Bool("json", false, "")
+	got, err := parseInterleaved(f, []string{"--json", "--", "-Abc123"})
+	if err != nil || len(got) != 1 || got[0] != "-Abc123" || !*asJSON {
+		t.Fatalf("positional %q json=%v err=%v", got, *asJSON, err)
 	}
 }

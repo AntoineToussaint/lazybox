@@ -367,7 +367,8 @@ func Enrol(ctx context.Context, r OwnerRoute, keys ClientKeys, name string) (Enr
 // Revoke removes this client's key from the host's owners over the selected route.
 func Revoke(ctx context.Context, r OwnerRoute, keyID string) error {
 	words := r.ownerCommand()
-	words = append(words, "link", "owners", "revoke", keyID, "--json")
+	// A key ID is base64url and may begin with "-": after "--" it is never read as a flag.
+	words = append(words, "link", "owners", "revoke", "--json", "--", keyID)
 	_, err := r.Run(ctx, nil, words...)
 	return err
 }

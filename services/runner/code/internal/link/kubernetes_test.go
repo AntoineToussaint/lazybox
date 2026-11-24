@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -52,5 +53,27 @@ func TestKubernetesRouteUsesPinnedTargetWithoutTTY(t *testing.T) {
 	target.Workload = "statefulset/--other"
 	if target.Validate() == nil {
 		t.Fatal("accepted an invalid workload")
+	}
+}
+
+// recordingRoute is an owner route that records the command it is asked to run.
+type recordingRoute struct {
+	KubernetesRoute
+	words []string
+}
+
+func (r *recordingRoute) Run(_ context.Context, _ io.Reader, words ...string) ([]byte, error) {
+	r.words = words
+	return []byte("{}"), nil
+}
+
+func TestRevokeNeverPassesAKeyIDAsAFlag(t *testing.T) {
+	r := &recordingRoute{}
+	if err := Revoke(context.Background(), r, "-Abc123"); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(r.words, " ")
+	if !strings.HasSuffix(got, "link owners revoke --json -- -Abc123") {
+		t.Fatalf("revoke command: %q", got)
 	}
 }

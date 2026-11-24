@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fitHeader, HEADER_GAP, HEADER_ORDER, HEADER_PRIORITY, MORE_WIDTH, reserve, STAT_WIDTH, type HeaderItem } from '../packages/surfaces/src/header-layout.ts';
 import { agentModelText, conversationName, conversationOption, currentSession, cutAtWord, modelName, titleFromMessage } from '../packages/surfaces/src/conversation-model.ts';
-import { contextLevel, percentLabel } from '../packages/surfaces/src/usage-model.ts';
+import { contextLevel, percentLabel, reportFor, usageSubject } from '../packages/surfaces/src/usage-model.ts';
 
 // The header from the report: every item present, with realistic widths.
 const everything: HeaderItem[] = [
@@ -148,4 +148,15 @@ test('a window that moved to another execution never shows the session it left',
   const read = create(SessionSchema, { id: 'alpha-session', conversationId: 'alpha-conversation', title: 'Read' });
   assert.equal(currentSession('alpha-session', read, source), read);
   assert.equal(currentSession('', undefined, undefined), undefined);
+});
+
+test('usage figures are shown only for the workspace and execution they were read for', () => {
+  const alpha = usageSubject('', 'alpha-session'), beta = usageSubject('', 'beta-session');
+  const read = { subject: alpha, report: { used: 367100 } };
+  // Moved to another execution: the previous figures are not its, from the first render on.
+  assert.equal(reportFor(read, beta), undefined);
+  assert.equal(reportFor(read, usageSubject('alpha', 'alpha-session')), undefined, 'another workspace is another subject');
+  // The same execution (its conversation just became known): the figures stay until the wider read answers.
+  assert.equal(reportFor(read, usageSubject(undefined, 'alpha-session')), read.report);
+  assert.equal(reportFor(undefined, alpha), undefined);
 });

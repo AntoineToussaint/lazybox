@@ -12,24 +12,57 @@ import { createServer, gateServerConfig } from './fixtures/vite-cache.mjs';
 
 const scripts = fileURLToPath(new URL('.', import.meta.url));
 
-/** Whether `text` takes `createServer` straight from Vite, around the gate server. */
-export function importsViteCreateServer(text: string): boolean {
-  return [...text.matchAll(/import\s*{([^}]*)}\s*from\s*['"]vite['"]/g)].some(match => match[1].split(',').some(name => name.trim() === 'createServer'));
+/** What Vite may be imported for in a test script: building and previewing, never its dev server. */
+const allowedFromVite = new Set(['build', 'preview']);
+
+/**
+ * The imports of Vite in `text` that could reach its own dev server: a named
+ * import other than `build`/`preview` (renamed or not), a default or namespace
+ * import, a bare side-effect import, a re-export, or a dynamic `import('vite')`.
+ */
+export function viteServerImports(text: string): string[] {
+  const vite = String.raw`(?<q>['"])vite\k<q>`;
+  const found: string[] = [];
+  for (const match of text.matchAll(new RegExp(String.raw`\b(?:import|export)\s*([^'";]*?)\s*from\s*${vite}`, 'g'))) {
+    const clause = match[1].trim();
+    const named = /^{([^}]*)}$/.exec(clause);
+    const names = named ? named[1].split(',').map(name => name.trim().split(/\s+as\s+/)[0].trim()).filter(Boolean) : [];
+    if (!named || names.some(name => !allowedFromVite.has(name))) found.push(match[0]);
+  }
+  for (const match of text.matchAll(new RegExp(String.raw`\bimport\s+${vite}`, 'g'))) found.push(match[0]);
+  for (const match of text.matchAll(new RegExp(String.raw`\bimport\s*\(\s*${vite}\s*\)`, 'g'))) found.push(match[0]);
+  return found;
 }
 
-test('the detector finds a createServer taken from Vite', () => {
-  assert.equal(importsViteCreateServer(`import { createServer } from 'vite';`), true);
-  assert.equal(importsViteCreateServer(`import {build,createServer,preview} from "vite";`), true);
-  assert.equal(importsViteCreateServer(`import {build,preview} from 'vite';import {createServer} from './fixtures/vite-cache.mjs';`), false);
-  assert.equal(importsViteCreateServer(`import { createServer } from 'node:http';`), false);
+test('the detector finds every way to reach Vite\'s own server', () => {
+  for (const source of [
+    `import { createServer } from 'vite';`,
+    `import {build,createServer,preview} from "vite";`,
+    `import {createServer as cs} from 'vite';`,
+    `import * as vite from 'vite'; await vite.createServer({});`,
+    `import vite from 'vite';`,
+    `import vite, { build } from 'vite';`,
+    `const { createServer } = await import('vite');`,
+    `const vite = await import( "vite" );`,
+    `import 'vite';`,
+    `export { createServer } from 'vite';`,
+    `export * from 'vite';`,
+  ]) assert.notDeepEqual(viteServerImports(source), [], source);
+  for (const source of [
+    `import {build,preview} from 'vite';import {createServer} from './fixtures/vite-cache.mjs';`,
+    `import { build as bundle } from 'vite';`,
+    `import { createServer } from 'node:http';`,
+    `import react from '@vitejs/plugin-react';`,
+    `import { createServer } from './fixtures/vite-cache.mjs';`,
+  ]) assert.deepEqual(viteServerImports(source), [], source);
 });
 
 test('every UI test serves through the gate server', async () => {
-  const offenders = [];
+  const offenders: string[] = [];
   for (const name of (await readdir(scripts)).filter(name => /^test-.*\.mjs$/.test(name))) {
-    if (importsViteCreateServer(await readFile(join(scripts, name), 'utf8'))) offenders.push(name);
+    for (const use of viteServerImports(await readFile(join(scripts, name), 'utf8'))) offenders.push(`${name}: ${use}`);
   }
-  assert.deepEqual(offenders, [], 'take createServer from ./fixtures/vite-cache.mjs');
+  assert.deepEqual(offenders, [], 'take createServer from ./fixtures/vite-cache.mjs (only build and preview come from vite)');
 });
 
 test('the gate server keeps the test\'s server options and turns watching and hot reload off', () => {

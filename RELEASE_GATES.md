@@ -233,7 +233,9 @@ other. Its Vite server comes from the same fixture's `createServer`, which
 neither watches the checkout nor hot reloads: an edit anywhere in the tree
 while a gate runs (another agent's, a branch switch) would otherwise reload
 the gate's page mid-step (`scripts/vite-server.test.ts` holds every suite to
-it). `test:transcript-performance` bounds a long conversation's opening
+it). Such a run still fails, on the runner's `sourceChanged` check, since what
+it tested mixes modules served before the edit with modules compiled after.
+`test:transcript-performance` bounds a long conversation's opening
 relative to a short calibration conversation opened alongside it. The
 absolute budgets apply only with `PERF_STRICT=1`, on a quiet machine.
 

@@ -88,8 +88,8 @@ export function searchSnippets<T extends SearchableSnippet>(rows: readonly T[], 
 }
 
 /** Catalog actions whose instructions belong in the structured code-review brief. */
-export function isReviewSnippet(key: string) {
-  return key === 'review' || key === 'deepreview';
+export function isReviewSnippet(key: string, origin?: string) {
+  return key === 'review' || key === 'deepreview' || (key === 'review-pr-ci' && origin === 'workflow');
 }
 
 const commandUsageKey = 'slash-command-usage:v1';

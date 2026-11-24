@@ -294,7 +294,7 @@ Open pull requests are checked about every minute while Lazybox has your
 focus and every five minutes otherwise; merged or closed ones once a day for
 a week. Unchanged pull requests cost nothing against GitHub's rate limit; if
 the limit is reached, checking pauses and the panel says until when.
-Automatic reactions are not available: every send is yours.
+Outside an explicitly started workflow, sending failures from the PR panel takes your click. The **review-pr-ci** snippet asks the original author to watch and repair CI for the PR it prepares.
 
 Codex can list workspace actions and read or wait for managed command output
 without a per-call approval. Starting or cancelling commands retains its approval.

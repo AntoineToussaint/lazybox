@@ -72,6 +72,11 @@ func (c Command) List(ctx context.Context) ([]Entry, error) {
 		}
 		seen[entry.Key] = true
 	}
+	// This workflow is implemented by the V2 Runner. Leave a same-named
+	// user snippet available as ordinary text.
+	if !seen["review-pr-ci"] {
+		entries = append(entries, Entry{Key: "review-pr-ci", Category: "Review", Origin: "workflow", Description: "Review with the default reviewer, fix findings, open or update the PR, and repair failing CI.", Body: "Start an independent code review with my default reviewer. Return the completed report to this conversation. Apply fixes here, create or update the pull request, and monitor and repair its CI until checks pass or a blocker needs my decision. Leave the PR open."})
+	}
 	return entries, nil
 }
 

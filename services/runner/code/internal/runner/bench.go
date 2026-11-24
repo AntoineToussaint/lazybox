@@ -557,7 +557,7 @@ func New(cfg Config) (*Bench, error) {
 		return nil, err
 	}
 	b.watchPendingDeletions()
-	b.watchVerification()
+	b.watchReviewWorkflows()
 	return b, nil
 }
 

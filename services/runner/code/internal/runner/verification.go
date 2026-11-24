@@ -244,9 +244,9 @@ func (b *Bench) removeFinishedVerificationCheckouts() {
 	}
 }
 
-// watchVerification resumes undelivered round transitions and bounds test
-// execution across Runner restarts using the managed command's saved start.
-func (b *Bench) watchVerification() {
+// watchReviewWorkflows resumes pending author handoffs and verification rounds
+// across Runner restarts.
+func (b *Bench) watchReviewWorkflows() {
 	b.watchers.Add(1)
 	go func() {
 		defer b.watchers.Done()
@@ -265,6 +265,9 @@ func (b *Bench) watchVerification() {
 					continue
 				}
 				for _, run := range review.Runs {
+					if run.TemplateID == reviews.ReviewPRCITemplate && run.State == reviews.RunDone && run.ResultArtifact != "" && !run.PRHandoffSent && run.StopReason != reviews.StopError {
+						b.sendReviewPRHandoff(workspace, run)
+					}
 					if run.TemplateID != reviews.VerificationTemplate {
 						continue
 					}

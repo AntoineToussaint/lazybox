@@ -330,7 +330,8 @@ merged is history. `pr.checks-passed` needs every check read: checks that were
 
 ### Reactions
 
-Always a person's click; automatic reactions are not offered. Both go to the
+The **review-pr-ci** snippet instructs the original author to follow and repair CI
+on the PR it prepares. The two PR panel reactions below require a click. Both go to the
 conversation that delivered the pull request (else the workspace's most
 recent), as a message Lazybox wrote with its origin chip, queued behind a turn
 in progress.

@@ -9,7 +9,8 @@ import type { StreamEnd } from './stream.js';
  * tagged `settings_not_in_effect`, whose content lists the files and entries
  * (or, where the transport keeps messages, says so in general). The settings
  * the worker passes (`settings`) are among those it may reject; Claude names
- * them "SDK inline settings".
+ * them "--settings (inline JSON)" (inlineSettingsNames). The content is the
+ * text Claude Code prints on stderr for the same problem outside the SDK.
  *
  * Nothing should stop an agent from working, but approvals must never turn
  * off silently. Lazybox's "ask" permission and the help assistant rest on the
@@ -20,12 +21,35 @@ import type { StreamEnd } from './stream.js';
  * person's settings files, or Lazybox's other settings, the warning shows in
  * the conversation as a notice, naming them, and the agent goes on.
  */
-/** Claude's name for the settings the SDK passes inline: the worker's own. */
-export const inlineSettingsName = 'SDK inline settings';
+/**
+ * Claude Code's names for the worker's own settings. The SDK passes `settings`
+ * as `--settings '<json>'`, which Claude Code 2.1.330 lists as
+ * "--settings (inline JSON)"; settings sent later with applyFlagSettings are
+ * "SDK inline settings". testdata/settings-not-in-effect.json holds the
+ * warning as the bundled Claude Code prints it.
+ */
+export const inlineSettingsNames = ['--settings (inline JSON)', 'SDK inline settings'] as const;
 // The headings of the lists in Claude Code 2.1.330's warning.
 const NOT_LOADED = 'These settings did not load';
 const SKIPPED = 'These settings entries were skipped';
 const NOT_USED = 'These settings files are not used';
+
+/**
+ * The setting path of a listed entry of the worker's own settings
+ * ("--settings (inline JSON) (permissions.ask): …" is `permissions.ask`; an
+ * entry for the whole source is ''), or undefined for another source. The
+ * label is matched as a prefix: it has parentheses of its own.
+ */
+function ownEntry(entry: string): string | undefined {
+  for (const name of inlineSettingsNames) {
+    if (entry.startsWith(`${name}: `)) return '';
+    if (entry.startsWith(`${name} (`)) {
+      const end = entry.indexOf('): ', name.length + 2);
+      return end < 0 ? '' : entry.slice(name.length + 2, end);
+    }
+  }
+  return undefined;
+}
 
 /**
  * Whether the warning says Lazybox's own permission settings are not in
@@ -42,13 +66,12 @@ export function rejectsLazyboxPermissions(warning: string): boolean {
     if (line.startsWith(NOT_USED)) { section = 'other'; listed = true; continue; }
     if (!line.startsWith('  ')) { section = undefined; continue; }
     if (section !== 'not_loaded' && section !== 'skipped') continue;
-    // "  SDK inline settings (permissions.ask[0]): …", or "  … and 3 more in SDK inline settings".
     const entry = line.trim();
-    const more = entry.match(/^… and \d+ more in (.+)$/);
-    const name = more ? more[1] : entry.replace(/( \(.*\))?: .*$/, '');
-    if (name !== inlineSettingsName) continue;
-    if (section === 'not_loaded' || more) return true;
-    const path = entry.match(/^[^(]*\((.*?)\): /)?.[1] ?? '';
+    // "… and 3 more in --settings (inline JSON)": entries not shown, so any may be a permission.
+    if (entry.startsWith('… and ') && inlineSettingsNames.some(name => entry.endsWith(` more in ${name}`))) return true;
+    const path = ownEntry(entry);
+    if (path === undefined) continue;
+    if (section === 'not_loaded') return true;
     if (path === '' || path === 'permissions' || path.startsWith('permissions.') || path.startsWith('permissions[')) return true;
   }
   return !listed;

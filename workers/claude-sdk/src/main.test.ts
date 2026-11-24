@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { loadFixture } from './settings-capture.js';
 
 /**
  * The worker as the Runner runs it (main.ts over its pipe), with a stand-in
@@ -76,32 +77,36 @@ async function drive(open: Record<string, unknown>, say: unknown[], until: (line
 }
 
 const warning = (content: string) => ({ type: 'system', subtype: 'informational', tag: 'settings_not_in_effect', level: 'warning', content, uuid: '00000000-0000-4000-8000-000000000001', session_id: 'native' });
-const inlineRejected = 'These settings did not load, so nothing in them is in effect, including hooks, permission rules and sandbox settings, though environment variables they already set can stay:\n  SDK inline settings (permissions.ask): Invalid value\nFix each problem listed, then start Claude Code again.';
-const userRejected = 'These settings did not load, so nothing in them is in effect, including hooks, permission rules and sandbox settings, though environment variables they already set can stay:\n  /work/repo/.claude/settings.json: Invalid JSON\nFix each problem listed, then start Claude Code again.';
+// What the bundled Claude Code prints (settings-capture.ts; settings-effect.test.ts checks it still does).
+const real = loadFixture().warnings;
 const events = (lines: Line[]) => lines.filter(l => l.method === 'event').map(l => l.params!);
 
-test('an ask session whose own settings Claude rejected closes Claude, says why last, and exits', async () => {
-  const { lines, code, log } = await drive({ permission: 'ask' }, [warning(inlineRejected)], () => false);
-  assert.equal(lines[0]?.id, 'open-1', 'the open reply comes first');
-  const said = events(lines);
-  const last = said.at(-1)!;
-  assert.equal(last.type, 'failure');
-  assert.equal(last.status, 'sdk_error', 'the stop is the last line, not the stream end that follows the close');
-  assert.match(last.text!, /stopped rather than run a command without asking you/);
-  assert.ok(last.text!.includes('SDK inline settings (permissions.ask)'));
-  assert.equal(said.filter(e => e.type === 'failure').length, 1, 'one failure: the close adds no provider_process_exit');
-  assert.equal(code, 1, 'the worker exits, so the Runner sees the agent process end');
-  assert.match(log, /stdin closed|terminated/, 'Claude Code was let go (q.close())');
+test('an ask session whose own permission settings Claude rejected closes Claude, says why last, and exits', async () => {
+  for (const name of ['inline did not load (permissions)', 'inline entry skipped (permissions)']) {
+    const { lines, code, log } = await drive({ permission: 'ask' }, [warning(real[name])], () => false);
+    assert.equal(lines[0]?.id, 'open-1', `${name}: the open reply comes first`);
+    const said = events(lines);
+    const last = said.at(-1)!;
+    assert.equal(last.type, 'failure', name);
+    assert.equal(last.status, 'sdk_error', `${name}: the stop is the last line, not the stream end that follows the close`);
+    assert.match(last.text!, /stopped rather than run a command without asking you/, name);
+    assert.ok(last.text!.includes('--settings (inline JSON) (permissions.ask)'), name);
+    assert.equal(said.filter(e => e.type === 'failure').length, 1, `${name}: one failure: the close adds no provider_process_exit`);
+    assert.equal(code, 1, `${name}: the worker exits, so the Runner sees the agent process end`);
+    assert.match(log, /stdin closed|terminated/, `${name}: Claude Code was let go (q.close())`);
+  }
 });
 
 test('an ask session whose only rejected settings are the person’s own shows a notice and keeps running', async () => {
-  const { lines, code } = await drive({ permission: 'ask' }, [warning(userRejected)], ls => events(ls).some(e => e.type === 'provider_notice'));
-  const notice = events(lines).find(e => e.type === 'provider_notice')!;
-  assert.equal(notice.status, 'settings_not_in_effect');
-  assert.ok(notice.text!.includes('/work/repo/.claude/settings.json'));
-  assert.equal(events(lines).filter(e => e.type === 'failure').length, 0, 'nothing faults the conversation');
-  // It was still running: it ended only when its pipe closed, as a worker does.
-  assert.notEqual(code, 1);
+  for (const [name, file] of [['project file did not load', 'settings.json'], ['local file entry skipped (permissions)', 'settings.local.json']]) {
+    const { lines, code } = await drive({ permission: 'ask' }, [warning(real[name])], ls => events(ls).some(e => e.type === 'provider_notice'));
+    const notice = events(lines).find(e => e.type === 'provider_notice')!;
+    assert.equal(notice?.status, 'settings_not_in_effect', name);
+    assert.ok(notice.text!.includes(`<workspace>/.claude/${file}`), name);
+    assert.equal(events(lines).filter(e => e.type === 'failure').length, 0, `${name}: nothing faults the conversation`);
+    // It was still running: it ended only when its pipe closed, as a worker does.
+    assert.notEqual(code, 1, name);
+  }
 });
 
 test('a grant the worker was opened with and does not hold is reported right after the open reply', async () => {

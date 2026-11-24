@@ -614,9 +614,15 @@ func (b *Bench) OpenEmptyWorkspace(profile string, options accounts.Options, gat
 	return b.open(profile, "", "", options, gatewayID, "", "", "", "coding", "", true)
 }
 
-// OpenAssistant opens a bounded application conversation without a Collection
-// or repository lease. Coding permissions and provider configuration are not saved.
+// OpenAssistant starts an artifact companion in its workspace, or a bounded
+// application assistant with read-only permissions.
 func (b *Bench) OpenAssistant(profile, purpose, contextText string, options accounts.Options, gatewayID string, workspace ...string) (*Execution, error) {
+	if purpose == "artifact" {
+		if len(workspace) == 0 || workspace[0] == "" || len(contextText) > 128<<10 {
+			return nil, errors.New("artifact companion requires a workspace and context up to 128 KiB")
+		}
+		return b.open(profile, "", "", options, gatewayID, "", "", workspace[0], purpose, contextText, false)
+	}
 	if !agent.IsAssistant(purpose) || len(contextText) > 128<<10 {
 		return nil, errors.New("assistant purpose must be help, planning, or summary; context max 128 KiB")
 	}
@@ -678,6 +684,9 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 			return nil, err
 		}
 		parent = &record
+		if record.Purpose == "artifact" {
+			purpose = record.Purpose
+		}
 		if _, err = b.History.Successor(b.ctx, previous); err == nil {
 			return nil, errors.New("execution already has a successor")
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -780,10 +789,11 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 			options.Instructions = b.Config.Defaults.Instructions
 		}
 		contextText += "\n" + sectionText(briefing, "settings") + "\n" + sectionText(briefing, "provider") + "\n" + options.Instructions
-		if options.BehaviorProfile == "" && purpose == "coding" {
+		workspaceAgent := purpose == "coding" || purpose == "artifact"
+		if options.BehaviorProfile == "" && workspaceAgent {
 			options.BehaviorProfile = b.Config.Defaults.BehaviorProfile
 		}
-		if behavior := options.BehaviorInstructions(); purpose == "coding" && behavior != "" {
+		if behavior := options.BehaviorInstructions(); workspaceAgent && behavior != "" {
 			contextText += "\n\n" + behavior
 		}
 		var rest []string
@@ -813,7 +823,7 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 		if options.Permission == "" {
 			options.Permission = b.Config.Defaults.Permission
 		}
-		if purpose == "coding" && options.BehaviorProfile == accounts.CheckInFirst {
+		if workspaceAgent && options.BehaviorProfile == accounts.CheckInFirst {
 			if selected.Provider != "codex" && selected.Provider != "claude" {
 				return nil, errors.New("Check in first requires a harness with enforced read-only access (Claude or Codex)")
 			}

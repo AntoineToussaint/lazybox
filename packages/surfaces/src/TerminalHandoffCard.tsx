@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Code, ConnectError } from '@lazybox/client-core';
+import { shellQuote } from './handoff-model';
 import { runAction } from './actions';
 import { useRunner } from './RunnerContext';
 import { requestTerminal } from './TerminalPanel';
@@ -40,8 +41,11 @@ export function TerminalHandoffCard({ handoff }: { handoff: TerminalHandoff }) {
       status === 'running' ? 'Interactive command running' :
       status === 'finished' ? 'Interactive command finished' :
       status === 'declined' ? 'Interactive command declined' : 'Interactive command request expired'}</strong>
-    <pre className="terminal-handoff-argv"><code>{JSON.stringify(handoff.argv)}</code></pre>
-    <p>{handoff.cwd}</p>
+    <pre className="terminal-handoff-argv"><code>{handoff.argv.map(shellQuote).join(' ')}</code></pre>
+    {handoff.cwd && <details className="terminal-handoff-directory">
+      <summary>Working directory · {handoff.cwd.split('/').filter(Boolean).at(-1) || '/'}</summary>
+      <code>{handoff.cwd}</code>
+    </details>}
     {status === 'pending' && <>
       <button className="primary" disabled={busy} onClick={() => void decide(true)}>Run and take over</button>{' '}
       <button disabled={busy} onClick={() => void decide(false)}>Decline</button>

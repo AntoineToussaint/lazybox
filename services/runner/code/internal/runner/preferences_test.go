@@ -5,6 +5,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/accounts"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent/agenttest"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
 	"strings"
 	"testing"
 )
@@ -90,5 +91,27 @@ func TestExplicitNativeAndAssistantPermissionsOverrideRunnerYOLODefault(t *testi
 	}
 	if fake.Session.Open.Permission != "read-only" {
 		t.Fatal("helper permissions relaxed")
+	}
+}
+
+func TestArtifactCompanionPurposeAndStartupContext(t *testing.T) {
+	b, err := New(Config{State: t.TempDir(), WorktreeRoot: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	fake := &agenttest.Adapter{}
+	b.Adapters["codex"] = fake
+	workspace, err := b.Collections.Create(context.Background(), "artifact", collections.Spec{Name: "Artifact workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const reference = "lazybox artifact get example --version 2"
+	e, err := b.OpenAssistant("codex-default", "artifact", reference, accounts.Options{Permission: "ask"}, "direct", workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Saved.Purpose != "artifact" || e.Cwd != workspace.Root || fake.Session.Open.Permission != "ask" || !strings.Contains(fake.Session.Open.Context, reference) {
+		t.Fatal("companion lost its purpose, workspace, permission or startup context")
 	}
 }

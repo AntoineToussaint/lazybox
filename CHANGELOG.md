@@ -23,6 +23,11 @@ written, fold the dated sections above it into it first: `make release`
 refuses a version with dated sections above its own, which its notes would
 leave out.
 
+## [2026-11-24.1] - 2026-11-24 · Interactive commands and artifact companions
+
+- **Review interactive commands** Read the command with shell quoting and expand its working directory to inspect the full path.
+- **Start an artifact companion** The companion receives the pinned version and selection at startup. Its message box opens empty, and you can return to it from the artifact.
+
 ## [0.1.0-pre.1] - 2026-11-17 · The first prerelease
 
 ### Install and updates

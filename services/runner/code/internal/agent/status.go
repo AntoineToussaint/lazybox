@@ -68,7 +68,7 @@ func IsAssistant(purpose string) bool {
 }
 
 func ValidPurpose(purpose string) bool {
-	return purpose == "" || purpose == "coding" || IsAssistant(purpose)
+	return purpose == "" || purpose == "coding" || purpose == "artifact" || IsAssistant(purpose)
 }
 
 func LimitState(code string) string {

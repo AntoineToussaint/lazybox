@@ -77,6 +77,7 @@ test('the inbox has one row per conversation, grouped by need, newest first, wit
     session('review-old', { agents: [{ updated: 3_000, ended: 3_000 }] }),
     session('asks', { pending: [question], status: 'waiting_input', agents: [{ updated: 2_000 }] }),
     session('broken', { fault: 'delivery_failed', agents: [{ updated: 4_000 }] }),
+    session('artifact-companion', { purpose: 'artifact', pending: [question] }),
     session('helper', { purpose: 'help', pending: [question] }),
   ], { since: 0, marks: { 'idle-old-conversation': 1_000 } });
   assert.deepEqual(inbox.rows.map(row => row.session.id), ['asks', 'broken', 'review-new', 'review-old', 'working', 'idle-old']);

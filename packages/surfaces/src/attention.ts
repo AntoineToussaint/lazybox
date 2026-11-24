@@ -43,7 +43,7 @@ export type Attention = {
 };
 
 /** Assistant side panels ("Ask Lazybox") are part of the workspace, not work items. */
-const assistantPurposes = new Set(['help', 'planning', 'summary']);
+const assistantPurposes = new Set(['help', 'planning', 'summary', 'artifact']);
 export function isWorkConversation(session: Session): boolean {
   return !assistantPurposes.has(session.purpose);
 }

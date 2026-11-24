@@ -243,13 +243,13 @@ try {
   await page.goto(standalone.replace(doc.id, standaloneNote.id));
   await page.getByRole('button', { name: 'Agent companion', exact: true }).click();
   await expect(chat.getByRole('combobox', { name: 'Conversation' })).toHaveValue('');
-  await expect(chat).toContainText('The artifact reference will be added to your draft');
   assert.equal(fixture.mutations.filter(call => call.method === 'OpenSession').length, 0, 'the chat pane does not start an agent');
   await chat.getByRole('button', { name: /^Start Claude/ }).click();
-  await expect(draft).toHaveValue(/Workspace note/);
-  const started = fixture.mutations.find(call => call.method === 'OpenSession');
+  await expect(draft).toHaveValue('');
+  const started = fixture.mutations.find(call => call.method === 'OpenAssistant' && call.body.purpose === 'artifact');
+  assert.match(started?.body.context, /Workspace note/);
   assert.equal(started?.body.collectionId, 'alpha');
-  assert.equal(fixture.mutations.filter(call => call.method === 'Apply').length, sendsBefore, 'starting the selected conversation must leave the reference in the draft');
+  assert.equal(fixture.mutations.filter(call => call.method === 'Apply').length, sendsBefore, 'starting the selected conversation must not send a user message');
 
   const noteDraft = await draft.inputValue();
   await draft.fill(noteDraft + '\n\nCould you check this?');
@@ -260,8 +260,24 @@ try {
   await draft.press('Enter');
   await expect.poll(() => fixture.mutations.filter(call => call.method === 'Apply' && call.body.message).length).toBe(sendsBefore + 1);
   const discussion = fixture.mutations.find(call => call.method === 'Apply' && call.body.message);
-  assert.match(JSON.stringify(discussion.body.message), /Workspace note.*Could you check this/);
+  assert.doesNotMatch(JSON.stringify(discussion.body.message), /Workspace note/);
+  assert.match(JSON.stringify(discussion.body.message), /Could you check this/);
   assert.equal(fixture.sessions.find(item => item.id === discussion.body.sessionId)?.collectionId, 'alpha');
+
+  // Reopening a saved companion keeps the prompt empty; an explicit selection is still offered.
+  await page.reload();
+  await page.getByRole('button', { name: 'Agent companion', exact: true }).click();
+  await expect(chat.getByRole('combobox', { name: 'Conversation' })).toHaveValue(discussion.body.sessionId);
+  await expect(draft).toHaveValue('');
+  await page.reload();
+  await page.getByText('Notes for a new discussion.', { exact: true }).first().evaluate(node => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+  });
+  await page.getByRole('button', { name: 'Discuss selection with agent companion' }).click();
+  await expect(draft).toHaveValue(/Selected excerpt:[\s\S]*Notes for a new discussion/);
 
   // A discussion pins its source revision and keeps the chat beside the diff.
   const reviewDoc = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Revision review', content: '## Scope\n\nKeep the original wording.' });

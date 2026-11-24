@@ -92,7 +92,7 @@ const HANDOVER_NOTICE = 'Added the compact view of a terminal run. Review it, ad
 
 export type AgentWindowProps = {
   connection: RunnerConnection;
-  purpose?: 'coding' | 'help' | 'planning' | 'summary';
+  purpose?: 'coding' | 'artifact' | 'help' | 'planning' | 'summary';
   assistantContext?: string;
   /** Initial choices. Starting a session always requires an explicit click. */
   agent?: 'claude' | 'codex';
@@ -172,7 +172,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // Enter while a send is in flight (the box is read-only meanwhile) does nothing: the send under way says how it went.
   useKeyboardAction('chat.send', () => { const focused = document.activeElement as HTMLTextAreaElement; if (focused === composer.current && !sendingRef.current && (canSend || missingFiles.length > 0 || !!message.trim())) focused.form?.requestSubmit(); });
 
-  const assistant = purpose !== 'coding';
+  const assistant = purpose !== 'coding' && purpose !== 'artifact';
   const [sessionID, setSessionID] = useState(initialSessionId);
   // A conversation in a tab behind another holds no stream: it catches up from
   // its cursor when brought to the front. A browser allows six connections to

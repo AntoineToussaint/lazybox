@@ -43,7 +43,7 @@ type Props = {
   onBack?(): void;
   /** In a workspace: show a conversation (source message, Send to agent). */
   onShowSession?(target: ViewTarget): void;
-  onDiscuss?(artifact: Artifact, reference: string): void;
+  onDiscuss?(artifact: Artifact, reference: string, explicit: boolean): void;
   chatOpen?: boolean;
   /** The conversation the page is beside, for Send to agent. */
   conversationId?: string;
@@ -413,13 +413,14 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
       : agentReference(artifact, currentText ?? '', 1200, shown);
     return excerpt ? `${reference}Selected excerpt:\n${excerpt.split('\n').map(line => `> ${line}`).join('\n')}\n\n` : reference;
   };
-  const sendToAgent = (text = discussionReference(!!onDiscuss)) => {
+  const sendToAgent = (brief?: string) => {
+    const text = brief ?? discussionReference(!!onDiscuss);
     if (onDiscuss) {
       if (!discussionVersion && shown) {
         setDiscussionVersion(shown);
         setSelected(shown);
       }
-      onDiscuss(artifact, text);
+      onDiscuss(artifact, text, !!brief || !!excerpt);
       return;
     }
     if (conversationId && onShowSession) {
@@ -458,7 +459,7 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
         <button type="button" className={onDiscuss ? "artifact-tool artifact-discuss" : "artifact-tool"}
           aria-label={onDiscuss ? discussLabel : (conversationId ? (excerpt ? 'Send selection to agent' : 'Send to agent') : 'Copy artifact reference')}
           onMouseDown={event => { if (excerpt) event.preventDefault(); }} onClick={() => sendToAgent()}
-          title={onDiscuss ? 'Open the agent companion with this version in its draft' : conversationId ? `Put a reference in the message box of “${conversationTitle || 'the conversation'}” (not sent)` : 'Copy a reference an agent can read'}>
+          title={onDiscuss ? 'Discuss this version with the agent companion' : conversationId ? `Put a reference in the message box of “${conversationTitle || 'the conversation'}” (not sent)` : 'Copy a reference an agent can read'}>
           <Icon name={onDiscuss ? 'chat' : 'send'} size={14}/><span className={onDiscuss ? 'artifact-companion-label' : 'artifact-tool-label'}>{onDiscuss ? (chatOpen ? 'Add to companion' : 'Agent companion') : conversationId ? (excerpt ? 'Send selection' : 'Send to agent') : 'Copy reference'}</span>
         </button>
         <ActionMenu label="Export" className="artifact-export-menu" summary={<><Icon name="download" size={14}/><span className="artifact-tool-label">Export</span></>}>

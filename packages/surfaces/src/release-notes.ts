@@ -9,6 +9,15 @@ import type { Release } from './onboarding-model';
  */
 export const releaseNotes: readonly Release[] = [
   {
+    id: '2026-11-24.1',
+    date: '2026-11-24',
+    title: 'Interactive commands and artifact companions',
+    items: [
+      { title: 'Review interactive commands', body: 'Read the command with shell quoting and expand its working directory to inspect the full path.' },
+      { title: 'Start an artifact companion', body: 'The companion receives the pinned version and selection at startup. Its message box opens empty, and you can return to it from the artifact.' },
+    ],
+  },
+  {
     id: '0.1.0-pre.1',
     date: '2026-11-17',
     title: 'The first prerelease',

@@ -29,7 +29,7 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
   const [sessionId, setSessionId] = useState<string>();
   const [requested, setRequested] = useState('');
   const [chatKey, setChatKey] = useState(0);
-  const [pending, setPending] = useState<{ text: string }>();
+  const [pending, setPending] = useState<{ text: string; explicit: boolean }>();
   const lastDiscussed = useRef<{ sessionId: string; reference: string }>(undefined);
   const pane = useRef<HTMLElement>(null);
   const documentPane = useRef<HTMLDivElement>(null);
@@ -53,7 +53,8 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
     const control = new AbortController();
     const adopt = (session?: Session) => {
       if (control.signal.aborted) return;
-      const id = session?.collectionId === collectionId && (!session.purpose || session.purpose === 'coding') ? session.id : '';
+      if (session?.purpose === 'artifact' && session.collectionId === collectionId) setPending(value => value?.explicit ? value : undefined);
+      const id = session?.collectionId === collectionId && (!session.purpose || session.purpose === 'coding' || session.purpose === 'artifact') ? session.id : '';
       if (lastDiscussed.current?.sessionId === requested) lastDiscussed.current.sessionId = id;
       setSessionId(id);
       setRequested('');
@@ -82,6 +83,7 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
     setSessionId(id);
   };
   const followSession = (id: string) => {
+    if (!sessionId) setPending(undefined);
     const last = lastDiscussed.current;
     if (last && last.sessionId === sessionId) last.sessionId = id;
     rememberSession(id);
@@ -90,7 +92,7 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
     if (id !== sessionId) setChatKey(key => key + 1);
     rememberSession(id);
   };
-  const discuss = (_artifact: Artifact, reference: string) => {
+  const discuss = (_artifact: Artifact, reference: string, explicit: boolean) => {
     let id = sessionId;
     if (id === undefined) {
       id = '';
@@ -98,7 +100,7 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
       resolveSession(id);
     }
     if (chatOpen || lastDiscussed.current?.sessionId !== id || lastDiscussed.current.reference !== reference) {
-      setPending(previous => previous?.text === reference ? previous : { text: appendToDraft(previous?.text || '', reference) });
+      setPending(previous => previous?.text === reference ? previous : { text: appendToDraft(previous?.text || '', reference), explicit: explicit || !!previous?.explicit });
       lastDiscussed.current = { sessionId: id, reference };
     }
     showChat();
@@ -129,11 +131,11 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
           <button type="button" className="icon-button" aria-label="Close agent companion" onClick={closeChat}><Icon name="close" size={14}/></button>
         </header>
         {requested && <p className="artifact-chat-pending" role="status">Opening conversation…</p>}
-        {!requested && !sessionId && pending && <p className="artifact-chat-pending">The artifact reference will be added to your draft when you start the chat.</p>}
         {!requested && <PanelShownContext.Provider value={shown && chatOpen}>
           <ChatPanel key={chatKey} embedded collectionId={collectionId} viewState={companionStore}
+            purpose={sessionId ? undefined : 'artifact'} assistantContext={pending?.text ?? lastDiscussed.current?.reference}
             initialSessionId={sessionId} onSessionChange={followSession} showCommands={false}
-            draftAddition={pending} onDraftAdded={() => setPending(undefined)}/>
+            draftAddition={sessionId ? pending : undefined} onDraftAdded={() => setPending(undefined)}/>
         </PanelShownContext.Provider>}
       </aside>
     }

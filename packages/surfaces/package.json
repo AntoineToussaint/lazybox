@@ -18,7 +18,7 @@
     "mermaid": "12.3.0",
     "monaco-editor": "0.57.0",
     "monaco-vim": "0.4.4",
-    "react": "^19.3.1",
+    "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-markdown": "10.1.0",
     "remark-gfm": "4.0.1",

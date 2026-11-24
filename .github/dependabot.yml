@@ -21,6 +21,11 @@ updates:
     groups:
       npm:
         update-types: [minor, patch]
+        # The Agent SDK bundles the Claude Code the worker drives, so a bump
+        # changes agent behaviour, approvals and auth errors, and wants the
+        # real-provider tests (`make test-real`) and RUNTIME_EVIDENCE.md. It
+        # comes as its own pull request instead of riding a group.
+        exclude-patterns: ["@anthropic-ai/claude-agent-sdk"]
 
   - package-ecosystem: gomod
     directory: /services/runner/code

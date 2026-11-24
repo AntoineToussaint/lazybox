@@ -607,12 +607,18 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     const open = detachedFor(live, target);
     if (open) { try { await chatHost.openChat({ panelId: open.id, ...pinnedTarget(open) }); } catch (error) { setError(String(error)); } return; }
     setPending(panel.id);
-    const before = live;
+    const before = live, startedIn = workspaceID;
     try {
       if (!changePage(detachChat(live, panel.id, target))) return;
       await chatHost.openChat({ panelId: panel.id, collectionId: target.collectionId, sessionId: target.sessionId });
     }
-    catch (error) { changePage(before); setError(String(error)); }
+    catch (error) {
+      // The chat comes back where it left: this page, or, when another workspace is shown
+      // by now, that workspace's saved pages (as the chat of a closed window does).
+      if (shownWorkspace.current === startedIn) changePage(before);
+      else chatReturned.current({ panelId: panel.id, collectionId: startedIn, reason: 'closed' });
+      setError(String(error));
+    }
     finally { setPending(''); }
   };
   // A conversation row (Workspaces, Agents, the Inbox) opens its conversation

@@ -127,6 +127,7 @@
     "test:polish-pass": "node scripts/test-polish-pass.mjs",
     "test:layout-stability": "node scripts/test-layout-stability.mjs && node scripts/test-sidebar-stability.mjs",
     "test:reattach": "node scripts/test-reattach.mjs",
+    "test:chat-window-failure": "node scripts/test-chat-window-failure.mjs",
     "test:context-menus": "node scripts/test-context-menus.mjs && node scripts/test-context-menus-live.mjs",
     "test:chat-decisions": "node scripts/test-chat-decisions.mjs",
     "test:slash-commands": "node scripts/test-slash-commands.mjs",

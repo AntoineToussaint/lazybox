@@ -104,6 +104,7 @@ leave out.
 
 ### Home checkouts and your terminal
 
+- **Review interactive commands** Read the command with shell quoting and expand its working directory to inspect the full path.
 - **Terminals stay through a Runner restart** An open terminal keeps its tab, its screen and its scrollback when the Runner restarts on a new port or with a new credential, and goes on where it was.
 - **Take over an interactive command** When Codex or Claude needs you to sign in, review the command in chat and run it in the workspace terminal. The agent resumes when it exits.
 
@@ -165,6 +166,7 @@ leave out.
 
 ### Artifacts
 
+- **Start an artifact companion** The companion receives the pinned version and selection at startup. Its message box opens empty, and you can return to it from the artifact.
 - **Work beside an artifact** Open Agent companion from the reader, inspect structured documents by type, or edit the latest source and save a new version.
 
 - **Versioned artifacts** Track a plan or a report from a message, a file or an agent; each update is a version you can compare with the last.

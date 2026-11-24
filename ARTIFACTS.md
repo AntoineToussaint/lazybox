@@ -378,8 +378,8 @@ The page follows new versions by itself.
   the kind, the version, an outline of the headings, and the
   `lazybox artifact get ID` command so the agent can read the whole text. In
   its own window, **Discuss in chat** opens a resizable chat beside the
-  artifact. Its draft contains one line naming the artifact and the command
-  to read that revision. Selecting a passage also includes the quotation.
+  artifact. A new companion receives the pinned artifact reference and any selected
+  passage as startup context. Its message box starts empty.
   The companion starts a fresh conversation by default and remembers an
   explicit conversation choice for that artifact.
   **Copy artifact reference** is also available in the artifact actions menu.
@@ -486,4 +486,4 @@ checkout of REPO** directly before the block. The same destination
 instructions work with a standalone inline-code command. HTML previews and
 version comparisons remain display-only.
 
-The agent companion opens a fresh conversation by default, with the displayed revision and any selected excerpt in its draft. Selecting an existing workspace conversation explicitly continues its history. The companion remembers that choice per artifact. Enter in the detached reader uses the same configured send binding as workspace chat.
+The agent companion opens a fresh conversation by default, with the displayed revision and any selected excerpt supplied privately at startup. New companions stay out of the Agents sidebar. Selecting an existing workspace conversation explicitly continues its history. The companion remembers that choice per artifact. Enter in the detached reader uses the same configured send binding as workspace chat.

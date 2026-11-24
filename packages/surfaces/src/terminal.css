@@ -20,6 +20,8 @@
 .panel-terminal{border-top:1px solid var(--line)}
 .workspace-shell .terminal-tab .terminal-close{min-width:24px;min-height:24px;display:inline-flex;align-items:center;justify-content:center}
 
-.terminal-handoff-argv { white-space: pre-wrap; overflow-wrap: anywhere; }
+.terminal-handoff-argv { white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px 12px; border-radius: 6px; background: var(--surface-sunken); }
+.terminal-handoff-directory { margin: 8px 0; overflow-wrap: anywhere; color: var(--text-muted); }
+.terminal-handoff-directory summary { cursor: pointer; }
 
 .terminal-view .terminal-send-selection{position:absolute;bottom:28px;right:14px;z-index:2;display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface-raised);color:var(--text)}

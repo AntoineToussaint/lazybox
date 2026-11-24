@@ -307,6 +307,11 @@ func (s *Service) OpenAssistant(ctx context.Context, p *pb.OpenAssistantRequest)
 		options.NoRotation = p.Options.NoRotation
 		gateway = p.Options.GatewayId
 	}
+	if p.Purpose == "artifact" && p.Options != nil {
+		options.Permission = p.Options.Permission
+		options.Workflow = p.Options.Workflow
+		options.BehaviorProfile = p.Options.BehaviorProfile
+	}
 	e, err := s.Bench.OpenAssistant(p.ProfileId, p.Purpose, p.Context, options, gateway, p.CollectionId)
 	if err != nil {
 		return nil, rpcError(err)

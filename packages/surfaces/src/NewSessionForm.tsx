@@ -14,7 +14,7 @@ import { showToast } from './toasts';
 
 export type ConversationCopy = { provider: string; model: string; effort?: string; title: string };
 
-type Purpose = 'coding' | 'help' | 'planning' | 'summary';
+type Purpose = 'coding' | 'artifact' | 'help' | 'planning' | 'summary';
 
 /**
  * The choices a new conversation starts with (agent, account, permissions,
@@ -47,7 +47,7 @@ export function useSessionLauncher({ api, info, viewState, agent, copy, workingD
   const [profile, setProfile] = useState(remembered.profile || '');
   // On by default: the Runner may continue on another signed-in subscription of this provider.
   const [rotate, setRotate] = useState(true);
-  const assistant = purpose !== 'coding';
+  const assistant = purpose !== 'coding' && purpose !== 'artifact';
   const [cwd, setCwd] = useState(workingDirectory);
   const [model, setModel] = useState(remembered.model || '');
   const [effort, setEffort] = useState(remembered.effort || '');
@@ -72,7 +72,7 @@ export function useSessionLauncher({ api, info, viewState, agent, copy, workingD
     const signal = lifetime.current!.signal;
     try {
       const options = { model, effort, permission: checkInFirst ? 'read-only' : permission, workflow, gatewayId: gateway, rotationProfileIds: [], noRotation: !rotate, instructions, behaviorProfile: assistant ? '' : behaviorProfile };
-      const result = assistant ? await api.openAssistant({ profileId: selectedProfile, purpose, context: assistantContext, collectionId, options }, { signal }) : await api.openSession({ profileId: selectedProfile, cwd: collectionId || emptyWorkspace ? '' : cwd, collectionId, emptyWorkspace, options }, { signal });
+      const result = assistant || purpose === 'artifact' ? await api.openAssistant({ profileId: selectedProfile, purpose, context: assistantContext, collectionId, options }, { signal }) : await api.openSession({ profileId: selectedProfile, cwd: collectionId || emptyWorkspace ? '' : cwd, collectionId, emptyWorkspace, options }, { signal });
       if (!result.session) throw new Error('Runner did not return a session');
       if (signal.aborted) return;
       if (!assistant) {
@@ -121,7 +121,7 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
   agentName: string;
 }) {
   const { runnerSettings, copy, title, setTitle, provider, setProvider, setProfile, rotate, setRotate, cwd, setCwd, model, setModel, effort, setEffort, gateway, setGateway, instructions, setInstructions, behaviorProfile, setBehaviorProfile, checkInFirst, permission, setPermission, workflow, setWorkflow, opening, profiles, gateways, selectedProfile, open } = launcher;
-  const assistant = purpose !== 'coding';
+  const assistant = purpose !== 'coding' && purpose !== 'artifact';
   return <section className="session-setup">
     {assistant && <p>{purposeLabel(purpose)}. This conversation runs on the Runner.</p>}
     <form onSubmit={open} className="open-form">

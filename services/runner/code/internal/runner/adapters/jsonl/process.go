@@ -78,7 +78,10 @@ type Process struct {
 	// delivered is the transport cursor of the last line handed to Receive.
 	// After the agent exits, the host is released only once commit reaches
 	// it: until then the host still holds output this Runner has not recorded.
-	delivered   uint64
+	delivered uint64
+	// skipped is the last line that yielded nothing to deliver (not a
+	// message); it is acknowledged once everything delivered before it is.
+	skipped     uint64
 	exitSeen    bool
 	releaseOnce sync.Once
 }
@@ -123,10 +126,12 @@ func StartWith(ctx context.Context, binary string, args, env []string, cwd strin
 		s := bufio.NewScanner(out)
 		s.Buffer(make([]byte, 4096), 16<<20)
 		for s.Scan() {
-			var m Message
-			if err := json.Unmarshal(s.Bytes(), &m); err != nil {
-				p.stop(fmt.Errorf("invalid adapter JSON: %w", err))
-				return
+			// A line that is not a message (a stray print) is a diagnostic,
+			// as it is for a hosted agent: the conversation goes on.
+			m, err := decodeMessage(s.Bytes())
+			if err != nil {
+				_, _ = fmt.Fprintf(diagnostic, "\nignored agent output that is not a message (%v): %s", err, clip(s.Bytes()))
+				continue
 			}
 			if m.Method == "" && len(m.ID) > 0 {
 				p.mu.Lock()

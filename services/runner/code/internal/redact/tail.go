@@ -50,6 +50,22 @@ func (t *Tail) Write(data []byte) (int, error) {
 	return n, nil
 }
 
+// WriteExcerpt writes prefix and at most limit bytes of the start of data,
+// marking a cut with an ellipsis. Data is redacted before it is cut: cutting
+// first could leave the start of a secret, which Text no longer recognises.
+func (t *Tail) WriteExcerpt(prefix string, data []byte, limit int) {
+	t.mu.Lock()
+	text := string(data)
+	for _, secret := range t.secrets {
+		text = strings.ReplaceAll(text, secret, "[redacted]")
+	}
+	t.mu.Unlock()
+	if len(text) > limit {
+		text = strings.ToValidUTF8(text[:limit], "") + "…"
+	}
+	_, _ = t.Write([]byte(prefix + text))
+}
+
 // Text is the redacted tail, at most Limit bytes.
 func (t *Tail) Text() string {
 	t.mu.Lock()

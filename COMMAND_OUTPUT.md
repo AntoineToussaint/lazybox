@@ -116,7 +116,9 @@ still moves, and the report says how to stop it (`kill -TERM -PGID`).
 in the console, the live bar, Processes; `lazybox stop ID`) reaches it there:
 SIGTERM to the group, SIGKILL after 5 seconds. `BackgroundCommand` (the owner's
 alone: **Move to background** in the live bar) moves a foreground run at once,
-whatever it is. A followed run outlives a Runner restart: the next Runner
+whatever it is. Both requests are written to the run's journal before they
+are asked, so a stop or a move asked just before a Runner restart still
+reaches the run from the next Runner. A followed run outlives a Runner restart: the next Runner
 reopens it where its output stopped, the follower resumes publishing (keeping
 up to 8 MiB it could not send meanwhile, and saying what it dropped beyond
 that), and a run nothing hears from for 90 seconds is ended as *stopped

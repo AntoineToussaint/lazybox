@@ -381,6 +381,179 @@ func TestCommandAdoptedElsewhereEndsHereWithoutStopping(t *testing.T) {
 	}
 }
 
+// A command whose output fills its journal is stopped, and how it ended is
+// still recorded: the completion has room kept for it. Before, the completion
+// did not fit, yet the host was released, so the next Runner found neither the
+// outcome nor the host and called it unknown.
+func TestACommandThatFillsItsJournalKeepsItsCompletion(t *testing.T) {
+	f := newHosted(t)
+	const budget = 8 << 10
+	m, err := NewHosted(f.dir, budget, 0, f.hosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := m.Start(Spec{SessionID: "s", Title: "flood", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", "while :; do echo x; sleep 0.01; done"}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := finished(t, c)
+	if !strings.Contains(state.Error, "capture failed") || state.Signal == "" {
+		t.Fatalf("a command that filled its journal: %+v", state)
+	}
+	waitFor(t, "the finished command's host stayed", func() bool { ids, _ := sessionhost.Hosts(f.hosts); return len(ids) == 0 })
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	next, err := NewHosted(f.dir, budget, 0, f.hosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	reopened, err := next.Get(state.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Status(); !got.Done || got.Error != state.Error || got.Signal != state.Signal {
+		t.Fatalf("the completion was lost: recorded %+v, was %+v", got, state)
+	}
+}
+
+// A host is released only once its command's completion is recorded. One
+// whose completion could not be written keeps the exit, and the next Runner
+// records it.
+func TestAnUnrecordedCompletionLeavesTheExitWithTheHost(t *testing.T) {
+	f := newHosted(t)
+	m := f.open(t)
+	quiet := `printf before; while [ ! -e "` + f.gate + `" ]; do sleep 0.02; done; exit 4`
+	c, err := m.Start(Spec{SessionID: "s", Title: "build", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", quiet}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "first output never recorded", func() bool { return c.Status().Offset > 0 })
+	// The journal takes nothing more (a failing disk, say).
+	_ = c.spool.Close()
+	if err = os.WriteFile(f.gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if state := finished(t, c); !strings.Contains(state.Error, "capture") {
+		t.Fatalf("an unrecorded completion: %+v", state)
+	}
+	if ids, _ := sessionhost.Hosts(f.hosts); len(ids) != 1 {
+		t.Fatal("the host was released although the exit was not recorded")
+	}
+	_ = m.Close()
+	next := f.open(t)
+	defer next.Close()
+	adopted, err := next.Get(c.Status().ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := finished(t, adopted); state.ExitCode == nil || *state.ExitCode != 4 {
+		t.Fatalf("the next Runner did not collect the exit: %+v", state)
+	}
+}
+
+// A connection to a live host that drops (here closed under the Runner) is
+// not the command's end: the Runner re-attaches and records the rest of its
+// output and its own exit. Before, the command was marked done while it ran,
+// and the next Runner's sweep stopped it as an orphan.
+func TestADroppedHostConnectionIsReattached(t *testing.T) {
+	f := newHosted(t)
+	m := f.open(t)
+	defer m.Close()
+	c, err := m.Start(Spec{SessionID: "s", Title: "build", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", f.script()}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "first output never recorded", func() bool { return c.Status().Offset > 0 })
+	c.mu.Lock()
+	lost := c.host
+	c.mu.Unlock()
+	_ = lost.Detach() // The connection ends; this Runner did not detach.
+	waitFor(t, "the command was not re-attached", func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.host != lost })
+	if state := c.Status(); state.Done {
+		t.Fatalf("a running command was marked done when its connection dropped: %+v", state)
+	}
+	if err = os.WriteFile(f.gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	state := finished(t, c)
+	if state.ExitCode == nil || *state.ExitCode != 4 || state.Error != "" {
+		t.Fatalf("the command's own exit was not recorded: %+v", state)
+	}
+	if got := output(t, c); got != "beforeafterwarn" && got != "beforewarnafter" {
+		t.Fatalf("output across the dropped connection is %q: nothing may be lost or repeated", got)
+	}
+}
+
+// staleAttached is a backend whose hosts all report a client attached, as a
+// host does for a connection that died until it reads its close.
+type staleAttached struct{ sessionhost.Local }
+
+func (b staleAttached) Probe(ctx context.Context, root, id string) (sessionhost.Status, error) {
+	status, err := b.Local.Probe(ctx, root, id)
+	status.Attached = true
+	return status, err
+}
+
+// A host that still counts the dropped connection as attached is no reason
+// to stand down: re-attaching supersedes the stale client. Before, the
+// command was left shown done, supervised by no one, and Cancel could not
+// reach it.
+func TestADroppedConnectionTheHostStillCountsIsReattached(t *testing.T) {
+	f := newHosted(t)
+	m, err := NewHostedOn(f.dir, 1<<20, 0, f.hosts, staleAttached{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	c, err := m.Start(Spec{SessionID: "s", Title: "build", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", f.script()}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "first output never recorded", func() bool { return c.Status().Offset > 0 })
+	c.mu.Lock()
+	lost := c.host
+	c.mu.Unlock()
+	_ = lost.Detach()
+	waitFor(t, "the command was not re-attached", func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.host != lost || c.status.Done
+	})
+	if state := c.Status(); state.Done {
+		t.Fatalf("a running command was given up: %+v", state)
+	}
+	if err = os.WriteFile(f.gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if state := finished(t, c); state.ExitCode == nil || *state.ExitCode != 4 || state.Error != "" {
+		t.Fatalf("the command's own exit was not recorded: %+v", state)
+	}
+}
+
+// A host that dies while attached took its command with it (processguard):
+// its outcome is unknown, and nothing is left running to confirm.
+func TestACommandWhoseHostDiesWhileAttachedIsReportedUnknown(t *testing.T) {
+	f := newHosted(t)
+	m := f.open(t)
+	defer m.Close()
+	c, err := m.Start(Spec{SessionID: "s", Title: "build", Cwd: t.TempDir(), Argv: []string{"/bin/sh", "-c", f.script()}, Env: os.Environ()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "no output", func() bool { return c.Status().Offset > 0 })
+	record, err := sessionhost.ReadRecord(filepath.Join(f.hosts, c.hostID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = syscall.Kill(record.PID, syscall.SIGKILL)
+	state := finished(t, c)
+	if state.ExitCode != nil || !strings.Contains(state.Error, "outcome unknown") {
+		t.Fatalf("dead host: %+v", state)
+	}
+}
+
 func TestUpgradeStopsUnisolatedVerification(t *testing.T) {
 	f := newHosted(t)
 	m := f.open(t)

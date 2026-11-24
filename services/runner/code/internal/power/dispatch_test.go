@@ -109,6 +109,35 @@ func TestDispatchRunsOncePerEventAndBoundsRuns(t *testing.T) {
 	}
 }
 
+// Slow runs finish even after newer runs pushed them out of the recent list,
+// and their slots come back. Before, Finish found them only in that list, so
+// four slow hooks skipped every hook until the Runner restarted.
+func TestSlowRunsPushedOutOfTheRecentListStillFreeTheirSlots(t *testing.T) {
+	d, _ := dispatcherWith(t, "hooks:\n  - id: h\n    on: turn.done\n    run: [true]\n")
+	e := event(EventTurnDone, "alpha", "t")
+	var slow []HookRun
+	for i := range MaxConcurrentRuns {
+		e.Key = "slow" + string(rune('a'+i))
+		slow = append(slow, d.Dispatch(e)...)
+	}
+	for i := range keptRuns + 1 {
+		e.Key = "burst" + string(rune(i))
+		if runs := d.Dispatch(e); len(runs) != 1 || runs[0].State != RunSkipped {
+			t.Fatalf("a run while the slots are taken: %+v", runs)
+		}
+	}
+	for _, r := range slow {
+		if r.State != RunRunning {
+			t.Fatalf("slow run: %+v", r)
+		}
+		d.Finish(r.ID, func(*HookRun) {})
+	}
+	e.Key = "after"
+	if runs := d.Dispatch(e); len(runs) != 1 || runs[0].State != RunRunning {
+		t.Fatalf("the finished runs kept their slots: %+v", runs)
+	}
+}
+
 func TestDispatchRecordsLaunchFailuresAndOutcomes(t *testing.T) {
 	d, _ := dispatcherWith(t, "hooks:\n  - id: broken\n    on: turn.done\n    run: [x]\n  - id: fine\n    on: turn.done\n    run: [x]\n    grants: [read]\n")
 	runs := d.Dispatch(event(EventTurnDone, "alpha", "t"))

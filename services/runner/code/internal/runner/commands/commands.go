@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,7 +130,17 @@ type Output struct {
 	// Seq is the host's sequence number of this output (on "output"): the
 	// cursor a re-attaching Runner resumes after.
 	Seq uint64 `json:"seq,omitempty"`
+	// Request is what the Runner asked of a followed run (on "request"):
+	// requestStop or requestBackground. Recorded before it is asked, so the
+	// next Runner still asks it if this one restarts before the run polls.
+	Request string `json:"request,omitempty"`
 }
+
+// What the Runner asks of a followed run (Output.Request).
+const (
+	requestStop       = "stop"
+	requestBackground = "background"
+)
 
 type Command struct {
 	mu       sync.Mutex
@@ -253,6 +264,7 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 		var state Status
 		var host string
 		var seq uint64
+		var stopRequested, backgroundRequested bool
 		for cursor := uint64(0); cursor < spool.Count(); cursor++ {
 			record, err := spool.Next(context.Background(), cursor)
 			if err != nil {
@@ -276,6 +288,13 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 				state.Offset = output.Offset + uint64(len(output.Data))
 				seq = max(seq, output.Seq)
 			}
+			if output.Type == "request" {
+				stopRequested = stopRequested || output.Request == requestStop
+				backgroundRequested = backgroundRequested || output.Request == requestBackground
+			}
+			if output.Status != nil && output.Status.Background {
+				backgroundRequested = false // The run moved: asked and answered.
+			}
 		}
 		if state.ID == "" {
 			spool.Dispose()
@@ -283,7 +302,7 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 		}
 		if !state.Done && host != "" {
 			spool.Dispose()
-			if spool, err = journal.Open(filepath.Join(dir, entry.Name()), perCommandBudget); err != nil {
+			if spool, err = m.openSpool(filepath.Join(dir, entry.Name()), state); err != nil {
 				m.Detach()
 				return nil, err
 			}
@@ -296,11 +315,11 @@ func NewHostedOn(dir string, perCommandBudget int64, maxLive int, hostRoot strin
 			// A `lazybox run` that follows the Runner keeps publishing after
 			// the restart; if it stopped too, watchFollowers ends the pipe.
 			spool.Dispose()
-			if spool, err = journal.Open(filepath.Join(dir, entry.Name()), perCommandBudget); err != nil {
+			if spool, err = m.openSpool(filepath.Join(dir, entry.Name()), state); err != nil {
 				m.Detach()
 				return nil, err
 			}
-			m.items[state.ID] = &Command{spool: spool, status: state, finished: make(chan struct{}), wake: make(chan struct{}), lastSeen: time.Now()}
+			m.items[state.ID] = &Command{spool: spool, status: state, finished: make(chan struct{}), wake: make(chan struct{}), lastSeen: time.Now(), stopRequested: stopRequested, backgroundRequested: backgroundRequested}
 			continue
 		}
 		if !state.Done {
@@ -370,6 +389,30 @@ func (m *Manager) watchFollowers(silence time.Duration, idleLimits struct{ Never
 }
 
 func ID() string { return rand.Text() }
+
+// maxErrorText bounds the error a completion records, so it fits the reserve.
+const maxErrorText = 4 << 10
+
+// reserveFor is the part of a command's journal budget kept for what ends
+// it (journal.Reserve): its stop and background requests and its completion,
+// which repeats its status, with an exit, an error and, for a pipe, a report.
+// Output that fills the journal then still leaves room to record how the
+// command ended. At most a quarter of the budget.
+func reserveFor(limit int64, state Status) int64 {
+	completion, _ := json.Marshal(Output{Type: "completed", Offset: math.MaxUint64, Status: ptr(state)})
+	record, _ := json.Marshal(journal.Record{Sequence: math.MaxUint64, Time: time.Now(), Value: completion})
+	reserve := int64(len(record)) + maxErrorText + 4<<10
+	if state.Mode == "pipe" {
+		// The compact view, escaped (MaxAgentView), and the rest of a report.
+		reserve += 2*MaxAgentView + 4<<10
+	}
+	return min(reserve, limit/4)
+}
+
+// openSpool opens a command's journal at path for writing, with its reserve.
+func (m *Manager) openSpool(path string, state Status) (*journal.Journal, error) {
+	return journal.Open(path, m.limit, journal.Reserve(reserveFor(m.limit, state)))
+}
 
 func (m *Manager) Register(spec Spec) (*Command, error) { return m.register(spec, nil) }
 
@@ -446,14 +489,16 @@ func (m *Manager) register(spec Spec, host *sessionhost.Client) (*Command, error
 		return nil, err
 	}
 	id := ID()
-	spool, err := journal.Open(filepath.Join(m.dir, id+".jsonl"), m.limit)
+	status := Status{ID: id, Spec: spec, Mode: "pipe", StartedAt: time.Now().UnixMilli()}
+	if len(spec.Argv) > 0 {
+		status.Mode = "managed"
+	}
+	spool, err := m.openSpool(filepath.Join(m.dir, id+".jsonl"), status)
 	if err != nil {
 		return nil, err
 	}
-	c := &Command{spool: spool, finished: make(chan struct{}), status: Status{ID: id, Spec: spec, Mode: "pipe", StartedAt: time.Now().UnixMilli()}, hostRoot: m.hostRoot, hostBackend: m.backend, wake: make(chan struct{})}
-	if len(spec.Argv) > 0 {
-		c.status.Mode = "managed"
-	} else {
+	c := &Command{spool: spool, finished: make(chan struct{}), status: status, hostRoot: m.hostRoot, hostBackend: m.backend, wake: make(chan struct{})}
+	if status.Mode == "pipe" {
 		c.lastPublished = time.Now()
 	}
 	if host != nil {
@@ -575,9 +620,11 @@ func (c *Command) complete(exit *int, signal string, cause error, report *Report
 	c.completeThen(exit, signal, cause, report, nil)
 }
 
-// completeThen runs recorded, if any, once the completion is in the journal
-// and before waiters see the command done.
-func (c *Command) completeThen(exit *int, signal string, cause error, report *Report, recorded func()) {
+// completeThen runs recorded, if any, once the completion was appended to
+// the journal (written says whether it is there), before waiters see the
+// command done. The completion uses the journal's reserve: output that filled
+// the journal does not keep it from being recorded.
+func (c *Command) completeThen(exit *int, signal string, cause error, report *Report, recorded func(written bool)) {
 	c.once.Do(func() {
 		c.mu.Lock()
 		c.status.Done = true
@@ -587,13 +634,17 @@ func (c *Command) completeThen(exit *int, signal string, cause error, report *Re
 		if cause != nil {
 			c.status.Error = cause.Error()
 		}
-		if _, err := c.spool.Append(Output{Type: "completed", Offset: c.status.Offset, Status: ptr(c.status)}); err != nil && c.status.Error == "" {
+		if len(c.status.Error) > maxErrorText {
+			c.status.Error = strings.ToValidUTF8(c.status.Error[:maxErrorText], "") + "…"
+		}
+		_, err := c.spool.AppendReserved(Output{Type: "completed", Offset: c.status.Offset, Status: ptr(c.status)})
+		if err != nil && c.status.Error == "" {
 			c.status.Error = "capture completion failed: " + err.Error()
 		}
 		c.mu.Unlock()
 		_ = c.spool.Close()
 		if recorded != nil {
-			recorded()
+			recorded(err == nil)
 		}
 		close(c.finished)
 	})
@@ -720,9 +771,27 @@ func (c *Command) RequestBackground() error {
 	if !c.status.CanBackground() {
 		return errors.New("only a lazybox run still in the foreground can move to the background")
 	}
-	c.backgroundRequested = true
+	return c.requestLocked(requestBackground)
+}
+
+// requestLocked asks a followed run for request; it gets it when it next asks
+// (Follow). The request is recorded first, so a Runner restart in between
+// does not lose it. If recording fails it is still asked of the run, and the
+// error says a restart would lose it.
+func (c *Command) requestLocked(request string) error {
+	asked := &c.stopRequested
+	if request == requestBackground {
+		asked = &c.backgroundRequested
+	}
+	var err error
+	if !*asked {
+		if _, err = c.spool.AppendReserved(Output{Type: "request", Offset: c.status.Offset, Request: request}); err != nil {
+			err = fmt.Errorf("the run is asked, but a Runner restart before it asks would lose the request: %w", err)
+		}
+	}
+	*asked = true
 	c.wakeLocked()
-	return nil
+	return err
 }
 
 func (c *Command) wakeLocked() {
@@ -880,14 +949,27 @@ func (c *Command) adopt() {
 		c.finish(nil, "", processguard.ErrCleanupUnconfirmed)
 		return
 	}
+	if host := c.reattach("after a Runner restart"); host != nil {
+		c.follow(host)
+	}
+}
+
+// reattach attaches to the command's host again, resuming after the last
+// chunk recorded: after a Runner restart, or after this Runner's connection
+// to it was lost (when names which). A command whose host is gone is finished
+// as of unknown outcome (the host's exit killed its group); one whose host
+// cannot be adopted is stopped. It returns nil once the command is finished.
+func (c *Command) reattach(when string) *sessionhost.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	host, err := c.hostBackend.Attach(ctx, c.hostRoot, c.hostID, c.seq)
+	c.mu.Lock()
+	seq := c.seq
+	c.mu.Unlock()
+	host, err := c.hostBackend.Attach(ctx, c.hostRoot, c.hostID, seq)
 	var cause string
 	switch {
 	case err == nil && host.Spawned():
-		c.follow(host)
-		return
+		return host
 	case err == nil:
 		_ = host.Detach()
 		cause = "command did not start before the Runner restarted"
@@ -896,14 +978,60 @@ func (c *Command) adopt() {
 		// is gone, and its exit status with it.
 		_ = c.hostBackend.Forget(c.hostRoot, c.hostID)
 		c.finish(nil, "", errors.New("command outcome unknown: its session host exited while no Runner was attached"))
-		return
+		return nil
 	default:
-		cause = "command stopped: its session host could not be adopted after a Runner restart"
+		cause = "command stopped: its session host could not be adopted " + when
 	}
+	c.stopHost(ctx, cause)
+	return nil
+}
+
+// stopHost stops a command this Runner cannot supervise and finishes it with
+// cause, or as unconfirmed if the stop is not confirmed.
+func (c *Command) stopHost(ctx context.Context, cause string) {
 	if c.hostBackend.Stop(ctx, c.hostRoot, c.hostID) != nil {
 		cause = processguard.ErrCleanupUnconfirmed.Error()
 	}
 	c.finish(nil, "", errors.New(cause))
+}
+
+// maxReconnects bounds the attempts to re-attach a host whose connection
+// keeps ending before anything arrives on it.
+const maxReconnects = 3
+
+// reconnect handles a connection to the command's host that ended without the
+// host saying why (not superseded, not this Runner detaching). The host may
+// well be alive, and its command with it: finishing the command here would
+// call it done while it runs, and the next Runner's sweep would then stop it
+// as an orphan. So the command is re-attached, as a restart would.
+//
+// The host's own "attached" is no reason to stand down: it counts this
+// Runner's dead connection as attached until it reads its close. Attaching
+// supersedes such a stale client. Another Runner cannot hold the host: this
+// one holds the state lock, so it is the only legitimate client.
+// attempt counts the reconnections since anything last arrived. It returns
+// the new connection, or nil once the command is settled here.
+func (c *Command) reconnect(lost *sessionhost.Client, attempt int) *sessionhost.Client {
+	_ = lost.Detach()
+	if attempt > maxReconnects {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		c.stopHost(ctx, "command stopped: its session host connection kept failing")
+		return nil
+	}
+	host := c.reattach("after its connection was lost")
+	if host == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.detaching {
+		// This Runner is leaving the command to the next one meanwhile.
+		_ = host.Detach()
+		return nil
+	}
+	c.host = host
+	return host
 }
 
 // follow records the host's chunks, acknowledging each only once it is in the
@@ -916,6 +1044,7 @@ func (c *Command) follow(host *sessionhost.Client) {
 	c.mu.Unlock()
 	go func() {
 		defer close(done)
+		attempts := 0
 		for {
 			m, exit, err := host.Next(context.Background())
 			if err != nil {
@@ -928,12 +1057,16 @@ func (c *Command) follow(host *sessionhost.Client) {
 					c.handOver()
 					return
 				}
-				if !detaching {
-					// The host vanished: nothing confirms the command's group stopped.
-					c.finish(nil, "", processguard.ErrCleanupUnconfirmed)
+				if detaching {
+					return
 				}
-				return
+				attempts++
+				if host = c.reconnect(host, attempts); host == nil {
+					return
+				}
+				continue
 			}
+			attempts = 0
 			if exit != nil {
 				var cause error
 				if exit.Outcome.Error != "" {
@@ -943,16 +1076,22 @@ func (c *Command) follow(host *sessionhost.Client) {
 				// exits on its own once released, a moment later; its record goes
 				// first, so that once the command is done no inventory, stop or
 				// orphan sweep finds the host still listed.
-				retired := false
-				retire := func() {
+				settled := false
+				retire := func(written bool) {
+					settled = true
+					if !written {
+						// Not recorded: the host keeps the exit, and the next
+						// Runner, adopting the command, collects it again.
+						_ = host.Detach()
+						return
+					}
 					_ = host.Release()
 					_ = host.Detach()
 					_ = c.hostBackend.Forget(c.hostRoot, host.ID())
-					retired = true
 				}
 				c.completeThen(exitCode(processguard.Outcome(exit.Outcome)), exit.Outcome.Signal, cause, nil, retire)
-				if !retired {
-					retire() // Completed earlier on another path.
+				if !settled {
+					retire(true) // Completed earlier on another path.
 				}
 				return
 			}
@@ -1033,8 +1172,7 @@ func (c *Command) CancelForegroundPipe() {
 	if !c.status.CanBackground() || c.backgroundRequested || c.detaching {
 		return
 	}
-	c.stopRequested = true
-	c.wakeLocked()
+	_ = c.requestLocked(requestStop)
 }
 
 func (c *Command) Cancel() error {
@@ -1054,10 +1192,8 @@ func (c *Command) Cancel() error {
 	case host == nil && process == nil && c.Status().Following:
 		// A `lazybox run` stops its own command when it next asks (FollowPipe).
 		c.mu.Lock()
-		c.stopRequested = true
-		c.wakeLocked()
-		c.mu.Unlock()
-		return nil
+		defer c.mu.Unlock()
+		return c.requestLocked(requestStop)
 	case host != nil:
 		// The host applies the command's grace period itself, so a stop
 		// in progress completes even if this Runner goes away.

@@ -47,6 +47,16 @@ speak the version in its record without displacing the attached Runner.
 
 ## Delivery contract
 
+- An agent's output is JSON lines, and only JSON is sequenced: a line that is
+  not JSON (a stray print) cannot travel in a frame, so the host keeps it in
+  the bounded, redacted stderr tail its exit report carries instead (its
+  first 512 bytes, redacted before they are cut). Before,
+  such a line cut the connection, and stayed at the head of the log so that
+  every re-attachment failed on it. JSON that is not a message (`42`, a
+  string, `null`) reaches the Runner, which acknowledges it in order with the
+  lines before it and keeps a diagnostic of it, reported with the agent's
+  stderr when its stream ends (an exit, a lost connection, a close); the
+  agent goes on being supervised. A local pipe does the same.
 - Every output line or chunk gets a transport sequence number. The Runner
   acknowledges it only after what it derived is durable: for agents, the
   events in the execution journal (each records its `transportCursor`); for
@@ -82,7 +92,12 @@ speak the version in its record without displacing the attached Runner.
 - While no Runner is attached the host keeps reading until a 64 MiB buffer is
   full, then stops: the program blocks on its own output instead of losing it.
   A Runner that is slow to read gets the same backpressure; only its process
-  dying, or a newer Runner attaching, ends its connection.
+  dying, or a newer Runner attaching, ends its connection. Once the program
+  has been waited for, the host takes what is left in its pipes or its
+  terminal past the limit, up to 1 MiB more: a stopped program's exit is
+  reported even when no Runner is left to make room. Output beyond that,
+  from a descendant that outlived the program (a background job still
+  holding a terminal), is dropped, and the exit report says so.
 - Only the attached Runner's operations count. A connection a newer Runner
   superseded is closed at its next operation, which is not applied.
 - The Runner's input to an agent is queued and written by its own goroutine, so
@@ -126,6 +141,22 @@ notices in the conversation.
   cursors across restarts, and their turn index is rebuilt as they open.
 - Cancelling a hosted process's context stops it, exactly as for a local pipe.
   Only an explicit `Detach`, or the Runner dying outright, leaves it running.
+- A command's connection to its host that ends without the host saying why
+  (not superseded, not this Runner detaching) is re-attached from the last
+  chunk recorded, as a restart would; the command was not stopped. A host
+  that is gone is reported as `command outcome unknown`. The host's own
+  "attached" is not a reason to stand down (it counts the dead connection
+  until it reads its close); attaching supersedes that stale client. A
+  connection that keeps ending before anything arrives on it is given up
+  after three attempts and the command stopped. Before, the command was
+  marked done while it ran, and the next Runner's sweep stopped it.
+- A command's completion is recorded before its host is released, in room
+  its journal keeps for it: a command whose output filled its journal still
+  records how it ended. If the completion cannot be written, the host keeps
+  the exit for the next Runner instead of being released.
+- A stop or a move to the background asked of a followed `lazybox run` is
+  journalled before it is asked; the next Runner asks it again if this one
+  restarts before the run polls.
 - Opening the command registry re-attaches every unfinished command with a host.
   A command whose host is gone is reported as `command outcome unknown` (its
   host's exit killed its group); one whose host cannot be adopted is stopped.
@@ -192,6 +223,9 @@ notices in the conversation.
   The conversation still resumes natively when its Runner returns.
 - A host whose directory was deleted (its state is gone) stops its program and
   exits. A host removes its directory when it exits.
+- A host told to stop whose program is still not stopped a minute past its
+  stop grace, with no Runner attached, abandons the program and exits: the
+  Runner that asked went away, and nothing else would ever end the host.
 - `scripts/runner-command.mjs` sets `LAZYBOX_V2_KEEP_AGENTS=1` for Dev, Working
   and the Codefly service; an installed release's `lazybox-runner serve` keeps
   agents by default, and its service (a launchd job; on Linux a systemd user
@@ -555,6 +589,19 @@ directory, in `hosts/` and `command-hosts/`.
   `TestReplayedReplyTextIsHandedOverOnce`,
   `TestResolvedRequestIsNotReplayedAfterReattach` (Codex), and in `internal/redact`
   `TestSecretCutByTheWindowDoesNotLeak`.
+- Robustness fixes, each failing without its fix:
+  `TestALineThatIsNotJSONDoesNotBlockTheConnection`,
+  `TestAStopWithAFullBufferEndsTheHost`, `TestAStopNoRunnerSeesThroughIsAbandoned`,
+  `TestOutputAfterTheProgramIsGoneIsBounded`,
+  `TestANonJSONLineCutThroughACredentialDoesNotLeakIt`
+  (`internal/sessionhost`); `TestJSONThatIsNotAMessageKeepsTheAgentSupervised`,
+  `TestALastLineThatIsNotAMessageIsAcknowledged`,
+  `TestCloseAfterALineThatIsNotAMessageStopsTheAgent` (`adapters/jsonl`);
+  `TestACommandThatFillsItsJournalKeepsItsCompletion`,
+  `TestAnUnrecordedCompletionLeavesTheExitWithTheHost`,
+  `TestADroppedHostConnectionIsReattached`,
+  `TestADroppedConnectionTheHostStillCountsIsReattached`,
+  `TestRequestsToAFollowedRunOutliveARunnerRestart` (`runner/commands`).
 - Redelivery, backpressure, proxy re-pointing, token authentication, the
   version window, stream mode, orphan limit, terminate-kills-descendants, and
   exit while detached: `internal/sessionhost`.

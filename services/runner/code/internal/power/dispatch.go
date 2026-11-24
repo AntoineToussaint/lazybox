@@ -48,15 +48,18 @@ type Dispatcher struct {
 	Launch  Launcher
 	Now     func() time.Time
 
-	mu     sync.Mutex
-	seen   map[string]time.Time
-	fired  map[string][]time.Time
-	runs   []*HookRun
-	active int
+	mu    sync.Mutex
+	seen  map[string]time.Time
+	fired map[string][]time.Time
+	runs  []*HookRun
+	// running holds the runs not finished yet, by ID, however many newer
+	// runs pushed them out of runs: they still count against
+	// MaxConcurrentRuns until they finish.
+	running map[string]*HookRun
 }
 
 func NewDispatcher(m *Manager, launch Launcher) *Dispatcher {
-	return &Dispatcher{Manager: m, Launch: launch, Now: time.Now, seen: map[string]time.Time{}, fired: map[string][]time.Time{}}
+	return &Dispatcher{Manager: m, Launch: launch, Now: time.Now, seen: map[string]time.Time{}, fired: map[string][]time.Time{}, running: map[string]*HookRun{}}
 }
 
 // Dispatch runs every hook that follows the event and has not run for it.
@@ -117,7 +120,7 @@ func (d *Dispatcher) fire(h Hook, e Event) (HookRun, bool) {
 	switch {
 	case len(recent) >= MaxRunsPerHookPerMinute:
 		skip = "skipped: this hook already ran 10 times in the last minute"
-	case d.active >= MaxConcurrentRuns:
+	case len(d.running) >= MaxConcurrentRuns:
 		skip = "skipped: 4 hooks are already running"
 	case run.CollectionID == "":
 		skip = "skipped: hooks run for events in a workspace"
@@ -129,7 +132,7 @@ func (d *Dispatcher) fire(h Hook, e Event) (HookRun, bool) {
 		return *run, true
 	}
 	d.fired[h.ID] = append(recent, now)
-	d.active++
+	d.running[run.ID] = run
 	d.keepLocked(run)
 	d.mu.Unlock()
 	commandID, err := d.Launch(h, e, *run)
@@ -153,37 +156,45 @@ func (d *Dispatcher) keepLocked(run *HookRun) {
 func (d *Dispatcher) Finish(id string, outcome func(*HookRun)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, r := range d.runs {
-		if r.ID == id && r.State == RunRunning {
-			outcome(r)
-			if r.State == RunRunning {
-				r.State = RunSucceeded
-			}
-			r.Ended = d.Now()
-			d.active--
-			return
-		}
+	r := d.running[id]
+	if r == nil {
+		return
 	}
+	delete(d.running, id)
+	outcome(r)
+	if r.State == RunRunning {
+		r.State = RunSucceeded
+	}
+	r.Ended = d.Now()
 }
 
 // Update changes a running run (its command, say) without finishing it.
 func (d *Dispatcher) Update(id string, change func(*HookRun)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if r := d.findLocked(id); r != nil {
+		change(r)
+	}
+}
+
+// findLocked returns run id, running or among the recent runs.
+func (d *Dispatcher) findLocked(id string) *HookRun {
+	if r := d.running[id]; r != nil {
+		return r
+	}
 	for _, r := range d.runs {
 		if r.ID == id {
-			change(r)
+			return r
 		}
 	}
+	return nil
 }
 
 func (d *Dispatcher) run(id string) HookRun {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, r := range d.runs {
-		if r.ID == id {
-			return *r
-		}
+	if r := d.findLocked(id); r != nil {
+		return *r
 	}
 	return HookRun{}
 }

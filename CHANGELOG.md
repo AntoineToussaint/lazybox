@@ -206,6 +206,13 @@ leave out.
 - **Back after your Mac restarts** A conversation whose agent was running keeps its checkpoints, commands and queued messages, and resumes the agent's own session with your next message.
 - **Said plainly when something is off** No network, a Runner on another version than the app, an update that did not finish: one sentence each, with the fix.
 - **Owner uncertain, settled** A workspace or conversation a previous Lazybox left with agents or commands it can't confirm stopped no longer blocks new conversations and deleting with no way out. Lazybox checks each recorded process by its ID and start time and clears what is gone by itself, which after your Mac restarts is everything. Otherwise Delete, New conversation, the workspace's page and the conversation show which agent or command, its PID and command line, and whether it runs, with Stop them and continue, or They're already stopped, continue.
+- **A stray line no longer cuts an agent off** An agent that prints a line that is not a message keeps working, Resume and restarts re-attach it, and closing it stops it; the line is kept with the agent's diagnostics.
+- **Commands keep running when their connection drops** A command whose connection to the Runner breaks is picked back up with its output, instead of being marked done while it runs and stopped at the next restart.
+- **How a command ended is always recorded** A command whose output fills its log still records its exit, and the next Runner still finds it.
+- **Stop reaches a lazybox run across a restart** Stop or Move to background asked just before the Runner restarts still reaches the run.
+- **A stopped command never lingers** A command stopped while nothing read its output ends, and its host goes away.
+- **Slow hooks no longer block every hook** Four slow hooks used to make every later hook be skipped until the Runner restarted; each now frees its slot when it finishes.
+- **One terminal per open** Opening a terminal twice at once starts one shell, and once that shell exits the same request opens a new one.
 
 - **A Runner in Kubernetes** `lazybox remote add-kubernetes` reaches a Runner deployed in a cluster through `kubectl exec`, with the same owner handshake and pinned key as SSH; the desktop finds it like any remote Runner.
 

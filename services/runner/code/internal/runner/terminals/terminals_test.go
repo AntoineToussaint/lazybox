@@ -132,6 +132,57 @@ func TestTerminalShellLifecycle(t *testing.T) {
 	}
 }
 
+// Requests with the same key at the same time start one shell: the second
+// waits for the first and gets its terminal. Once that shell exits, the key
+// is free, and a new request with it starts a new shell.
+func TestConcurrentStartsWithOneKeyStartOneShell(t *testing.T) {
+	dir := private(t)
+	m := manager(t, dir)
+	defer m.Close()
+	spec := shellSpec(t, dir)
+	const racers = 4
+	started := make(chan *Terminal, racers)
+	for range racers {
+		go func() {
+			term, err := m.Start(spec, "open-once")
+			if err != nil {
+				t.Error(err)
+			}
+			started <- term
+		}()
+	}
+	first := <-started
+	for range racers - 1 {
+		if term := <-started; term != first {
+			t.Fatal("one request key started two shells")
+		}
+	}
+	if live := m.List(""); len(live) != 1 {
+		t.Fatalf("%d terminals for one request", len(live))
+	}
+	if err := first.Write([]byte("exit 0\n")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := first.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	kept := len(m.keys)
+	m.mu.Unlock()
+	if kept != 0 {
+		t.Fatal("an exited shell kept its request key")
+	}
+	again, err := m.Start(spec, "open-once")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again == first || again.Status().Done {
+		t.Fatal("a request after the shell exited got the exited terminal")
+	}
+}
+
 func TestTerminalOutlivesTheRunner(t *testing.T) {
 	dir := private(t)
 	first := manager(t, dir)

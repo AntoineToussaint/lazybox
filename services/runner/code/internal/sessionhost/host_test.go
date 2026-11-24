@@ -15,9 +15,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/redact"
 )
 
 // The test binary doubles as a fake JSONL agent and as a short-lived "Runner"
@@ -58,6 +61,10 @@ func fakeAgent() {
 		switch {
 		case m.Method == "echo":
 			emit(out, "echoed", m.Params)
+		case m.Method == "raw":
+			var line string
+			_ = json.Unmarshal(m.Params, &line)
+			fmt.Fprintf(out, "%s\n", line)
 		case m.Method == "ask":
 			fmt.Fprintf(out, `{"id":%s,"method":"question"}`+"\n", m.Params)
 		case m.Method == "flood":
@@ -1072,4 +1079,142 @@ func TestResolveConfirmedBeforeReattachAndRejectsStaleOwner(t *testing.T) {
 	if name, _ := method(t, next(t, third)); name != "echoed" {
 		t.Fatalf("resolved request replayed: %s", name)
 	}
+}
+
+// A line that is not JSON (a stray print) cannot be sent in a frame. It must
+// not block the lines after it, nor every later attach: it becomes a
+// diagnostic in the exit report instead.
+func TestALineThatIsNotJSONDoesNotBlockTheConnection(t *testing.T) {
+	dir := root(t)
+	c, _ := started(t, dir)
+	_ = c.Ack(1)
+	_ = c.Send(json.RawMessage(`{"method":"raw","params":"debug: not json"}`))
+	_ = c.Send(json.RawMessage(`{"method":"echo","params":"after"}`))
+	m := next(t, c)
+	if name, params := method(t, m); name != "echoed" || string(params) != `"after"` {
+		t.Fatalf("the line after a non-JSON one: %s", m.Line)
+	}
+	_ = c.Detach()
+	again, err := Attach(deadline(t), dir, c.ID(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, _ := method(t, next(t, again)); name != "echoed" {
+		t.Fatal("re-attachment did not replay the unacknowledged line")
+	}
+	_ = again.Terminate()
+	for {
+		_, exit, err := again.Next(deadline(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exit != nil {
+			if !strings.Contains(exit.Stderr, "not JSON: debug: not json") {
+				t.Fatalf("the non-JSON line is not in the diagnostics: %q", exit.Stderr)
+			}
+			break
+		}
+	}
+	_ = again.Release()
+}
+
+// A host told to stop while its buffer is full, by a Runner that then went
+// away, still stops its program and exits. Its reader waited for room nobody
+// would make, so the exit was never reported and the host stayed for ever:
+// the orphan limit skips a host that is already stopping.
+func TestAStopWithAFullBufferEndsTheHost(t *testing.T) {
+	dir := root(t)
+	ctx := deadline(t)
+	const limit = 64 << 10
+	c, err := Launch(ctx, dir, Options{BufferLimit: limit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Spawn(ctx, streamSpec(`exec /usr/bin/yes`)); err != nil {
+		t.Fatal(err)
+	}
+	record, err := ReadRecord(filepath.Join(dir, c.ID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := c.AgentPID()
+	// Nothing is acknowledged: once this much was sent, the host holds a full
+	// buffer and its reader waits for room.
+	for held := 0; held < limit; {
+		held += len(next(t, c).Line)
+	}
+	if err = c.Terminate(); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Detach()
+	eventually(t, "the stopped program kept running", func() bool { return !alive(program) })
+	eventually(t, "a host stopped with a full buffer never exited", func() bool { return !alive(record.PID) })
+}
+
+// A host that was told to stop, and whose program has still not stopped long
+// after its grace period with no Runner attached, abandons it and exits. One
+// a Runner still attends, or still within the limit, waits.
+func TestAStopNoRunnerSeesThroughIsAbandoned(t *testing.T) {
+	now := time.Now()
+	stopped := now.Add(-abandonStopAfter - time.Second)
+	h := &host{cfg: launch{OrphanAfter: DefaultOrphanAfter}, spawned: true, stopping: true, stoppingSince: stopped, unattached: stopped}
+	if done, abandon := h.verdictLocked(now, stopped); done || !abandon {
+		t.Fatalf("a stuck stop: done %v, abandon %v", done, abandon)
+	}
+	h.grace = time.Minute
+	if _, abandon := h.verdictLocked(now, stopped); abandon {
+		t.Fatal("abandoned within the program's grace period")
+	}
+	h.grace = 0
+	h.unattached = now
+	if _, abandon := h.verdictLocked(now, stopped); abandon {
+		t.Fatal("abandoned a stop whose Runner just left")
+	}
+	h.unattached = stopped
+	h.client = &conn{}
+	if _, abandon := h.verdictLocked(now, stopped); abandon {
+		t.Fatal("abandoned a stop a Runner still attends")
+	}
+}
+
+// Once the program is gone the host takes what it left in its pipes past the
+// buffer limit, but no more: a descendant that outlived it (a background job
+// holding a terminal, say) cannot grow the unacknowledged log without bound.
+func TestOutputAfterTheProgramIsGoneIsBounded(t *testing.T) {
+	const limit = 4 << 10
+	h := &host{cfg: launch{BufferLimit: limit}, open: map[string]entry{}, answered: map[string]bool{}, stderr: &redact.Tail{}, gone: true}
+	h.cond = sync.NewCond(&h.mu)
+	line, _ := json.Marshal(Chunk{Channel: TerminalChannel, Data: make([]byte, 1024)})
+	for range 4 * (limit + goneSlack) / len(line) {
+		h.recordOutput(line, nil)
+	}
+	if h.size > limit+goneSlack+int64(len(line)) {
+		t.Fatalf("the host kept %d bytes after its program was gone", h.size)
+	}
+	if !strings.Contains(h.stderr.Text(), "dropped") {
+		t.Fatal("dropped output is not reported")
+	}
+}
+
+// A line that is not JSON is cut for the diagnostics only after its
+// credentials are redacted: a cut through one must not leave its start.
+func TestANonJSONLineCutThroughACredentialDoesNotLeakIt(t *testing.T) {
+	dir := root(t)
+	c, _ := started(t, dir)
+	raw, _ := json.Marshal(strings.Repeat("x", notJSONLimit-12) + "credential-value and more")
+	_ = c.Send(json.RawMessage(`{"method":"raw","params":` + string(raw) + `}`))
+	_ = c.Send(json.RawMessage(`{"method":"exit","params":0}`))
+	for {
+		_, exit, err := c.Next(deadline(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exit != nil {
+			if strings.Contains(exit.Stderr, "credential-v") || !strings.Contains(exit.Stderr, "[redacted]") {
+				t.Fatalf("the cut line leaks the credential: %q", exit.Stderr)
+			}
+			break
+		}
+	}
+	_ = c.Release()
 }

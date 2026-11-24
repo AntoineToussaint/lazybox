@@ -72,7 +72,8 @@ func (h *host) spawnTerminalLocked(spec *Spec) error {
 	go func() {
 		err := cmd.Wait()
 		h.mu.Lock()
-		h.reaped = true
+		h.reaped, h.gone = true, true
+		h.cond.Broadcast()
 		h.mu.Unlock()
 		outcome := Outcome{Started: true}
 		if state := cmd.ProcessState; state != nil {

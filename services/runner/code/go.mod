@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	buf.build/go/protovalidate v1.4.1
-	cel.dev/cel-go v0.33.2
+	cel.dev/cel-go v0.33.4
 	connectrpc.com/connect v1.21.1
 	connectrpc.com/vanguard v0.4.0
 	github.com/BurntSushi/toml v1.6.0
@@ -18,9 +18,9 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.34.0
 	github.com/rs/cors v1.11.1
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
-	golang.org/x/net v0.62.0
+	golang.org/x/net v0.63.0
 	golang.org/x/sys v0.50.0
-	golang.org/x/term v0.47.0
+	golang.org/x/term v0.48.0
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
@@ -63,7 +63,7 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/yoheimuta/go-protoparser/v4 v4.14.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/exp v0.0.0-20261113113407-e3970619a1a4 // indirect
 	golang.org/x/text v0.44.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20261110000943-09e21b237f2c // indirect

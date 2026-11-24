@@ -31,6 +31,20 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 		return Repository{}, err
 	}
 	r = m.resolveRepositorySource(ctx, r)
+	common, err := m.git(ctx, r.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return Repository{}, err
+	}
+	common, err = filepath.EvalSymlinks(common)
+	if err != nil {
+		return Repository{}, err
+	}
+	// A hidden entry is the source of the workspaces made from it: their
+	// members name its Git directory. Registering a different clone under the
+	// same ID would strand them, so that clone gets an ID of its own.
+	if old, ok := m.repos[r.ID]; ok && old.Hidden && m.common[old.ID] != common {
+		r.ID += "-" + strings.TrimPrefix(gitidentity.ID(common), "local-")[:12]
+	}
 	// The home is the person's setting, not part of a registration: one
 	// survives registering the same repository again.
 	if old, ok := m.repos[r.ID]; ok && r.Home == "" {
@@ -44,14 +58,6 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 	}
 	if len(m.repos) >= 512 {
 		return Repository{}, errors.New("repository library capacity reached")
-	}
-	common, err := m.git(ctx, r.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if err != nil {
-		return Repository{}, err
-	}
-	common, err = filepath.EvalSymlinks(common)
-	if err != nil {
-		return Repository{}, err
 	}
 	identity := gitidentity.Repository(common, r.SourceURL)
 	for _, old := range m.repositories() {

@@ -137,6 +137,59 @@ func TestGitHubRepositoryRegistrationUnifiesClonesAndPreservesWorkspace(t *testi
 	}
 }
 
+// Removing a GitHub repository hides its entry; its workspaces still name the
+// removed clone's Git directory. Adding the repository again from another
+// clone must not take over that entry, or those workspaces cannot be deleted.
+func TestReaddingRemovedGitHubRepositoryFromAnotherCloneKeepsItsWorkspaces(t *testing.T) {
+	ctx := context.Background()
+	first, second := repoTest(t), repoTest(t)
+	for _, repo := range []Repository{first, second} {
+		gitTest(t, repo.Path, "remote", "add", "origin", "https://github.com/team/api.git")
+		gitTest(t, repo.Path, "update-ref", "refs/remotes/origin/main", "HEAD")
+	}
+	root := t.TempDir()
+	m := newTest(t, root)
+	one, err := m.AddLocalRepository(ctx, first.Path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := m.Create(ctx, "from-first-clone", Spec{Name: "feature", Members: []MemberSpec{{RepositoryID: one.ID}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.RemoveRepository(one.ID); err != nil {
+		t.Fatal(err)
+	}
+	two, err := m.AddLocalRepository(ctx, second.Path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if two.ID == one.ID {
+		t.Fatal("another clone took over the removed repository's entry")
+	}
+	if hidden, ok := m.Repository(one.ID); !ok || !hidden.Hidden || hidden.Path != one.Path {
+		t.Fatalf("removed entry changed: %+v", hidden)
+	}
+	if list := m.Repositories(); len(list) != 1 || list[0].ID != two.ID {
+		t.Fatalf("library = %+v", list)
+	}
+	again, err := m.AddLocalRepository(ctx, second.Path, "")
+	if err != nil || again != two {
+		t.Fatal("re-adding the same clone was not idempotent", again, err)
+	}
+	if err = m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m = newTest(t, root)
+	inactive := func(string) bool { return false }
+	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.FinishDeletion(ctx, c.ID, false, inactive); err != nil {
+		t.Fatal("workspace from the removed clone stranded", err)
+	}
+}
+
 func TestLegacyGitHubAliasesStayResolvableButListOnce(t *testing.T) {
 	first, second := repoTest(t), repoTest(t)
 	first.ID, second.ID = "old-one", "old-two"

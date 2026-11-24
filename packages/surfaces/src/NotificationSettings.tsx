@@ -14,10 +14,11 @@ export const notificationOptions: { key: keyof NotificationPreferences; label: s
   { key: 'needsInput', label: 'Needs input', detail: 'An agent asks a question or waits for an approval.' },
   { key: 'failed', label: 'Failed', detail: 'A provider failure, a message that could not be delivered, or a turn a Runner restart interrupted.' },
   { key: 'review', label: 'Ready for review', detail: 'An agent finished its turn.' },
+  { key: 'reminders', label: 'Reminders', detail: 'Notify me when a follow-up is due. Due reminders stay in the main window until dismissed.' },
   { key: 'badge', label: 'Dock badge', detail: 'Show on the app icon the Inbox count: what needs you, pull requests and tasks included.' },
 ];
 const sounds: { key: 'soundNeedsYou' | 'soundDone'; sound: AlertSound; label: string; detail: string }[] = [
-  { key: 'soundNeedsYou', sound: 'request', label: 'Needs you', detail: 'An agent asks a question, waits for an approval, or fails.' },
+  { key: 'soundNeedsYou', sound: 'request', label: 'Needs you', detail: 'An agent asks a question, waits for an approval, fails, or a follow-up reminder is due.' },
   { key: 'soundDone', sound: 'done', label: 'Done', detail: 'An agent finished its turn.' },
 ];
 

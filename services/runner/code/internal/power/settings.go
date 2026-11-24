@@ -37,13 +37,14 @@ var NotificationFields = map[string]string{
 	"needs-input":     "needsInput",
 	"failed":          "failed",
 	"review":          "review",
+	"reminders":       "reminders",
 	"dock-badge":      "badge",
 	"sound-needs-you": "soundNeedsYou",
 	"sound-done":      "soundDone",
 }
 
 // notificationOrder is the order the schema and the writer use.
-var notificationOrder = []string{"needs-input", "failed", "review", "dock-badge", "sound-needs-you", "sound-done"}
+var notificationOrder = []string{"needs-input", "failed", "review", "reminders", "dock-badge", "sound-needs-you", "sound-done"}
 
 // appearanceField is one setting of the appearance section: its name in the
 // app (AppearancePreferences, or its typography), what it holds, and how the

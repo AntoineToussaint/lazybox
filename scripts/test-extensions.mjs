@@ -107,6 +107,7 @@ async function scenario(browser, scheme, full) {
   await expect(board.getByRole('region', { name: 'Needs you' }).getByRole('button', { name: /Pick the database/ })).toBeVisible();
   await expect(board.getByRole('heading', { name: /1 need you/ })).toBeVisible();
   const boardFrame = await inner(page);
+  assert.equal(await boardFrame.evaluate(() => lazybox.reminders.list().catch(error => error.code)), 'not-granted');
   const surface = await page.evaluate(() => getComputedStyle(document.querySelector('.extension-panel')).backgroundColor);
   await expect.poll(() => boardFrame.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe(surface);
   assert.equal(await boardFrame.evaluate(() => document.documentElement.dataset.scheme), scheme);
@@ -226,7 +227,7 @@ async function scenario(browser, scheme, full) {
     await page.getByRole('button', { name: 'Manage extensions', exact: true }).click();
     await expect(extensions).toHaveAttribute('aria-current', 'page');
     await page.getByRole('listitem', { name: 'Agent board' }).getByRole('button', { name: 'Open Agent board' }).click();
-    await expect(page.locator('iframe[title="Agent board (extension)"]')).toBeVisible();
+    await expect(page.frameLocator('iframe.extension-frame').frameLocator('iframe').getByRole('region', { name: 'Needs you' })).toBeVisible();
     await page.keyboard.press('Meta+k');
     const palette = page.getByRole('dialog', { name: 'Command palette' });
     await palette.getByRole('combobox', { name: 'Search commands' }).fill('plugins');
@@ -244,6 +245,45 @@ try {
   browser = await webkit.launch();
   await scenario(browser, 'dark', true);
   await scenario(browser, 'light', false);
+  const page = await browser.newPage();
+  await page.goto(url);
+  await page.locator('summary[aria-label="Panels"]').click();
+  await page.getByRole('button', { name: 'New Extensions panel', exact: true }).click();
+  await page.locator('.extension-home li', { hasText: 'Reminders' }).getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('dialog', { name: 'Allow Reminders?' }).getByRole('button', { name: 'Allow and turn on' }).click();
+  const reminders = page.frameLocator('iframe.extension-frame').frameLocator('iframe');
+  await reminders.getByLabel('What should you check?').fill('Check the build');
+  await reminders.getByRole('button', { name: 'Set reminder' }).click();
+  await expect(reminders.locator('#scheduled')).toContainText('Check the build');
+  const frame = await inner(page);
+  assert.match(await frame.evaluate(() => lazybox.reminders.create('Past', 1).catch(e => e.message)), /future time/);
+  await reminders.getByLabel('What should you check?').fill('Cancel this');
+  await reminders.getByRole('button', { name: 'Set reminder' }).click();
+  const cancelled = reminders.getByRole('listitem').filter({ hasText: 'Cancel this' });
+  await cancelled.getByRole('button', { name: 'Cancel' }).click();
+  await expect(cancelled).toHaveCount(0);
+
+  const revoked = await frame.evaluate(() => lazybox.reminders.create('Disabled follow-up', Date.now() + 3600000));
+
+  // Set a short deadline through the same SDK used by the panel and leave it.
+  await frame.evaluate(() => lazybox.reminders.create('Review results', Date.now() + 1500));
+  await page.getByRole('combobox', { name: 'Extension panel' }).selectOption({ label: 'Agent board' });
+  const live = page.locator('.account-notice').filter({ hasText: 'Review results' });
+  await expect(live).toBeVisible();
+  await expect(live.locator('small')).toContainText('Reminders ·');
+  await live.getByRole('button', { name: 'Done' }).click();
+  await page.goto('about:blank');
+  await page.clock.install({ time: new Date(Date.now() + 16 * 60000) });
+  await page.goto(url);
+  const due = page.locator('.account-notice').filter({ hasText: 'Check the build' });
+  await expect(due).toBeVisible();
+  await due.getByRole('button', { name: 'Done' }).click();
+  await f.extensions.handle('SetExtensionEnabled', { id: 'reminders', enabled: false });
+  await page.reload();
+  await expect.poll(() => page.evaluate(id => Object.keys(localStorage).some(key => key.endsWith(':' + id)), revoked)).toBe(false);
+  await expect(page.locator('.page-layout')).toBeVisible();
+  await expect(due).toHaveCount(0);
+  await page.close();
   console.log('extensions: ok');
 } finally {
   await browser?.close();

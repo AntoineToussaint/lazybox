@@ -6,6 +6,7 @@ import {
   compareRepositories,
   repositoryOrganization,
 } from "./repository-model";
+import { shortName } from "./repository-request-model";
 import { GitHubSettings } from "./GitHubSettings";
 import { ReplaceRepositoryCopy } from "./RepositoryReplacement";
 import "./repository-browser.css";
@@ -51,8 +52,10 @@ export function RepositoryBrowser({
   const results = useRef<HTMLDivElement>(null);
   useEffect(() => { if (results.current) results.current.scrollTop = 0; }, [query]);
   const entries = [...(catalog?.entries || [])].sort(compareRepositories),
+    needle = query.trim().toLowerCase(),
+    qualified = needle.includes("/"),
     visible = entries.filter((r) =>
-      r.name.toLowerCase().includes(query.trim().toLowerCase()),
+      (qualified ? r.name : shortName(r.name)).toLowerCase().includes(needle),
     );
   const github = catalog?.sources.find((s) => s.id === "github"),
     limited = github?.state !== "connected";
@@ -83,7 +86,7 @@ export function RepositoryBrowser({
           spellCheck={false}
           autoComplete="off"
           aria-label="Find repositories"
-          placeholder="Search organization or repository…"
+          placeholder="Search by repository name or owner/repo…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -216,14 +219,14 @@ export function RepositoryBrowser({
                         onSelected(next);
                       }}
                     />
-                    <span title={repo.name}>{repo.name.includes("/")?repo.name.slice(repo.name.indexOf("/")+1):repo.name}</span>
+                    <span title={repo.name}>{shortName(repo.name)}</span>
                     {included.has(repo.repositoryId) && (
                       <small>In workspace</small>
                     )}
                   </label>
                 ) : (
                   <>
-                    <span title={repo.name}>{repo.name.includes("/")?repo.name.slice(repo.name.indexOf("/")+1):repo.name}</span>
+                    <span title={repo.name}>{shortName(repo.name)}</span>
                     {repo.repositoryId && repo.identity.startsWith("github:") && (
                       // A history GitHub replaced (a force-push with a new root,
                       // or a new repository under the name): a fresh copy.
@@ -277,7 +280,7 @@ export function RepositoryBrowser({
             </strong>
             <p>
               {query.trim()
-                ? "Try a different repository or organization name. Your selection is kept when you search."
+                ? "Try a repository name or owner/repo. Your selection is kept when you search."
                 : limited
                 ? "The current GitHub connection may expose only part of your repositories. Check its access or discover an existing local checkout."
                 : "Refresh discovery, check GitHub access, or choose a folder containing your repositories."}

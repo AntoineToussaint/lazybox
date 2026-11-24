@@ -56,7 +56,7 @@ export async function createExtensionsFake({ mutations }) {
     const a = approvals.get(id);
     const grants = m.grants || [], hosts = m.network || [];
     const issues = [];
-    for (const [i, g] of grants.entries()) if (!/^(read:(workspaces|sessions|attention|commands|missions|usage|runtime|pulls|releases|artifacts|mailbox)|show:(conversations|runtime|github)|scan:disk|draft:artifact|send:messages|switch:(claude|codex)|do:[\w.-]+)$/.test(g)) issues.push({ path: `grants[${i}]`, line: 1, message: `there is no grant "${g}"`, severity: 'error' });
+    for (const [i, g] of grants.entries()) if (!/^(read:(workspaces|sessions|attention|commands|missions|usage|runtime|pulls|releases|artifacts|mailbox)|show:(conversations|runtime|github)|manage:reminders|scan:disk|draft:artifact|send:messages|switch:(claude|codex)|do:[\w.-]+)$/.test(g)) issues.push({ path: `grants[${i}]`, line: 1, message: `there is no grant "${g}"`, severity: 'error' });
     // An account policy (EXTENSIONS.md): the subset parser keeps its key; its two fields are read from the text.
     const accountPolicy = m.accountPolicy !== undefined ? { providers: grants.filter(g => g.startsWith('switch:')).map(g => g.slice(7)), switchOnLimit: /^\s+switchOnLimit:\s*true\b/m.test(text), accounts: [] } : undefined;
     const state = issues.length || !m.name ? 'broken' : !a ? 'new' : !a.enabled ? 'disabled' : !subset(grants, a.grants) || !subset(hosts, a.hosts) ? 'review' : 'enabled';

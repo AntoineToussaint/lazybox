@@ -5,7 +5,7 @@ import { browserRequestSummary } from './browser-model';
 import { startRequestSummary } from './conversation-request-model';
 import { questionsOf } from './request-model';
 import { providerData } from '@lazybox/client-core';
-import { accountLabel, awaitingFirstMessage } from './agent-status';
+import { accountLabel, awaitingFirstMessage, runningChild } from './agent-status';
 import { backAt, isLimitState } from './subscription-model';
 
 /**
@@ -139,7 +139,7 @@ export function deriveAttention(session: Session, seenAt = 0): Attention {
     const restart = !fault && session.status !== 'failed';
     return { ...base, state: 'failed', unread: at > seenAt, reason: restart ? 'Interrupted' : isLimitState(session.fault) && !session.closed ? 'Limit reached' : 'Failed', line: restart ? 'The Runner stopped during this turn and could not re-attach' : faultSummary(session) };
   }
-  if (!session.closed && !awaitingFirstMessage(session) && (session.busy || session.queued > 0 || ['running', 'starting', 'switching_profile'].includes(session.status))) {
+  if (!session.closed && !awaitingFirstMessage(session) && (session.busy || session.queued > 0 || session.agents.some(runningChild) || ['running', 'starting', 'switching_profile'].includes(session.status))) {
     return { ...base, state: 'working', unread: false, reason: session.status === 'switching_profile' ? 'Switching subscription' : 'Working', line: message };
   }
   if (ended > seenAt && ended > 0) {
@@ -202,8 +202,8 @@ export function seenMark(row: Pick<Attention, 'at' | 'turnEndedAt'>): number {
 }
 
 /** Notifications (a system notification, or a toast in a focused window) per kind; sounds apart from them. */
-export type NotificationPreferences = { needsInput: boolean; failed: boolean; review: boolean; badge: boolean; soundNeedsYou: boolean; soundDone: boolean };
-export const defaultNotificationPreferences: NotificationPreferences = { needsInput: true, failed: true, review: false, badge: true, soundNeedsYou: true, soundDone: false };
+export type NotificationPreferences = { needsInput: boolean; failed: boolean; review: boolean; reminders: boolean; badge: boolean; soundNeedsYou: boolean; soundDone: boolean };
+export const defaultNotificationPreferences: NotificationPreferences = { needsInput: true, failed: true, review: false, reminders: true, badge: true, soundNeedsYou: true, soundDone: false };
 export type AttentionSpeech = { id: string; text: string; at: number; requestId?: string };
 export type AttentionNotice = { speech?: AttentionSpeech; key: string; kind: 'needs-input' | 'failed' | 'review'; title: string; body: string; collectionId: string; sessionId: string; runner?: string };
 

@@ -149,6 +149,11 @@
     },
     mailbox: { list: function () { return call('mailbox.list'); } },
     sessions: { list: function (options) { return call('sessions.list', options); } },
+    reminders: {
+      list: function () { return call('reminders.list'); },
+      create: function (text, due) { return call('reminders.create', { text: text, due: due }); },
+      remove: function (id) { return call('reminders.remove', { id: id }); },
+    },
     attention: { list: function () { return call('attention.list'); } },
     commands: { list: function (sessionId) { return call('commands.list', { sessionId: sessionId }); } },
     missions: { list: function () { return call('missions.list'); } },

@@ -12,7 +12,7 @@ import { ageLabel, attentionTitle, seenMark, type Attention, type AttentionState
 import { announceAttention } from './voice/voice-session';
 import { attentionChanges, deliverAttention } from './attention-alerts';
 import { bindings, displayKey, isChord } from './actions';
-import { useAttentionHost, useNotificationPreferences, useViewingReader } from './useAttention';
+import { attentionWindowFocused, useAttentionHost, useNotificationPreferences, useViewingReader } from './useAttention';
 import { RunnerBadge, useMergedInbox, useRunnerActionHosts, useRunnerDirectory } from './RunnerDirectory';
 import { rowTarget, type RunnerRow } from './runner-directory';
 import { MissionInboxSection, useAwaitingTasks, useMissionAttention } from './MissionInbox';
@@ -168,7 +168,7 @@ function useAttentionNotifier(inbox: ReturnType<typeof useMergedInbox>, count: n
     const before = previous.current, { collections, selection, preferences, viewing } = latest.current;
     previous.current = new Map(inbox.rows.map(row => [row.key, row]));
     if (!before) return;
-    const focused = document.visibilityState === 'visible' && document.hasFocus();
+    const focused = attentionWindowFocused();
     const here = focused ? inbox.rows.find(row => row.runner === inbox.here && row.session.id === selection.sessionId)?.key : '';
     const elsewhere = viewing();
     const runnerOf = (row: Attention) => row.runner && row.runner !== inbox.here ? others.current?.find(value => value.id === row.runner) : undefined;

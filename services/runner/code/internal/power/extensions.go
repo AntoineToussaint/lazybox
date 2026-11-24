@@ -70,6 +70,7 @@ const (
 	GrantReadPulls         = "read:pulls"
 	GrantReadReleases      = "read:releases"
 	GrantReadArtifacts     = "read:artifacts"
+	GrantReminders         = "manage:reminders"
 	GrantDiskScan          = "scan:disk"
 	GrantReadMailbox       = "read:mailbox"
 	GrantShowRuntime       = "show:runtime"
@@ -92,7 +93,7 @@ const SwitchAccountsPrefix = "switch:"
 var AccountPolicyGrants = []string{SwitchAccountsPrefix + "claude", SwitchAccountsPrefix + "codex"}
 
 // ExtensionGrants are the fixed grants, in the order the sheet lists them.
-var ExtensionGrants = []string{GrantReadWorkspaces, GrantReadSessions, GrantReadAttention, GrantReadCommands, GrantReadMissions, GrantReadUsage, GrantReadRuntime, GrantReadPulls, GrantReadReleases, GrantReadArtifacts, GrantReadMailbox, GrantShowRuntime, GrantShowGitHub, GrantDraftArtifact, GrantShowConversations, GrantDiskScan, GrantSendMessages}
+var ExtensionGrants = []string{GrantReadWorkspaces, GrantReadSessions, GrantReadAttention, GrantReadCommands, GrantReadMissions, GrantReadUsage, GrantReadRuntime, GrantReadPulls, GrantReadReleases, GrantReadArtifacts, GrantReadMailbox, GrantShowRuntime, GrantShowGitHub, GrantDraftArtifact, GrantShowConversations, GrantDiskScan, GrantReminders, GrantSendMessages}
 
 // ExtensionIcons are the icons a panel may name (the app's own set).
 var ExtensionIcons = []string{"puzzle", "chart", "columns", "activity", "target", "sliders", "globe", "bell", "inbox", "checklist", "report", "notes", "card", "tag", "sparkle", "shield", "agent", "eye", "history", "file", "folder", "chat", "terminal", "branch", "cloud", "review", "layout"}

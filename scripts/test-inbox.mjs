@@ -56,6 +56,12 @@ try {
   // Three agents move while the person is in another app: one finishes, one fails, one asks.
   await page.evaluate(() => { window.__focused = false; });
   Object.assign(session('review-session'), {status: 'done', busy: false, agents: root('done', Date.now(), {turnEndedAtUnixMillis: ms(Date.now()), lastTurnStatus: 'completed'}), lastMessage: 'I split the parser into three files.\n\n**All 42 tests pass.**'});
+  const reviewRow = page.locator('.page-layout .conversation-row').filter({hasText: 'Refactor the parser'});
+  const reviewer = { id: 'claude-reviewer', parentId: 'root', kind: 'local_agent', status: 'running' };
+  session('review-session').agents.push(reviewer);
+  await expect(reviewRow).toContainText('Running in the background');
+  await expect(reviewRow.locator('.session-mark .live-indicator[data-tone="busy"]')).toBeVisible();
+  reviewer.status = 'done';
   Object.assign(session('failing-session'), {status: 'failed', busy: false, fault: 'provider delivery failed; reconcile before continuing', agents: root('failed', Date.now())});
   Object.assign(session('approval-session'), {status: 'waiting_approval', busy: false, agents: root('waiting_approval', Date.now()), pending: [{type: 'approval', requestId: 'a-deps', text: 'Bash', providerDataJson: data({input: {command: 'npm update'}})}]});
   await expect(inboxButton).toHaveAccessibleName('Inbox, 4 conversations need attention', {timeout: 10_000});
@@ -67,7 +73,6 @@ try {
   await page.evaluate(() => { window.__focused = true; });
 
   // Sidebar: the finished conversation is marked unread in its workspace.
-  const reviewRow = page.locator('.page-layout .conversation-row').filter({hasText: 'Refactor the parser'});
   await expect(reviewRow).toHaveAttribute('data-unread', 'review');
   await expect(reviewRow.locator('.session-dot.unread')).toBeVisible();
 

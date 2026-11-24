@@ -12,7 +12,8 @@ import { Icon } from './Icons';
 import type { ExtensionPanelChoice, ModuleProps } from './PanelRegistry';
 import { useRunner } from './RunnerContext';
 import { useRunnerIdentity } from './RunnerDirectory';
-import { useSeen } from './useAttention';
+import { listReminders, createReminder, removeReminder } from './reminders';
+import { useAttentionRoot, useSeen } from './useAttention';
 import { useExtensions } from './useExtensions';
 import { openInBrowser } from './web-links';
 import { TrackArtifactDialog } from './ArtifactDialogs';
@@ -163,6 +164,7 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
   const [stalled, setStalled] = useState(() => { const at = Number(storage()?.getItem(loadingKey(extension.id)) || 0); return at > 0 && Date.now() - at > 15_000; });
   const [reopen, setReopen] = useState(0);
   const panel = extension.panels.find(p => p.id === panelId) || extension.panels[0];
+  const reminderRoot = useAttentionRoot();
   const runs = extension.state === 'enabled' || extension.state === 'review';
   const notify = (notice: Notice) => setNotices(list => [notice, ...list.filter(n => n.key !== notice.key)].slice(0, 3));
   // A session per panel, and a new one whenever its files or grants change (hot reload).
@@ -261,6 +263,9 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
         const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : undefined;
         return projectConversations((await client.listHistory({ limit, ...(workspaceId ? { collectionId: workspaceId } : {}) })).sessions, collectionsRef.current, workspaceId);
       },
+      'reminders.list': async () => listReminders(localStorage, reminderRoot, extension.id),
+      'reminders.create': async params => createReminder(localStorage, reminderRoot, extension.id, stringParam(params, 'text', 240), params.due),
+      'reminders.remove': async params => removeReminder(localStorage, reminderRoot, extension.id, stringParam(params, 'id', 64)),
       'attention.list': async () => projectAttention((await client.listHistory({ limit: 100 })).sessions, collectionsRef.current, seenRef.current),
       'commands.list': async params => projectCommands((await client.listCommands({ sessionId: stringParam(params, 'sessionId') })).commands),
       'missions.list': async () => projectMissions((await client.listMissions({})).missions),
@@ -296,7 +301,7 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
       else if (refused.code === 'refused') { notify({ key: k, tone: 'warn', text: 'Lazybox refused a request from this extension; reconnecting it.' }); setReopen(n => n + 1); }
       else notify({ key: k, tone: refused.code === 'rate-limited' ? 'warn' : 'info', text: refused.message });
     } });
-  }, [session, client]);
+  }, [session, client, reminderRoot, extension.id]);
   // Messages from the frame: only from this panel's own shell.
   useEffect(() => {
     if (!host || !session) return;

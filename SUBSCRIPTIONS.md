@@ -225,7 +225,7 @@ There is no terminal instruction or token field. The native callback currently
 requires the browser and Runner on the same machine; remote enrollment needs
 its own supported callback transport. Quota windows arrive from structured SDK
 `rate_limit_event` reports during activity and from **Refresh usage**. Refresh
-uses SDK 0.3.311's experimental
+uses the SDK's (0.3.311 to 0.3.330, response type unchanged) experimental
 `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET` method with
 `skipBehaviors: true`, no prompt, no tools/hooks and no persisted conversation.
 This version-pinned adapter keeps 0–100 usage percentages separate from event

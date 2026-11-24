@@ -211,7 +211,7 @@ try {
   await page.reload();
   await expect(page.locator('[data-panel-id="alpha-work-chat"]').getByRole('textbox', { name: 'Message', exact: true })).toBeEnabled();
   assert.equal(fixture.mutations.length, 1, 'restoring assistant started another provider');
-  fixture.sessions.push(...['a', 'b', 'c'].map(id => ({ ...fixture.sessions[0], id: `plain-${id}`, collectionId: '', title: `Conversation ${id}` })));
+  fixture.sessions.push(...['a', 'b', 'c'].map(id => ({ ...fixture.sessions[0], agents: [], busy: false, id: `plain-${id}`, collectionId: '', title: `Conversation ${id}` })));
   const olderContext = await browser.newContext();
   await olderContext.addInitScript(() => { try { localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'); } catch { /* a popup without storage */ } });
   const olderPage = await olderContext.newPage();

@@ -105,8 +105,9 @@ Mac with their own Claude sign-in, `LAZYBOX_V2_REAL_PROVIDER=claude`:
 - `make test-real-outlive`: `TestRealAgentOutlivesRunnerRestart/claude` passed.
 - Codex was skipped by choice (not part of this upgrade).
 - **Unverified live:** a macOS Keychain that refuses a renewed login (now
-  `invalid_request` with `api_error: oauth_refresh_store_refused`, reported
-  `auth_required` by the worker; covered by unit tests only), a Monitor
+  `invalid_request` with `api_error: oauth_refresh_store_refused`; reported
+  by the worker as a provider error naming that cause, never `auth_required`,
+  since the stored login is intact; covered by unit tests only), a Monitor
   approval without suggestions, and the experimental usage query (its response
   type is unchanged between the two versions).
 

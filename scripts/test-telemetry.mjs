@@ -12,13 +12,23 @@ let browser;
 try{
  await server.listen();browser=await (process.env.TEST_WEBKIT?webkit:chromium).launch({headless:true});const page=await browser.newPage({viewport:{width:1500,height:1100}});page.setDefaultTimeout(10000);
  const errors=[];await collectPageErrors(page, errors);
- await page.route('**/GetTelemetry',route=>route.fulfill({json:{groups:[{scope:{workspace:'alpha',execution:'alpha-session',profile:'Account one'},source:'gateway',model:'fixture',records:'2',unpriced:'1',incomplete:'1',nanos:'12300000',tokens:{input:'1200',cacheRead:'800',output:'100'}}],contexts:[{scope:{execution:'alpha-session'},agent:'root',used:'80000',capacity:'1000000',reserve:'33000',source:'sdk_summary_estimate',observedAt:'2026-11-02T12:00:00Z',categories:[{name:'messages',tokens:'24500',kind:'used',included:true},{name:'system_tools',tokens:'20600',kind:'used',included:true},{name:'mcp_tools',tokens:'16800',kind:'used',included:true},{name:'system_prompt',tokens:'11500',kind:'used',included:true},{name:'skills',tokens:'6600',kind:'used',included:true},{name:'mcp_tools_deferred',tokens:'50000',kind:'deferred',included:false}]}]}}));
+ await page.route('**/GetTelemetry',route=>route.fulfill({json:{groups:[{scope:{workspace:'alpha',execution:'alpha-session',profile:'Account one'},source:'gateway',model:'fixture',records:'2',unpriced:'1',incomplete:'1',nanos:'12300000',tokens:{input:'1200',cacheRead:'800',output:'100'}}],contexts:[...['worker-one','worker-two'].map(agent=>({scope:{execution:'alpha-session'},agent,used:'10',capacity:'100'})),{scope:{execution:'alpha-session'},agent:'root',used:'80000',capacity:'1000000',reserve:'33000',source:'sdk_summary_estimate',observedAt:'2026-11-02T12:00:00Z',categories:[{name:'messages',tokens:'24500',kind:'used',included:true},{name:'system_tools',tokens:'20600',kind:'used',included:true},{name:'mcp_tools',tokens:'16800',kind:'used',included:true},{name:'system_prompt',tokens:'11500',kind:'used',included:true},{name:'skills',tokens:'6600',kind:'used',included:true},{name:'mcp_tools_deferred',tokens:'50000',kind:'deferred',included:false}]}]}}));
+ const lifecycle=fixture.openEvents('alpha-session');
+
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`);
  await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');await page.getByRole('combobox',{name:'Session',exact:true}).selectOption('alpha-session');
  const trigger=page.getByRole('button',{name:'Context and token cost'});await expect(trigger).toContainText('8%');
  const messagesBefore=await page.locator('.messages:visible').boundingBox();await trigger.click();
  const panel=page.locator('.context-popover');await expect(panel).toBeVisible();
  assert.deepEqual(await page.locator('.messages:visible').boundingBox(),messagesBefore,'context should not displace conversation');
+ for(const agentId of ['worker-one','worker-two']) lifecycle.push({type:'agent_status',agentId:'attempt-1:'+agentId,status:'running',parentAgentId:'root'});
+ await expect(panel.locator('.context-card')).toHaveCount(3);
+ lifecycle.push({type:'agent_status',agentId:'attempt-1:worker-one',status:'done'});
+ await expect(panel.getByRole('region',{name:'worker-one context'})).toHaveCount(0);
+ await expect(panel.getByRole('region',{name:'worker-two context'})).toBeVisible();
+ lifecycle.push({type:'agent_status',agentId:'attempt-1:worker-two',status:'stopped'});
+ await expect(panel.locator('.context-card')).toHaveCount(1);
+
  await expect(panel).toContainText('80K');await expect(panel).toContainText('1M');
  await expect(panel.locator('.context-deferred')).toContainText('Outside context');await expect(panel.getByRole('meter')).toHaveAttribute('aria-valuenow','80000');
  await expect(panel.locator('.context-meter>span').first()).toHaveAttribute('style',/width: 2.45%;/);

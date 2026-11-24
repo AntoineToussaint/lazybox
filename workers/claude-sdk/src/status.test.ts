@@ -217,3 +217,14 @@ test('late progress and start notifications cannot restart a completed task', ()
   }
   assert.equal(status.normalize(message({ ...task, subtype: 'task_started', run_id: '003', description: 'Retry' }))[0].status, 'running');
 });
+
+test('later results refresh context only for agents still running', () => {
+  const status = new NativeStatus();
+  for (const id of ['finished', 'active']) {
+    status.normalize(message({ type: 'system', subtype: 'task_started', task_id: id, tool_use_id: id, is_backgrounded: true }));
+    status.normalize(message({ type: 'assistant', parent_tool_use_id: id, message: { content: [], model: 'fixture', usage: { input_tokens: 20 } } }));
+  }
+  status.normalize(message({ type: 'system', subtype: 'task_notification', task_id: 'finished', status: 'completed' }));
+  const result = status.normalize(message({ type: 'result', subtype: 'success', modelUsage: {fixture: {contextWindow: 100}} }));
+  assert.deepEqual(result.filter(event => event.type === 'context').map(event => event.agentId), ['claude-tool:active']);
+});

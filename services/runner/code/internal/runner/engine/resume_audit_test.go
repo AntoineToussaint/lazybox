@@ -433,8 +433,10 @@ func TestADetachFailingWhileTheLoopEndsIsALostStream(t *testing.T) {
 }
 
 // A refused message does not take what is queued behind it down with it:
-// those messages stay queued (the next message, or a turn's end, sends them),
-// where they used to be dispatched at once and refused in a burst.
+// those messages stay queued until the person continues, where they used to
+// follow it into the same refusal. Each accepted message and each turn's end
+// kicks dispatch, and a kick from before the refusal can run after it: the
+// queue holds whatever the kicks' timing (the refusal's fault holds it).
 func TestARefusalKeepsTheQueueBehindIt(t *testing.T) {
 	e, native := bench(t, false)
 	ctx := contextFor(t)
@@ -456,9 +458,15 @@ func TestARefusalKeepsTheQueueBehindIt(t *testing.T) {
 	if r := awaitReceipt(t, e, "second"); r.Receipt.Delivery != "failed" {
 		t.Fatalf("setup: %+v", r)
 	}
-	time.Sleep(100 * time.Millisecond) // a burst would have been dispatched by now
+	// The receipt, the refusal's fault and the queue change under one lock:
+	// the snapshot is the state the refusal left.
+	if s := e.Snapshot(); s.Queued != 2 || s.Fault != agent.DeliveryRejectedFault {
+		t.Fatalf("after a refusal %d messages are queued (fault %q), want 2: %+v", s.Queued, s.Fault, s.QueuedMessages)
+	}
+	// A kick from before the refusal, arriving after it, delivers nothing.
+	e.dispatch()
 	if s := e.Snapshot(); s.Queued != 2 {
-		t.Fatalf("after a refusal %d messages are queued, want 2: %+v", s.Queued, s.QueuedMessages)
+		t.Fatalf("a late dispatch took %d queued messages into the refusal", 2-s.Queued)
 	}
 	// The person's next message continues, after what waited, in order.
 	native.Hold(agent.Message, released, nil)
@@ -467,6 +475,36 @@ func TestARefusalKeepsTheQueueBehindIt(t *testing.T) {
 	}
 	if op := applied(t, native); op.ID != "third" {
 		t.Fatalf("delivered %q first, want the oldest queued", op.ID)
+	}
+}
+
+// Send now on a message held behind a refusal is the person continuing: it
+// goes, as a message they send would.
+func TestSendNowDeliversAMessageHeldBehindARefusal(t *testing.T) {
+	e, native := bench(t, false)
+	ctx := contextFor(t)
+	if _, err := e.Apply(ctx, agent.Operation{ID: "first", Kind: agent.Message, Text: "build it"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = applied(t, native)
+	native.Events <- agent.Event{Type: "turn_started"}
+	await(t, e, "turn_started")
+	for _, id := range []string{"second", "third"} {
+		if _, err := e.Apply(ctx, agent.Operation{ID: id, Kind: agent.Message, Text: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	released := make(chan struct{})
+	close(released)
+	native.Hold(agent.Message, released, agent.Rejected(errors.New("refused")))
+	native.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	awaitReceipt(t, e, "second")
+	native.Hold(agent.Message, released, nil)
+	if _, err := e.DeliverQueued(ctx, "third", DeliverNow); err != nil {
+		t.Fatal(err)
+	}
+	if op := applied(t, native); op.ID != "third" {
+		t.Fatalf("delivered %q", op.ID)
 	}
 }
 

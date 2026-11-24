@@ -617,6 +617,11 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 	e.queue = append(append([]agent.Operation{op}, e.queue[:at]...), e.queue[at+1:]...)
 	e.persistDurableLocked()
 	busy := e.state.Busy
+	if e.state.Fault == agent.DeliveryRejectedFault {
+		// The person sends it now: that continues the conversation, as a
+		// message they send would (dispatch holds the queue otherwise).
+		e.state.Fault = ""
+	}
 	interruptID := op.ID[:min(len(op.ID), 120)] + ":now"
 	if previous, found := e.ops[interruptID]; found && previous.receipt.Delivery != "accepted" {
 		interruptID = "queued-interrupt:" + rand.Text()
@@ -723,7 +728,14 @@ func (e *Engine) dispatch() {
 	// A provider error ended the last turn: a queued message continues the
 	// conversation and clears it, as a message sent now would (Apply). A
 	// message never waits in the queue while the agent is idle.
-	if agent.TurnFault(e.state.Fault) && e.queue[0].Kind == agent.Message {
+	//
+	// A refused message is the exception: the refusal may well persist, so
+	// what is queued behind it waits for the person (their next message, or
+	// Send now) instead of following it into the same refusal. Dispatch is
+	// kicked from many places (each message accepted, each turn's end), and
+	// a kick from before the refusal can run after it: holding the queue is
+	// the fault's to say, never the kick's timing.
+	if agent.TurnFault(e.state.Fault) && e.state.Fault != agent.DeliveryRejectedFault && e.queue[0].Kind == agent.Message {
 		e.state.Fault = ""
 	}
 	if e.state.Fault != "" {

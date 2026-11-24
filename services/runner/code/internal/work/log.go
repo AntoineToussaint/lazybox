@@ -28,6 +28,11 @@ type file struct {
 	// size may be on disk, so nothing more is written until a rewrite
 	// replaces the file.
 	broken error
+	// unsyncedDir is set when a rewrite's rename landed but syncing its
+	// directory failed. The rewrite stands (the file is the log now); the
+	// next append syncs the directory first, so nothing more is acknowledged
+	// until the rename is durable.
+	unsyncedDir string
 }
 
 // openFile reads every complete event of a log and leaves it open for appending.
@@ -73,6 +78,12 @@ var ErrFull = errors.New("the log is full")
 func (l *file) append(events []Event) error {
 	if l.broken != nil {
 		return l.broken
+	}
+	if l.unsyncedDir != "" {
+		if err := atomicfile.SyncDir(l.unsyncedDir); err != nil {
+			return fmt.Errorf("the log's last rewrite is not durable yet: %w", err)
+		}
+		l.unsyncedDir = ""
 	}
 	var buffer bytes.Buffer
 	for _, e := range events {
@@ -132,10 +143,15 @@ func (l *file) rewrite(path string, events []Event) error {
 		f.Close()
 		return err
 	}
-	// The new file is the log now, whether or not the rename is durable yet.
+	// The new file is the log now, so the rewrite has happened and its caller
+	// keeps its result; only the rename's durability may still be owed, and
+	// the next append pays it before acknowledging anything.
 	_ = l.f.Close()
-	l.f, l.size, l.broken = f, int64(buffer.Len()), nil
-	return atomicfile.SyncDir(filepath.Dir(path))
+	l.f, l.size, l.broken, l.unsyncedDir = f, int64(buffer.Len()), nil, ""
+	if err = atomicfile.SyncDir(filepath.Dir(path)); err != nil {
+		l.unsyncedDir = filepath.Dir(path)
+	}
+	return nil
 }
 
 func (l *file) close() error { return l.f.Close() }

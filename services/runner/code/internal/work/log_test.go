@@ -7,6 +7,47 @@ import (
 	"time"
 )
 
+// A rewrite whose rename landed has happened even if syncing the directory
+// fails: Forget keeps its result in memory, and the next append owes the
+// directory sync before acknowledging anything.
+func TestForgetLandsWhenOnlyTheDirectorySyncFails(t *testing.T) {
+	dir := t.TempDir()
+	p, err := OpenPrompts(filepath.Join(dir, "prompts.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	for _, conversation := range []string{"gone", "kept"} {
+		if err = p.Submit(Human, PromptPayload{Conversation: conversation, Text: "hello from " + conversation}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Without read permission the directory cannot be opened to sync it, but
+	// a rename inside it still succeeds.
+	if err = os.Chmod(dir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if err = p.Forget("gone"); err != nil {
+		t.Fatalf("forget reported failure for a rewrite that landed: %v", err)
+	}
+	if got := p.History(HistoryQuery{Conversation: "gone"}); len(got) != 0 {
+		t.Fatalf("forgotten prompts still recalled: %+v", got)
+	}
+	if err = p.Submit(Human, PromptPayload{Conversation: "kept", Text: "while the directory cannot sync"}, nil); err == nil {
+		t.Fatal("append acknowledged before the rewrite was durable")
+	}
+	if err = os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Submit(Human, PromptPayload{Conversation: "kept", Text: "after"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.History(HistoryQuery{Conversation: "kept"}); len(got) != 2 {
+		t.Fatalf("kept history = %+v", got)
+	}
+}
+
 // When a failed append cannot be cut back off, the bytes it left may hold
 // whole lines nobody acknowledged: the log must refuse every later append
 // rather than write after them.

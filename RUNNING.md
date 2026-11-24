@@ -12,6 +12,10 @@ and the remaining crash-recovery boundaries.
 
 The verified versions are in [runtime evidence](RUNTIME_EVIDENCE.md). Install Go, Node/npm, Codefly, and the provider harnesses you intend to exercise. Codefly's protocol generation uses its supported companion backend. Claude uses the pinned `@anthropic-ai/claude-agent-sdk` worker; it does not reimplement a private CLI protocol.
 
+Lazybox builds and tests Go packages with `-trimpath` so identical sources in
+different worktrees reuse the same compiled packages in Go's build cache.
+Debug information uses module-relative source paths.
+
 From the repository root:
 
 ```sh

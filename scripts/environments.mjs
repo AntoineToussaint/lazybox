@@ -72,7 +72,7 @@ export async function freezeRunnerReload(source) {
   await writeFile(path, config.replace(/^    hot-reload: true$/m, '    hot-reload: false'));
 }
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const buildEnv = { ...process.env, CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS || '1', GOMAXPROCS: process.env.GOMAXPROCS || '1', GOFLAGS: process.env.GOFLAGS || '-p=1' };
+const buildEnv = { ...process.env, CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS || '1', GOMAXPROCS: process.env.GOMAXPROCS || '1', GOFLAGS: `${process.env.GOFLAGS || '-p=1'} -trimpath` };
 async function run(command, args, cwd, env = buildEnv) {
   const child = spawn(command, args, { cwd, env, stdio: 'inherit' });
   const [code, signal] = await once(child, 'exit');

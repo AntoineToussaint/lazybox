@@ -2,7 +2,7 @@
 GO_BUILD_JOBS ?= 1
 GOMAXPROCS ?= 1
 export GOMAXPROCS
-export GOFLAGS := -p=$(GO_BUILD_JOBS)
+export GOFLAGS := -trimpath -p=$(GO_BUILD_JOBS)
 GO_ROOT := services/runner/code
 BENCH_STATE ?= $(abspath .cache/bench)
 BENCH_CONFIG ?=
@@ -62,7 +62,11 @@ build-web: deps
 	npm run build:web
 
 test: build-worker
-	cd $(GO_ROOT) && LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) LAZYBOX_V2_BROWSER_WORKER=$(abspath workers/browser/dist/main.js) $(GO_TEST) -timeout 6m ./...
+	@set -e; fixtures=$$(mktemp -d); trap 'rm -rf "$$fixtures"' EXIT; \
+	cd $(GO_ROOT); \
+	CGO_ENABLED=0 go build -o "$$fixtures/lazybox" ./cmd/lazybox; \
+	CGO_ENABLED=0 go build -o "$$fixtures/lazybox-runner" .; \
+	LAZYBOX_V2_REMOTE_TEST_BIN="$$fixtures" LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) LAZYBOX_V2_BROWSER_WORKER=$(abspath workers/browser/dist/main.js) $(GO_TEST) -timeout 6m ./...
 test-real: build-worker
 	cd $(GO_ROOT) && LAZYBOX_V2_REAL=1 LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -timeout 12m -v ./tests/integration -run TestReal
 
@@ -159,7 +163,7 @@ release: deps
 # (INSTALL_JOBS), not the one-job default this Makefile keeps for shared
 # build machines.
 INSTALL_JOBS ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-INSTALL_ENV = PREFIX='$(if $(filter command line,$(origin PREFIX)),$(PREFIX))' LINK_DIR='$(LINK_DIR)' OPEN='$(OPEN)' SMOKE='$(SMOKE)' PURGE='$(PURGE)' CARGO_BUILD_JOBS='$(INSTALL_JOBS)' GOMAXPROCS='$(INSTALL_JOBS)' GOFLAGS='-p=$(INSTALL_JOBS)'
+INSTALL_ENV = PREFIX='$(if $(filter command line,$(origin PREFIX)),$(PREFIX))' LINK_DIR='$(LINK_DIR)' OPEN='$(OPEN)' SMOKE='$(SMOKE)' PURGE='$(PURGE)' CARGO_BUILD_JOBS='$(INSTALL_JOBS)' GOMAXPROCS='$(INSTALL_JOBS)' GOFLAGS='-trimpath -p=$(INSTALL_JOBS)'
 NEED_NODE = command -v node >/dev/null 2>&1 || { echo 'Node.js is missing: install Node.js 24 or later (https://nodejs.org), then run make install again.'; exit 1; }
 .PHONY: install uninstall update install-check
 install:

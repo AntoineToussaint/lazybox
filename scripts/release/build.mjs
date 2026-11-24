@@ -174,7 +174,7 @@ export function sourceManifest({ commit, dirty, checkout, date = new Date() }) {
 const cache = join(root, '.cache', 'release');
 /** Where the Tauri build leaves the app (make install copies it from here). */
 export const builtApp = join(cache, 'target', 'release', 'bundle', 'macos', 'Lazybox.app');
-const buildEnv = { ...process.env, CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS || '4', GOMAXPROCS: process.env.GOMAXPROCS || '4', GOFLAGS: process.env.GOFLAGS || '-p=4' };
+const buildEnv = { ...process.env, CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS || '4', GOMAXPROCS: process.env.GOMAXPROCS || '4', GOFLAGS: `${process.env.GOFLAGS || '-p=4'} -trimpath` };
 
 function step(title) { console.log(`\n▸ ${title}`); }
 

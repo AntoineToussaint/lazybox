@@ -67,7 +67,7 @@ export async function servicePlan(environmentRoot, { env = process.env, executab
   const args = runnerArguments({ paths, source, snippetAdapter: snippets, snippetDirectory: source, subscriptionState: subscriptions, actionsFile: userActionsFile(env) });
   // Only these explicitly public values reach the durable service definition.
   // Login tokens and the private endpoint's bearer never become arguments/env.
-  const publicEnv = { PATH: (env.PATH || '').split(delimiter).filter(isAbsolute).join(delimiter), GOMAXPROCS: '1', GOFLAGS: '-p=1' };
+  const publicEnv = { PATH: (env.PATH || '').split(delimiter).filter(isAbsolute).join(delimiter), GOMAXPROCS: '1', GOFLAGS: '-p=1 -trimpath' };
   if (!publicEnv.PATH) throw new Error('An absolute toolchain PATH is required');
   const contract = { executable: binary, executableDigest: hash(await readFile(binary)), source, args, publicEnv, restart: 'never', startAtLogin: false, sourceDigest: metadata.sourceDigest, appDigest: metadata.appDigest, workerDigest: await digestTree(dirname(worker), () => true) };
   const version = hash(JSON.stringify(contract));

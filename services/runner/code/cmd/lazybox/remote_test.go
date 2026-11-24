@@ -67,6 +67,11 @@ type remoteWorld struct {
 
 func buildBinaries(t *testing.T) string {
 	t.Helper()
+	// The suite builds its static fixtures before any per-test clock starts.
+	// A standalone go test invocation can still build its own copies.
+	if dir := os.Getenv("LAZYBOX_V2_REMOTE_TEST_BIN"); dir != "" {
+		return dir
+	}
 	dir := t.TempDir()
 	for target, pkg := range map[string]string{"lazybox": ".", "lazybox-runner": "../.."} {
 		cmd := exec.Command("go", "build", "-o", filepath.Join(dir, target), pkg)

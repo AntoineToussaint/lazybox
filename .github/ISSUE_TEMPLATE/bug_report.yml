@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for reporting. **Help → Send feedback…** in the app fills most of this in for you.
-        A security problem does not go here: follow [SECURITY.md](https://github.com/AntoineToussaint/lazybox/blob/main/SECURITY.md).
+        A security problem does not go here: email toussaint.antoine@gmail.com, as [SECURITY.md](https://github.com/AntoineToussaint/lazybox/blob/main/SECURITY.md#reporting-a-vulnerability) describes.
   - type: textarea
     id: what
     attributes:

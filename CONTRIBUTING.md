@@ -72,10 +72,6 @@ and a `test:` script that is not fails the catalog. Run a few by name with
 - The pull request says what you verified and how, and what you could not
   (no provider login, no phone, a gate you skipped); its template asks for
   each, and whether each change is a fix or a hack ([AGENTS.md](AGENTS.md)).
-- Commit with an address you are happy to publish (GitHub's
-  `…@users.noreply.github.com` works): CI's `scripts/check-private.mjs`
-  refuses private names in the tree and in the author, committer and
-  co-author addresses of the commits a pull request adds.
 - Generated code is never edited by hand: change
   `services/runner/proto/api.proto` and run `make generate`. Wire changes stay
   compatible with `contracts/runner-v1.binpb` unless [DECISIONS.md](DECISIONS.md)

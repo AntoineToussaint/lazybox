@@ -58,7 +58,7 @@ and choose the branch and **full**. Manual runs default to full.
 
 | Check | Fast | Full |
 | --- | --- | --- |
-| Catalog, spelling, export, private-file checks (and the addresses on the commits a pull request or push adds) | Yes | Yes |
+| Catalog, spelling, export, private-file checks | Yes | Yes |
 | TypeScript, client and worker tests | Yes | Yes |
 | Codefly and Buf regeneration, wire compatibility | Yes | Yes |
 | Linux Go | Format and vet | Format, vet, full tests and restart race checks |

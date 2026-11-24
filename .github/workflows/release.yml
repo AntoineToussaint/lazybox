@@ -151,7 +151,12 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
+      # Pinned to a commit of the `stable` branch, which defaults its toolchain
+      # from the branch name; say it here so a bump to another commit (a
+      # Dependabot update, a tag) still installs stable.
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: apps/desktop/src-tauri -> ../../../.cache/release/target

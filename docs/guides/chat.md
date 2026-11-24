@@ -32,7 +32,8 @@ it did.
   now the conversation shows one quiet line, *Stopped to send your message*,
   and your message goes as soon as the step stops, the other queued messages
   in order after it.
-  **Edit** pauses delivery before the editor opens. The message keeps its place
+  **Edit**, in the message's row of buttons right before Send now, pauses
+  delivery before the editor opens below the message. The message keeps its place
   and attachments, even if the current turn ends. **Save** releases the
   revised message. **Cancel edit** releases the original. If you reload the
   tab while editing, choose **Resume edit** to continue.

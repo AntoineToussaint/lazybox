@@ -1038,7 +1038,8 @@ inference was used.
   sign-in; Codex never gets the key; the reply carries only the last four
   characters; a subscription token (`sk-ant-oat…`) is refused; the file is
   `0600`. `internal/accounts` (`TestAPIKeyIsKeptPrivateAndNeverASubscriptionToken`,
-  `TestWithAPIKeyIsTheOnlyClaudeCredential`). The worker passes it through
+  `TestWithAPIKeyIsTheOnlyClaudeCredential`, which also removes an inherited
+  `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_API_BASE_URL` and `CLAUDE_CODE_CUSTOM_OAUTH_URL`). The worker passes it through
   unchanged for every purpose and permission (`workers/claude-sdk/src/options.test.ts`).
   **Not verified:** a real Claude Code turn billed to a real key.
 - **Claude sign-in in Lazybox, off.** `TestClaudeSignInInLazyboxIsOffByDefault`:

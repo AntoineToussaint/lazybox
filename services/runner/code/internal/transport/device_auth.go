@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // DeviceVerifier resolves a paired device's access credential
@@ -73,13 +74,15 @@ var deviceRPCs = map[string]deviceRule{
 	pb.RunnerService_OpenSession_FullMethodName: {grant: devices.GrantStart, allow: func(req any) bool {
 		r, ok := req.(*pb.OpenSessionRequest)
 		// Only in an existing workspace, with the Runner's own defaults for
-		// permission and gateway: a phone does not pick a directory, resume an
-		// arbitrary provider thread or raise an agent's permissions.
-		if !ok || r.CollectionId == "" || r.Cwd != "" || r.ResumeReference != "" || r.EmptyWorkspace {
+		// everything that decides what the agent may do or what it bills: a
+		// phone does not pick a directory, resume an arbitrary provider thread,
+		// raise an agent's permissions or leave plan-by-default (workflow),
+		// choose the gateway, instructions or behavior profile, or rotate onto
+		// other accounts. The model and its effort are the phone's to choose.
+		if !ok || r.CollectionId == "" || r.Cwd != "" || r.ResumeReference != "" || r.EmptyWorkspace || r.Fork != nil {
 			return false
 		}
-		o := r.Options
-		return o == nil || (o.Permission == "" && o.GatewayId == "" && o.Instructions == "")
+		return deviceStartOptions(r.Options)
 	}},
 	// Continuing an ended conversation, never with processes_stopped: that is
 	// the owner's statement, after an unclean shutdown, that the previous
@@ -115,6 +118,19 @@ var deviceRPCs = map[string]deviceRule{
 		r, ok := req.(*pb.AnswerConversationStartRequest)
 		return ok && (r.Decision == "start" || r.Decision == "decline") && r.ProfileId == "" && r.Model == "" && r.Workspace == ""
 	}},
+}
+
+// deviceStartOptions admits the options a phone may start a conversation
+// with: none but the model and its effort. It clears exactly those two from a
+// copy and requires what remains to be empty, so an option added to
+// RunnerOptions later is refused until it is decided here.
+func deviceStartOptions(o *pb.RunnerOptions) bool {
+	if o == nil {
+		return true
+	}
+	rest := proto.Clone(o).(*pb.RunnerOptions)
+	rest.Model, rest.Effort = "", ""
+	return proto.Size(rest) == 0
 }
 
 // deviceStreams are the server streams a device may follow.

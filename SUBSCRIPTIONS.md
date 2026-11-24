@@ -33,7 +33,8 @@ Claude is different ([CLAUDE_COMPLIANCE.md](CLAUDE_COMPLIANCE.md)). The
 recommended credential is an Anthropic API key the person saves in Settings →
 Agents & workspaces → Claude (`SetClaudeApiKey`, kept in
 `<state>/secrets/anthropic-api-key`, `0600`): the `claude-default` account's
-agents get it as `ANTHROPIC_API_KEY`, every other Claude credential removed.
+agents get it as `ANTHROPIC_API_KEY`, every other Claude credential and any
+inherited endpoint (`ANTHROPIC_BASE_URL` and the like) removed.
 Without one, `claude-default` runs on the person's own Claude Code sign-in.
 Claude subscriptions saved through Lazybox's own sign-in start only with
 `RunnerSettings.claude_subscription_sign_in` on (off by default), and Lazybox

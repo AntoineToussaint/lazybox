@@ -295,7 +295,17 @@ func NewSender(keys *Keys) *Sender {
 	return &Sender{Keys: keys, Client: client, Now: time.Now, Validate: ValidateEndpoint}
 }
 
-var tailnet = mustCIDR("100.64.0.0/10")
+// refused are the ranges the net.IP predicates miss: the tailnet (CGNAT),
+// "this network", benchmarking, and the IPv6 prefixes that embed an IPv4
+// address (NAT64 and 6to4), through which a name could still reach a private
+// or loopback host.
+var refused = []*net.IPNet{
+	mustCIDR("100.64.0.0/10"),
+	mustCIDR("0.0.0.0/8"),
+	mustCIDR("198.18.0.0/15"),
+	mustCIDR("64:ff9b::/96"),
+	mustCIDR("2002::/16"),
+}
 
 func mustCIDR(cidr string) *net.IPNet {
 	_, n, _ := net.ParseCIDR(cidr)
@@ -311,10 +321,19 @@ func refusePrivate(_, address string, _ syscall.RawConn) error {
 		return err
 	}
 	ip := net.ParseIP(host)
-	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() || tailnet.Contains(ip) {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() || inRefused(ip) {
 		return fmt.Errorf("refusing to send a notification to %s", host)
 	}
 	return nil
+}
+
+func inRefused(ip net.IP) bool {
+	for _, n := range refused {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func validTopic(topic string) bool {

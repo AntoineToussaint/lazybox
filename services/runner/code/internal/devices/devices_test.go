@@ -346,6 +346,30 @@ func TestDevicesAndCredentialsSurviveARunnerRestart(t *testing.T) {
 	}
 }
 
+// The challenge endpoint answers anyone on the tailnet who names a paired
+// device. Flooding one device's challenges is refused for that device alone:
+// another device still signs in, and the flooded one does once they expire.
+func TestChallengesAreBoundedPerDevice(t *testing.T) {
+	m, c := open(t, t.TempDir())
+	p, q := phone(t), phone(t)
+	flooded, other := pair(t, m, p), pair(t, m, q)
+	refused := false
+	for i := 0; i < 2048 && !refused; i++ {
+		_, _, err := m.Challenge(flooded.ID)
+		if errors.Is(err, devices.ErrTooMany) {
+			refused = true
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !refused {
+		t.Fatal("one device's pending challenges are unbounded")
+	}
+	signIn(t, m, q, other.ID)
+	c.Advance(devices.ChallengeLifetime)
+	signIn(t, m, p, flooded.ID)
+}
+
 func TestPendingOffersAreBounded(t *testing.T) {
 	m, c := open(t, t.TempDir())
 	for i := 0; i < 8; i++ {

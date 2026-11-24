@@ -136,6 +136,11 @@ export const releaseNotes: readonly Release[] = [
       { group: 'Security', title: 'An orchestrator never answers for you', body: 'It never approves, passes a gate or accepts a task, and its agents never get more permission than it has.' },
       { group: 'Security', title: 'Feedback without secrets', body: 'A feedback report removes tokens, keys, passwords and e-mail addresses, and shows your home folder as ~.' },
       { group: 'Security', title: 'Allow exactly what is asked', body: 'When Codex asks for the network or a folder outside its sandbox, the card names it and Allow grants just that, for the turn or the conversation. What you always allow in a Claude conversation outlives its agent; the session menu lists it, and × removes it.' },
+      { group: 'Security', title: 'A phone starts conversations your way', body: 'A phone allowed to start conversations picks only the model and its effort: it cannot leave plan-by-default, change the behavior profile or rotate onto other accounts.' },
+      { group: 'Security', title: 'Your API key goes only to Anthropic', body: 'With an API key saved, an ANTHROPIC_BASE_URL or similar endpoint inherited by the Runner no longer receives it.' },
+      { group: 'Security', title: 'Nobody on your tailnet can block pairing', body: 'Pairing attempts are limited per pairing code and sign-in challenges per phone, no longer shared by everyone, and the phone gateway answers only on this computer and its tailnet name.' },
+      { group: 'Security', title: 'Notifications go only to push services', body: 'The notification sender also refuses benchmarking and "this network" addresses, and IPv6 addresses that carry an IPv4 one.' },
+      { group: 'Security', title: 'What agents can and cannot reach', body: 'SECURITY.md now says plainly that an agent\'s narrower credential prevents accidents, not an agent that misbehaves on purpose, and describes the fix.' },
     ],
   },
 ];

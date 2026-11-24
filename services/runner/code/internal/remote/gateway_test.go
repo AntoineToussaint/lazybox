@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/devices"
@@ -154,6 +155,88 @@ func TestPhonePairsSignsInAndIsRevokedOverTheGateway(t *testing.T) {
 	// The phone learns it was signed out, so it can say so and forget its key.
 	if code, body := f.signIn(t, p, id); code != http.StatusUnauthorized || body["code"] != "revoked" {
 		t.Fatalf("revoked sign-in: %d %v", code, body)
+	}
+}
+
+// Pairing attempts are bounded per offer: anyone on the tailnet flooding the
+// endpoint (here with made-up pairing codes) does not keep the person's phone
+// from pairing, and an offer still refuses a flood of its own.
+func TestPairingFloodDoesNotBlockAnotherOffer(t *testing.T) {
+	f := newGateway(t)
+	p, err := devicetest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		if code, body := f.post(t, "/remote/v1/pair", p.PairRequest("made-up", "guess", "flood")); code != http.StatusForbidden {
+			t.Fatalf("made-up pairing code %d: %d %v", i, code, body)
+		}
+	}
+	offer, secret, err := f.devices.Begin([]string{devices.GrantRespond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := f.post(t, "/remote/v1/pair", p.PairRequest(offer.ID, secret, "iPhone")); code != http.StatusOK {
+		t.Fatalf("pairing after a flood: %d %v", code, body)
+	}
+	// A pending offer answers its own flood (here the right code with a
+	// signature that does not verify, which burns nothing) until its budget
+	// runs out.
+	offer, secret, err = f.devices.Begin([]string{devices.GrantRespond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := p.PairRequest(offer.ID, secret, "forged")
+	forged.Signature = "AAAA"
+	limited := false
+	for i := 0; i < 100 && !limited; i++ {
+		code, _ := f.post(t, "/remote/v1/pair", forged)
+		limited = code == http.StatusTooManyRequests
+	}
+	if !limited {
+		t.Fatal("one offer's attempts are unbounded")
+	}
+}
+
+// The gateway answers only requests addressed to this computer or to its
+// tailnet name: a web page that rebinds its own name to 127.0.0.1 is refused,
+// and naming hosts does not make the gateway ask Tailscale more than once per
+// nameRefresh.
+func TestGatewayAnswersOnlyLoopbackAndItsTailnetName(t *testing.T) {
+	f := newGateway(t)
+	fake := &fakeTailscale{status: runningStatus, serve: `{}`}
+	f.gateway.Tailscale = Tailscale{Run: fake.run}
+	get := func(host string) int {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, f.server.URL+"/", nil)
+		req.Host = host
+		res, err := f.server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	for _, host := range []string{"127.0.0.1:8443", "localhost:8443", "[::1]:8443", "LAPTOP.example.ts.net:8443", "laptop.example.ts.net.", "laptop.example.ts.net"} {
+		if code := get(host); code != http.StatusOK {
+			t.Errorf("%s: %d", host, code)
+		}
+	}
+	lookups := len(fake.calls)
+	if lookups == 0 {
+		t.Fatal("the tailnet name was never looked up")
+	}
+	// Once the window has passed, an unknown host looks the name up once more.
+	f.gateway.name.Lock()
+	f.gateway.name.checked = time.Time{}
+	f.gateway.name.Unlock()
+	for _, host := range []string{"attacker.example:8443", "attacker.example", "10.0.0.5:8443", "laptop.example.ts.net.attacker.example"} {
+		if code := get(host); code != http.StatusMisdirectedRequest {
+			t.Errorf("%q answered: %d", host, code)
+		}
+	}
+	if got := len(fake.calls) - lookups; got != 2 {
+		t.Fatalf("unknown hosts ran %d Tailscale commands, want one lookup (two commands)", got)
 	}
 }
 

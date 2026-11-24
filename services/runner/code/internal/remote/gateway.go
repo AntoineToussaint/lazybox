@@ -35,9 +35,6 @@ const (
 	rpcPrefix   = "/lazybox.bench.v1.RunnerService/"
 	apiPrefix   = "/remote/v1/"
 	maxBodySize = 16 << 10
-	// pairingBudget bounds pairing attempts per minute, on top of each offer's
-	// own five-failure limit.
-	pairingBudget = 30
 )
 
 // contentPolicy confines the phone app to its own origin: no inline or
@@ -67,12 +64,20 @@ type Gateway struct {
 	server   *http.Server
 	problem  string
 
-	limit struct {
+	// name is this machine's tailnet name, the one Host besides loopback the
+	// gateway answers (allowedHost). It is learned from Tailscale's status
+	// whenever the gateway reads it, and looked up again, at most once per
+	// nameRefresh, when a request names another host.
+	name struct {
 		sync.Mutex
-		window time.Time
-		count  int
+		value   string
+		checked time.Time
 	}
 }
+
+// nameRefresh bounds how often a request naming an unknown host makes the
+// gateway ask Tailscale for this machine's name again.
+const nameRefresh = 30 * time.Second
 
 // New loads the gateway's settings from the Runner state directory.
 func New(state string, manager *devices.Manager, rpc http.Handler) (*Gateway, error) {
@@ -193,6 +198,7 @@ func (g *Gateway) Access(ctx context.Context) *pb.RemoteAccess {
 	enabled, problem := g.saved.Tailscale, g.problem
 	g.mu.Unlock()
 	status := g.Tailscale.Status(ctx, g.HTTPSPort, local)
+	g.learnName(status.DNSName)
 	out := &pb.RemoteAccess{LocalUrl: local, Problem: problem, Tailscale: &pb.TailscaleAccess{State: status.State, DnsName: status.DNSName, HttpsPort: g.HTTPSPort, Enabled: enabled, Detail: status.Detail}}
 	if local == "" {
 		out.Problem = "The device gateway is not running."
@@ -257,6 +263,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "This Runner is not available from the public internet.", http.StatusForbidden)
 		return
 	}
+	// DNS rebinding: a web page whose own name resolves to 127.0.0.1 reaches
+	// this listener with that name as its Host.
+	if !g.allowedHost(r.Context(), r.Host) {
+		http.Error(w, "This Runner answers only on this computer and on its tailnet name.", http.StatusMisdirectedRequest)
+		return
+	}
 	switch {
 	case strings.HasPrefix(r.URL.Path, rpcPrefix):
 		h.Set("Cache-Control", "no-store")
@@ -271,6 +283,48 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		g.static(w, r)
 	}
+}
+
+// allowedHost admits a request addressed to loopback (this computer) or to
+// this machine's tailnet name (`tailscale serve` keeps the phone's Host).
+// Another name is looked up again at most once per nameRefresh, so a gateway
+// that started before Tailscale connected, or a renamed machine, is still
+// reached without reopening Settings.
+func (g *Gateway) allowedHost(ctx context.Context, raw string) bool {
+	host := raw
+	if h, _, err := net.SplitHostPort(raw); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil || host == "" {
+		return ip != nil && ip.IsLoopback()
+	}
+	g.name.Lock()
+	known, stale := g.name.value, time.Since(g.name.checked) >= nameRefresh
+	if host == known || !stale {
+		g.name.Unlock()
+		return host == known
+	}
+	g.name.checked = time.Now()
+	g.name.Unlock()
+	g.learnName(g.Tailscale.Status(ctx, g.HTTPSPort, g.LocalURL()).DNSName)
+	g.name.Lock()
+	defer g.name.Unlock()
+	return host == g.name.value
+}
+
+// learnName records this machine's tailnet name from a Tailscale status.
+func (g *Gateway) learnName(name string) {
+	name = strings.TrimSuffix(strings.ToLower(name), ".")
+	if name == "" {
+		return
+	}
+	g.name.Lock()
+	g.name.value = name
+	g.name.Unlock()
 }
 
 func (g *Gateway) static(w http.ResponseWriter, r *http.Request) {
@@ -308,17 +362,6 @@ func writeJSON(w http.ResponseWriter, code int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func (g *Gateway) allowPairing() bool {
-	g.limit.Lock()
-	defer g.limit.Unlock()
-	now := time.Now()
-	if now.Sub(g.limit.window) > time.Minute {
-		g.limit.window, g.limit.count = now, 0
-	}
-	g.limit.count++
-	return g.limit.count <= pairingBudget
-}
-
 func wireDevice(d devices.Device) map[string]any {
 	return map[string]any{"id": d.ID, "name": d.Name, "grants": d.Grants, "fingerprint": d.Fingerprint()}
 }
@@ -344,16 +387,18 @@ func (g *Gateway) api(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 	switch strings.TrimPrefix(r.URL.Path, apiPrefix) {
 	case "pair":
-		if !g.allowPairing() {
-			writeJSON(w, http.StatusTooManyRequests, apiError{Error: "too many pairing attempts; wait a minute"})
-			return
-		}
+		// Each offer bounds its own attempts (devices.Complete): one budget
+		// shared by every request let anyone on the tailnet block pairing.
 		var req devices.PairRequest
 		if decoder.Decode(&req) != nil {
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "malformed pairing request"})
 			return
 		}
 		d, err := g.Devices.Complete(req)
+		if errors.Is(err, devices.ErrTooManyAttempts) {
+			writeJSON(w, http.StatusTooManyRequests, apiError{Error: err.Error()})
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusForbidden, apiError{Error: err.Error()})
 			return

@@ -64,6 +64,11 @@ func TestWithAPIKeyIsTheOnlyClaudeCredential(t *testing.T) {
 	if !slices.Equal(env, want) {
 		t.Fatalf("env %v, want %v", env, want)
 	}
+	// An endpoint the Runner inherited does not receive the saved key.
+	env = WithAPIKey([]string{"PATH=/bin", "ANTHROPIC_BASE_URL=https://elsewhere.example", "CLAUDE_CODE_API_BASE_URL=https://elsewhere.example", "CLAUDE_CODE_CUSTOM_OAUTH_URL=https://elsewhere.example/oauth"}, fixtureKey)
+	if want = []string{"ANTHROPIC_API_KEY=" + fixtureKey, "PATH=/bin"}; !slices.Equal(env, want) {
+		t.Fatalf("env %v, want %v", env, want)
+	}
 	if !HasAPICredential(env) || HasAPICredential([]string{"CLAUDE_CODE_OAUTH_TOKEN=sub"}) {
 		t.Fatal("API credential detection")
 	}

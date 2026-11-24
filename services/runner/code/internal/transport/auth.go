@@ -17,7 +17,8 @@ import (
 // (runner.Bench implements it): one per execution, given to its agent, and one
 // per workspace terminal, given to the person's shell. Neither is the owner's
 // bearer, so nothing an agent runs, and nothing started in a terminal, can
-// approve a request, answer a question, send a message or change a setting.
+// approve a request, answer a question, send a message or change a setting
+// with it (see agentRPCs for what that does not stop).
 type AgentCredentials interface {
 	// AgentSession returns the execution a scoped credential was issued to,
 	// or an error for a forged or revoked one.
@@ -49,6 +50,13 @@ type AgentCredentials interface {
 // `lazybox link` and `lazybox items` need to link a pull request to its own
 // workspace and list that workspace's links (never to unlink, react or merge).
 // Every other RPC, including any added later, is the owner's.
+//
+// This allowlist prevents accidents, not a hostile agent. It holds for an
+// agent that uses the credential it was given; an agent runs as the same OS
+// user as the Runner and can read the Runner state (the owner's
+// endpoint.json, agent-credential.key, the saved API key), so one that sets
+// out to can act as the owner. SECURITY.md ("What an agent can reach") says
+// what remains and the design that closes it.
 var agentRPCs = map[string]func(agents AgentCredentials, who principal, req any) bool{
 	// An agent reads and publishes only its own conversation's delivery
 	// outcome (never a task lookup), and records a review verdict only as the

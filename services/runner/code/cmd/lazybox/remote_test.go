@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -65,22 +66,54 @@ type remoteWorld struct {
 	extraHostEnv, extraEnv []string
 }
 
-func buildBinaries(t *testing.T) string {
-	t.Helper()
-	// The suite builds its static fixtures before any per-test clock starts.
-	// A standalone go test invocation can still build its own copies.
-	if dir := os.Getenv("LAZYBOX_V2_REMOTE_TEST_BIN"); dir != "" {
-		return dir
-	}
-	dir := t.TempDir()
-	for target, pkg := range map[string]string{"lazybox": ".", "lazybox-runner": "../.."} {
-		cmd := exec.Command("go", "build", "-o", filepath.Join(dir, target), pkg)
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("building %s: %v\n%s", target, err, out)
+// remoteFixture is what every remote test runs: this build's lazybox and
+// lazybox-runner, compiled as a release is (CGO_ENABLED=0), and the runtime
+// bundle a Mac uploads, packed from them. Compiling is integration work, so
+// TestMain does it once for the package, before any test runs: no test pays
+// for the compile, and none times out on a loaded box because of it. Its time
+// is bounded by the package's go test -timeout, not the per-test deadline.
+var remoteFixture struct {
+	bin, bundle string
+	err         error
+}
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	var dir string
+	if !testing.Short() {
+		dir, remoteFixture.err = os.MkdirTemp("", "lbx-remote-bin-")
+		if remoteFixture.err == nil {
+			remoteFixture.bin, remoteFixture.bundle, remoteFixture.err = buildRemoteFixture(dir)
 		}
 	}
-	return dir
+	code := m.Run()
+	if dir != "" {
+		_ = os.RemoveAll(dir)
+	}
+	os.Exit(code)
+}
+
+// buildRemoteFixture compiles lazybox and lazybox-runner into a runtime under
+// dir (version 0.0.0-e2e), and packs that runtime into a bundle in dir. The
+// tests run this Mac's lazybox from the runtime's bin, and never write there.
+func buildRemoteFixture(dir string) (bin, bundle string, err error) {
+	runtimeDir := filepath.Join(dir, "runtime")
+	bin = filepath.Join(runtimeDir, "bin")
+	for target, pkg := range map[string]string{"lazybox": ".", "lazybox-runner": "../.."} {
+		cmd := exec.Command("go", "build", "-o", filepath.Join(bin, target), pkg)
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", "", fmt.Errorf("building %s: %v\n%s", target, err, out)
+		}
+	}
+	if err = os.WriteFile(filepath.Join(runtimeDir, "VERSION"), []byte("0.0.0-e2e\n"), 0o644); err != nil {
+		return "", "", err
+	}
+	b, err := link.PackRuntime(runtimeDir, dir)
+	if err != nil {
+		return "", "", err
+	}
+	return bin, b.Path, nil
 }
 
 func newRemoteWorld(t *testing.T) *remoteWorld {
@@ -88,7 +121,10 @@ func newRemoteWorld(t *testing.T) *remoteWorld {
 	if testing.Short() {
 		t.Skip("builds the Runner and runs it: not in -short")
 	}
-	w := &remoteWorld{t: t, bin: buildBinaries(t)}
+	if remoteFixture.err != nil {
+		t.Fatalf("TestMain could not build the remote fixture: %v", remoteFixture.err)
+	}
+	w := &remoteWorld{t: t, bin: remoteFixture.bin, bundle: remoteFixture.bundle}
 	base, err := os.MkdirTemp("", "lbx-remote-")
 	if err != nil {
 		t.Fatal(err)
@@ -104,28 +140,6 @@ func newRemoteWorld(t *testing.T) *remoteWorld {
 	if err := os.WriteFile(w.ssh, []byte(fakeSSH), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// The bundle this Mac uploads: a runtime with the CLI and the Runner.
-	runtimeDir := filepath.Join(base, "runtime")
-	for _, f := range []string{"lazybox", "lazybox-runner"} {
-		data, err := os.ReadFile(filepath.Join(w.bin, f))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = os.MkdirAll(filepath.Join(runtimeDir, "bin"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err = os.WriteFile(filepath.Join(runtimeDir, "bin", f), data, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(runtimeDir, "VERSION"), []byte("0.0.0-e2e\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	b, err := link.PackRuntime(runtimeDir, base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.bundle = b.Path
 	t.Cleanup(w.stop)
 	return w
 }

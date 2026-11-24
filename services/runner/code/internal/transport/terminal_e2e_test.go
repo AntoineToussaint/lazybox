@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,32 @@ import (
 	"google.golang.org/grpc"
 )
 
+// cliBuild is this build's lazybox CLI. Compiling is integration work, so
+// TestMain does it once for the package, before any test runs, and no test
+// pays for it; its time is bounded by go test's -timeout for the package, not
+// by the per-test deadline. It is built with the real HOME, so it uses the
+// existing module cache.
+var cliBuild struct {
+	dir string
+	err error
+}
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "lbx-cli-")
+	if err == nil {
+		build := exec.Command("go", "build", "-o", filepath.Join(dir, "lazybox"), "github.com/AntoineToussaint/lazybox/services/runner/code/cmd/lazybox")
+		if out, buildErr := build.CombinedOutput(); buildErr != nil {
+			err = fmt.Errorf("go build: %v\n%s", buildErr, out)
+		}
+	}
+	cliBuild.dir, cliBuild.err = dir, err
+	code := m.Run()
+	if dir != "" {
+		_ = os.RemoveAll(dir)
+	}
+	os.Exit(code)
+}
+
 // The whole path a person takes: a real zsh login shell in a workspace
 // terminal, whose profile puts another `lazybox` first on PATH (as a V1
 // install does), pipes a test run into `lazybox log` with no flag. The
@@ -27,12 +54,10 @@ func TestAPipeInAWorkspaceTerminalReachesTheWorkspaceConsole(t *testing.T) {
 	if _, err := os.Stat("/bin/zsh"); err != nil {
 		t.Skip("zsh is not installed")
 	}
-	// Built with the real HOME, so it uses the existing module cache.
-	cli := t.TempDir()
-	build := exec.Command("go", "build", "-o", filepath.Join(cli, "lazybox"), "github.com/AntoineToussaint/lazybox/services/runner/code/cmd/lazybox")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the CLI: %v %s", err, out)
+	if cliBuild.err != nil {
+		t.Fatalf("TestMain could not build the CLI: %v", cliBuild.err)
 	}
+	cli := cliBuild.dir
 	t.Setenv("SHELL", "/bin/zsh")
 	home := t.TempDir()
 	t.Setenv("HOME", home)

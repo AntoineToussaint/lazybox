@@ -117,7 +117,15 @@ try{
  await expect(changes).toContainText('Review it and send');
  assert.equal(fixture.mutations.filter(m=>m.method==='Apply').length,applies,'the review must not be sent on the person\'s behalf');
  assert.ok(!reviewWrites().some(m=>m.method==='SetReviewDisposition'&&m.body.disposition==='sent'));
+ // The message is delivered, then marking the comments sent loses its reply: the message still
+ // counts as sent (draft cleared, one delivery), and the warning says what did not happen.
+ let loseReply=true;
+ await page.route('**/SetReviewDisposition',async route=>{if(loseReply&&route.request().postDataJSON()?.disposition==='sent'){loseReply=false;await route.fetch();await route.fulfill({status:503,json:{code:'unavailable',message:'the reply was lost'}});}else await route.continue();});
  await box.press('Enter');
+ await expect(box).toHaveValue('');
+ await expect(page.getByRole('region',{name:'Agent chat'}).getByRole('alert').filter({hasText:'Sent. The review findings could not be marked as sent'})).toBeVisible();
+ assert.equal(fixture.mutations.filter(m=>m.method==='Apply').length,applies+1,'delivered once');
+ await page.unroute('**/SetReviewDisposition');
  await expect.poll(()=>reviewWrites().some(m=>m.method==='SetReviewDisposition'&&m.body.disposition==='sent')).toBe(true);
  const sent=reviewWrites().find(m=>m.method==='SetReviewDisposition').body;assert.equal(sent.disposition,'sent');assert.equal(sent.sessionId,'alpha-session');assert.equal(sent.ids.length,2);
  await expect(tray).toContainText('2 sent');await expect(tray).toContainText('Nothing pending');

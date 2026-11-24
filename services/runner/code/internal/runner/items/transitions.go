@@ -68,7 +68,7 @@ func Transitions(before *Item, after Item) []Event {
 		ev.Failed = now.FailingNames()
 		out = append(out, ev)
 	}
-	if now.Checks == "success" && (old.Checks == "pending" || old.Checks == "failure" || (newHead && old.Checks != "success")) {
+	if now.Checks == "success" && (old.Checks == "pending" || old.Checks == "failure" || old.Checks == "incomplete" || (newHead && old.Checks != "success")) {
 		out = append(out, event(EventChecksPassed, "checks passed"))
 	}
 	if now.Review == "changes_requested" && old.Review != "changes_requested" {

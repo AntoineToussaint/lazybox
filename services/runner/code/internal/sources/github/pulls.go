@@ -40,9 +40,12 @@ type PullRequestStatus struct {
 	Mergeable      bool
 	ReviewDecision string // approved, changes_requested, review_required or empty
 	Checks         []Check
-	ChecksState    string // success, failure, pending or none
-	MergeCommit    string
-	Author         string
+	// ChecksState is success, failure, pending, none, or incomplete when the
+	// head has more checks than one read takes (MaxListed) and none of those
+	// read fails.
+	ChecksState string
+	MergeCommit string
+	Author      string
 }
 
 // NewPullRequest is a pull request to open from a pushed branch of the same repository.
@@ -75,6 +78,9 @@ func splitName(fullName string) (string, string, error) {
 func writeError(err error, response *sdk.Response) error {
 	if err == nil {
 		return nil
+	}
+	if limit := rateLimit(err, response); limit != nil {
+		return limit
 	}
 	if response != nil && response.Response != nil {
 		switch response.StatusCode {
@@ -145,15 +151,12 @@ func (c *Client) PullRequestStatus(ctx context.Context, token, fullName, branch 
 		return PullRequestStatus{}, apiError(err, response)
 	}
 	out := PullRequestStatus{DefaultBranch: repo.GetDefaultBranch()}
-	list, response, err := client.PullRequests.List(ctx, owner, name, &sdk.PullRequestListOptions{Head: owner + ":" + branch, State: "all", Sort: "created", Direction: "desc", ListOptions: sdk.ListOptions{PerPage: 10}})
+	list, _, err := branchPulls(ctx, client, owner, name, branch, "")
 	if err != nil {
-		return out, apiError(err, response)
+		return out, err
 	}
 	var chosen *sdk.PullRequest
 	for _, pr := range list {
-		if pr.GetHead().GetRef() != branch {
-			continue
-		}
 		if chosen == nil || pr.GetState() == "open" && chosen.GetState() != "open" {
 			chosen = pr
 		}
@@ -171,32 +174,33 @@ func (c *Client) describe(ctx context.Context, client *sdk.Client, owner, name s
 		return out, apiError(err, response)
 	}
 	out = pullStatus(pr, out)
-	reviews, response, err := client.PullRequests.ListReviews(ctx, owner, name, number, &sdk.ListOptions{PerPage: 100})
+	reviews, _, err := readReviews(ctx, client, owner, name, number)
 	if err != nil {
-		return out, apiError(err, response)
+		return out, err
 	}
 	out.ReviewDecision = reviewDecision(reviews, len(pr.RequestedReviewers)+len(pr.RequestedTeams))
 	if out.HeadSHA == "" {
 		out.ChecksState = "none"
 		return out, nil
 	}
-	runs, response, err := client.Checks.ListCheckRunsForRef(ctx, owner, name, out.HeadSHA, &sdk.ListCheckRunsOptions{ListOptions: sdk.ListOptions{PerPage: 100}})
+	runs, err := readRuns(ctx, client, owner, name, out.HeadSHA, "")
 	if err != nil {
-		return out, apiError(err, response)
+		return out, err
 	}
-	out.Checks = checkRuns(runs.CheckRuns)
-	combined, response, err := client.Repositories.GetCombinedStatus(ctx, owner, name, out.HeadSHA, &sdk.ListOptions{PerPage: 100})
+	statuses, err := readStatuses(ctx, client, owner, name, out.HeadSHA, "")
 	if err != nil {
-		return out, apiError(err, response)
+		return out, err
 	}
-	out.Checks = append(out.Checks, commitStatuses(combined.Statuses)...)
+	out.Checks = append(runs.Checks, statuses.Checks...)
 	sort.SliceStable(out.Checks, func(i, j int) bool { return checkRank(out.Checks[i]) < checkRank(out.Checks[j]) })
-	out.ChecksState = checksState(out.Checks)
+	out.ChecksState = checksState(out.Checks, runs.Complete && statuses.Complete)
 	return out, nil
 }
 
 // reviewDecision mirrors GitHub's: each reviewer's latest approving or
 // blocking review counts; a pending request with neither is review_required.
+// reviews are oldest first: all of them, or the newest MaxListed of a
+// pull request with more (readReviews).
 func reviewDecision(reviews []*sdk.PullRequestReview, requested int) string {
 	latest := map[string]string{}
 	for _, review := range reviews {
@@ -242,15 +246,23 @@ func Failing(c Check) bool {
 	return false
 }
 
-func checksState(checks []Check) string {
+// checksState is failure when any check read fails. Otherwise a read that
+// did not reach every check (complete false) is incomplete: never success,
+// since an unread check may be failing.
+func checksState(checks []Check, complete bool) string {
+	for _, c := range checks {
+		if Failing(c) {
+			return "failure"
+		}
+	}
+	if !complete {
+		return "incomplete"
+	}
 	if len(checks) == 0 {
 		return "none"
 	}
 	state := "success"
 	for _, c := range checks {
-		if Failing(c) {
-			return "failure"
-		}
 		if c.Status != "completed" {
 			state = "pending"
 		}

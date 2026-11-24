@@ -6,8 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDeviceAndRefreshRequestsDoNotRequireAppSecret(t *testing.T) {
@@ -184,4 +186,77 @@ func TestSDKRejectsOversizedBodiesAndRedactsErrors(t *testing.T) {
 			t.Fatal("unbounded or unsafe error", err)
 		}
 	}
+}
+
+// A rate limit is not a refusal: the token still works, and the error says
+// when to try again instead of sending the person to reconnect it. Each of
+// GitHub's documented signals is told apart, on the REST API, on sign-in
+// and on a job's logs.
+func TestRateLimitsAreToldApartFromRefusals(t *testing.T) {
+	reset := time.Now().Add(17 * time.Minute).Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repositories/1": // primary: x-ratelimit-remaining 0, until x-ratelimit-reset
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+			w.WriteHeader(403)
+			w.Write([]byte(`{"message":"API rate limit exceeded for user ID 1."}`))
+		case "/repositories/2": // secondary, with retry-after
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(403)
+			w.Write([]byte(`{"message":"You have exceeded a secondary rate limit.","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}`))
+		case "/repositories/3": // secondary, its message only
+			w.WriteHeader(403)
+			w.Write([]byte(`{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`))
+		case "/repositories/4": // 429 with retry-after
+			w.Header().Set("Retry-After", "30")
+			w.WriteHeader(429)
+		case "/repositories/5": // a refusal
+			w.WriteHeader(403)
+			w.Write([]byte(`{"message":"Resource not accessible by personal access token"}`))
+		case "/login/device/code":
+			w.Header().Set("Retry-After", "90")
+			w.WriteHeader(429)
+		case "/repos/team/api/actions/jobs/9/logs":
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(403)
+			w.Write([]byte(`{"message":"You have exceeded a secondary rate limit."}`))
+		}
+	}))
+	defer server.Close()
+	c := NewAt(server.URL)
+	c.loginURL = server.URL
+	ctx := context.Background()
+	limited := func(what string, err error, after time.Duration) {
+		t.Helper()
+		var limit *RateLimitError
+		if !errors.As(err, &limit) || errors.Is(err, ErrForbidden) {
+			t.Fatalf("%s: not told apart: %v", what, err)
+		}
+		if wait := time.Until(limit.Reset); wait < after-5*time.Second || wait > after+5*time.Second {
+			t.Fatalf("%s: retry in %s, want %s", what, wait, after)
+		}
+		text := err.Error()
+		if !strings.Contains(text, limit.Reset.UTC().Format("15:04")+" UTC") || !strings.Contains(text, "still works") || strings.Contains(text, "permission") {
+			t.Fatalf("%s: %q", what, text)
+		}
+	}
+	_, err := c.Repository(ctx, "fixture", 1)
+	limited("primary", err, time.Until(reset))
+	if !strings.Contains(err.Error(), "in about 17 minutes") {
+		t.Fatalf("primary: %q", err)
+	}
+	_, err = c.Repository(ctx, "fixture", 2)
+	limited("secondary with retry-after", err, 2*time.Minute)
+	_, err = c.Repository(ctx, "fixture", 3)
+	limited("secondary by its message", err, secondaryWait)
+	_, err = c.Repository(ctx, "fixture", 4)
+	limited("429", err, 30*time.Second)
+	if _, err = c.Repository(ctx, "fixture", 5); !errors.Is(err, ErrForbidden) || strings.Contains(err.Error(), "rate limit") {
+		t.Fatalf("a refusal is a refusal: %v", err)
+	}
+	_, err = c.Begin(ctx, "Iv.test")
+	limited("sign-in", err, 90*time.Second)
+	_, err = c.JobLog(ctx, "fixture", "team/api", 9)
+	limited("job logs", err, time.Minute)
 }

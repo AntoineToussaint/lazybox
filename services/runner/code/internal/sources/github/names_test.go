@@ -21,7 +21,7 @@ func TestDotRepositoryNamesNeverReachGitHub(t *testing.T) {
 		if _, err := client.ReadPullRequest(ctx, "ghp_fixture", name, 1, nil); err == nil {
 			t.Errorf("%s: read accepted", name)
 		}
-		if _, _, err := client.ReviewComments(ctx, "ghp_fixture", name, 1); err == nil {
+		if _, err := client.ReviewComments(ctx, "ghp_fixture", name, 1); err == nil {
 			t.Errorf("%s: review comments accepted", name)
 		}
 	}

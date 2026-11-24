@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +18,78 @@ import (
 )
 
 var ErrUnauthorized = errors.New("GitHub sign-in expired or revoked; reconnect this Lazybox account")
-var ErrForbidden = errors.New("GitHub denied access; check token permissions, organization or SSO policy, App access if applicable, and rate limits")
+var ErrForbidden = errors.New("GitHub denied access; check token permissions, organization or SSO policy, and App access if applicable")
+
+// RateLimitError is GitHub asking the client to wait: a spent primary rate
+// limit (x-ratelimit-remaining: 0) or a secondary one (retry-after, or
+// GitHub's message), as HTTP 403 or 429. The token still works. Reset is
+// when GitHub takes requests again.
+type RateLimitError struct{ Reset time.Time }
+
+func (e *RateLimitError) Error() string {
+	const works = "the connection still works, so wait rather than reconnect"
+	if e.Reset.IsZero() {
+		return "GitHub's rate limit was reached; try again in a few minutes (" + works + ")"
+	}
+	wait := "in under a minute"
+	if minutes := int(time.Until(e.Reset).Round(time.Minute) / time.Minute); minutes == 1 {
+		wait = "in about a minute"
+	} else if minutes > 1 {
+		wait = fmt.Sprintf("in about %d minutes", minutes)
+	}
+	return fmt.Sprintf("GitHub's rate limit was reached; try again after %s UTC, %s (%s)", e.Reset.UTC().Format("15:04"), wait, works)
+}
+
+// secondaryWait is how long GitHub asks a client to wait after a secondary
+// rate limit that names no time.
+const secondaryWait = time.Minute
+
+// rateLimitOf tells GitHub's rate limits apart from refusals by GitHub's
+// documented signals: retry-after, x-ratelimit-remaining: 0 (until
+// x-ratelimit-reset), any 429, and a 403 whose message names a rate limit.
+// It is nil for any other answer.
+func rateLimitOf(status int, header http.Header, message string) *RateLimitError {
+	if status != http.StatusForbidden && status != http.StatusTooManyRequests {
+		return nil
+	}
+	if seconds, err := strconv.Atoi(strings.TrimSpace(header.Get("Retry-After"))); err == nil && seconds >= 0 {
+		return &RateLimitError{Reset: time.Now().Add(time.Duration(seconds) * time.Second)}
+	}
+	if header.Get("X-RateLimit-Remaining") == "0" {
+		if unix, err := strconv.ParseInt(header.Get("X-RateLimit-Reset"), 10, 64); err == nil && unix > 0 {
+			return &RateLimitError{Reset: time.Unix(unix, 0)}
+		}
+		return &RateLimitError{Reset: time.Now().Add(secondaryWait)}
+	}
+	if status == http.StatusTooManyRequests || strings.Contains(strings.ToLower(message), "rate limit") {
+		return &RateLimitError{Reset: time.Now().Add(secondaryWait)}
+	}
+	return nil
+}
+
+// rateLimit is the rate limit behind an SDK error, or nil.
+func rateLimit(err error, response *sdk.Response) *RateLimitError {
+	var primary *sdk.RateLimitError
+	if errors.As(err, &primary) && !primary.Rate.Reset.IsZero() {
+		return &RateLimitError{Reset: primary.Rate.Reset.Time}
+	}
+	var secondary *sdk.AbuseRateLimitError
+	if errors.As(err, &secondary) && secondary.RetryAfter != nil {
+		return &RateLimitError{Reset: time.Now().Add(*secondary.RetryAfter)}
+	}
+	if primary != nil || secondary != nil {
+		return &RateLimitError{Reset: time.Now().Add(secondaryWait)}
+	}
+	if response == nil || response.Response == nil {
+		return nil
+	}
+	message := ""
+	var detail *sdk.ErrorResponse
+	if errors.As(err, &detail) {
+		message = detail.Message
+	}
+	return rateLimitOf(response.StatusCode, response.Header, message)
+}
 
 type Token struct {
 	AccessToken      string `json:"access_token"`
@@ -124,6 +196,13 @@ func (c *Client) request(ctx context.Context, method, target, token string, form
 		return ErrUnauthorized
 	}
 	if res.StatusCode == 403 || res.StatusCode == 429 {
+		var refusal struct {
+			Message string `json:"message"`
+		}
+		_ = json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&refusal)
+		if limit := rateLimitOf(res.StatusCode, res.Header, refusal.Message); limit != nil {
+			return limit
+		}
 		return ErrForbidden
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
@@ -205,11 +284,14 @@ func apiError(err error, response *sdk.Response) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return context.DeadlineExceeded
 	}
+	if limit := rateLimit(err, response); limit != nil {
+		return limit
+	}
 	if response != nil && response.Response != nil {
 		switch response.StatusCode {
 		case 401:
 			return ErrUnauthorized
-		case 403, 429:
+		case 403:
 			return ErrForbidden
 		default:
 			return &HTTPError{Status: response.StatusCode}

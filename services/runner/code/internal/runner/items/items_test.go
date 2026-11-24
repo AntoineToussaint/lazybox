@@ -183,6 +183,14 @@ func TestTransitionsAreEmittedOnce(t *testing.T) {
 	if got := names(Transitions(&open, pr("closed", "pending", "", "", "a"))); !slices.Equal(got, []string{EventClosed}) {
 		t.Fatalf("closed: %v", got)
 	}
+	// More checks than one read takes: never passed, until a read reaches them all.
+	incomplete := pr("open", "incomplete", "", "clean", "a")
+	if got := Transitions(&open, incomplete); len(got) != 0 {
+		t.Fatalf("incomplete checks: %v", got)
+	}
+	if got := names(Transitions(&incomplete, pr("open", "success", "", "clean", "a"))); !slices.Equal(got, []string{EventChecksPassed}) {
+		t.Fatalf("incomplete, then read in full and green: %v", got)
+	}
 }
 
 func TestStorePersistsLinksAndPlacesEvents(t *testing.T) {

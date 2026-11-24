@@ -16,7 +16,9 @@ export function checksSummary(pr: PullRequestStatus): string {
   if (!pr.checks.length) return 'No checks';
   const count = (state: CheckState) => pr.checks.filter(check => checkState(check) === state).length;
   const parts = [[count('failed'), 'failing'], [count('running'), 'running'], [count('passed'), 'passed'], [count('skipped'), 'skipped']] as const;
-  return parts.filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}`).join(' · ');
+  const summary = parts.filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}`).join(' · ');
+  // The Runner reads a bounded number of checks; past it, the rest are on GitHub.
+  return pr.checksState === 'incomplete' ? `${summary} · more on GitHub` : summary;
 }
 
 const verb = (status: string) => status === '?' || status === 'A' ? 'Add' : status === 'D' ? 'Remove' : status === 'R' ? 'Rename' : 'Update';
@@ -53,6 +55,7 @@ export function mergeBlocker(pr: PullRequestStatus): string {
   if (pr.draft) return 'Draft — mark it ready for review on GitHub first';
   if (pr.checksState === 'failure') return 'Checks are failing';
   if (pr.checksState === 'pending') return 'Waiting for checks to finish';
+  if (pr.checksState === 'incomplete') return 'More checks than Lazybox reads; check them on GitHub';
   if (pr.reviewDecision === 'changes_requested') return 'A reviewer requested changes';
   switch (pr.mergeableState) {
     case 'clean': case 'unstable': case 'has_hooks': return '';

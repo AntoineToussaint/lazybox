@@ -155,8 +155,8 @@ or **Merge** is next. Nothing happens without an explicit click.
   after any draft. It is never sent for you.
 - **Merge** (squash, merge commit or rebase; the choice is remembered in this
   browser) is offered only when GitHub reports the pull request green and
-  mergeable; otherwise the card says why (failing or running checks, a required
-  review, conflicts, branch protection). It asks for confirmation, merges only
+  mergeable; otherwise the card says why (failing or running checks, more
+  checks than Lazybox reads, a required review, conflicts, branch protection). It asks for confirmation, merges only
   the head shown (a later push makes GitHub refuse), and shows GitHub's own
   refusal, such as a branch-protection rule, as it is stated.
 - **Update branch** is offered instead of Merge when the repository requires
@@ -201,6 +201,21 @@ scoped credential is denied, like every RPC off its allowlist).
   request is found by `owner:branch` (an open one first); the review decision
   is each reviewer's latest approving or blocking review, else
   `review_required` while a request is outstanding.
+- Every list a decision rests on — the head's check runs and commit statuses,
+  the reviews, a branch's pull requests — is read page by page to its end
+  (GitHub's `Link` header), up to 1000 entries (`github.MaxListed`). A head
+  with more checks than that, none of those read failing, is `incomplete`:
+  never `success`, so Merge is not offered and `pr.checks-passed` is not
+  emitted; the card says to check them on GitHub. A failure among those read
+  is still a failure. Reviews past 1000 are read from the newest end, so each
+  reviewer's latest review still decides.
+- A GitHub rate limit is told apart from a refusal on every request (sign-in,
+  reads, writes, job logs): `x-ratelimit-remaining: 0` (until
+  `x-ratelimit-reset`), `retry-after`, a 403 whose message names a rate
+  limit, and any 429. The error says the connection still works and when to
+  try again (`after 15:04 UTC, in about 12 minutes`; a minute when GitHub
+  names no time), instead of sending the person to check the token's
+  permissions or reconnect.
 
 A repository whose origin is not on GitHub can commit and push; its card says
 pull requests need GitHub. Without a GitHub connection, a GitHub origin says to
@@ -274,11 +289,15 @@ beside the pass, the PR loop's): a read that began before the snapshot kept
 was observed is dropped, so an older answer never replaces a newer one or
 replays its transitions.
 
-Every read is conditional: the pull request, its head's check runs and its
-commit statuses each carry their ETag (`If-None-Match`), and a 304 costs no
-rate limit. Reviews are read again only when the pull request changed
-(submitting a review changes it). A 403 or 429 rate limit pauses tracking
-until its reset (at least five minutes) and `ListLinks` says so; a revoked
+Every read is conditional: the pull request and each page of its head's
+check runs and commit statuses carry their ETag (`If-None-Match`), and a 304
+costs no rate limit. A list is unchanged only when every page answers 304; a
+change on any page reads the list again from its first page. A read that
+stopped at 1000 checks keeps no validators, so the next one is read in full
+and says `incomplete` again rather than carrying a partial read forward.
+Reviews are read again only when the pull request changed (submitting a
+review changes it). A rate limit pauses tracking until its reset (at least
+five minutes) and `ListLinks` says so; a revoked
 credential stops it until reconnected. Any other failed lookup or read is
 said too: `ListLinks.tracking_error` names what could not be read and why (a
 private repository answers 404 to a connection that cannot see it), for the
@@ -293,7 +312,8 @@ Each transition is emitted once, never on a poll that finds nothing new:
 `pr.changes-requested`, `pr.approved`, `pr.merged`, `pr.closed`,
 `pr.conflicts`. A pull request first seen open is opened; first seen already
 failing, with changes requested or in conflict, it says so too; first seen
-merged is history. Each event goes to:
+merged is history. `pr.checks-passed` needs every check read: checks that were
+`incomplete` pass only once a read reaches them all. Each event goes to:
 
 - **hooks** ([automate.md](docs/guides/automate.md)), with the pull request in
   the event (`LAZYBOX_EVENT_PR_URL`);
@@ -332,7 +352,10 @@ in progress.
   Only reviews and comments whose author is the repository's `OWNER`,
   `MEMBER` or `COLLABORATOR` (GitHub's `author_association`) are imported and
   sent; the others are counted in a note, to the person and the agent, and
-  stay on GitHub.
+  stay on GitHub. Comments and reviews are read from their newest end: a pull
+  request with more than 1000 of either sends its newest 1000, and a note to
+  the person and the agent says the older ones were not read and stay on
+  GitHub.
 
 Both messages quote everything GitHub wrote — the title, check names,
 summaries and logs, review summaries and comments — in one external-content

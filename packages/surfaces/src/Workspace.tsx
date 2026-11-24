@@ -800,6 +800,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   // ⇧⌘D (or the Window menu) with a popped-out group's window in front: that group goes back.
   useKeyboardAction('window.put-back', () => { const group = dock.current?.focusedPopout(); if (group) dock.current?.dockBack(group); }, () => !!dock.current?.focusedPopout());
   const navigator = useWorkspaceCommands({
+    openCostDashboard: () => openExtensionPanel({ id: 'cost-dashboard', panel: 'costs' }),
     root: viewState?.root || '', main: !fixedWorkspaceId && ownWindows, canShowMissions: !fixedWorkspaceId, missionOpen, collections, selection: missionOpen ? emptyTarget() : page.selection, workspaceId: missionOpen ? '' : workspaceID, workbench: missionOpen ? undefined : workbench, registry,
     windows: missionOpen ? [] : otherWindows, canStartConversation: !missionOpen && !!info && !pending && canShowNewSession, terminalReady: !missionOpen && terminalReady, canOpenWorkspaceWindow: !missionOpen && !!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId,
     showRun: target => showPanelFor('console', target), showSession, selectWorkspace: select, closeSettings: () => setSettings(false),

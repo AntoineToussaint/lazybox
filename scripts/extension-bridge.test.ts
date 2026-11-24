@@ -98,7 +98,7 @@ test('usage sums priced groups in dollars and counts the unpriced', () => {
   const usage = projectUsage([{ workspaceId: 'alpha', report }], alpha);
   assert.equal(usage.totalUsd, 1.5);
   assert.equal(usage.unpriced, 1);
-  assert.deepEqual(usage.groups[0], { workspaceId: 'alpha', workspaceName: 'Alpha', conversationId: 'a-c', model: 'opus', provider: 'claude', inputTokens: 10, outputTokens: 5, cacheReadTokens: 3, cacheWriteTokens: 1, usd: 1.5, records: 2 });
+  assert.deepEqual(usage.groups[0], { workspaceId: 'alpha', workspaceName: 'Alpha', conversationId: 'a-c', model: 'opus', provider: 'claude', inputTokens: 10, outputTokens: 5, cacheReadTokens: 3, cacheWriteTokens: 1, usd: 1.5, unpriced: 0, records: 2 });
   assert.equal(usage.groups[1].usd, null);
   assert.equal('series' in usage, false, 'no series unless asked');
 });

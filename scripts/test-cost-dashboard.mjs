@@ -72,6 +72,13 @@ const spent = (from, to = Infinity, keep = () => true) => series.filter(b => b.a
 const f = await startRunnerFixture();
 const usage = body => body.series ? report(body.workspace) : { ...report(body.workspace), series: [] };
 f.telemetry = usage;
+f.tracked.trackingError = 'GitHub is offline';
+const link = (workspace, conversation, repository, number) => ({
+  collectionId: workspace, conversationId: conversation, role: 'delivers',
+  item: { kind: 'pull_request', ref: { key: repository + '#' + number }, repository },
+});
+f.tracked.links.push(link('alpha', 'alpha', 'acme/parser', 1), link('alpha', 'c-alpha-2', 'acme/cache', 1), link('beta', '', 'acme/release', 2),
+  link('alpha', 'c-alpha-3', 'acme/parser', 2), link('alpha', 'c-alpha-3', 'acme/cache', 2));
 Object.assign(f.sessions.find(s => s.id === 'alpha-session'), { title: 'Fix the parser' });
 Object.assign(f.sessions.find(s => s.id === 'beta-session'), { title: 'Ship the release' });
 for (const c of conversations.filter(c => c.id.startsWith('c-'))) f.sessions.push({ id: c.id, collectionId: c.workspace, profileId: 'claude-default', title: c.title, status: 'ready', closed: true, capabilities: {}, pending: [] });
@@ -95,23 +102,21 @@ async function scenario(browser, scheme, full) {
   await page.goto(url);
   await expect(page.locator('.page-layout .panel-chat').getByRole('textbox', { name: 'Message', exact: true })).toBeEnabled();
 
-  await page.locator('summary[aria-label="Panels"]').click();
-  await page.getByRole('button', { name: 'New Extensions panel', exact: true }).click();
+  const composer = page.locator('.page-layout .panel-chat').getByRole('textbox', { name: 'Message', exact: true });
+  await composer.fill('/pr-cost');
+  await composer.press('Enter');
   const panel = page.locator('.extension-home, .extension-panel').first();
   if (full) {
     await panel.locator('li', { hasText: 'Cost dashboard' }).getByRole('button', { name: 'Add' }).click();
     const sheet = page.getByRole('dialog', { name: 'Allow Cost dashboard?' });
     const can = sheet.getByRole('list', { name: 'What it can do' });
-    await expect(can.locator('li')).toHaveCount(3);
+    await expect(can.locator('li')).toHaveCount(4);
     for (const text of ['See token use and cost', 'See your conversations', 'Show a conversation']) await expect(can).toContainText(text);
     await expect(sheet).toContainText('Nothing: it cannot use the network.');
     await sheet.getByRole('button', { name: 'Allow and turn on' }).click();
     await expect(sheet).toHaveCount(0);
-    assert.deepEqual(f.mutations.filter(m => m.method === 'ApproveExtension').at(-1).body, { id: 'cost-dashboard', grants: ['read:usage', 'read:sessions', 'show:conversations'] });
-  } else {
-    const picker = page.getByRole('combobox', { name: 'Extension panel' });
-    if (await picker.count()) await picker.selectOption({ label: 'Cost dashboard' });
-    else await panel.locator('.extension-tile', { hasText: 'Cost dashboard' }).click();
+    assert.deepEqual(f.mutations.filter(m => m.method === 'ApproveExtension').at(-1).body, { id: 'cost-dashboard', grants: ['read:usage', 'read:sessions', 'read:pulls', 'show:conversations'] });
+
   }
 
   const board = page.frameLocator('iframe.extension-frame').frameLocator('iframe');
@@ -143,6 +148,13 @@ async function scenario(browser, scheme, full) {
   await col.hover();
   await expect(board.locator('#tooltip')).toBeVisible();
   await expect(board.locator('#tooltip .sum')).toHaveText(dollars(spent(today)));
+  await expect(board.locator('#by-pull')).toContainText('Using saved PR links. GitHub is offline');
+  const pullCost = label => board.locator('#by-pull .row').filter({ hasText: label }).locator('.cost');
+  await expect(pullCost('acme/parser#1')).toHaveText(dollars(byConversation.get('alpha')));
+  await expect(pullCost('acme/cache#1')).toHaveText(dollars(byConversation.get('c-alpha-2')));
+  await expect(pullCost('acme/cache#2')).toHaveText('–');
+  await expect(pullCost('Shared workspace usage')).toHaveText(dollars(byConversation.get('c-alpha-3')));
+  await expect(pullCost('acme/release#2')).toHaveText(dollars(spent(today - 6 * DAY, Infinity, b => b.workspace === 'beta')));
   // ---- The lists, ranked, with the share of the period.
   await expect(board.locator('#by-model .row')).toHaveCount(new Set(inWeek.map(b => b.model)).size);
   await expect(board.locator('#by-workspace .row')).toHaveCount(2);
@@ -235,6 +247,13 @@ async function scenario(browser, scheme, full) {
     await expect(board.locator('#board')).toBeHidden();
     await shot(frameEl, 'narrow-empty');
     f.telemetry = usage;
+f.tracked.trackingError = 'GitHub is offline';
+const link = (workspace, conversation, repository, number) => ({
+  collectionId: workspace, conversationId: conversation, role: 'delivers',
+  item: { kind: 'pull_request', ref: { key: repository + '#' + number }, repository },
+});
+f.tracked.links.push(link('alpha', 'alpha', 'acme/parser', 1), link('alpha', 'c-alpha-2', 'acme/cache', 1), link('beta', '', 'acme/release', 2),
+  link('alpha', 'c-alpha-3', 'acme/parser', 2), link('alpha', 'c-alpha-3', 'acme/cache', 2));
   }
 
   // No policy violation, no refusal and no error, in the panel or the app.

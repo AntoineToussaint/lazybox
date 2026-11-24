@@ -287,6 +287,9 @@ export function useSlashCommands(o: Options) {
           .then(receipt => { if (receipt.delivery === 'failed') onError(receipt.error || 'Could not list MCP servers.'); })
           .catch(e => onError(humanError(e)));
         break;
+      case 'pr-cost':
+        if (!runAction('cost-dashboard.open')) notice('Open the Cost dashboard in the workspace window');
+        break;
       case 'cost': case 'context':
         if (!openUsage(latest.current.sessionID, command.name)) notice('The usage of this conversation shows in its header');
         break;

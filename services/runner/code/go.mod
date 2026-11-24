@@ -6,7 +6,7 @@ require (
 	buf.build/go/protovalidate v1.4.1
 	cel.dev/cel-go v0.33.2
 	connectrpc.com/connect v1.21.1
-	connectrpc.com/vanguard v0.5.0
+	connectrpc.com/vanguard v0.4.0
 	github.com/BurntSushi/toml v1.6.0
 	github.com/codefly-dev/core v0.19.7-0.20261025185759-e501458995d0
 	github.com/codefly-dev/gortk v0.2.0
@@ -31,7 +31,6 @@ require (
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.12-20260825204119-511051f7f437.2 // indirect
 	cel.dev/expr v0.25.3 // indirect
-	connectrpc.com/connect/v2 v2.0.0 // indirect
 	github.com/Masterminds/semver v1.5.0 // indirect
 	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect

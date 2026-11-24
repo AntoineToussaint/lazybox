@@ -185,9 +185,28 @@ describe('browser service', () => {
     assert.match(submitted.text, /Now on "Welcome"/);
   });
 
+  // A requested navigation that never changes this tab's address returns promptly, not after a timeout:
+  // a download, a form back to the same address.
+  it('returns promptly from a click whose navigation keeps the address', async () => {
+    const timed = async (path: string, button: string) => {
+      await act({ action: 'navigate', url: `${sites.home}${path}` });
+      const ref = refIn(await snapshot(), button), started = Date.now();
+      await act({ action: 'click', ref });
+      return Date.now() - started;
+    };
+    // A link into a new tab is timed where popups are tested: it is folded into this page.
+    for (const [path, button] of [['/download', 'link "Get the report"'], ['/same', 'button "Search again"']]) {
+      const took = await timed(path, button);
+      assert.ok(took < 2500, `${path}: the click took ${took} ms`);
+    }
+  });
+
   it('folds a popup into the page and dismisses dialogs', async () => {
     await act({ action: 'navigate', url: `${sites.home}/popup` });
-    await act({ action: 'click', ref: refIn(await snapshot(), 'link "Open in a new window"') });
+    const link = refIn(await snapshot(), 'link "Open in a new window"'), started = Date.now();
+    await act({ action: 'click', ref: link });
+    // A link into a new tab is no navigation of this one: the click returns promptly.
+    assert.ok(Date.now() - started < 2500, `the click took ${Date.now() - started} ms`);
     await runner.until(() => runner.logged('popup').length === 1);
     await act({ action: 'wait_for', text: 'Name' });
     assert.match(runner.logged('popup')[0], /^Opened 127\.0\.0\.1:\d+\/form here instead of a new window$/);

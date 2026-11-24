@@ -39,6 +39,8 @@ export async function startSites(): Promise<Sites> {
       case '/signin-slow': return { body: page('Sign in', `<form action="/welcome"><label>Email <input name="email"></label><button>Sign in</button></form><script>addEventListener('beforeunload', () => { const end = Date.now() + 400; while (Date.now() < end); });</script>`) };
       case '/welcome': return { body: page('Welcome', '<h1>Signed in</h1>') };
       case '/download': return { body: page('Download', '<a href="/file">Get the report</a>') };
+      // A form that comes back to the same address (a search, a post-back with errors).
+      case '/same': return { body: page('Same', '<form action="/same"><button>Search again</button></form>') };
       case '/file': return { headers: { 'content-type': 'text/plain', 'content-disposition': 'attachment; filename="report.txt"' }, body: 'report body\n' };
       case '/popup': return { body: page('Popup', '<a href="/form" target="_blank">Open in a new window</a>') };
       case '/fetch-forbidden': return { body: page('Fetch', `<p id="out">pending</p><script>fetch('${forbiddenURL}/').then(() => out.textContent = 'reached', () => out.textContent = 'refused')</script>`) };

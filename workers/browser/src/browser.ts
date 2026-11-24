@@ -49,6 +49,9 @@ export function reason(error: unknown): string {
  * holds the agent-only rules: no typing into password fields, and asking
  * before a sign-in form is submitted.
  */
+/** How long a requested navigation may take to show its first sign, and then to commit (settle()). */
+const signWait = 3000, navigationWait = 10_000;
+
 export class AgentBrowser {
   /** Who acts now; navigations the person makes never ask. */
   actor: 'agent' | 'person' = 'agent';
@@ -76,15 +79,16 @@ export class AgentBrowser {
     const main = () => page.mainFrame();
     // Chromium says a navigation was requested while the click is still being handled, before any
     // request leaves: a busy machine cannot delay it past settle()'s look, as it could the request.
+    // Only this tab's page counts: not a frame inside it, a new tab, or a download link.
     // Page events reach this session only once its Page domain is on.
     void cdp.send('Page.enable').then(() => cdp.send('Page.getFrameTree')).then(tree => { this.mainFrameId = tree.frameTree.frame.id; }).catch(() => {});
-    cdp.on('Page.frameRequestedNavigation', event => { if (!this.mainFrameId || event.frameId === this.mainFrameId) this.requested = true; });
-    page.on('request', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = true; this.changed(); } });
-    page.on('requestfailed', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = false; this.changed(); } });
-    page.on('load', () => { this.loading = false; this.changed(); });
+    cdp.on('Page.frameRequestedNavigation', event => { if (this.mainFrameId && event.frameId === this.mainFrameId && event.disposition === 'currentTab') this.requested = true; });
+    page.on('request', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = true; this.wake(); this.changed(); } });
+    page.on('requestfailed', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = false; this.wake(); this.changed(); } });
+    page.on('load', () => { this.loading = false; this.wake(); this.changed(); });
     page.on('domcontentloaded', () => this.changed());
-    page.on('framenavigated', frame => { if (frame === main()) void this.committed(frame.url()); });
-    page.on('download', download => void this.download(download));
+    page.on('framenavigated', frame => { if (frame === main()) { this.navigated = true; this.wake(); void this.committed(frame.url()); } });
+    page.on('download', download => { this.wake(); void this.download(download); });
     page.on('dialog', dialog => {
       // A dialog would stall the agent; it is answered at once and logged.
       const kind = dialog.type(), message = dialog.message();
@@ -250,22 +254,37 @@ export class AgentBrowser {
     if (!answer?.allow) throw new Error(`The person did not allow submitting the sign-in form on ${origin || url}.`);
   }
 
-  /** After an action that may navigate: wait for the next page, and say where the agent is. */
-  /** Where the page is as an action begins; a navigation requested from now on is that action's. */
+  /** Where the page is as an action begins; a navigation requested, signalled or committed from now on is that action's. */
   private beginAction(): string {
-    this.requested = false;
+    this.requested = false; this.signed = false; this.navigated = false;
     return this.page.url();
   }
 
+  /** A sign of where a requested navigation went (its request, its failure, its commit, its load, a
+   * download, the gate asking the person): recorded, and wakes a settle() waiting for one. */
+  wake() { this.signed = true; const waiting = this.waiting; this.waiting = undefined; waiting?.(); }
+  private waiting?: () => void;
+  /** A sign since the action began, so settle() does not wait for one that already came. */
+  private signed = false;
+  /** This tab's page committed a navigation since the action began (to the same address too). */
+  private navigated = false;
+  private nextSign(ms: number): Promise<void> {
+    return new Promise<void>(resolve => { const timer = setTimeout(resolve, ms); this.waiting = () => { clearTimeout(timer); resolve(); }; }).finally(() => { this.waiting = undefined; });
+  }
+
+  /** After an action that may navigate: wait for the next page, and say where the agent is. */
   private async settle(before: string): Promise<string> {
     await this.page.waitForTimeout(150);
     const requested = this.requested;
     this.requested = false;
-    if (this.page.url() !== before || this.loading || requested) {
-      // A requested navigation that has not reached the network yet: wait for it to commit first.
-      if (requested && this.page.url() === before && !this.loading) await this.page.waitForURL(url => url.toString() !== before, { timeout: 10_000, waitUntil: 'commit' }).catch(() => {});
-      await this.page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {});
-    }
+    // Asked to go somewhere, and nothing has shown yet (a page slow to leave): wait for the first sign of
+    // where it went: its request, its commit (the same address too), a download, a failure, the person
+    // being asked. Bounded: a navigation that never shows a sign costs this much, not more.
+    if (requested && !this.signed && !this.pendingSite) await this.nextSign(signWait);
+    // On its way (its request left) but not committed: the old page is still the loaded one, so wait for
+    // the commit, or the failure, a download or the person being asked, not for this page's load.
+    for (const end = Date.now() + navigationWait; this.loading && !this.navigated && !this.pendingSite && Date.now() < end;) await this.nextSign(end - Date.now());
+    if (this.navigated || this.page.url() !== before) await this.page.waitForLoadState('domcontentloaded', { timeout: navigationWait }).catch(() => {});
     const notes: string[] = [];
     if (this.page.url() !== before) notes.push(`Now on ${await this.where()}.`);
     if (this.pendingSite) notes.push(`Waiting for the person to allow ${this.pendingSite}; the page changes once they answer.`);
@@ -387,7 +406,7 @@ export class AgentBrowser {
 
   private async history(p: ActParams): Promise<ActResult> {
     const options = { waitUntil: 'domcontentloaded' as const, timeout: navigationTimeout };
-    const before = this.beginAction();
+    const before = this.page.url();
     const words = { back: ['Went back', 'There is no previous page.'], forward: ['Went forward', 'There is no next page.'], reload: ['Reloaded the page', ''] }[p.action as 'back' | 'forward' | 'reload'];
     const response = p.action === 'back' ? await this.page.goBack(options) : p.action === 'forward' ? await this.page.goForward(options) : await this.page.reload(options);
     if (!response && p.action !== 'reload' && this.page.url() === before) return this.result(p, words[1], words[0], undefined, false);

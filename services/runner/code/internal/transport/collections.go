@@ -16,7 +16,7 @@ func (s *Service) collectionStore() (*collections.Manager, error) {
 	return s.Bench.Collections, nil
 }
 func wireCollection(c collections.Collection) *pb.Collection {
-	w := &pb.Collection{Id: c.ID, HourlyWorkflowReview: c.HourlyWorkflowReview, Name: c.Name, WorkId: c.WorkID, Root: c.Root, State: c.State, Error: c.Error, OwnerExecutionId: c.OwnerExecutionID, OwnershipUncertain: c.OwnershipUncertain, OwnerExecutionIds: c.OwnerExecutionIDs, CreatedAtUnixMillis: c.CreatedAt}
+	w := &pb.Collection{ConversationOrder: c.ConversationOrder, Id: c.ID, HourlyWorkflowReview: c.HourlyWorkflowReview, Name: c.Name, WorkId: c.WorkID, Root: c.Root, State: c.State, Error: c.Error, OwnerExecutionId: c.OwnerExecutionID, OwnershipUncertain: c.OwnershipUncertain, OwnerExecutionIds: c.OwnerExecutionIDs, CreatedAtUnixMillis: c.CreatedAt}
 	if c.Origin != nil {
 		w.Origin = &pb.ItemRef{Provider: c.Origin.Provider, Key: c.Origin.Key}
 	}
@@ -91,6 +91,21 @@ func (s *Service) ListCollections(ctx context.Context, r *pb.ListCollectionsRequ
 		w.Collections = append(w.Collections, wireCollection(c))
 	}
 	return w, nil
+}
+
+func (s *Service) ArrangeConversations(ctx context.Context, r *pb.ArrangeConversationsRequest) (*pb.CollectionResponse, error) {
+	m, err := s.collectionStore()
+	if err != nil {
+		return nil, err
+	}
+	c, err := m.ArrangeConversations(r.CollectionId, r.ConversationIds)
+	if errors.Is(err, collections.ErrArrangementTooLong) {
+		return nil, grpcError(codes.InvalidArgument, err)
+	}
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	return &pb.CollectionResponse{Collection: wireCollection(c)}, nil
 }
 
 // ArrangeWorkspaces keeps the person's order of their workspaces: the one

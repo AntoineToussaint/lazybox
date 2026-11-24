@@ -208,6 +208,9 @@ const (
 	// RunnerServiceArrangeWorkspacesProcedure is the fully-qualified name of the RunnerService's
 	// ArrangeWorkspaces RPC.
 	RunnerServiceArrangeWorkspacesProcedure = "/lazybox.bench.v1.RunnerService/ArrangeWorkspaces"
+	// RunnerServiceArrangeConversationsProcedure is the fully-qualified name of the RunnerService's
+	// ArrangeConversations RPC.
+	RunnerServiceArrangeConversationsProcedure = "/lazybox.bench.v1.RunnerService/ArrangeConversations"
 	// RunnerServiceArchiveCollectionProcedure is the fully-qualified name of the RunnerService's
 	// ArchiveCollection RPC.
 	RunnerServiceArchiveCollectionProcedure = "/lazybox.bench.v1.RunnerService/ArchiveCollection"
@@ -830,6 +833,8 @@ type RunnerServiceClient interface {
 	// answers in, so every window and a paired phone list them alike, across
 	// restarts. The owner's only. Answers the list in its new order.
 	ArrangeWorkspaces(context.Context, *connect.Request[gen.ArrangeWorkspacesRequest]) (*connect.Response[gen.ListCollectionsResponse], error)
+	// Keeps the sidebar conversation order on this workspace.
+	ArrangeConversations(context.Context, *connect.Request[gen.ArrangeConversationsRequest]) (*connect.Response[gen.CollectionResponse], error)
 	ArchiveCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	ReconcileCollection(context.Context, *connect.Request[gen.ReconcileCollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	// The owner's only. What a previous Runner left unconfirmed in a workspace
@@ -1634,6 +1639,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceArrangeWorkspacesProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("ArrangeWorkspaces")),
+			connect.WithClientOptions(opts...),
+		),
+		arrangeConversations: connect.NewClient[gen.ArrangeConversationsRequest, gen.CollectionResponse](
+			httpClient,
+			baseURL+RunnerServiceArrangeConversationsProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("ArrangeConversations")),
 			connect.WithClientOptions(opts...),
 		),
 		archiveCollection: connect.NewClient[gen.CollectionRequest, gen.CollectionResponse](
@@ -2738,6 +2749,7 @@ type runnerServiceClient struct {
 	getCollection                *connect.Client[gen.CollectionRequest, gen.CollectionResponse]
 	listCollections              *connect.Client[gen.ListCollectionsRequest, gen.ListCollectionsResponse]
 	arrangeWorkspaces            *connect.Client[gen.ArrangeWorkspacesRequest, gen.ListCollectionsResponse]
+	arrangeConversations         *connect.Client[gen.ArrangeConversationsRequest, gen.CollectionResponse]
 	archiveCollection            *connect.Client[gen.CollectionRequest, gen.CollectionResponse]
 	reconcileCollection          *connect.Client[gen.ReconcileCollectionRequest, gen.CollectionResponse]
 	getOwnership                 *connect.Client[gen.OwnershipRequest, gen.Ownership]
@@ -3206,6 +3218,11 @@ func (c *runnerServiceClient) ListCollections(ctx context.Context, req *connect.
 // ArrangeWorkspaces calls lazybox.bench.v1.RunnerService.ArrangeWorkspaces.
 func (c *runnerServiceClient) ArrangeWorkspaces(ctx context.Context, req *connect.Request[gen.ArrangeWorkspacesRequest]) (*connect.Response[gen.ListCollectionsResponse], error) {
 	return c.arrangeWorkspaces.CallUnary(ctx, req)
+}
+
+// ArrangeConversations calls lazybox.bench.v1.RunnerService.ArrangeConversations.
+func (c *runnerServiceClient) ArrangeConversations(ctx context.Context, req *connect.Request[gen.ArrangeConversationsRequest]) (*connect.Response[gen.CollectionResponse], error) {
+	return c.arrangeConversations.CallUnary(ctx, req)
 }
 
 // ArchiveCollection calls lazybox.bench.v1.RunnerService.ArchiveCollection.
@@ -4180,6 +4197,8 @@ type RunnerServiceHandler interface {
 	// answers in, so every window and a paired phone list them alike, across
 	// restarts. The owner's only. Answers the list in its new order.
 	ArrangeWorkspaces(context.Context, *connect.Request[gen.ArrangeWorkspacesRequest]) (*connect.Response[gen.ListCollectionsResponse], error)
+	// Keeps the sidebar conversation order on this workspace.
+	ArrangeConversations(context.Context, *connect.Request[gen.ArrangeConversationsRequest]) (*connect.Response[gen.CollectionResponse], error)
 	ArchiveCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	ReconcileCollection(context.Context, *connect.Request[gen.ReconcileCollectionRequest]) (*connect.Response[gen.CollectionResponse], error)
 	// The owner's only. What a previous Runner left unconfirmed in a workspace
@@ -4980,6 +4999,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceArrangeWorkspacesProcedure,
 		svc.ArrangeWorkspaces,
 		connect.WithSchema(runnerServiceMethods.ByName("ArrangeWorkspaces")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceArrangeConversationsHandler := connect.NewUnaryHandler(
+		RunnerServiceArrangeConversationsProcedure,
+		svc.ArrangeConversations,
+		connect.WithSchema(runnerServiceMethods.ByName("ArrangeConversations")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceArchiveCollectionHandler := connect.NewUnaryHandler(
@@ -6140,6 +6165,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceListCollectionsHandler.ServeHTTP(w, r)
 		case RunnerServiceArrangeWorkspacesProcedure:
 			runnerServiceArrangeWorkspacesHandler.ServeHTTP(w, r)
+		case RunnerServiceArrangeConversationsProcedure:
+			runnerServiceArrangeConversationsHandler.ServeHTTP(w, r)
 		case RunnerServiceArchiveCollectionProcedure:
 			runnerServiceArchiveCollectionHandler.ServeHTTP(w, r)
 		case RunnerServiceReconcileCollectionProcedure:
@@ -6729,6 +6756,10 @@ func (UnimplementedRunnerServiceHandler) ListCollections(context.Context, *conne
 
 func (UnimplementedRunnerServiceHandler) ArrangeWorkspaces(context.Context, *connect.Request[gen.ArrangeWorkspacesRequest]) (*connect.Response[gen.ListCollectionsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ArrangeWorkspaces is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) ArrangeConversations(context.Context, *connect.Request[gen.ArrangeConversationsRequest]) (*connect.Response[gen.CollectionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ArrangeConversations is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) ArchiveCollection(context.Context, *connect.Request[gen.CollectionRequest]) (*connect.Response[gen.CollectionResponse], error) {

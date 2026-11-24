@@ -653,3 +653,22 @@ func TestAdoptedOwnersAreCertainAndUnadoptedOnesStillNeedReconciliation(t *testi
 		t.Fatalf("workspace with only a re-attached owner refused new sessions: %v", err)
 	}
 }
+
+func TestConversationOrderSurvivesRestart(t *testing.T) {
+	root := t.TempDir()
+	m := newTest(t, root)
+	c, err := m.Create(context.Background(), "first", Spec{Name: "First"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arranged, err := m.ArrangeConversations(c.ID, []string{"two", "one", "two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arranged.ConversationOrder[0] = "changed-copy"
+	m.Close()
+	loaded, err := newTest(t, root).Get(c.ID)
+	if err != nil || strings.Join(loaded.ConversationOrder, ",") != "two,one" {
+		t.Fatalf("loaded order %v, error %v", loaded.ConversationOrder, err)
+	}
+}

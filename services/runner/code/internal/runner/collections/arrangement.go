@@ -127,3 +127,25 @@ func arrange(list []Collection, order []string) {
 		}
 	})
 }
+
+// ArrangeConversations keeps sidebar positions on their workspace record.
+func (m *Manager) ArrangeConversations(id string, ids []string) (Collection, error) {
+	if len(ids) > maxArranged {
+		return Collection{}, ErrArrangementTooLong
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.items[id]
+	if !ok || c.State == "deleted" {
+		return Collection{}, os.ErrNotExist
+	}
+	if m.closed {
+		return Collection{}, errors.New("workspace manager closed")
+	}
+	c = clone(c)
+	c.ConversationOrder = cleanOrder(ids, nil)
+	if err := m.save(c); err != nil {
+		return Collection{}, err
+	}
+	return clone(c), nil
+}

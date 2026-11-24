@@ -1,3 +1,6 @@
+import { useListReorder } from './useListReorder';
+import { inOrder } from './workspace-order';
+import { showToast } from './toasts';
 import { peekProps } from './peek-model';
 import { ActionMenu } from './ActionMenu';
 import { ActionMenuItems } from './ActionMenuItems';
@@ -28,7 +31,7 @@ import './inbox.css';
  * are the tooltip. Selecting a conversation attaches a reader; it never
  * starts execution. The row's menu is every conversation's (ConversationActions).
  */
-export function ConversationList({ collectionId = '', target, onTarget, compact = false, hideWhenEmpty = false, heading, allWorkspaces = false, sessions: supplied, workspaceName }: { sessions?: Session[]; allWorkspaces?: boolean; compact?: boolean; hideWhenEmpty?: boolean; heading?: string; collectionId?: string; target: ViewTarget; onTarget(target: ViewTarget): void; workspaceName?(id: string): string }) {
+export function ConversationList({ collectionId = '', target, onTarget, compact = false, hideWhenEmpty = false, heading, allWorkspaces = false, sessions: supplied, workspaceName, order, arrange }: { order?: readonly string[]; arrange?(ids: string[]): Promise<void>; sessions?: Session[]; allWorkspaces?: boolean; compact?: boolean; hideWhenEmpty?: boolean; heading?: string; collectionId?: string; target: ViewTarget; onTarget(target: ViewTarget): void; workspaceName?(id: string): string }) {
   const { api, info, revision, error:connectionError } = useRunner();
   const [search, setSearch] = useState('');
   const [deleted,setDeleted]=useState<Set<string>>(()=>new Set());
@@ -79,19 +82,30 @@ export function ConversationList({ collectionId = '', target, onTarget, compact 
   const matching = (supplied || mergeConversations(history, info?.sessions || [])).filter(session => !deleted.has(session.id) && (allWorkspaces || session.collectionId === collectionId) && (allWorkspaces || !isArchivedAway(session)) && (!search.trim() || session.title.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())));
   // Pinned first, in the order they were pinned; the rest keep their order.
   const visible = [...matching.filter(isPinned).sort((a, b) => pinnedAt(a) - pinnedAt(b)), ...matching.filter(session => !isPinned(session))];
+  const rows = visible.map(session => ({id: session.conversationId || session.id, session}));
+  const ordered = inOrder(rows, order);
+  const reorder = useListReorder({
+    items: [...ordered.filter(row => isPinned(row.session)), ...ordered.filter(row => !isPinned(row.session))],
+    name: row => conversationName(row.session), group: row => isPinned(row.session),
+    grip: '.conversation-link', arrange,
+    onError: body => showToast({ tone: 'failed', title: 'Conversations not reordered', body }),
+  });
   if(hideWhenEmpty&&!visible.length&&!search&&!error)return null;
   return <div className="conversation-navigation" data-peek-list>
     {heading&&<div className="explorer-heading"><span>{heading}</span></div>}
     {error && !connectionError && <p className="error" role="alert">Could not load saved conversations.</p>}
     {unsupported && !collectionId && <p className="module-empty">Live conversations · saved history requires a Runner update.</p>}
     {allWorkspaces && <input autoFocus type="search" className="conversation-filter" aria-label="Search all conversation titles" placeholder="Search all conversation titles…" maxLength={120} value={search} onChange={event => { setSearch(event.target.value); setPageCount(1); }}/> }
-    <nav aria-label={allWorkspaces ? 'All conversations' : collectionId ? 'Workspace conversations' : 'Conversations'}>{visible.map(session => {
+    <nav {...(arrange ? reorder.listProps : {})} aria-keyshortcuts={arrange ? "Alt+Shift+ArrowUp Alt+Shift+ArrowDown" : undefined} aria-label={allWorkspaces ? 'All conversations' : collectionId ? 'Workspace conversations' : 'Conversations'}>
+      {arrange && <span className="sr-only" role="status" aria-live="polite">{reorder.announcement}</span>}
+      {reorder.items.map(({id, session}) => {
+      const dragProps = arrange ? reorder.itemProps(id) : undefined;
       const marker = unread(session), title = conversationName(session), status = sessionStatus(session), archived = archivedAt(session) > 0, pinned = isPinned(session);
       const items = actions.items(session, { rename: () => setRenaming(session.id) }), at = activityAt(session);
       const details = [allWorkspaces || !compact ? workspaceName?.(session.collectionId) : '', conversationDetails(session, info?.profiles || [])].filter(Boolean).join(' · ');
-      return <div className="conversation-row" data-unread={marker || undefined} data-pinned={pinned || undefined} data-archived={archived || undefined} key={session.id}
+      return <div {...dragProps} className="conversation-row" data-unread={marker || undefined} data-pinned={pinned || undefined} data-archived={archived || undefined} key={session.id}
         onContextMenu={contextMenu('conversation', () => items, { sessionId: session.id, workspaceId: session.collectionId }, `Conversation ${title}`)}
-        onKeyDown={event => { if (event.key === 'F2' && renaming !== session.id) { event.preventDefault(); setRenaming(session.id); } }}>
+        onKeyDown={event => { dragProps?.onKeyDown(event); if (event.key === 'F2' && renaming !== session.id) { event.preventDefault(); setRenaming(session.id); } }}>
         {renaming === session.id
           ? <div className="conversation-renaming"><SessionMark session={session} unread={marker}/><InlineConversationRename session={session} onDone={() => setRenaming('')}/></div>
           : <button className="conversation-link" {...peekProps({ kind: 'conversation', sessionId: session.id, workspaceId: session.collectionId, title: session.title })} aria-current={target.sessionId===session.id?'page':undefined}

@@ -6,7 +6,7 @@ import type { MenuItem } from './context-menu-model';
 import { runAction, useAction } from './actions';
 import { useRunner } from './RunnerContext';
 import { showToast } from './toasts';
-import { cdCommand, DEFAULT_TERMINAL, folderFor, parseTerminalChoice, resumeCommand, TERMINAL_APPS, terminalFor, terminalTitle, type TerminalChoice } from './handoff-model';
+import { cdCommand, DEFAULT_TERMINAL, folderFor, legacyTerminalCommand, parseTerminalChoice, resumeCommand, TERMINAL_APPS, terminalFor, terminalTitle, type TerminalChoice } from './handoff-model';
 import { SettingsGroup, SettingsRow } from './settings-parts';
 
 /**
@@ -17,10 +17,18 @@ import { SettingsGroup, SettingsRow } from './settings-parts';
  * `handoff-model.ts`.
  */
 
-/** What the desktop app adds: its installed terminals, and opening one at a folder. */
+/**
+ * What the desktop app adds: its installed terminals, and opening one at a
+ * folder. The page names a folder and a terminal, never a command line: a
+ * custom one is the host's own setting, which `setCustomCommand` saves only
+ * once the person allowed it in the host's native confirmation (it rejects
+ * otherwise) and `customCommand` reads back ('' when none).
+ */
 export type ExternalTerminalHost = {
   installed(): Promise<string[]>;
-  open(request: { path: string; app: string; command: string }): Promise<unknown>;
+  open(request: { path: string; app: string }): Promise<unknown>;
+  customCommand(): Promise<string>;
+  setCustomCommand(command: string): Promise<string>;
 };
 let terminalHost: ExternalTerminalHost | undefined;
 export function configureExternalTerminal(host: ExternalTerminalHost | undefined) { terminalHost = host; installedApps = undefined; }
@@ -28,11 +36,15 @@ export function configureExternalTerminal(host: ExternalTerminalHost | undefined
 export const hasTerminalHost = () => !!terminalHost;
 let installedApps: Promise<string[]> | undefined;
 const installed = () => (installedApps ??= terminalHost ? terminalHost.installed().catch(() => []) : Promise.resolve([]));
+const customCommand = () => terminalHost ? terminalHost.customCommand().catch(() => '') : Promise.resolve('');
 
 // Which terminal is installed is this computer's, not the Runner's: kept in this browser's storage.
 const TERMINAL_PREFERENCE = 'lazybox:external-terminal';
 export function readTerminalChoice(): TerminalChoice {
   try { return parseTerminalChoice(globalThis.localStorage?.getItem(TERMINAL_PREFERENCE)); } catch { return DEFAULT_TERMINAL; }
+}
+function readLegacyCommand(): string {
+  try { return legacyTerminalCommand(globalThis.localStorage?.getItem(TERMINAL_PREFERENCE)); } catch { return ''; }
 }
 export function writeTerminalChoice(choice: TerminalChoice) {
   try { globalThis.localStorage?.setItem(TERMINAL_PREFERENCE, JSON.stringify(choice)); } catch { /* kept for this window only */ }
@@ -68,14 +80,15 @@ export async function openInTerminal(folder: string): Promise<void> {
   if (!folder) { showMenuNotice('This has no folder yet'); return; }
   if (!terminalHost) { await offerCd(folder); return; }
   const choice = readTerminalChoice();
-  const target = terminalFor(choice, await installed());
+  const custom = choice.app === 'custom' ? await customCommand() : '';
+  const target = terminalFor(choice, await installed(), custom);
   if (!target) {
     showToast({ id: 'open-in-terminal', tone: 'failed', title: choice.app === 'custom' ? 'Your terminal command is empty' : 'No terminal found', body: 'Choose yours in Settings → Agents & workspaces.', action: { label: 'Open settings', run: () => void runAction('settings.open', 'agents') } });
     return;
   }
-  try { await terminalHost.open({ path: folder, ...target }); }
+  try { await terminalHost.open({ path: folder, app: target.app }); }
   catch (error) {
-    showToast({ id: 'open-in-terminal', tone: 'failed', title: `Could not open ${terminalTitle(target.app, target.command)}`, body: String(error).replace(/^Error: /, ''), button: { label: 'Copy cd', run: () => void copyText(cdCommand(folder), 'Copied the cd command') } });
+    showToast({ id: 'open-in-terminal', tone: 'failed', title: `Could not open ${terminalTitle(target.app, custom)}`, body: String(error).replace(/^Error: /, ''), button: { label: 'Copy cd', run: () => void copyText(cdCommand(folder), 'Copied the cd command') } });
   }
 }
 
@@ -155,9 +168,24 @@ export function useTerminalAction(workspaceId: string, sessionId: string) {
 export function TerminalSettings() {
   const [choice, setChoice] = useState(readTerminalChoice);
   const [apps, setApps] = useState<string[]>();
+  // The command line the host keeps, and the one being typed: saved only
+  // through the host's own confirmation. One an earlier version kept in this
+  // page's storage is offered as the draft, to save the same way.
+  const [saved, setSaved] = useState<string>();
+  const [draft, setDraft] = useState(readLegacyCommand);
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState<{ error: boolean; text: string }>();
   useEffect(() => { void installed().then(setApps); }, []);
+  useEffect(() => { void customCommand().then(command => { setSaved(command); if (command) setDraft(command); }); }, []);
   const change = (next: TerminalChoice) => { setChoice(next); writeTerminalChoice(next); };
-  const automatic = terminalFor({ app: '', command: '' }, apps || []);
+  const saveCommand = async () => {
+    if (!terminalHost) return;
+    setSaving(true); setNote(undefined);
+    try { const kept = await terminalHost.setCustomCommand(draft); setSaved(kept); setDraft(kept); setNote({ error: false, text: kept ? 'Saved.' : 'Cleared.' }); }
+    catch (error) { setNote({ error: true, text: String(error).replace(/^Error: /, '') }); }
+    finally { setSaving(false); }
+  };
+  const automatic = terminalFor({ app: '' }, apps || []);
   if (!terminalHost) return <SettingsGroup title="Your terminal" description={<>“Open in Terminal” copies a <code>cd</code> to the workspace’s folder for you to paste. In the desktop app it opens your terminal there.</>}><></></SettingsGroup>;
   return <SettingsGroup title="Your terminal" description={<>“Open in Terminal” (on a workspace, a conversation, a file, or from the command palette) opens this app at the workspace’s folder. <code>lazybox run</code> and <code>lazybox log</code> typed there show in the workspace’s console.</>}>
     <SettingsRow label="Terminal app" htmlFor="external-terminal">
@@ -167,9 +195,13 @@ export function TerminalSettings() {
         <option value="custom">Custom command…</option>
       </select>
     </SettingsRow>
-    {choice.app === 'custom' && <SettingsRow label="Command" htmlFor="external-terminal-command" description={<>One line; <code>{'{dir}'}</code> is replaced by the folder, already quoted. It runs in that folder.</>}>
-      <input id="external-terminal-command" className="mono" spellCheck={false} placeholder="alacritty --working-directory {dir}" maxLength={1000} value={choice.command} onChange={event => change({ ...choice, command: event.target.value })}/>
+    {choice.app === 'custom' && <SettingsRow label="Command" htmlFor="external-terminal-command" description={<>One line; <code>{'{dir}'}</code> is replaced by the folder, already quoted. It runs in that folder. Lazybox asks you to allow a new command before it keeps it.</>}>
+      <form className="settings-inline-form" onSubmit={event => { event.preventDefault(); void saveCommand(); }}>
+        <input id="external-terminal-command" className="mono" spellCheck={false} placeholder="alacritty --working-directory {dir}" maxLength={1000} value={draft} onChange={event => { setDraft(event.target.value); setNote(undefined); }}/>
+        <button type="submit" disabled={saving || saved === undefined || draft.trim() === saved}>{saving ? 'Saving…' : 'Save'}</button>
+      </form>
     </SettingsRow>}
+    {choice.app === 'custom' && note && <p className={note.error ? 'settings-error' : 'settings-error tone-note'} role={note.error ? 'alert' : 'status'}>{note.text}</p>}
     {choice.app && choice.app !== 'custom' && apps && !apps.includes(choice.app) && <p className="settings-error tone-note" role="note">{terminalTitle(choice.app)} is not in your Applications folder. Lazybox will still ask macOS to open it.</p>}
   </SettingsGroup>;
 }

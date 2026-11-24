@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     env,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::Mutex,
@@ -183,47 +183,73 @@ pub async fn remote_add(
         if let Some(name) = name.as_deref() {
             command.args(["--name", name]);
         }
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Could not run lazybox: {e}"))?;
-        let stdout = child.stdout.take().ok_or("no output")?;
-        let mut result: Result<Value, String> =
-            Err("lazybox remote add ended without saying how".into());
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let Ok(event) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if event.get("step").is_some() {
-                let _ = window.emit(
-                    "remote-add-progress",
-                    AddProgress {
-                        id: id.clone(),
-                        event,
-                    },
-                );
-            } else if let Some(error) = event.get("error").and_then(Value::as_str) {
-                result = Err(error.to_string());
-            } else if event.get("done").is_some() {
-                result = Ok(event.get("remote").cloned().unwrap_or(Value::Null));
-            }
-        }
-        let output = child.wait_with_output().map_err(|e| e.to_string())?;
-        if result.is_err() && !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let message = stderr.trim().trim_start_matches("lazybox:").trim();
-            if !message.is_empty()
-                && matches!(result, Err(ref e) if e.starts_with("lazybox remote add ended"))
-            {
-                result = Err(message.to_string());
-            }
-        }
-        result
+        run_add(command, |event| {
+            let _ = window.emit(
+                "remote-add-progress",
+                AddProgress {
+                    id: id.clone(),
+                    event,
+                },
+            );
+        })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Runs `lazybox remote add … --progress json`: each step to `step`, then the
+/// remote's record, or the error in the CLI's words. Stderr is read on a
+/// thread of its own while stdout is read here, so a CLI that writes more
+/// than a pipe holds on stderr (an SSH banner, a long diagnostic) is never
+/// blocked on it while this waits for its stdout to end.
+fn run_add(mut command: Command, mut step: impl FnMut(Value)) -> Result<Value, String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not run lazybox: {e}"))?;
+    let stdout = child.stdout.take().ok_or("no output")?;
+    let mut stderr = child.stderr.take().ok_or("no output")?;
+    let errors = std::thread::Builder::new()
+        .name("lazybox-remote-add-stderr".into())
+        .spawn(move || {
+            let mut text = Vec::new();
+            let _ = stderr.read_to_end(&mut text);
+            String::from_utf8_lossy(&text).into_owned()
+        });
+    let errors = match errors {
+        Ok(errors) => errors,
+        Err(e) => {
+            terminate(&mut child);
+            return Err(format!("Could not run lazybox: {e}"));
+        }
+    };
+    let mut result: Result<Value, String> =
+        Err("lazybox remote add ended without saying how".into());
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if event.get("step").is_some() {
+            step(event);
+        } else if let Some(error) = event.get("error").and_then(Value::as_str) {
+            result = Err(error.to_string());
+        } else if event.get("done").is_some() {
+            result = Ok(event.get("remote").cloned().unwrap_or(Value::Null));
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let stderr = errors.join().unwrap_or_default();
+    if result.is_err() && !status.success() {
+        let message = stderr.trim().trim_start_matches("lazybox:").trim();
+        if !message.is_empty()
+            && matches!(result, Err(ref e) if e.starts_with("lazybox remote add ended"))
+        {
+            result = Err(message.to_string());
+        }
+    }
+    result
 }
 
 /// Forgets a computer here and revokes this computer's key on it.
@@ -247,4 +273,45 @@ pub fn remote_remove(window: tauri::Webview, name: String) -> Result<Value, Stri
         terminate(&mut child);
     }
     run_cli(app, &["remote", "rm", &name])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    /// Runs `script` as the CLI would be run, on a thread: a deadlock shows as
+    /// no answer, reported after a minute instead of hanging the suite.
+    fn add(script: &str) -> (Result<Value, String>, Vec<Value>) {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]);
+        let (send, receive) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut steps = Vec::new();
+            let result = run_add(command, |event| steps.push(event));
+            let _ = send.send((result, steps));
+        });
+        receive
+            .recv_timeout(Duration::from_secs(60))
+            .expect("lazybox remote add never finished: blocked on its stderr")
+    }
+
+    /// More than a pipe holds on stderr before the last line on stdout: the
+    /// CLI used to block writing it while the app waited for stdout to end.
+    #[test]
+    fn a_cli_that_writes_much_on_stderr_still_finishes() {
+        let (result, steps) = add(
+            r#"head -c 300000 /dev/zero | tr '\0' 'x' >&2; echo '{"step":"enrol"}'; echo '{"done":true,"remote":{"name":"studio"}}'"#,
+        );
+        assert_eq!(result.expect("added")["name"], "studio");
+        assert_eq!(steps, [serde_json::json!({"step":"enrol"})]);
+    }
+
+    #[test]
+    fn a_cli_that_fails_without_a_report_says_why_in_its_words() {
+        let (result, _) = add("echo 'lazybox: studio did not answer' >&2; exit 1");
+        assert_eq!(result.expect_err("failed"), "studio did not answer");
+        let (result, _) = add(r#"echo '{"error":"the key was refused"}'; exit 1"#);
+        assert_eq!(result.expect_err("failed"), "the key was refused");
+    }
 }

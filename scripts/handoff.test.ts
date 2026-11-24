@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cdCommand, folderFor, parseTerminalChoice, resumeCommand, shellQuote, terminalFor, terminalTitle } from '../packages/surfaces/src/handoff-model.ts';
+import { cdCommand, folderFor, legacyTerminalCommand, parseTerminalChoice, resumeCommand, shellQuote, terminalFor, terminalTitle } from '../packages/surfaces/src/handoff-model.ts';
 import { DEFAULT_SOUNDS, parseSoundSettings } from '../packages/surfaces/src/sounds.ts';
 
 test('shell quoting keeps plain paths readable and makes the rest safe', () => {
@@ -29,14 +29,21 @@ test('Continue in… says why when the command would not find the conversation, 
 });
 
 test('the terminal choice: yours, else the first installed in Lazybox\'s order', () => {
-  assert.deepEqual(parseTerminalChoice(null), { app: '', command: '' });
-  assert.deepEqual(parseTerminalChoice('{"app":"xterm"}'), { app: '', command: '' });
-  assert.deepEqual(parseTerminalChoice('{"app":"custom","command":"alacritty --working-directory {dir}"}'), { app: 'custom', command: 'alacritty --working-directory {dir}' });
-  assert.deepEqual(terminalFor({ app: '', command: '' }, ['terminal', 'iterm']), { app: 'iterm', command: '' });
-  assert.deepEqual(terminalFor({ app: '', command: '' }, ['terminal']), { app: 'terminal', command: '' });
-  assert.equal(terminalFor({ app: '', command: '' }, []), undefined);
-  assert.deepEqual(terminalFor({ app: 'warp', command: '' }, []), { app: 'warp', command: '' }, 'a chosen app is asked for even when not found');
-  assert.equal(terminalFor({ app: 'custom', command: '  ' }, ['terminal']), undefined);
+  assert.deepEqual(parseTerminalChoice(null), { app: '' });
+  assert.deepEqual(parseTerminalChoice('{"app":"xterm"}'), { app: '' });
+  // A command line in the page's storage is never part of the choice: the host keeps its own.
+  assert.deepEqual(parseTerminalChoice('{"app":"custom","command":"alacritty --working-directory {dir}"}'), { app: 'custom' });
+  assert.equal(legacyTerminalCommand('{"app":"custom","command":" alacritty --working-directory {dir} "}'), 'alacritty --working-directory {dir}');
+  assert.equal(legacyTerminalCommand('{"app":"iterm"}'), '');
+  assert.equal(legacyTerminalCommand('{'), '');
+  assert.deepEqual(terminalFor({ app: '' }, ['terminal', 'iterm']), { app: 'iterm' });
+  assert.deepEqual(terminalFor({ app: '' }, ['terminal']), { app: 'terminal' });
+  assert.equal(terminalFor({ app: '' }, []), undefined);
+  assert.deepEqual(terminalFor({ app: 'warp' }, []), { app: 'warp' }, 'a chosen app is asked for even when not found');
+  // Custom: only when the host keeps a command, and the request never carries it.
+  assert.equal(terminalFor({ app: 'custom' }, ['terminal']), undefined);
+  assert.equal(terminalFor({ app: 'custom' }, ['terminal'], '  '), undefined);
+  assert.deepEqual(terminalFor({ app: 'custom' }, ['terminal'], 'kitty --directory {dir}'), { app: 'custom' });
   assert.equal(terminalTitle('ghostty'), 'Ghostty');
   assert.equal(terminalTitle('custom', '/opt/bin/kitty --directory {dir}'), 'kitty');
 });

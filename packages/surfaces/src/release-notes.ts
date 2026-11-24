@@ -141,6 +141,13 @@ export const releaseNotes: readonly Release[] = [
       { group: 'Security', title: 'Nobody on your tailnet can block pairing', body: 'Pairing attempts are limited per pairing code and sign-in challenges per phone, no longer shared by everyone, and the phone gateway answers only on this computer and its tailnet name.' },
       { group: 'Security', title: 'Notifications go only to push services', body: 'The notification sender also refuses benchmarking and "this network" addresses, and IPv6 addresses that carry an IPv4 one.' },
       { group: 'Security', title: 'What agents can and cannot reach', body: 'SECURITY.md now says plainly that an agent\'s narrower credential prevents accidents, not an agent that misbehaves on purpose, and describes the fix.' },
+      { group: 'Security', title: 'Your terminal command, allowed by you', body: 'A custom "Open in Terminal" command is kept by the app, not the page: Save in Settings → Agents & workspaces shows the exact line in a macOS confirmation, and only a line you allowed ever runs. A command saved by an earlier version waits in Settings for you to save it once more.' },
+      { group: 'Security', title: 'Each window asks only for its own', body: 'Links and media open only from Lazybox\'s own windows; setting up the service and removing an older Lazybox only from the setup window; feedback and linking the command only from Settings.' },
+      { group: 'Security', title: 'Web pages cannot reach this Mac through their icons', body: 'A Web panel\'s icon is never fetched from this Mac or your local network, whatever its address resolves or redirects to, IPv6 included.' },
+      { group: 'Security', title: 'A tighter page policy', body: 'Lazybox\'s windows frame only extension panels, and no link base or form can send a page elsewhere.' },
+      { group: 'Security', title: 'A large attachment no longer stops Claude', body: 'The Claude worker takes the largest message Lazybox accepts, images included; anything larger fails that one message with the reason, and an unreadable line is set aside instead of ending the conversation\'s agent.' },
+      { group: 'Security', title: 'No leftovers from sounds and terminals', body: 'Notification sounds and terminals that keep running are waited for, so none lingers as a zombie, and a terminal can keep writing its messages after Lazybox stops watching them.' },
+      { group: 'Security', title: 'Add a computer finishes', body: 'Adding a computer no longer hangs when the lazybox command writes a long diagnostic.' },
     ],
   },
 ];

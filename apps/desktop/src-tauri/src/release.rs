@@ -192,6 +192,22 @@ fn release_of(app: &tauri::AppHandle) -> Result<Release, String> {
     Release::detect(app).ok_or_else(|| "This build of Lazybox has no bundled Runner".to_string())
 }
 
+/// The service's set-up steps belong to the setup window.
+fn setup_window(label: &str) -> Result<(), String> {
+    crate::host::allow(
+        label == SETUP_LABEL,
+        "Only the setup window sets up the Runner service",
+    )
+}
+
+/// Settings (in the main or a workspace window) manages the installed app.
+fn settings_window(label: &str) -> Result<(), String> {
+    crate::host::allow(
+        crate::host::is_workspace_window(label),
+        "Only Settings manages the installed Lazybox",
+    )
+}
+
 #[tauri::command]
 pub fn setup_state(app: tauri::AppHandle) -> Result<SetupState, String> {
     let release = release_of(&app)?;
@@ -213,7 +229,13 @@ pub fn setup_state(app: tauri::AppHandle) -> Result<SetupState, String> {
 /// part reports on its own, so a CLI link that fails does not hide that the
 /// Runner is running.
 #[tauri::command]
-pub async fn setup_install(app: tauri::AppHandle, link_cli: bool) -> Result<Value, String> {
+pub async fn setup_install(
+    app: tauri::AppHandle,
+    window: tauri::Webview,
+    link_cli: bool,
+) -> Result<Value, String> {
+    // The setup window installs it; Settings moves it to this release.
+    setup_window(window.label()).or_else(|_| settings_window(window.label()))?;
     let release = release_of(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let service = release.json(&["service", "install"])?;
@@ -232,7 +254,8 @@ pub async fn setup_install(app: tauri::AppHandle, link_cli: bool) -> Result<Valu
 }
 
 #[tauri::command]
-pub async fn setup_start(app: tauri::AppHandle) -> Result<Value, String> {
+pub async fn setup_start(app: tauri::AppHandle, window: tauri::Webview) -> Result<Value, String> {
+    setup_window(window.label())?;
     let release = release_of(&app)?;
     tauri::async_runtime::spawn_blocking(move || release.json(&["service", "start"]))
         .await
@@ -240,7 +263,8 @@ pub async fn setup_start(app: tauri::AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn run_doctor(app: tauri::AppHandle) -> Result<Value, String> {
+pub async fn run_doctor(app: tauri::AppHandle, window: tauri::Webview) -> Result<Value, String> {
+    setup_window(window.label())?;
     let release = release_of(&app)?;
     tauri::async_runtime::spawn_blocking(move || release.json(&["doctor"]))
         .await
@@ -248,7 +272,8 @@ pub async fn run_doctor(app: tauri::AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn link_cli(app: tauri::AppHandle) -> Result<Value, String> {
+pub async fn link_cli(app: tauri::AppHandle, window: tauri::Webview) -> Result<Value, String> {
+    settings_window(window.label())?;
     let release = release_of(&app)?;
     tauri::async_runtime::spawn_blocking(move || release.json(&["link"]))
         .await
@@ -261,7 +286,11 @@ pub async fn link_cli(app: tauri::AppHandle) -> Result<Value, String> {
 /// only after the person confirmed the exact command it showed; the CLI finds
 /// what to remove itself and refuses anything but Homebrew's formula.
 #[tauri::command]
-pub async fn remove_older_lazybox(app: tauri::AppHandle) -> Result<Value, String> {
+pub async fn remove_older_lazybox(
+    app: tauri::AppHandle,
+    window: tauri::Webview,
+) -> Result<Value, String> {
+    setup_window(window.label())?;
     let release = release_of(&app)?;
     tauri::async_runtime::spawn_blocking(move || release.json(&["link", "--remove-older", "--yes"]))
         .await
@@ -270,7 +299,8 @@ pub async fn remove_older_lazybox(app: tauri::AppHandle) -> Result<Value, String
 
 /// Shows the Runner's log in Console.
 #[tauri::command]
-pub fn show_runner_log(app: tauri::AppHandle) -> Result<(), String> {
+pub fn show_runner_log(app: tauri::AppHandle, window: tauri::Webview) -> Result<(), String> {
+    setup_window(window.label())?;
     let status = release_of(&app)?.status()?;
     if status.log.is_empty() || !Path::new(&status.log).exists() {
         return Err("The Runner has not written a log yet".into());
@@ -288,7 +318,8 @@ pub fn show_runner_log(app: tauri::AppHandle) -> Result<(), String> {
 
 /// The service is running: connect the app to it and close the setup window.
 #[tauri::command]
-pub fn setup_finish(app: tauri::AppHandle) -> Result<(), String> {
+pub fn setup_finish(app: tauri::AppHandle, window: tauri::Webview) -> Result<(), String> {
+    setup_window(window.label())?;
     if app.try_state::<crate::host::Host>().is_none() {
         let release = release_of(&app)?;
         let status = release.status()?;
@@ -361,6 +392,30 @@ mod tests {
             reachable,
             runner_version: runner.into(),
             ..Default::default()
+        }
+    }
+
+    /// Removing an older Lazybox (brew uninstall), starting or diagnosing the
+    /// service belong to the setup window; linking the CLI and moving the
+    /// Runner to this release to Settings. No other page may ask.
+    #[test]
+    fn only_the_setup_window_and_settings_manage_the_installation() {
+        assert!(setup_window("setup").is_ok());
+        for label in [
+            "main",
+            "workspace-a",
+            "chat-a",
+            "viewer-main-1",
+            "popout-1",
+            "",
+        ] {
+            assert!(setup_window(label).is_err(), "{label}");
+        }
+        for label in ["main", "workspace-a"] {
+            assert!(settings_window(label).is_ok(), "{label}");
+        }
+        for label in ["setup", "chat-a", "console-a", "web-a", "viewer-main-1", ""] {
+            assert!(settings_window(label).is_err(), "{label}");
         }
     }
 

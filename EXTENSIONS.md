@@ -280,7 +280,7 @@ app window (Lazybox origin)
 | Approve itself, or widen its grants with an update | Approvals live in the Runner's state, of exactly what the sheet showed; a wider manifest runs with the old grants until reviewed |
 | A crafted host that widens the policy (`https://a; script-src *`) | Hosts are parsed and normalized to `scheme://host[:port]`; anything else is an error by line |
 | Reach the content server from a web page (DNS rebinding) | `Host` must be the bound address; paths are capability URLs |
-| Desktop: reach Tauri's IPC from the frame | The frame is on `http://127.0.0.1:<port>`, not the app's origin, so Tauri's capabilities (local origin only) do not apply to it; the app's CSP adds only `frame-src http://127.0.0.1:*`; no new Tauri capability exists for extension content |
+| Desktop: reach Tauri's IPC from the frame | The frame is on `http://127.0.0.1:<port>`, not the app's origin, so Tauri's capabilities (local origin only) do not apply to it; the app's CSP frames only a content server's session path, `frame-src http://127.0.0.1:*/x/`; no new Tauri capability exists for extension content |
 
 **What remains, said plainly.**
 

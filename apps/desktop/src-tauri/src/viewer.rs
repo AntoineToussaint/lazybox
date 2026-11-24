@@ -12,13 +12,18 @@
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
+    sync::Mutex,
+};
 use tauri::{
     Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Rect, Webview, WebviewUrl,
     webview::{
         DownloadEvent, NewWindowResponse, PageLoadEvent, PermissionResponse, WebviewBuilder,
     },
 };
+use tauri_plugin_http::reqwest;
 use url::Url;
 
 /// Every viewer's label starts with this; no app webview's does.
@@ -326,22 +331,103 @@ fn page_details(view: &Webview, report: Reporter, page: Url) {
             return;
         };
         let report = report.clone();
+        let page_local = is_local(&page);
         tauri::async_runtime::spawn(async move {
-            if let Ok(icon) = fetch_icon(icon).await {
+            if let Ok(icon) = fetch_icon(icon, page_local).await {
                 report.send(|id| Event::Icon { id, icon });
             }
         });
     });
 }
 
-/// This machine or its local network.
+/// An address of this machine or a network it is on rather than the web:
+/// loopback, unspecified, private, link-local, shared (CGNAT, which Tailscale
+/// uses) and broadcast IPv4; loopback, unspecified, unique-local (fc00::/7),
+/// link-local (fe80::/10) and site-local (fec0::/10) IPv6, and an IPv6 form
+/// of a local IPv4 (mapped, compatible, NAT64).
+fn local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, ..] = ip.octets();
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || a == 0
+                || (a == 100 && (64..128).contains(&b))
+        }
+        IpAddr::V6(ip) => {
+            let first = ip.segments()[0];
+            let embedded = ip.to_ipv4_mapped().or_else(|| {
+                let s = ip.segments();
+                // ::a.b.c.d (compatible) and 64:ff9b::a.b.c.d (NAT64).
+                ((s[..6] == [0; 6] && !ip.is_loopback() && !ip.is_unspecified())
+                    || s[..6] == [0x64, 0xff9b, 0, 0, 0, 0])
+                .then(|| Ipv4Addr::from(((s[6] as u32) << 16) | s[7] as u32))
+            });
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+                || (first & 0xffc0) == 0xfec0
+                || embedded.is_some_and(|v4| local_ip(IpAddr::V4(v4)))
+        }
+    }
+}
+
+/// This machine or its local network, by the address's own text: a local
+/// name, or a local IP. A name that resolves to a local address is caught
+/// when it is resolved (`PublicOnly`).
 fn is_local(url: &Url) -> bool {
     match url.host() {
-        Some(url::Host::Domain(name)) => name == "localhost" || name.ends_with(".localhost"),
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.');
+            name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local")
+        }
+        Some(url::Host::Ipv4(ip)) => local_ip(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => local_ip(IpAddr::V6(ip)),
         None => false,
     }
+}
+
+/// Resolves a name for an icon of a page on the web, and refuses it when any
+/// address it resolves to is local: the connection uses exactly the
+/// addresses checked, so a name that points at this machine (or is made to,
+/// between two lookups) never reaches it.
+struct PublicOnly;
+
+type ResolveError = Box<dyn std::error::Error + Send + Sync>;
+
+fn public_only(addrs: Vec<SocketAddr>) -> Result<reqwest::dns::Addrs, ResolveError> {
+    if addrs.is_empty() {
+        return Err("the name resolves to no address".into());
+    }
+    if addrs.iter().any(|addr| local_ip(addr.ip())) {
+        return Err("the name resolves to an address on this machine or its network".into());
+    }
+    Ok(Box::new(addrs.into_iter()))
+}
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs = tauri::async_runtime::spawn_blocking(move || {
+                (host.as_str(), 0).to_socket_addrs().map(Vec::from_iter)
+            })
+            .await
+            .map_err(|e| -> ResolveError { e.to_string().into() })??;
+            public_only(addrs)
+        })
+    }
+}
+
+/// Whether an icon request follows a redirect to `next`, the `hops`-th: a
+/// web page's icon never moves to this machine or its network, and three
+/// redirects are enough.
+fn follows(page_local: bool, next: &Url, hops: usize) -> bool {
+    hops <= 3 && page_url(next.as_str()).is_ok() && (page_local || !is_local(next))
 }
 /// The icon a page names, else its /favicon.ico. A page on the web never
 /// gets the app to fetch from this machine or the local network.
@@ -376,13 +462,23 @@ pub fn icon_type(declared: &str, bytes: &[u8]) -> Option<&'static str> {
         _ => None,
     })
 }
-async fn fetch_icon(url: Url) -> Result<String, String> {
-    use tauri_plugin_http::reqwest;
-    let client = reqwest::Client::builder()
+/// Fetches an icon. For a page on the web (`page_local` false) every name is
+/// resolved by `PublicOnly` and every redirect is checked by `follows`, so
+/// neither the icon's address nor where it leads reaches this machine.
+async fn fetch_icon(url: Url, page_local: bool) -> Result<String, String> {
+    let mut client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
-        .map_err(|e| e.to_string())?;
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if follows(page_local, attempt.url(), attempt.previous().len()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }));
+    if !page_local {
+        client = client.dns_resolver(std::sync::Arc::new(PublicOnly));
+    }
+    let client = client.build().map_err(|e| e.to_string())?;
     let mut response = client.get(url).send().await.map_err(|e| e.to_string())?;
     if !response.status().is_success() {
         return Err("no icon".into());
@@ -906,6 +1002,134 @@ mod tests {
         // A page on this machine may use its own icon.
         let local = Url::parse("http://localhost:3000/").expect("local");
         assert!(icon_url(&local, "/favicon.ico").is_some());
+    }
+
+    #[test]
+    fn local_addresses_include_ipv6_private_ranges() {
+        for local in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.100.1.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fd12:3456::1",
+            "fc00::1",
+            "fe80::1",
+            "fec0::1",
+            "::ffff:127.0.0.1",
+            "::ffff:192.168.0.1",
+            "::127.0.0.1",
+            "64:ff9b::a00:1",
+        ] {
+            assert!(local_ip(local.parse().unwrap()), "{local}");
+        }
+        for public in [
+            "93.184.216.34",
+            "1.1.1.1",
+            "100.128.0.1",
+            "2606:4700::1111",
+            "::ffff:93.184.216.34",
+        ] {
+            assert!(!local_ip(public.parse().unwrap()), "{public}");
+        }
+        let page = Url::parse("https://example.com/").unwrap();
+        for refused in [
+            "http://[fd00::1]/i.png",
+            "http://[fe80::1]/i.png",
+            "http://[::ffff:127.0.0.1]/i.png",
+            "http://100.64.0.1/i.png",
+            "http://printer.local/i.png",
+            "http://localhost./i.png",
+        ] {
+            assert!(icon_url(&page, refused).is_none(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_this_machine_is_refused() {
+        let at = |ip: &str| SocketAddr::new(ip.parse().unwrap(), 0);
+        assert!(public_only(vec![at("93.184.216.34")]).is_ok());
+        assert!(public_only(vec![at("127.0.0.1")]).is_err());
+        assert!(public_only(vec![at("fd00::1")]).is_err());
+        // One local address among public ones is enough to refuse the name.
+        assert!(public_only(vec![at("93.184.216.34"), at("10.0.0.1")]).is_err());
+        assert!(public_only(vec![]).is_err());
+    }
+
+    #[test]
+    fn a_web_pages_icon_never_redirects_to_this_machine() {
+        let next = |raw: &str| Url::parse(raw).unwrap();
+        assert!(follows(
+            false,
+            &next("https://www.example.com/favicon.ico"),
+            1
+        ));
+        assert!(!follows(false, &next("http://127.0.0.1:43210/"), 1));
+        assert!(!follows(false, &next("http://[fd00::1]/"), 1));
+        assert!(!follows(false, &next("file:///etc/passwd"), 1));
+        assert!(
+            !follows(false, &next("https://www.example.com/i.png"), 4),
+            "three are enough"
+        );
+        assert!(
+            follows(true, &next("http://127.0.0.1:43210/i.png"), 1),
+            "a local page's own"
+        );
+    }
+
+    /// One HTTP/1.1 server on 127.0.0.1: `/icon.png` is a PNG, `/moved` redirects there.
+    fn icon_server() -> u16 {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().map_while(Result::ok) {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                let mut header = String::new();
+                while reader.read_line(&mut header).is_ok_and(|n| n > 2) {
+                    header.clear();
+                }
+                let mut stream = stream;
+                let body = b"\x89PNG\r\n\x1a\n";
+                let _ = if line.starts_with("GET /moved ") {
+                    write!(
+                        stream,
+                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/icon.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else {
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+                        .and_then(|_| stream.write_all(body))
+                };
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_web_pages_icon_is_never_fetched_from_this_machine() {
+        let port = icon_server();
+        let url = |raw: String| Url::parse(&raw).unwrap();
+        tauri::async_runtime::block_on(async {
+            // A name that resolves to this machine: refused when resolved.
+            let named = url(format!("http://localhost:{port}/icon.png"));
+            assert!(fetch_icon(named.clone(), false).await.is_err());
+            assert!(fetch_icon(named, true).await.is_ok(), "a local page's own");
+            // A redirect to this machine is not followed.
+            let moved = url(format!("http://127.0.0.1:{port}/moved"));
+            assert!(fetch_icon(moved.clone(), false).await.is_err());
+            assert!(
+                fetch_icon(moved, true)
+                    .await
+                    .is_ok_and(|icon| icon.starts_with("data:image/png;base64,"))
+            );
+        });
     }
 
     #[test]

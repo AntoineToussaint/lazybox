@@ -8,15 +8,22 @@
 //! (never a Web panel's viewer, never a console or artifact window) may call
 //! it, and the folder must be inside a workspace, or a repository's home
 //! checkout, that the Runner lists right now — the Runner is asked, never the
-//! page. `terminal_apps` reports which of the
+//! page. The page names only a folder and a terminal: a custom command line is
+//! the host's own setting (`terminal.json` in the app's config folder), which
+//! only `set_terminal_command` changes, and only once the person allowed that
+//! exact line in a native confirmation. `terminal_apps` reports which of the
 //! known terminals are installed, for Settings.
 use crate::host::Host;
 use serde::{Deserialize, Serialize};
 use std::{
+    fs,
+    io::{self, Read, Seek, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
-use tauri::{State, Webview};
+use tauri::{Manager, State, Webview};
 
 /// A terminal Lazybox knows how to open at a folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,16 +106,14 @@ pub fn terminal_apps() -> Vec<String> {
         .collect()
 }
 
+/// What the page asks for: a folder and a terminal, never a command line.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OpenRequest {
     /// The folder, absolute, inside one of the Runner's workspaces.
     path: String,
-    /// A known terminal's id, or "custom".
+    /// A known terminal's id, or "custom" for the host's saved command line.
     app: String,
-    /// For "custom": the command line; `{dir}` is replaced by the quoted folder.
-    #[serde(default)]
-    command: String,
 }
 
 /// What `open_terminal` runs, decided before anything runs (tested below).
@@ -121,6 +126,50 @@ struct Launch {
 
 const COMMAND_LIMIT: usize = 1000;
 
+/// A custom command line as the host keeps it: one line, at most
+/// COMMAND_LIMIT bytes; empty means none.
+fn valid_command(command: &str) -> Result<String, String> {
+    let command = command.trim();
+    if command.len() > COMMAND_LIMIT || command.contains(['\0', '\n', '\r']) {
+        return Err("Your terminal command must be one line of at most 1000 characters".into());
+    }
+    Ok(command.to_string())
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+struct Saved {
+    command: String,
+}
+
+/// The host's own terminal setting, in `folder` (the app's config folder);
+/// the page has no way to write it but `set_terminal_command`.
+fn saved_command(folder: &Path) -> String {
+    fs::read(folder.join("terminal.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
+        .and_then(|saved| valid_command(&saved.command).ok())
+        .unwrap_or_default()
+}
+
+fn save_command(folder: &Path, command: &str) -> Result<(), String> {
+    let error = |e: &dyn std::fmt::Display| format!("Could not save your terminal command: {e}");
+    fs::create_dir_all(folder).map_err(|e| error(&e))?;
+    let mut file = tempfile::NamedTempFile::new_in(folder).map_err(|e| error(&e))?;
+    let bytes = serde_json::to_vec(&Saved {
+        command: command.into(),
+    })
+    .map_err(|e| error(&e))?;
+    file.write_all(&bytes).map_err(|e| error(&e))?;
+    file.persist(folder.join("terminal.json"))
+        .map_err(|e| error(&e))?;
+    Ok(())
+}
+
+fn config_folder(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path().app_config_dir().map_err(|e| e.to_string())
+}
+
 /// A path quoted for `/bin/sh`.
 fn quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
@@ -132,11 +181,9 @@ fn launch(app: &str, command: &str, dir: &Path, runner: Option<&Path>) -> Result
         .into_iter();
     let dir_text = dir.to_string_lossy().into_owned();
     if app == "custom" {
-        let command = command.trim();
-        if command.is_empty()
-            || command.len() > COMMAND_LIMIT
-            || command.contains(['\0', '\n', '\r'])
-        {
+        // `command` is the host's saved setting, never the page's.
+        let command = valid_command(command).unwrap_or_default();
+        if command.is_empty() {
             return Err("Set your terminal command in Settings → Agents & workspaces: one line, with {dir} where the folder goes".into());
         }
         return Ok(Launch {
@@ -320,55 +367,126 @@ pub async fn open_terminal(
     let mut roots = workspace_roots(&url, &token).await?;
     roots.extend(home_roots(&url, &token).await);
     let dir = inside(Path::new(&request.path), &roots)?;
-    let plan = launch(
-        &request.app,
-        &request.command,
-        &dir,
-        host.reload_endpoint.as_deref(),
-    )?;
+    let command = if request.app == "custom" {
+        saved_command(&config_folder(window.app_handle())?)
+    } else {
+        String::new()
+    };
+    let runner = host.reload_endpoint.clone();
+    let plan = launch(&request.app, &command, &dir, runner.as_deref())?;
+    // `open` returns at once; a custom command or WezTerm may keep running, so
+    // only a quick failure is reported, without waiting for the terminal.
+    tauri::async_runtime::spawn_blocking(move || start(&plan, runner.as_deref(), QUICK_FAILURE))
+        .await
+        .map_err(|_| "Could not start the terminal".to_string())??;
+    Ok(Opened {
+        path: dir.to_string_lossy().into_owned(),
+    })
+}
+
+/// How long a terminal that fails at once is waited for, to say why.
+const QUICK_FAILURE: Duration = Duration::from_secs(2);
+
+/// Starts `plan` and reports a failure within `watch`, with the first line
+/// the program wrote on stderr. A program still running after `watch` (a
+/// custom command, WezTerm) is left to run and reaped on its own thread: the
+/// returned handle. Its stderr goes to an unnamed temporary file, never a
+/// pipe, so it can write there for as long as it runs and never meets a pipe
+/// nobody reads (full) or one closed under it (SIGPIPE).
+fn start(
+    plan: &Launch,
+    runner: Option<&Path>,
+    watch: Duration,
+) -> Result<Option<JoinHandle<io::Result<ExitStatus>>>, String> {
+    let fail = |_| "Could not start the terminal".to_string();
+    let mut errors = tempfile::tempfile().map_err(fail)?;
     let mut command = Command::new(&plan.program);
     command
         .args(&plan.args)
         .current_dir(&plan.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    if let Some(endpoint) = &host.reload_endpoint {
+        .stderr(errors.try_clone().map_err(fail)?);
+    if let Some(endpoint) = runner {
         command.env("LAZYBOX_RUNNER", endpoint);
     }
-    // `open` returns at once; a custom command or WezTerm may keep running, so
-    // only a quick failure is reported, without waiting for the terminal.
-    let mut child = command
-        .spawn()
-        .map_err(|_| "Could not start the terminal".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        for _ in 0..20 {
-            match child.try_wait() {
-                Ok(Some(status)) if !status.success() => {
-                    let mut text = String::new();
-                    if let Some(mut err) = child.stderr.take() {
-                        use std::io::Read;
-                        let _ = err.read_to_string(&mut text);
-                    }
-                    let detail = text.lines().next().unwrap_or("").trim().to_string();
-                    return Err(if detail.is_empty() {
-                        "The terminal did not open".to_string()
-                    } else {
-                        format!("The terminal did not open: {detail}")
-                    });
+    let mut child = command.spawn().map_err(fail)?;
+    let deadline = Instant::now() + watch;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                let mut text = String::new();
+                if errors.rewind().is_ok() {
+                    let _ = (&mut errors).take(4096).read_to_string(&mut text);
                 }
-                Ok(Some(_)) => return Ok(()),
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-                Err(_) => return Ok(()),
+                let detail = text.lines().next().unwrap_or("").trim().to_string();
+                return Err(if detail.is_empty() {
+                    "The terminal did not open".to_string()
+                } else {
+                    format!("The terminal did not open: {detail}")
+                });
             }
+            Ok(Some(_)) => return Ok(None),
+            Ok(None) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                std::thread::sleep((deadline - now).min(Duration::from_millis(100)));
+            }
+            Err(_) => break,
         }
-        Ok(())
-    })
-    .await
-    .map_err(|_| "Could not start the terminal".to_string())??;
-    Ok(Opened {
-        path: dir.to_string_lossy().into_owned(),
-    })
+    }
+    crate::children::reap(child).map(Some).map_err(fail)
+}
+
+/// The custom command line "Open in Terminal" runs, as the host keeps it.
+#[tauri::command]
+pub fn terminal_command(window: Webview) -> Result<String, String> {
+    if !owner_window(window.label()) {
+        return Err("Only a Lazybox workspace or chat window reads the terminal setting".into());
+    }
+    Ok(saved_command(&config_folder(window.app_handle())?))
+}
+
+/// Saves the custom command line "Open in Terminal" runs, once the person
+/// allowed that exact line in a native confirmation, which the page cannot
+/// answer. Clearing it, or saving the line already kept, asks nothing.
+/// Returns what is kept.
+#[tauri::command]
+pub async fn set_terminal_command(window: Webview, command: String) -> Result<String, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    if !owner_window(window.label()) {
+        return Err("Only a Lazybox workspace or chat window changes the terminal setting".into());
+    }
+    let command = valid_command(&command)?;
+    let folder = config_folder(window.app_handle())?;
+    if command.is_empty() || command == saved_command(&folder) {
+        save_command(&folder, &command)?;
+        return Ok(command);
+    }
+    let parent = window.window();
+    let dialog = window
+        .app_handle()
+        .dialog()
+        .message(format!(
+            "“Open in Terminal” will run this command line with /bin/sh, in the folder you open:\n\n{command}\n\nAllow it only if you typed it yourself."
+        ))
+        .title("Allow this terminal command?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Allow".into(),
+            "Cancel".into(),
+        ))
+        .parent(&parent);
+    let allowed = tauri::async_runtime::spawn_blocking(move || dialog.blocking_show())
+        .await
+        .map_err(|_| "Could not ask about the terminal command".to_string())?;
+    if !allowed {
+        return Err("Your terminal command was not saved".into());
+    }
+    save_command(&folder, &command)?;
+    Ok(command)
 }
 
 #[cfg(test)]
@@ -454,6 +572,98 @@ mod tests {
         for bad in ["", "   ", "a\nb", "a\0b", &"x".repeat(COMMAND_LIMIT + 1)] {
             assert!(launch("custom", bad, dir, None).is_err(), "{bad:?}");
         }
+    }
+
+    /// The page names a folder and a terminal; a command line from it is refused
+    /// outright, so a script in a window cannot have the host run one.
+    #[test]
+    fn the_page_cannot_send_a_command_line() {
+        let request: OpenRequest =
+            serde_json::from_str(r#"{"path":"/w/alpha","app":"custom"}"#).expect("request");
+        assert_eq!(
+            (request.path.as_str(), request.app.as_str()),
+            ("/w/alpha", "custom")
+        );
+        assert!(
+            serde_json::from_str::<OpenRequest>(
+                r#"{"path":"/w/alpha","app":"custom","command":"touch /tmp/owned"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_custom_command_is_the_hosts_own_setting() {
+        let folder = tempfile::tempdir().unwrap();
+        let config = folder.path().join("config");
+        assert_eq!(saved_command(&config), "", "none saved yet");
+        save_command(&config, "alacritty --working-directory {dir}").unwrap();
+        assert_eq!(
+            saved_command(&config),
+            "alacritty --working-directory {dir}"
+        );
+        save_command(&config, "").unwrap();
+        assert_eq!(saved_command(&config), "", "cleared");
+        // A file edited by hand into something the host would not save is ignored.
+        for bad in [r#"{"command":"a\nb"}"#, "not json", r#"{"command":7}"#] {
+            fs::write(config.join("terminal.json"), bad).unwrap();
+            assert_eq!(saved_command(&config), "", "{bad}");
+        }
+        assert_eq!(valid_command("  kitty {dir} ").unwrap(), "kitty {dir}");
+        assert_eq!(valid_command("").unwrap(), "");
+        assert!(valid_command("a\rb").is_err());
+        assert!(valid_command(&"x".repeat(COMMAND_LIMIT + 1)).is_err());
+    }
+
+    fn shell(script: &str, dir: &Path) -> Launch {
+        Launch {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            cwd: dir.into(),
+        }
+    }
+
+    #[test]
+    fn a_terminal_that_fails_at_once_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = start(
+            &shell("echo 'no such profile' >&2; exit 3", dir.path()),
+            None,
+            Duration::from_secs(10),
+        )
+        .expect_err("failed");
+        assert_eq!(error, "The terminal did not open: no such profile");
+        assert!(
+            start(&shell("exit 0", dir.path()), None, Duration::from_secs(10))
+                .expect("opened")
+                .is_none(),
+            "a terminal that handed off and ended is done"
+        );
+    }
+
+    /// A terminal still running after the quick-failure window keeps writing
+    /// to stderr: it neither dies of SIGPIPE (its pipe used to be closed under
+    /// it) nor stays a zombie when it ends (it used to be dropped unwaited).
+    #[test]
+    fn a_terminal_that_keeps_running_is_reaped_and_can_still_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let go = dir.path().join("go");
+        // More than a pipe holds (64 KiB), so a pipe nobody reads would block it too.
+        let script = "while [ ! -e go ]; do sleep 0.01; done; i=0; while [ $i -lt 5000 ]; do echo 'a line of terminal chatter' >&2; i=$((i+1)); done";
+        let running = start(&shell(script, dir.path()), None, Duration::from_millis(50))
+            .expect("started")
+            .expect("still running after the window");
+        fs::write(&go, "").unwrap();
+        // Waited for on its own thread; a blocked terminal shows as no answer.
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(running.join().expect("join"));
+        });
+        let status = receive
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the terminal never ended: blocked on its stderr")
+            .expect("wait");
+        assert!(status.success(), "{status:?}");
     }
 
     #[test]

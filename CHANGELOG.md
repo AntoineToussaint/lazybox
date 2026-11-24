@@ -197,3 +197,10 @@ leave out.
 - **Nobody on your tailnet can block pairing** Pairing attempts are limited per pairing code and sign-in challenges per phone, no longer shared by everyone, and the phone gateway answers only on this computer and its tailnet name.
 - **Notifications go only to push services** The notification sender also refuses benchmarking and "this network" addresses, and IPv6 addresses that carry an IPv4 one.
 - **What agents can and cannot reach** SECURITY.md now says plainly that an agent's narrower credential prevents accidents, not an agent that misbehaves on purpose, and describes the fix.
+- **Your terminal command, allowed by you** A custom "Open in Terminal" command is kept by the app, not the page: Save in Settings → Agents & workspaces shows the exact line in a macOS confirmation, and only a line you allowed ever runs. A command saved by an earlier version waits in Settings for you to save it once more.
+- **Each window asks only for its own** Links and media open only from Lazybox's own windows; setting up the service and removing an older Lazybox only from the setup window; feedback and linking the command only from Settings.
+- **Web pages cannot reach this Mac through their icons** A Web panel's icon is never fetched from this Mac or your local network, whatever its address resolves or redirects to, IPv6 included.
+- **A tighter page policy** Lazybox's windows frame only extension panels, and no link base or form can send a page elsewhere.
+- **A large attachment no longer stops Claude** The Claude worker takes the largest message Lazybox accepts, images included; anything larger fails that one message with the reason, and an unreadable line is set aside instead of ending the conversation's agent.
+- **No leftovers from sounds and terminals** Notification sounds and terminals that keep running are waited for, so none lingers as a zombie, and a terminal can keep writing its messages after Lazybox stops watching them.
+- **Add a computer finishes** Adding a computer no longer hangs when the lazybox command writes a long diagnostic.

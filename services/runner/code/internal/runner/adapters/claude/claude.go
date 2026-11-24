@@ -229,6 +229,9 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		}
 		wire.Context = ""
 	}
+	if err := fitsWorker(wire); err != nil {
+		return r, err
+	}
 	result, err := s.p.Call(ctx, string(op.Kind), wire)
 	if err != nil {
 		return r, err
@@ -236,6 +239,28 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 	err = json.Unmarshal(result, &r)
 	r.ID = op.ID
 	return r, err
+}
+
+// WorkerLineBytes is the longest line the Claude worker reads (LINE_LIMIT in
+// workers/claude-sdk/src/wire.ts; the two are kept equal). Every message the
+// Runner accepts (attachments.MaxPayloadBytes, base64 included) fits with
+// room for the text around it; a message that would not, such as text that
+// JSON escaping grows past it, is refused here with the reason instead of
+// being written.
+const WorkerLineBytes = 64 << 20
+
+// lineEnvelope is room for the request around a message's params.
+const lineEnvelope = 1 << 10
+
+func fitsWorker(wire wireMessage) error {
+	data, err := json.Marshal(wire)
+	if err != nil {
+		return err
+	}
+	if len(data)+lineEnvelope > WorkerLineBytes {
+		return fmt.Errorf("the message is too large for Claude: %d MiB encoded, at most %d MiB", (len(data)+(1<<20)-1)>>20, WorkerLineBytes>>20)
+	}
+	return nil
 }
 
 // Title names the conversation with Claude Code's own session-title

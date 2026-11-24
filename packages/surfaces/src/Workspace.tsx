@@ -182,6 +182,7 @@ const AGENTS_PREFERENCE = 'workspace.sidebar-agents';
 const readAgentsChoice = (viewState?: ViewStateStore): SidebarAgents | undefined => { try { const value = readPreference(viewState, AGENTS_PREFERENCE); return isSidebarAgents(value) ? value : undefined; } catch { return undefined; } };
 
 function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = emptyTarget(), host, onOpenViewer, onTargetChange, reveal, ownWindows = true }: ViewProps) {
+  const webPopouts = !!host?.webViews?.reclaim;
   const keyboardHint = useKeyboardNavigation(viewState);
   const keymap = useKeymap(viewState);
   const { api, info, error: connectionError, slow: runnerSlow, authFailed, refresh: refreshRunner, restart } = useRunner();
@@ -808,8 +809,9 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     title: titleOf,
     canClose: panel => !panel.detached,
     close: closePanel,
-    // A Web panel opens in a window like any panel, its page moving with it (native-web-view.ts, viewer.rs).
-    canOpenWindow: panel => panel.kind === 'chat' ? !!chatHost && !!resolveTarget(panel, page.selection).sessionId : !narrow,
+    // A Web panel opens in a window like any panel where its page moves with it (native views, native-web-view.ts);
+    // a browser's frame would reload there, so it keeps its own Move to a new window.
+    canOpenWindow: panel => panel.kind === 'chat' ? !!chatHost && !!resolveTarget(panel, page.selection).sessionId : (panel.kind !== 'web' || webPopouts) && !narrow,
     openWindow: (panel, handle) => {
       if (panel.kind === 'chat') { void detach(panel); return; }
       void handle.popout(panel.id).then(opened => { if (!opened) setError('The new window was blocked. Allow pop-ups for Lazybox and try again.'); });
@@ -1115,7 +1117,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
           {narrow
             ? mobilePanel ? <MobilePanel host={panelHosts.hostFor(mobilePanel)} title={titleOf(mobilePanel)} onClose={mobilePanel.kind === 'chat' || mobilePanel.detached ? undefined : () => closePanel(mobilePanel)}/> : <p className="module-empty">Your conversations are open in separate windows.</p>
             : <DockLayout ref={dock} page={page} hostFor={panelHosts.hostFor} titleOf={titleOf} badgeOf={badgeOf} iconOf={iconOf} imageOf={panel => liveTitles[panel.id]?.icon} canClose={groupCommands.canClose}
-              sidebarWidth={sidebarWidth} onSidebarWidth={saveSidebarWidth} popoutUrl={POPOUT_URL}
+              sidebarWidth={sidebarWidth} onSidebarWidth={saveSidebarWidth} popoutUrl={POPOUT_URL} webPopouts={webPopouts}
               closeLabel={(panel, title) => layout.pages.length > 1 && shownPanels(page).length === 1 && !page.detached.length && shownPanels(page)[0].id === panel.id ? `Close ${title} page` : `Close ${title} panel`}
               locked={locked} onArrange={next => { if (locked) return; const live = livePage(); changePage(followFrontTab(live, { ...live, ...next })); }}
               agentOf={panel => {

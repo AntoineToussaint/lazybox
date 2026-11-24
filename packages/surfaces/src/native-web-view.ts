@@ -85,12 +85,16 @@ function sync() {
   frame = 0;
   // Each window measures its own: this one, and each popped-out panel window a panel is in.
   const docs = new Map<Document, Slot[]>();
-  for (const slot of slots.values()) docs.set(slot.element.ownerDocument, [...(docs.get(slot.element.ownerDocument) || []), slot]);
+  for (const slot of slots.values()) {
+    const list = docs.get(slot.element.ownerDocument);
+    if (list) list.push(slot); else docs.set(slot.element.ownerDocument, [slot]);
+  }
   // While a panel is dragged the drop preview can land anywhere: every view steps aside.
   const dragging = document.documentElement.classList.contains('dock-dragging');
   for (const [doc, list] of docs) {
     const view = doc.defaultView, popout = popoutToken(doc);
-    const here = doc === document || !!popout;
+    // A panel window being closed is not where a view goes, even for the frames before it is gone.
+    const here = doc === document || (!!popout && !closingDocs.has(doc));
     if (here && view) observeDocument(doc);
     const found = here ? covers(doc) : [];
     const modal = dragging || doc.documentElement.classList.contains('dock-dragging') || found.some(element => { try { return element.matches('dialog:modal'); } catch { return false; } });
@@ -113,13 +117,21 @@ function sync() {
       if (key === slot.shown) continue;
       const wasShown = slot.shown !== 'hidden' && slot.shown !== '';
       slot.shown = key;
-      if (target) { const url = slot.placed ? '' : slot.url; slot.placed = true; void slot.views.show(slot.id, url, target, slot.zoom, popout).catch(slot.report); }
+      if (target) {
+        const url = slot.placed ? '' : slot.url; slot.placed = true;
+        void slot.views.show(slot.id, url, target, slot.zoom, popout).catch(error => {
+          // Its view went with a window that closed before its page could come home: open it again on its page.
+          if (!url && /closed/i.test(String(error))) { slot.placed = false; slot.shown = ''; schedule(); return; }
+          slot.report(error);
+        });
+      }
       else void slot.views.hide(slot.id).catch(slot.report);
       if (wasShown !== !!target) slot.onShown(!!target);
     }
   }
 }
-const schedule = () => { if (!frame) frame = requestAnimationFrame(sync); };
+// This window draws no frames while it is minimized or covered: a panel window it draws into still needs placing.
+const schedule = () => { if (!frame) frame = document.visibilityState === 'visible' ? requestAnimationFrame(sync) : window.setTimeout(sync, 16); };
 
 /** The listeners of each window views are measured in: this one, and popped-out panel windows. */
 const observed = new Map<Document, () => void>();
@@ -158,13 +170,29 @@ function observe() {
   if (stop) return;
   // A panel moves without changing size when something around it does (the
   // sidebar, a split, the Agents panel closing): its ancestors are watched too.
-  const resize = new ResizeObserver(schedule);
-  const watched = new WeakSet<Element>();
-  watch = element => { for (let node: Element | null = element; node; node = node.parentElement) if (!watched.has(node)) { watched.add(node); resize.observe(node); } };
+  // Each window's elements are watched by that window's observer: one of this window watching a
+  // popped-out window's elements gets its notifications out of step with that window's layout.
+  const resizers = new Map<Document, ResizeObserver>();
+  const resizerOf = (doc: Document) => {
+    let resizer = resizers.get(doc);
+    if (!resizer) { const Observer = (doc.defaultView as (Window & typeof globalThis) | null)?.ResizeObserver || ResizeObserver; resizer = new Observer(schedule); resizers.set(doc, resizer); }
+    return resizer;
+  };
+  // An element that moved into another window (its panel popped out) moves to that window's observer.
+  const watchedIn = new WeakMap<Element, Document>();
+  watch = element => {
+    const doc = element.ownerDocument, resizer = resizerOf(doc);
+    for (let node: Element | null = element; node; node = node.parentElement) {
+      const before = watchedIn.get(node);
+      if (before === doc) continue;
+      if (before) resizers.get(before)?.unobserve(node);
+      watchedIn.set(node, doc); resizer.observe(node);
+    }
+  };
   for (const slot of slots.values()) watch(slot.element);
   observeDocument(document);
   stop = () => {
-    resize.disconnect();
+    for (const resizer of resizers.values()) resizer.disconnect();
     for (const unobserve of [...observed.values()]) unobserve();
     watch = undefined; stop = undefined;
   };
@@ -203,12 +231,16 @@ export const refreshNativeWebViews = schedule;
  */
 export async function reclaimPopoutViews(popoutWindow: Window | null | undefined) {
   const doc = popoutWindow?.document, token = doc && popoutToken(doc);
-  if (!token) return;
+  if (!doc || !token) return;
+  closingDocs.add(doc);
   const views = new Set<NativeWebViews>();
-  for (const slot of slots.values()) if (slot.element.ownerDocument === doc) { views.add(slot.views); slot.shown = ''; }
+  // Hidden now, so they show again (here) once their panels land.
+  for (const slot of slots.values()) if (slot.element.ownerDocument === doc) { views.add(slot.views); slot.shown = 'hidden'; }
   await Promise.all([...views].map(view => view.reclaim?.(token).catch(() => {})));
   schedule();
 }
+/** Panel windows whose pages came home: never shown into again. */
+const closingDocs = new WeakSet<Document>();
 
 /**
  * Shows the native view `id` over `surface` while the component is mounted.

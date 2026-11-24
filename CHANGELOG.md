@@ -55,7 +55,7 @@ leave out.
 
 ### Workspaces and tabs
 
-- **A Web panel opens in its own window** Open in new window, or drag its tab out: the page goes with it, history, scroll and forms intact, and comes back the same way when you put it back or close that window.
+- **A Web panel opens in its own window** In the desktop app, Open in new window (or a drag into a panel window already open) takes the page with it, history, scroll and forms intact. Put it back or close that window and the page comes back the same way.
 - **The Dock shows the Inbox count** The badge on the app icon is the Inbox button's number, pull requests and tasks included, not only conversations waiting for an answer.
 - **Notifications that reach you, or say why not** On macOS, Lazybox asks permission once and posts through macOS's current notification system; Settings → Notifications shows what macOS decided and why a notification was refused, instead of reporting success for notifications macOS dropped.
 - **Focus stays where you put it** A conversation that opens a moment after you start a task (on another Runner, say) no longer takes the keyboard back if you have already moved on.

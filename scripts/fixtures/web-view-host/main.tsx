@@ -8,15 +8,18 @@ import { createRoot } from 'react-dom/client';
 import type { NativeWebViews, WebViewEvent, WebViewFrame } from '@lazybox/platform';
 import { WindowErrorBoundary, Workspace, installLinkRouting } from '@lazybox/surfaces';
 
-type View = { shown: boolean; url: string; frame?: WebViewFrame; shows: number; /** The popped-out panel window it is in, by its token; '' for this window. */ popout: string; /** Times it was created: a move to another window keeps its page, so this stays 1. */ created: number };
+type View = { shown: boolean; url: string; frame?: WebViewFrame; shows: number; /** The popped-out panel window it is in, by its token; '' for this window. */ popout: string; /** Shows that opened it on its page (with a url): a move to another window keeps its page, so this stays 1. */ opened: number };
 const views: Record<string, View> = {};
 const listeners = new Set<(event: WebViewEvent) => void>();
 const emit = (event: WebViewEvent) => setTimeout(() => { for (const listener of listeners) listener(event); });
 const loaded = (id: string, url: string) => emit({ id, kind: 'loaded', url, title: new URL(url).host });
 const webViews: NativeWebViews = {
   async show(id, url, frame, _zoom, popout) {
-    const view = views[id] ??= { shown: false, url: '', shows: 0, popout: '', created: 1 };
-    Object.assign(view, { shown: true, frame, shows: view.shows + 1, popout: popout || '' });
+    // A view that went with a panel window that closed before its page came home (the host's answer).
+    if (!url && (window as unknown as { loseNextView?: boolean }).loseNextView && views[id]) { (window as unknown as { loseNextView?: boolean }).loseNextView = false; delete views[id]; throw new Error('That web view is closed'); }
+    if (!url && !views[id]) throw new Error('That web view is closed');
+    const view = views[id] ??= { shown: false, url: '', shows: 0, popout: '', opened: 0 };
+    Object.assign(view, { shown: true, frame, shows: view.shows + 1, popout: popout || '', opened: view.opened + (url ? 1 : 0) });
     if (url && url !== view.url) { view.url = url; loaded(id, url); }
   },
   async hide(id) { if (views[id]) views[id].shown = false; },

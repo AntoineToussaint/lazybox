@@ -565,10 +565,9 @@ pub async fn web_view_reset(
     forget(&app, &viewers, &owner);
     Ok(())
 }
-/// Closes every viewer of a window webview that is going away or starting over.
-/// Popped-out panel windows by the token in their address, each with the
-/// app window that opened it (host.rs `popout_window`).
-static POPOUTS: Mutex<std::collections::BTreeMap<String, (String, String)>> =
+/// Popped-out panel windows by the token in their address. Which app window
+/// opened each is the host's record (`host::popout_opener`).
+static POPOUTS: Mutex<std::collections::BTreeMap<String, String>> =
     Mutex::new(std::collections::BTreeMap::new());
 
 /// Whether `token` can name a popped-out window: what the page put in its
@@ -580,31 +579,32 @@ pub fn popout_token(token: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// Records the popped-out window `label` that `opener` opened on `token`.
-pub fn register_popout(token: &str, label: &str, opener: &str) {
+/// Records the popped-out window `label` opened on `token`.
+pub fn register_popout(token: &str, label: &str) {
     if popout_token(token)
         && let Ok(mut map) = POPOUTS.lock()
     {
-        map.insert(token.to_string(), (label.to_string(), opener.to_string()));
+        map.insert(token.to_string(), label.to_string());
     }
 }
 
 /// Forgets the popped-out window `label`, closed.
 pub fn forget_popout(label: &str) {
     if let Ok(mut map) = POPOUTS.lock() {
-        map.retain(|_, (window, _)| window != label);
+        map.retain(|_, window| window != label);
     }
 }
 
-/// The label of the popped-out window `token` names, if `owner` opened it:
-/// a window can move its views only into its own panel windows.
-fn popout_label(owner: &str, token: &str) -> Option<String> {
-    POPOUTS
-        .lock()
-        .ok()?
-        .get(token)
-        .filter(|(_, opener)| opener == owner)
-        .map(|(label, _)| label.clone())
+/// The label of the popped-out window `token` names, if `owner` opened it
+/// (`opener_of`, the host's record): a window can move its views only into
+/// its own panel windows.
+fn popout_label(
+    owner: &str,
+    token: &str,
+    opener_of: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let label = POPOUTS.lock().ok()?.get(token).cloned()?;
+    (opener_of(&label).as_deref() == Some(owner)).then_some(label)
 }
 
 /// The popped-out window `token` names, if `owner` opened it.
@@ -613,7 +613,7 @@ fn popout_window(
     owner: &str,
     token: &str,
 ) -> Result<tauri::Window, String> {
-    popout_label(owner, token)
+    popout_label(owner, token, crate::host::popout_opener)
         .and_then(|label| app.get_window(&label))
         .ok_or_else(|| "That panel window is closed".into())
 }
@@ -655,6 +655,7 @@ pub async fn web_view_reclaim(
     Ok(())
 }
 
+/// Closes every viewer of a window webview that is going away or starting over.
 pub fn forget(app: &tauri::AppHandle, viewers: &Viewers, owner: &str) {
     let labels: Vec<String> = match viewers.0.lock() {
         Ok(mut map) => {
@@ -688,15 +689,22 @@ mod tests {
         for bad in ["", "short", "has space here", "../../etc", &"x".repeat(65)] {
             assert!(!popout_token(bad), "{bad:?}");
         }
-        register_popout(token, "popout-7", "main");
-        assert_eq!(popout_label("main", token).as_deref(), Some("popout-7"));
+        let opened_by_main = |label: &str| (label == "popout-7").then(|| "main".to_string());
+        register_popout(token, "popout-7");
+        assert_eq!(
+            popout_label("main", token, opened_by_main).as_deref(),
+            Some("popout-7")
+        );
         // Another app window cannot move its views into a window it did not open.
-        assert_eq!(popout_label("workspace-2", token), None);
+        assert_eq!(popout_label("workspace-2", token, opened_by_main), None);
         // A token the page made up names nothing.
-        register_popout("../../etc", "popout-8", "main");
-        assert_eq!(popout_label("main", "../../etc"), None);
+        register_popout("../../etc", "popout-8");
+        assert_eq!(
+            popout_label("main", "../../etc", |_| Some("main".into())),
+            None
+        );
         forget_popout("popout-7");
-        assert_eq!(popout_label("main", token), None);
+        assert_eq!(popout_label("main", token, opened_by_main), None);
     }
 
     #[test]

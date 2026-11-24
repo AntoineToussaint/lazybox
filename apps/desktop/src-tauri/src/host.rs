@@ -1007,7 +1007,7 @@ fn popout_window(
         Ok(window) => {
             // Its Web panels' views are addressed to it by the token in its address.
             if let Some((_, token)) = url.query_pairs().find(|(key, _)| key == "w") {
-                crate::viewer::register_popout(&token, &label, opener);
+                crate::viewer::register_popout(&token, &label);
             }
             if let Ok(mut openers) = POPOUT_OPENERS.lock() {
                 openers.insert(label, opener.to_string());

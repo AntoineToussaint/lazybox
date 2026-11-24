@@ -305,7 +305,8 @@ try {
 
   // Open in new window: the page moves into the panel's window, measured there, the same page (never
   // created again). Resized, it follows. Put back, it comes home before that window closes, and shows here.
-  const createdBefore = await host.evaluate(() => Object.keys(window.nativeWebViews).length);
+  const pagesOpened = () => host.evaluate(() => Object.values(window.nativeWebViews).map(view => view.opened));
+  const openedBefore = await pagesOpened();
   await webTabIn(host, 0).click({ button: 'right' });
   const [popped] = await Promise.all([native.waitForEvent('page'), host.getByRole('menuitem', { name: 'Open in new window' }).click()]);
   await popped.waitForLoadState();
@@ -315,7 +316,7 @@ try {
     popped.evaluate(() => { const r = document.querySelector('.web-surface')?.getBoundingClientRect(); return r && { x: r.left, y: r.top, width: Math.min(r.right, document.documentElement.clientWidth) - r.left, height: Math.min(r.bottom, document.documentElement.clientHeight) - r.top, viewportWidth: innerWidth, viewportHeight: innerHeight }; })])
     .then(([frames, want]) => frames.length === 1 && want && Object.keys(want).every(key => Math.abs(frames[0][key] - want[key]) < 0.01) ? 'placed' : JSON.stringify({ frames, want }));
   await expect.poll(inWindow).toBe('placed');
-  assert.equal(await host.evaluate(() => Object.keys(window.nativeWebViews).length), createdBefore, 'the page moved, it was not opened again');
+  assert.deepEqual(await pagesOpened(), openedBefore, 'the page moved, it was not opened again');
   await popped.setViewportSize({ width: 900, height: 700 });
   await expect.poll(inWindow).toBe('placed');
   await popped.screenshot({ path: '.cache/web-viewer-popout.png' });
@@ -323,6 +324,12 @@ try {
   await expect.poll(() => host.evaluate(t => window.reclaimedPopouts.includes(t), windowToken)).toBe(true);
   await expect.poll(placed).toBe('placed');
   assert.equal(await host.evaluate(() => Object.values(window.nativeWebViews).filter(view => view.popout).length), 0, 'every view is back in the main window');
+  assert.deepEqual(await pagesOpened(), openedBefore, 'put back, it is still the same page');
+  // A view that went with a window closed before its page came home opens again on its page, never a blank panel.
+  await host.evaluate(() => { window.loseNextView = true; });
+  await host.setViewportSize({ width: 1500, height: 960 });
+  await expect.poll(placed).toBe('placed');
+  await expect.poll(() => host.evaluate(() => Object.values(window.nativeWebViews).every(view => view.url && view.opened === 1))).toBe(true);
 
   assert.deepEqual(errors, []);
   console.log('Web viewer: links routed by click, ⌥-click and menu; address bar, search, history, zoom, copy, fallback, settings, detach and dock, persistence; native views placed over the page area, in a panel window of its own and back, through sidebar, window, notice, text size, split and maximize changes, and hidden under menus and other pages.');

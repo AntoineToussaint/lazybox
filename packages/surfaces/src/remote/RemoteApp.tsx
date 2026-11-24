@@ -232,7 +232,7 @@ function PhoneShell({ device, onForget }: { device: DeviceSession['device']; onF
   const offline = !!error && !info;
   return <>
     {route.screen === 'settings' ? <PhoneSettings device={device} pins={pins} onBack={() => go({})} onForget={onForget}/>
-      : route.session ? <PhoneConversation sessionId={route.session} commandId={route.command} device={device} collections={collections} go={go}/>
+      : route.session ? <PhoneConversation key={route.session} sessionId={route.session} commandId={route.command} device={device} collections={collections} go={go}/>
       : <PhoneInbox device={device} collections={collections} pins={pins} go={go} onRefresh={onRefresh}/>}
     {!online ? <div className="remote-offline" role="status"><Icon name="cloud" size={15}/>This phone is offline. What you see was loaded earlier.</div>
       : error && <div className="remote-offline" role="status"><span className="remote-spinner" aria-hidden="true"/>{offline ? 'Connecting to your computer…' : 'Can’t reach your computer · retrying'}<button type="button" onClick={refresh}>Retry now</button></div>}
@@ -249,7 +249,7 @@ function PhoneConversation({ sessionId, commandId, device, collections, go }: { 
   // An ended conversation is not in the live list; read it, and keep reading while it is shown.
   useEffect(() => {
     const control = new AbortController();
-    const load = () => void api.getSession({ sessionId }, { signal: control.signal, timeoutMs: 10000 }).then(result => { if (!control.signal.aborted) setFetched(result.session); }, failure => { if (!control.signal.aborted && !live) setError(ConnectError.from(failure).rawMessage); });
+    const load = () => void api.getSession({ sessionId }, { signal: control.signal, timeoutMs: 10000 }).then(result => { if (!control.signal.aborted && result.session?.id === sessionId) setFetched(result.session); }, failure => { if (!control.signal.aborted && !live) setError(ConnectError.from(failure).rawMessage); });
     load(); const timer = setInterval(load, 4000);
     return () => { control.abort(); clearInterval(timer); };
   }, [api, sessionId, !!live]);

@@ -229,6 +229,10 @@ try{
  assert.deepEqual((({scope,provider,sourceSessionId})=>({scope,provider,sourceSessionId}))(starts()[4]),{scope:'changes',provider:'claude',sourceSessionId:author.id});
  assert.equal(fixture.mutations.filter(m=>m.method==='Apply'&&m.body.sessionId===author.id&&/\/review/.test(m.body.message?.text||'')).length,0,'/review runs in Lazybox; nothing is sent to the agent');
 
+ const reviewTabs=page.locator('[data-panel-tab]').filter({hasText:/^Review · /});
+ await expect(reviewTabs.filter({hasText:'Claude'}).first()).toBeVisible();
+ const beforePR=await reviewTabs.count();
+
  // 10. The PR card: "Review the PR with Codex".
  api.pr={number:'7',title:'Return handler errors',url:'https://github.com/fixture-team/api/pull/7',state:'open',draft:false,base:'main',headSha:api.head,mergeableState:'clean',reviewDecision:'',checksState:'success',author:'fixture-user',checks:[]};
  await openWorkspaceChanges(page);
@@ -237,10 +241,9 @@ try{
  await expect.poll(()=>starts().length).toBe(6);
  assert.deepEqual((({scope,member})=>({scope,member}))(starts()[5]),{scope:'pr',member:'api'});
  assert.ok(fixture.sessions.some(s=>s.title==='Review · PR #7 · Codex'));
- // Its conversation is a tab beside the work, on the page that shows the work. A workspace's
- // conversations are its tabs when the page loads, so every review has one tab, and never two.
+ // Opening this review adds one tab beside the work. Older reviewers are reached through their cards.
  await page.getByRole('navigation',{name:'Pages'}).getByRole('button',{name:'Work'}).click();
- await expect(page.locator('[data-panel-tab]').filter({hasText:/^Review · /})).toHaveCount(starts().length);
+ await expect(reviewTabs).toHaveCount(beforePR+1);
  await expect(page.locator('[data-panel-tab]').filter({hasText:'Harden the handler'}).locator('xpath=ancestor::*[contains(concat(" ",normalize-space(@class)," ")," dv-tab ")][1]/following-sibling::*[1]')).toContainText('Review · Codex');
 
  // 11. Settings: the default reviewer, automatic reviews, the brief, and its reset.

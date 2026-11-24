@@ -5,7 +5,7 @@
 // or, when it is not installed, a fresh conversation of the author's agent,
 // said quietly. The review opens as a background tab beside the chat — the
 // person stays in their composer — titled "Review · Codex", with a badge that
-// ends as its findings count; the sidebar's row brings that tab to the front.
+// ends as its findings count; the review card brings that tab to the front.
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
 import {chromium,expect} from './fixtures/playwright.mjs';
@@ -76,10 +76,11 @@ try{
  assert.equal(fixture.reviewOf('alpha').comments.filter(c=>c.reviewId===run.id).length,3);
  await page.screenshot({path:'.cache/review-from-chat-findings.png'});
 
- // 3. The sidebar's row of the review brings its tab to the front: no second panel, the work's tab kept.
+ // 3. The review card brings its tab to the front: no second panel, the work's tab kept.
  const chatTabs=await tabs().filter({has:page.locator('[data-kind=chat]')}).count();
  const nav=page.getByRole('navigation',{name:'Workspaces'});
- await nav.getByText('Review · Changes · Codex',{exact:true}).first().click();
+ await expect(nav.getByText('Review · Changes · Codex',{exact:true})).toHaveCount(0);
+ await chat().getByRole('group',{name:'Codex review'}).getByRole('button',{name:'Open conversation'}).click();
  await expect(activeTab().filter({hasText:'Review · Codex'})).toHaveCount(1);
  await expect(tabs()).toHaveCount(await tabs().count());
  assert.equal(await tabs().filter({has:page.locator('[data-kind=chat]')}).count(),chatTabs,'no duplicate panel for the conversation');
@@ -301,5 +302,5 @@ try{
 
 
  assert.deepEqual(errors,[]);
- console.log('Review from the chat: the header button, /review <focus> and ⌘K; the other agent by default, the fallback said; a background tab with its findings; the sidebar row focuses it; cancelled from the card, Esc, the reviewer’s menu and ⌘K; stopped when its reviewer is ended.');
+ console.log('Review from the chat: the header button, /review <focus> and ⌘K; the other agent by default, the fallback said; a background tab with its findings; the review card focuses it; cancelled from the card, Esc, the reviewer’s menu and ⌘K; stopped when its reviewer is ended.');
 }finally{await browser?.close();await server.close();await fixture.close();}

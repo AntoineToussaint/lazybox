@@ -49,6 +49,40 @@ and credentials. Real-device, remote Hub, native service recovery and provider
 qualification remain separate roadmap gates. A deterministic pass is not a
 claim that the phone development journey is released.
 
+## A deadline on every unit test
+
+Every unit test finishes within 30 seconds, and every unit suite enforces it
+per test, so a hung or slow test fails fast and names itself instead of
+spending its package's or its gate's whole deadline:
+
+| Suite | Runs | Per-test deadline |
+| --- | --- | --- |
+| `node --test`: `npm run test:client`, `test:worker`, `test:browser-service`, `make test-environments` | `--test-timeout=30000` | A test (its subtests included) still running at 30 s fails. |
+| Go: `make test`, `make test-outlive`, `make test-reboot` | [`scripts/go-test-guard.mjs`](scripts/go-test-guard.mjs) around `go test -json` | A test running for 30 s, not counting time `t.Parallel` holds it paused, gets its binary a SIGQUIT: the binary prints every goroutine's stack, the run fails, and the summary names the test. |
+| Rust: `make check-desktop` (the Tauri crate and `tools/lazybox-snippets`) | `cargo nextest run` with [`.config/nextest.toml`](.config/nextest.toml) | `slow-timeout = { period = "30s", terminate-after = 1 }`: nextest ends the test's process and names it. |
+
+`go test -timeout` bounds a whole package binary and stays as the backstop for
+a binary that hangs outside any test, set above the slowest package as
+measured on a loaded shared box: 6 minutes for `make test` (`internal/transport`
+took 352 s with `GOMAXPROCS=1`), 5 for `make test-outlive` (`internal/runner`,
+161 s under `-race`), 1 for `make test-reboot` (two tests, under 5 s). The guard prints `go
+test`'s own text, not JSON: every line with `-v`, otherwise a failing test's
+lines and the package results, as `go test` prints them.
+
+The rule cannot erode quietly. Loading the gate catalog (CI's first job,
+staging, `make check-release`) runs
+[`scripts/unit-test-timeouts.mjs`](scripts/unit-test-timeouts.mjs), which fails
+on a `node --test` without `--test-timeout=30000` in an npm script, the
+Makefile or a workflow; on a `go test` outside the guard, except in the
+real-provider and release-smoke targets it lists with their reasons; on
+`cargo test`; and on a nextest config without the 30 s deadline or a CI
+install of another nextest version than the config requires.
+
+Real-provider tests (`make test-real*`) and the Playwright UI gates are not
+unit tests and keep their own deadlines (the gate's `timeoutMs`). A test
+that cannot fit in 30 s is integration work: it moves to such a target with
+its own limit, and the pull request says so with numbers.
+
 ## CI
 
 [The CI workflow](.github/workflows/ci.yml) has two profiles. Pull requests

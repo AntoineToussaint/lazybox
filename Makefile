@@ -13,10 +13,18 @@ SESSION ?=
 CARGO_BUILD_JOBS ?= 1
 export CARGO_BUILD_JOBS
 WORKSPACE_MANIFESTS := $(wildcard apps/*/package.json packages/*/package.json workers/*/package.json)
+# Every unit test finishes within 30 seconds, and each suite enforces it per
+# test (AGENTS.md; scripts/unit-test-timeouts.mjs fails the gate catalog
+# otherwise). go test's -timeout bounds a whole package binary, so Go unit
+# tests run through the guard, which stops a test that runs over and names it.
+GO_TEST := node $(abspath scripts/go-test-guard.mjs)
+# cargo test has no per-test deadline; nextest ends a test at 30 s. The crates
+# are separate Cargo workspaces, so the one config is passed, not looked up.
+NEXTEST := cargo nextest run --config-file $(abspath .config/nextest.toml) --locked
 
 .PHONY: help deps generate check check-go check-workspaces build build-go build-worker build-web test test-real test-browser fmt fmt-check run web
 help:
-	@printf '%s\n' 'make install    Build Lazybox from this clone and install it (make update, make uninstall)' 'make dev        Build and run isolated Lazybox Dev' 'make stage      Validate and freeze a Working candidate' 'make promote RELEASE=<id>  Pin a candidate for the next Working launch' 'make working    Run the pinned Working installation' 'make run        Run the Codefly gRPC Runner with temporary ports' 'make desktop    Build and launch the native Tauri agent window' 'make web        Optional browser test client (prints its authenticated URL)' 'make check      Format, vet, typecheck, test, generated-code and workspace checks' 'make check-desktop Native Rust format, tests, and clippy' 'make test       Deterministic Go tests' 'make test-outlive  Race-checked tests that agents and commands outlive a Runner restart' 'make stress-go RUN=<test>  Repeat Go tests under GOMAXPROCS=1, -race and CPU load' 'make stress-ui SUITES=<names>  Repeat UI suites, several at once' 'make test-real  Explicit real-provider tests; requires existing provider login' 'make build      Compile the Runner, test CLI, SDK worker, and browser client' 'make browser    Install the Chromium the agent browser runs (BROWSER.md)'
+	@printf '%s\n' 'make install    Build Lazybox from this clone and install it (make update, make uninstall)' 'make dev        Build and run isolated Lazybox Dev' 'make stage      Validate and freeze a Working candidate' 'make promote RELEASE=<id>  Pin a candidate for the next Working launch' 'make working    Run the pinned Working installation' 'make run        Run the Codefly gRPC Runner with temporary ports' 'make desktop    Build and launch the native Tauri agent window' 'make web        Optional browser test client (prints its authenticated URL)' 'make check      Format, vet, typecheck, test, generated-code and workspace checks' 'make check-desktop Native Rust format, tests (the desktop crate and the snippet helper), and clippy' 'make test       Deterministic Go tests' 'make test-outlive  Race-checked tests that agents and commands outlive a Runner restart' 'make stress-go RUN=<test>  Repeat Go tests under GOMAXPROCS=1, -race and CPU load' 'make stress-ui SUITES=<names>  Repeat UI suites, several at once' 'make test-real  Explicit real-provider tests; requires existing provider login' 'make build      Compile the Runner, test CLI, SDK worker, and browser client' 'make browser    Install the Chromium the agent browser runs (BROWSER.md)'
 
 # The agent browser's Chromium (BROWSER.md): Playwright's own headless build,
 # in Playwright's cache, matched to the pinned playwright-core. Never the
@@ -54,7 +62,7 @@ build-web: deps
 	npm run build:web
 
 test: build-worker
-	cd $(GO_ROOT) && LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) LAZYBOX_V2_BROWSER_WORKER=$(abspath workers/browser/dist/main.js) go test -timeout 6m ./...
+	cd $(GO_ROOT) && LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) LAZYBOX_V2_BROWSER_WORKER=$(abspath workers/browser/dist/main.js) $(GO_TEST) -timeout 6m ./...
 test-real: build-worker
 	cd $(GO_ROOT) && LAZYBOX_V2_REAL=1 LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -timeout 12m -v ./tests/integration -run TestReal
 
@@ -79,9 +87,11 @@ build-desktop: deps
 desktop: build-desktop
 	LAZYBOX_V2_ENDPOINT='$(ENDPOINT)' LAZYBOX_V2_PROJECT='$(PROJECT)' LAZYBOX_V2_SESSION='$(SESSION)' node scripts/desktop.mjs
 check-desktop: deps
+	@cargo nextest --version >/dev/null 2>&1 || { echo 'cargo-nextest is missing: make install-check says how to install it (CONTRIBUTING.md).'; exit 1; }
 	cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --check
 	npm run build:ui -w @lazybox/desktop
-	cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+	$(NEXTEST) --manifest-path apps/desktop/src-tauri/Cargo.toml
+	$(NEXTEST) --manifest-path tools/lazybox-snippets/Cargo.toml
 	cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --locked -- -D warnings
 
 .PHONY: test-workspace native-workspace-check
@@ -126,7 +136,7 @@ environments:
 share-subscriptions:
 	node scripts/environments.mjs share-subscriptions '$(SUBSCRIPTION_STATE)'
 test-environments:
-	node --test scripts/managed-build.test.mjs scripts/environments.test.mjs scripts/runner-service.test.mjs scripts/runner-restart.test.mjs scripts/release-gates.test.mjs scripts/user-config.test.mjs scripts/release/release.test.mjs scripts/release/install.test.mjs scripts/export-check.test.mjs scripts/check-private.test.mjs
+	node --test --test-timeout=30000 scripts/go-test-guard.test.mjs scripts/managed-build.test.mjs scripts/environments.test.mjs scripts/runner-service.test.mjs scripts/runner-restart.test.mjs scripts/release-gates.test.mjs scripts/user-config.test.mjs scripts/release/release.test.mjs scripts/release/install.test.mjs scripts/export-check.test.mjs scripts/check-private.test.mjs
 	bash scripts/release/publish-cask_test.sh
 
 # An installable release (RELEASING.md): dist/$(VERSION)/ with the DMG, the
@@ -201,14 +211,14 @@ OUTLIVE_PACKAGES := ./internal/sessionhost ./internal/redact ./internal/processg
 RACE_LOGS := $(abspath .cache/race)
 test-outlive: build-worker
 	rm -rf $(RACE_LOGS) && mkdir -p $(RACE_LOGS)
-	cd $(GO_ROOT) && GORACE="log_path=$(RACE_LOGS)/race" LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -race -count=1 -timeout 6m $(OUTLIVE_PACKAGES); \
+	cd $(GO_ROOT) && GORACE="log_path=$(RACE_LOGS)/race" LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) $(GO_TEST) -race -count=1 -timeout 5m $(OUTLIVE_PACKAGES); \
 	status=$$?; if ls $(RACE_LOGS)/race.* >/dev/null 2>&1; then cat $(RACE_LOGS)/race.*; echo 'data races reported (above)'; exit 1; fi; exit $$status
 # The reboot gate (SESSION_HOSTS.md, "After a reboot"): the Runner, every session
 # host and their programs are killed as a reboot kills them, a new Runner starts
 # on the same state, and what must come back is checked. No credentials, no network.
 .PHONY: test-reboot
 test-reboot:
-	cd $(GO_ROOT) && go test -count=1 -timeout 3m -run '^(TestRebootBringsBackEverythingAndResumesTheAgent|TestAgentLostNoticeIsRecordedOnce)$$' ./internal/runner
+	cd $(GO_ROOT) && $(GO_TEST) -count=1 -timeout 1m -run '^(TestRebootBringsBackEverythingAndResumesTheAgent|TestAgentLostNoticeIsRecordedOnce)$$' ./internal/runner
 test-real-outlive: build-worker
 	cd $(GO_ROOT) && LAZYBOX_V2_REAL=1 LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -timeout 14m -v ./tests/integration -run '^TestRealAgentOutlivesRunnerRestart$$'
 

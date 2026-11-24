@@ -95,6 +95,14 @@ never whether the full gate runs before you push.
   test that fails without the fix. UI behaviour is covered by a Playwright
   suite registered in `scripts/release-gates.json` — an unclassified `test:`
   script fails the catalog.
+- Every unit test finishes within 30 seconds; the suites enforce it per test:
+  `node --test --test-timeout=30000`, Go through `scripts/go-test-guard.mjs`
+  (it stops the test binary with a goroutine dump and names the test), Rust
+  under `cargo nextest` with `.config/nextest.toml`. A slow test is fixed at
+  its cause (a real wait, a sleep, an unbounded retry, integration work in a
+  unit test), never by raising the limit or exempting it; the gate catalog
+  fails while any suite runs without the deadline
+  ([RELEASE_GATES.md](RELEASE_GATES.md#a-deadline-on-every-unit-test)).
 - Docs are code: the PR that changes behaviour updates the document that
   describes it.
 

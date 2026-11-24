@@ -258,12 +258,32 @@ func TestReviewImportSaysWhenOlderFeedbackWasNotRead(t *testing.T) {
 	}
 	b.TrackItems(ctx)
 	imported, err := f.client.ImportPullRequestReview(owner, &pb.PullRequestReactionRequest{CollectionId: f.mine.Id, Ref: &pb.ItemRef{Provider: "github", Key: "team/api#3"}})
-	if err != nil || imported.Comments != 1 || len(imported.Notes) != 1 || !strings.Contains(imported.Notes[0], fmt.Sprintf("only its newest %d review comments", github.MaxListed)) {
+	// Only the comments were cut (the pull request has one review): the note names them alone.
+	commentsCut := fmt.Sprintf("the pull request has more review feedback than Lazybox reads at once: only its newest %d review comments were read; read the older ones on GitHub", github.MaxListed)
+	if err != nil || imported.Comments != 1 || len(imported.Notes) != 1 || imported.Notes[0] != commentsCut {
 		t.Fatalf("import: %+v %v", imported, err)
 	}
 	message := f.applied(t)
 	if !strings.Contains(message.Text, "read the older ones on GitHub") || !strings.Contains(message.Text, fmt.Sprintf("Note %d.", total)) || strings.Contains(message.Text, "Note 50.") {
 		t.Fatalf("the agent's message: %s", message.Text)
+	}
+
+	// Only the reviews cut: the note names the reviews alone.
+	f.github.Update(func(s *githubtest.Server) {
+		reviews := make([]string, 0, github.MaxListed+1)
+		for range github.MaxListed {
+			reviews = append(reviews, "ana:COMMENTED:Looked.")
+		}
+		s.Pulls["team/api"][0].Reviews = append(reviews, "bo:CHANGES_REQUESTED:Rename the package.")
+		s.Pulls["team/api"][0].Comments = nil
+	})
+	imported, err = f.client.ImportPullRequestReview(owner, &pb.PullRequestReactionRequest{CollectionId: f.mine.Id, Ref: &pb.ItemRef{Provider: "github", Key: "team/api#3"}})
+	reviewsCut := fmt.Sprintf("the pull request has more review feedback than Lazybox reads at once: only its newest %d reviews were read; read the older ones on GitHub", github.MaxListed)
+	if err != nil || len(imported.Notes) != 1 || imported.Notes[0] != reviewsCut {
+		t.Fatalf("reviews cut: %+v %v", imported, err)
+	}
+	if message = f.applied(t); !strings.Contains(message.Text, "only its newest 1000 reviews were read") || strings.Contains(message.Text, "review comments were read") {
+		t.Fatalf("the agent's message names the reviews alone: %s", message.Text)
 	}
 }
 

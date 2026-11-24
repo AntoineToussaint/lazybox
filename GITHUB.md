@@ -206,7 +206,8 @@ scoped credential is denied, like every RPC off its allowlist).
   (GitHub's `Link` header), up to 1000 entries (`github.MaxListed`). A head
   with more checks than that, none of those read failing, is `incomplete`:
   never `success`, so Merge is not offered and `pr.checks-passed` is not
-  emitted; the card says to check them on GitHub. A failure among those read
+  emitted; the card says to check them on GitHub, and the sidebar and hover
+  card say "checks not all read" (a neutral dot, never green). A failure among those read
   is still a failure. Reviews past 1000 are read from the newest end, so each
   reviewer's latest review still decides.
 - A GitHub rate limit is told apart from a refusal on every request (sign-in,
@@ -354,8 +355,8 @@ in progress.
   sent; the others are counted in a note, to the person and the agent, and
   stay on GitHub. Comments and reviews are read from their newest end: a pull
   request with more than 1000 of either sends its newest 1000, and a note to
-  the person and the agent says the older ones were not read and stay on
-  GitHub.
+  the person and the agent names the list that was cut (review comments,
+  reviews or both) and says the older ones were not read and stay on GitHub.
 
 Both messages quote everything GitHub wrote — the title, check names,
 summaries and logs, review summaries and comments — in one external-content

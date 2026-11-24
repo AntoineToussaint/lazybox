@@ -112,7 +112,7 @@ func TestJobLogsAndReviewComments(t *testing.T) {
 	}
 	feedback, err := client.ReviewComments(ctx, "ghp_fixture", "team/api", 7)
 	comments, reviews := feedback.Comments, feedback.Reviews
-	if err != nil || feedback.Truncated || len(comments) != 2 || comments[0].Line != 12 || comments[0].Side != "RIGHT" || comments[1].InReplyTo != 100 || comments[0].Outdated {
+	if err != nil || feedback.Truncated() || len(comments) != 2 || comments[0].Line != 12 || comments[0].Side != "RIGHT" || comments[1].InReplyTo != 100 || comments[0].Outdated {
 		t.Fatalf("comments %+v %v", comments, err)
 	}
 	if len(reviews) != 1 || reviews[0].State != "CHANGES_REQUESTED" || reviews[0].Body != "Please handle the empty case." {

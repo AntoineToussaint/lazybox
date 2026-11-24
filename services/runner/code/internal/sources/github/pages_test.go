@@ -153,19 +153,32 @@ func TestReviewCommentsAreReadFromTheNewestEnd(t *testing.T) {
 	}
 	fake.Update(func(s *githubtest.Server) { s.Pulls["team/api"][0].Comments = comments(350) })
 	feedback, err := client.ReviewComments(ctx, "ghp_fixture", "team/api", 7)
-	if err != nil || feedback.Truncated || len(feedback.Comments) != 350 || feedback.Comments[349].ID != 350 {
-		t.Fatalf("350 comments: %d, truncated %v, %v", len(feedback.Comments), feedback.Truncated, err)
+	if err != nil || feedback.Truncated() || len(feedback.Comments) != 350 || feedback.Comments[349].ID != 350 {
+		t.Fatalf("350 comments: %d, truncated %v, %v", len(feedback.Comments), feedback.Truncated(), err)
 	}
 	fake.Update(func(s *githubtest.Server) {
 		s.Pulls["team/api"][0].Comments = comments(github.MaxListed + 50)
 		s.Pulls["team/api"][0].Reviews = []string{"ana:COMMENTED:first"}
 	})
 	feedback, err = client.ReviewComments(ctx, "ghp_fixture", "team/api", 7)
-	if err != nil || !feedback.Truncated || len(feedback.Comments) != github.MaxListed || feedback.Comments[0].ID != 51 || feedback.Comments[len(feedback.Comments)-1].ID != int64(github.MaxListed+50) {
-		t.Fatalf("too many comments: %d, truncated %v, %v", len(feedback.Comments), feedback.Truncated, err)
+	if err != nil || !feedback.CommentsTruncated || feedback.ReviewsTruncated || len(feedback.Comments) != github.MaxListed || feedback.Comments[0].ID != 51 || feedback.Comments[len(feedback.Comments)-1].ID != int64(github.MaxListed+50) {
+		t.Fatalf("too many comments: %d, %+v, %v", len(feedback.Comments), feedback, err)
 	}
 	if len(feedback.Reviews) != 1 || feedback.Reviews[0].Body != "first" {
 		t.Fatalf("reviews: %+v", feedback.Reviews)
+	}
+	// Each list says for itself whether it was cut.
+	fake.Update(func(s *githubtest.Server) {
+		s.Pulls["team/api"][0].Comments = comments(2)
+		reviews := make([]string, github.MaxListed+1)
+		for i := range reviews {
+			reviews[i] = fmt.Sprintf("ana:COMMENTED:review %d", i+1)
+		}
+		s.Pulls["team/api"][0].Reviews = reviews
+	})
+	feedback, err = client.ReviewComments(ctx, "ghp_fixture", "team/api", 7)
+	if err != nil || feedback.CommentsTruncated || !feedback.ReviewsTruncated || len(feedback.Reviews) != github.MaxListed || feedback.Reviews[len(feedback.Reviews)-1].Body != fmt.Sprintf("review %d", github.MaxListed+1) {
+		t.Fatalf("too many reviews: %d reviews, comments cut %v, reviews cut %v, %v", len(feedback.Reviews), feedback.CommentsTruncated, feedback.ReviewsTruncated, err)
 	}
 }
 

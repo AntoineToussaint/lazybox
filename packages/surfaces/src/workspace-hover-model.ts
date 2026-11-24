@@ -120,6 +120,7 @@ function pullPills(facts: PullFacts): HoverPill[] {
   if (facts.checks === 'failure') pills.push({ text: facts.failing ? `${facts.failing} failing` : 'Checks failing', tone: 'failure', icon: 'cross' });
   else if (facts.checks === 'pending') pills.push({ text: 'Checks', tone: 'pending', icon: 'pending' });
   else if (facts.checks === 'success') pills.push({ text: 'Checks', tone: 'success', icon: 'check' });
+  else if (facts.checks === 'incomplete') pills.push({ text: 'Checks not all read', tone: 'neutral' });
   if (facts.conflicts) pills.push({ text: 'Conflicts', tone: 'changes', icon: 'alert' });
   if (facts.review === 'approved') pills.push({ text: 'Approved', tone: 'success' });
   else if (facts.review === 'changes_requested') pills.push({ text: 'Changes requested', tone: 'changes' });

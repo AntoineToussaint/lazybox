@@ -481,11 +481,19 @@ func (b *Bench) importPullRequestReview(ctx context.Context, workspace string, r
 	if skipped > 0 {
 		notes = append(notes, fmt.Sprintf("%d %s from people who are not the repository's owners, members or collaborators %s not sent; read %s on GitHub", skipped, noun(skipped, "review or comment", "reviews and comments"), noun(skipped, "was", "were"), noun(skipped, "it", "them")))
 	}
-	if feedback.Truncated {
-		notes = append(notes, fmt.Sprintf("the pull request has more review feedback than Lazybox reads at once: only its newest %d review comments and %d reviews were read; read the older ones on GitHub", github.MaxListed, github.MaxListed))
+	// Name only the list that was cut.
+	var cut []string
+	if feedback.CommentsTruncated {
+		cut = append(cut, fmt.Sprintf("%d review comments", github.MaxListed))
+	}
+	if feedback.ReviewsTruncated {
+		cut = append(cut, fmt.Sprintf("%d reviews", github.MaxListed))
+	}
+	if len(cut) > 0 {
+		notes = append(notes, fmt.Sprintf("the pull request has more review feedback than Lazybox reads at once: only its newest %s were read; read the older ones on GitHub", strings.Join(cut, " and ")))
 	}
 	if len(added) == 0 && len(unanchored) == 0 && len(summaries) == 0 {
-		if skipped > 0 || feedback.Truncated {
+		if skipped > 0 || feedback.Truncated() {
 			return Reaction{Notes: notes, Summary: "No new review feedback was sent. Open review to read feedback on GitHub."}, nil
 		}
 		return Reaction{Summary: "No new review feedback to send."}, nil

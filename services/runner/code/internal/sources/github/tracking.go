@@ -450,14 +450,17 @@ type ReviewFeedback struct {
 	Comments []ReviewComment
 	// Reviews are the submitted reviews, oldest first.
 	Reviews []Review
-	// Truncated: GitHub has older comments or reviews than these, the newest
-	// MaxListed of each.
-	Truncated bool
+	// CommentsTruncated and ReviewsTruncated: GitHub has older comments, or
+	// older reviews, than these, the newest MaxListed of that list.
+	CommentsTruncated, ReviewsTruncated bool
 }
+
+// Truncated: GitHub has older comments or reviews than were read.
+func (f ReviewFeedback) Truncated() bool { return f.CommentsTruncated || f.ReviewsTruncated }
 
 // ReviewComments reads a pull request's inline review comments and its
 // submitted reviews from their newest end: all of them, or the newest
-// MaxListed of each (Truncated).
+// MaxListed of each (CommentsTruncated, ReviewsTruncated).
 func (c *Client) ReviewComments(ctx context.Context, token, fullName string, number int64) (ReviewFeedback, error) {
 	owner, name, err := splitName(fullName)
 	if err != nil {
@@ -490,7 +493,7 @@ func (c *Client) ReviewComments(ctx context.Context, token, fullName string, num
 	for _, r := range reviews {
 		out.Reviews = append(out.Reviews, Review{ID: r.GetID(), Author: r.GetUser().GetLogin(), Association: r.GetAuthorAssociation(), State: r.GetState(), Body: r.GetBody(), URL: r.GetHTMLURL(), SubmittedAt: r.GetSubmittedAt().Time})
 	}
-	out.Truncated = !commentsComplete || !reviewsComplete
+	out.CommentsTruncated, out.ReviewsTruncated = !commentsComplete, !reviewsComplete
 	return out, nil
 }
 

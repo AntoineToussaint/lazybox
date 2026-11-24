@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 Object.assign(fixture.sessions[0], { title: 'Ship the front door with a long conversation title', busy: true, status: 'running' });
@@ -221,6 +221,6 @@ try {
     await page.context().close();
   }
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS polish pass: a narrow chat keeps its title and a whole message box; a phone reaches every page tab and keeps the step on one row; a page opened from the header closes with its ×; the header fits half a screen. Fixture only.');
 } finally { await browser?.close(); await server.close(); await fixture.close(); }

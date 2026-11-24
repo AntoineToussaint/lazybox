@@ -17,7 +17,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {mkdir} from 'node:fs/promises';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 fixture.library.push({id:'infra',name:'infra-base',path:'/fixture/repos/infra-base',gitIdentity:'github:fixture-team/infra-base'});
@@ -321,7 +321,7 @@ try {
  await expect(settings.getByRole('listitem',{name:'frontend home checkout'})).toContainText('/fixture/home/src/web');
  await settings.scrollIntoViewIfNeeded();
  await page.screenshot({path:`${shots}/home-checkouts-settings.png`});
- assert.deepEqual(errors,[],'no page errors');
+ await drainPageErrors(errors);assert.deepEqual(errors,[],'no page errors');
  console.log('home checkouts: set and updated, opened in the shell, an agent\'s login run exactly in its home (the idle shell reused, never sent to the agent), pasted without running, told done, a slow shell waited for (the command shown once, and run), a busy shell left alone, keyboard reachable, listed in Settings');
 } finally {
  await browser?.close();await server.close();await fixture.close();

@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -162,6 +162,6 @@ try {
   assert.ok(phoneCalls.length > 0);
   assert.deepEqual([...new Set(phoneCalls.map(c => c.method))].sort().filter(m => !['Apply', 'GetPushSettings', 'GetSession', 'Info', 'ListCollections', 'ListCommands', 'ListLinks', 'ReadSessionTail', 'WatchEvents'].includes(m)), [], 'the phone used an RPC it does not need');
   assert.deepEqual(f.mutations.filter(m => m.method === 'Apply' && !m.device), [], 'every reply came from a paired phone');
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS remote inbox: grouped attention across workspaces, approve, answer, reply, interrupt, back gesture, read-only phone, 320/390 widths, device allowlist only.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

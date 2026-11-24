@@ -336,17 +336,34 @@ before releasing the pointer, then verify the width remains persisted.
 Every UI gate, and the scenario runner, counts browser runtime errors and
 unhandled rejections through DOM events (`collectPageErrors` and
 `collectContextPageErrors` in `scripts/fixtures/page-errors.mjs`), never
-through Playwright's raw `pageerror`. WebKit's protocol labels a fetch that a
-navigation cut, and the app caught, as `pageerror` ("… due to access control
-checks"); that diagnostic is not an uncaught application error, and counting
-it failed gates at random whenever a reload or goto cut a poll. The collector
-is an init script, so it must be installed before the page's first navigation
-(it refuses otherwise); the context form also covers popups and pages opened
-later. The page-errors gate tests both browsers, retains genuine throws and
-rejected promises, exercises caught fetches across navigation, and checks the
+through Playwright's raw `pageerror` or `weberror`. WebKit's protocol labels a
+fetch that a navigation cut, and the app caught, as `pageerror` ("… due to
+access control checks"); that diagnostic is not an uncaught application error,
+and counting it failed gates at random whenever a reload or goto cut a poll.
+
+The collector fails closed. It reports an error the moment it is dispatched,
+so one thrown in a `pagehide` handler or by a gate's last action still counts
+(an error a document could not deliver while unloading waits in
+`sessionStorage` and its tab's next same-origin document sends it). Only after
+every listener has run, on a `MessageChannel` task that Playwright's clock
+never pauses, does it retract an error the app marked handled with
+`preventDefault`. `drainPageErrors(errors)` waits until everything dispatched
+so far has arrived; gates call it before asserting on their errors. The
+collector is an init script: it must be installed before the page's first
+navigation (it refuses otherwise) and before any other init script of the page
+or context; the context form also covers popups and pages opened later.
+
+The page-errors gate tests both browsers: genuine throws and rejected promises
+are kept, caught fetches across navigation and handled errors are not; an
+error from a `pagehide` handler, a last click, a paused clock and a later init
+script arrive; drained errors carry the step they were dispatched in; and the
 context, label and refusal behaviour. `scripts/page-errors.test.ts`
-(`npm run test:client`) fails when a script listens to the raw event without a
-`raw-pageerror: <why>` exception.
+(`npm run test:client`) fails when a script listens to a raw error event
+(also by a name built from parts, or not spelled out) without a
+`raw-pageerror: <why>` exception; when a UI gate's script or a `test-*.mjs`
+opens a page without the fixture and no `page-errors-opt-out: <why>`; and when
+an init script is installed before the collector that would hear it, without
+`init-before-page-errors: <why>`.
 
 The issue-start gate checks the action row at 1024×680 and 390×680. The new-task form scrolls its fields independently of the footer, including when agent controls wrap; repository selection and branch pickers remain covered by their existing gates.
 

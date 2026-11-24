@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -151,7 +151,7 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'no horizontal overflow on a phone');
   await page.screenshot({ path: '.cache/processes-phone.png' });
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('Processes panel: listed, opened, copied, stopped, cleaned up; a background lazybox run listed with its port and stopped; hosting chosen and its fallback explained.');
 } catch (error) {
   for (const p of browser?.contexts().flatMap(c => c.pages()) || []) await p.screenshot({ path: '.cache/processes-failure.png', fullPage: true }).catch(() => {});

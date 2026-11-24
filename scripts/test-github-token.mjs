@@ -5,7 +5,7 @@ import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -66,6 +66,6 @@ try {
   assert.equal(fixture.library.length, 2, 'Connection changes preserve repository sources');
   assert.equal(fixture.calls.filter(call => ['ListGitHubInstallations', 'BeginGitHubSignIn', 'ConfigureGitHubApp', 'CloseSession'].includes(call.method)).length, 0);
   assert.ok(fixture.calls.filter(call => call.method === 'ListGitHubRepositories').every(call => !call.body.installationId || call.body.installationId === '0'));
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS: personal token without App configuration → shared discovery, reload, rejected/expired token recovery, secret clearing, no installation RPC and non-destructive disconnect. Fake RPC only; no real credential used.');
 } finally { await browser?.close(); await server.close(); await fixture.close(); }

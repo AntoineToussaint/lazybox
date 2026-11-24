@@ -5,7 +5,7 @@ import {chromium,webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 let browser;
@@ -66,6 +66,7 @@ try{
      categories:[['uncached_input','66000'],['cached_input','300000'],['reasoning_output','800'],['other_output','300']].map(([name,tokens])=>({name,tokens,kind:'used',included:true}))}]
  });
  const codex = await browser.newPage({viewport:{width:1500,height:1100}});
+ await collectPageErrors(codex, errors);
  const reads=[];
  await codex.route('**/GetTelemetry',route=>{const scope=route.request().postDataJSON();reads.push(scope);return route.fulfill({json:usageReport(scope.conversation==='alpha-conversation'?'380000':'367100')});});
  // The session is held until the popover is open with a group unfolded.
@@ -137,5 +138,5 @@ try{
  await expect(chip).toContainText('50%');
  releaseAlpha();
  await forkWindow.close();
- assert.deepEqual(errors,[]);assert.equal(fixture.mutations.length,0);console.log('PASS: normalized context, deferred counts, partial pricing, disconnect/retry recovery. Fixture only.');
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);assert.equal(fixture.mutations.length,0);console.log('PASS: normalized context, deferred counts, partial pricing, disconnect/retry recovery. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const b64 = value => Buffer.from(JSON.stringify(value)).toString('base64');
@@ -124,7 +124,7 @@ try {
           await page.waitForTimeout(1800);
         }).catch(error => { if (report) throw error; failures++; console.error(String(error.message || error)); });
         if (name === 'WebKit' && width === 1440) await page.screenshot({ path: '.cache/layout-stability.png' });
-        assert.deepEqual(errors, []);
+        await drainPageErrors(errors);assert.deepEqual(errors, []);
         await page.context().close();
       }
     } finally { await browser.close(); }

@@ -6,7 +6,7 @@
 // person's reason. Fake Runner only.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];
@@ -143,6 +143,6 @@ try{
  assert.ok(await card.evaluate(node=>node.scrollWidth<=node.clientWidth+1),'the card does not overflow a narrow window');
  await page.screenshot({path:'.cache/repository-request-narrow.png'});
 
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('Repository requests: card, inbox, add with progress, choose another, decline with a reason, no match, narrow.');
 }finally{await browser?.close();await server.close();await fixture.close?.();}

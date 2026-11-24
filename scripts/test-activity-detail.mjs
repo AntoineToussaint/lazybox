@@ -7,7 +7,7 @@
 // palette, ] ] v) and the default (Settings → Chat) are remembered. Fake Runner only.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.busy=true;session.status='running';session.agents=[{id:'root',status:'running'}];
@@ -176,6 +176,6 @@ try{
  await chat.getByLabel('Session actions',{exact:true}).click();
  await expect(choice.locator('strong')).toHaveText('Activity detail · default');
  await expect(choice.getByRole('button',{name:'Verbose'})).toHaveAttribute('aria-pressed','true');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log(`PASS: Smart folds a ${files.length}-command run into one summary (${smartRows} lines mounted against ${verboseRows} in Verbose), expandable to short command lines and the full command; failures and edits stay; the running step shows live; Verbose and Quiet per conversation from the ⋯ menu and the palette, ] ] v cycles, the default in Settings → Chat with a preview, all remembered across reloads. Fixture only.`);
 }finally{await browser?.close();await server.close();await fixture.close();}

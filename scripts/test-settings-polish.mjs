@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture, defaultModelPrices } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 // A ~/.zshenv that puts V1's lazybox first: the Runner's shell integration fixed it.
@@ -192,7 +192,7 @@ try {
     assert.ok(await page.locator('.settings-page').evaluate(n => n.scrollWidth <= n.clientWidth), `${tab} scrolls sideways on a phone`);
     await expect(page.getByRole('tab', { name: tab, exact: true })).toBeInViewport();
   }
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS: pricing table (no overlap, no sideways scroll at 1440/900/480/360px, search, sort, edit, add, confirmed remove), subscription "back at" line, one automatic refresh after a passed reset, About says which lazybox agents reach (fixed / needs full path), keyboard section navigation, phone layout of every section. Fake Runner only.');
 } catch (error) { await page?.screenshot({ path: '.cache/settings-polish-failure.png', fullPage: true }); throw error; }
 finally { await browser?.close(); await server.close(); await fixture.close(); }

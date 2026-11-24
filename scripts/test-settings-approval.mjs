@@ -2,7 +2,7 @@
 // values with its reason before the user allows it. Isolated RPC fixture only.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.busy=true;session.agents=[{id:'root',status:'running'}];
 const encode=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const change={revision:1,reason:'You asked new coding sessions to ask before running tools.',changes:{permission:'ask',claudeContext:'Prefer small, reviewable commits.'}};
@@ -31,5 +31,5 @@ try{
  await expect(card.getByRole('heading',{name:'Change Lazybox settings',exact:true})).toBeVisible();
  const naming=card.locator('dl>div').filter({hasText:'Suggested workspace names'});await expect(naming.getByLabel('Current value')).toHaveText('Repository names');await expect(naming.getByLabel('Proposed value')).toHaveText('Memorable generated names');
  await expect(card.getByRole('alert')).toContainText('Lazybox will refuse this change');
- assert.deepEqual(errors,[]);console.log('PASS: settings approvals from Claude and Codex show the reason, current → proposed values and a stale-revision warning. Fixture only.');
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);console.log('PASS: settings approvals from Claude and Codex show the reason, current → proposed values and a stale-revision warning. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

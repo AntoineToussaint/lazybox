@@ -5,7 +5,7 @@ import {webkit, chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 let browser;
@@ -58,6 +58,6 @@ try {
   } else await page.screenshot({path:`/tmp/lazybox-polish-tablet-${width}.png`});
  }
  assert.equal(fixture.calls.filter(c=>c.method==='WatchEvents').length,streams,'navigation and panels must not reconnect the chat');
- assert.equal(fixture.mutations.length,0,'presentation does not create or stop agent execution');assert.deepEqual(errors,[]);
+ assert.equal(fixture.mutations.length,0,'presentation does not create or stop agent execution');await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS responsive shell: desktop/tablet/phone, visible composer, modal navigation, nested menus, panel switching, retained DOM/draft/event reader, no execution mutations.');
 } finally {await browser?.close();await server.close();await fixture.close();}

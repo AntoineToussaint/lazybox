@@ -13,7 +13,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 // Fake credentials for the redaction tests, assembled so no source line looks like a real one (the secret scan in scripts/check-private.mjs).
 const FAKE_GITHUB_TOKEN = ['ghp', '0123456789abcdefghijABCDEFGHIJ012345'].join('_');
 
@@ -134,7 +134,7 @@ try {
       const help = page.getByRole('button', { name: 'Send feedback…', exact: true });
       if (await help.isVisible()) { await help.click(); await expect(dialog).toBeVisible(); await page.screenshot({ path: '.cache/feedback-narrow-dark.png' }); await page.keyboard.press('Escape'); }
     }
-    assert.deepEqual(errors, []);
+    await drainPageErrors(errors);assert.deepEqual(errors, []);
     await context.close();
   }
   console.log('PASS Feedback: what is attached is chosen and previewed exactly, credentials and home redacted, conversation only when ticked, saved/copied/pre-filled issue with no upload.');

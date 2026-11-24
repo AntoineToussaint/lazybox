@@ -14,7 +14,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 fixture.versionInfo.version = '0.1.0';
@@ -240,7 +240,7 @@ try {
     await expect(notice(page)).toHaveCount(0);
     assert.equal(state.requests, quiet, 'a build from source never asks the update feed');
 
-    assert.deepEqual(errors, []);
+    await drainPageErrors(errors);assert.deepEqual(errors, []);
     await context.close();
   }
   console.log('PASS Updates: offered never forced, skip and remind, automatic off, offline and signature errors, running-agents warning, install and post-update notice, version mismatch fix, a build from source that never checks.');

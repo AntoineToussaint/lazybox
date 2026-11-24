@@ -6,7 +6,7 @@
 // output, errors visible, "Open full details"). Fake Runner only.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.busy=true;session.agents=[{id:'root',status:'running'}];
@@ -291,6 +291,6 @@ try{
  const exitStart=fixture.mutations.length;
  await fullAccess.click();
  await expect.poll(()=>fixture.mutations.slice(exitStart).filter(m=>m.method==='Apply').map(m=>m.body.permission||m.body.approval?.requestId)).toEqual([{mode:'yolo',exitPlanRequestId:'exit-plan-in-plan-workflow'},'exit-plan-in-plan-workflow']);
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: always-allowed choices listed in the session menu after a restart, with Remove; question cards (single, multi, Other…, preview, 1–9/arrows/Space/⌘↵, echo), approvals (command, cwd, risk hints, 1 of N and header count, Deny with reason via n, Always allow at the workspace scope, y from the chat) and inline tool lines (grouped reads/edits, exit/duration, failure line, running spinner, ANSI output, diff, full details), inline edit diffs, a quiet thinking line and the latest plan as a live checklist. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

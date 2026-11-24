@@ -11,7 +11,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const [alphaSession]=fixture.sessions;
@@ -177,6 +177,6 @@ await nav.screenshot({path:'.cache/workspace-rows-narrow.png'});
  // Only the owner's window asks, once for every workspace.
  const asks=fixture.calls.filter(c=>c.method==='ListWorkspaceGitSummaries');
  assert.ok(asks.length>=4&&asks.every(c=>!c.body.collectionIds?.length),'one request covers every workspace');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('workspace rows: git state, task titles, equal heights, live refresh — ok');
 }finally{await browser?.close();await server.close();await fixture.close();}

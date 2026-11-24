@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -121,7 +121,7 @@ try {
   await page.screenshot({ path: '.cache/runner-restart-unavailable.png' });
   assert.equal(restarts(), 3);
   assert.equal(fixture.calls.filter(c => ['OpenSession', 'Apply', 'CloseSession', 'StopSessionResources', 'CancelCommand', 'CloseTerminal'].includes(c.method)).length, 0, 'restarting touched an agent, command or terminal');
-  assert.equal(errors.length, 0, errors.join('\n'));
+  await drainPageErrors(errors);assert.equal(errors.length, 0, errors.join('\n'));
   console.log('PASS: Restart Runner confirm (keyboard and Escape), restarting/restarted states without a disconnect alarm, retained draft, refused restart with retry, unavailable explanation. Fake Runner only.');
 } catch (error) {
   if (page) await page.screenshot({ path: '.cache/runner-restart-failure.png', fullPage: true });

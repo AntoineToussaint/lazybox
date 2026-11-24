@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const alpha = f.sessions.find(s => s.id === 'alpha-session'), beta = f.sessions.find(s => s.id === 'beta-session');
@@ -47,9 +47,9 @@ try {
 
   for (const scheme of ['dark', 'light']) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
+    const errors = await collectContextPageErrors(context);
     await context.addInitScript(clipboard);
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    const errors = await collectPageErrors(page);
     let reported = false;
     await page.route('**/GetTelemetry', route => route.fulfill({ json: reported ? usage : { groups: [], contexts: [], recent: [] } }));
     await page.goto(`${base}&collection=alpha&session=${alpha.id}#token=${f.token}`);
@@ -209,7 +209,7 @@ try {
     await tray.getByRole('button', { name: /^All/ }).focus();
     await page.keyboard.press('Escape');
     await expect(tray).toHaveCount(0);
-    assert.deepEqual(errors, [], `no page errors (${scheme})`);
+    await drainPageErrors(errors);assert.deepEqual(errors, [], `no page errors (${scheme})`);
     await context.close();
   }
   console.log('PASS: context meter hidden until usage, no repeated title, Review tray keeps the diff ≥300px at 1024, Continue in Claude Code / Codex…, Open in Terminal (browser cd, desktop host, settings). Fixture only.');

@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const session = f.sessions[0];
@@ -172,7 +172,7 @@ try {
     await expect(page.locator('.panel-chat form.composer')).toBeVisible();
     await expect(page.locator('.panel-chat').getByRole('button', {name: /Codex.*change model/})).toBeVisible();
     await expect(page.locator('.panel-chat .composer-info').getByTitle('Waiting for the provider to report context usage')).toHaveText('Context —');
-    assert.deepEqual(errors, []);
+    await drainPageErrors(errors);assert.deepEqual(errors, []);
     await context.close();
   }
   console.log('composer info: the header\'s model and context, colour at 60/85%, model picker and context popover, narrow and phone; screenshots in .cache/composer-info-*.png');

@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const AGENT='The parser fails on `api/src/main.go`, see [the routes](api/src/routes.ts).\n\n```ts\nconst answer = 42;\n```\n\nDocs: [example](https://example.com/guide).';
@@ -35,6 +35,7 @@ try{
  await server.listen();await mkdir('.cache',{recursive:true});
  browser=await(process.env.TEST_CHROMIUM?chromium:webkit).launch({headless:true});
  const context=await browser.newContext({viewport:{width:1500,height:950}});
+ const errors=await collectContextPageErrors(context);
  // The clipboard is observed, not used; every contextmenu records whether its default was prevented once all listeners ran.
  await context.addInitScript(()=>{
   window.__copied=[];
@@ -51,7 +52,6 @@ try{
  const newTabs=[];context.on('page',tab=>{if(tab!==page){newTabs.push(tab.url());void tab.close();}});
  // Every way a link could open: window.open, a new tab, a Web panel.
  const nothingOpened=async what=>{await page.waitForTimeout(150);assert.deepEqual({opened:await page.evaluate(()=>window.__opened),tabs:newTabs,web:await page.getByRole('region',{name:'Web page'}).count()},{opened:[],tabs:[],web:0},`${what} opens nothing`);};
- const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const chat=page.locator('.panel-chat');
  const composer=chat.getByRole('textbox',{name:'Message',exact:true});
@@ -343,6 +343,6 @@ try{
   await nothingOpened('a slow right-click with the menu over the pointer');await expect(menu).toBeVisible();await close();}
  await page.evaluate(()=>document.getElementById('pinned-link')?.remove());
 
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: Lazybox context menus on messages, agent turns, selections, code blocks, links, file links, command output, Files rows, editor tabs, panel headers, workspace rows, Changes rows and diff lines, processes, terminal and inbox; never the browser menu; keyboard, type-ahead, long press, outside/scroll/Escape dismissal, edge placement; text fields and Monaco keep their own menus. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];
 Object.assign(session,{busy:false,status:'done',conversationId:'conversation-alpha',agents:[{id:'root',status:'done'}]});
@@ -283,6 +283,6 @@ try{
  await more.click();
  await page.getByRole('group',{name:'Artifact actions menu'}).getByRole('button',{name:'Restore',exact:true}).click();
  await expect(statusPage.getByRole('note',{name:'Retired'})).toHaveCount(0);
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: an agent\'s artifact put shows a card that opens the page (and an update its changes); a merge (put --supersedes) shows "Merged 3 artifacts into …" with Undo, the panel hides retired artifacts behind "Show retired (N)", a retired page says what superseded it with Restore, retire alone has its card, and the person retires and restores from ⋯, all from the keyboard; the header chip counts this conversation\'s artifacts and opens the panel on them; ⌘K (and its * prefix) finds an artifact of another workspace and opens it there; All workspaces groups by workspace; with none, no card or chip and a one-sentence empty state. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

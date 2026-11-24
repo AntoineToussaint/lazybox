@@ -5,7 +5,7 @@ import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -117,6 +117,6 @@ try {
     await expect(created).toHaveCount(0);
   }
   assert.deepEqual(fixture.mutations, [], 'Moving dialogs must not start sessions, login or repository operations');
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS: subscription, session and workspace dialogs drag by header, preserve input, keyboard movement/recenter, viewport bounds/resize, readable backdrop, Escape, close and reopen, and give the focus back; a danger button reads on its fill and titles share one size, dark and light. Fake Runner only.');
 } finally { await browser?.close(); await server.close(); await fixture.close(); }

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {longConversation} from './fixtures/long-conversation.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const turns=60;
 const fixture=await startRunnerFixture();
@@ -61,6 +61,6 @@ try{
  await composer.fill('draft in progress');const before=await pane.evaluate(n=>n.scrollTop);await page.keyboard.press('Alt+ArrowUp');await page.waitForTimeout(300);assert.equal(await pane.evaluate(n=>n.scrollTop),before,'Alt+↑ over a draft must not navigate');await expect(composer).toHaveValue('draft in progress');
  // The rail jumps straight to a prompt.
  await rail.getByRole('button',{name:/^Prompt 20:/}).click();await atTop('Question 19:');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log(`PASS: prompt rail (${turns} markers), searchable prompt list with Enter, Alt+↑/↓ from the chat and an empty composer (not over a draft), jumping into unmounted history.`);
 }finally{await browser?.close();await server.close();await fixture.close();}

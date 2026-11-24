@@ -14,7 +14,7 @@
 // oldest queued one from an empty box, and is an ordinary send while idle.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f=await startRunnerFixture();
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
@@ -335,13 +335,13 @@ try{
    await expect(heldStrip.getByText(/has not stopped yet/)).toHaveCount(0);
    await heldRow.getByRole('button',{name:'Cancel edit'}).click();
    await expect(heldRow.getByRole('textbox')).toHaveCount(0);
-   assert.deepEqual(heldErrors,[]);
+   await drainPageErrors(heldErrors);assert.deepEqual(heldErrors,[]);
    await held.close();
  }
  codex.sendNowWaits=false;
  assert.equal(codex.queuedMessages[0].editing,false);
  await revised.getByRole('button',{name:'Steer'}).click();
  await expect(youSaid(chat,'Updated queued message')).toBeVisible();
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS queued messages: a message sent during a busy turn shows as queued with what the agent is busy with, from the stream at once even while the session poll lags, and its ticking time is not announced; once delivered it is never also in a stale poll\'s strip; it is in the strip only, never also a bubble in the running turn; Send now delivers it in one click (interrupt, then next), said once after the stop, also after a reload, and its tooltip names the step it stops; Steer for Codex delivers into the running turn; Claude says it cannot be steered; several collapse and hide; Edit sits in the action row before Send now, in Tab order, pauses and edits, and supersedes a Send now still at work (no retry message when its time runs out); the row wraps in a narrow panel and on a phone. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

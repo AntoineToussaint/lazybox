@@ -1,6 +1,6 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const f=await startRunnerFixture(),channel=f.openEvents('alpha-session');Object.assign(f.sessions[0],{status:'running',busy:true,agents:[{id:'root',status:'running'}]});
 let clock=Date.now()-120000;
 function push(data,at){channel.events.push({cursor:String(channel.events.length+1),capturedAt:new Date(at).toISOString(),event:{type:'tool_activity',providerDataJson:Buffer.from(JSON.stringify(data)).toString('base64')}});}
@@ -19,5 +19,5 @@ try{
  await dialog.getByRole('button',{name:'Failed 1',exact:true}).click();await expect(dialog.locator('.tool-call')).toHaveCount(1);await expect(dialog.locator('.tool-call')).toContainText('Check formatting');await dialog.getByRole('button',{name:'Running 1',exact:true}).click();const duration=dialog.locator('.tool-duration'),before=await duration.textContent();await expect.poll(()=>duration.textContent()).not.toBe(before);
  await dialog.getByRole('button',{name:'All 11',exact:true}).click();await dialog.getByRole('searchbox').fill('repository API');await expect(dialog.locator('.tool-call')).toHaveCount(2);await expect(dialog.locator('.tool-duration').first()).toHaveText('—');await dialog.getByRole('searchbox').fill('');
  await page.setViewportSize({width:420,height:850});const bounds=await dialog.boundingBox();assert.ok(bounds.x>=0&&bounds.x+bounds.width<=420);assert.equal(await dialog.evaluate(e=>e.scrollWidth>e.clientWidth),false);await page.screenshot({path:'.cache/activity-presentation-narrow.png'});
- assert.equal(channel.clients.size,1);assert.deepEqual(errors,[]);console.log('PASS: action descriptions, recorded timing, live elapsed timer, one missing-history note, highlighted command, search/status filters, collapsed payloads and narrow layout.');
+ assert.equal(channel.clients.size,1);await drainPageErrors(errors);assert.deepEqual(errors,[]);console.log('PASS: action descriptions, recorded timing, live elapsed timer, one missing-history note, highlighted command, search/status filters, collapsed payloads and narrow layout.');
 }finally{await browser?.close();await server.close();await f.close();}

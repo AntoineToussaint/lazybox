@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createRunnerClient } from '../packages/client-core/src/index.ts';
 import assert from 'node:assert/strict';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const endpointPath = process.env.LAZYBOX_V2_ENDPOINT;
 if (!endpointPath) throw new Error('Set LAZYBOX_V2_ENDPOINT; start the real Codefly Runner before this test');
@@ -169,7 +169,7 @@ try {
   await viewer.getByLabel('Search output').fill('');
   assert.equal(await viewer.getByTestId('console-output').textContent(), 'first\nsecond\n');
   assert.equal(await readFile(directory + '/starts', 'utf8'), 'started\n');
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   await viewer.screenshot({ path: '.cache/console-viewer.png', fullPage: true });
   console.log('PASS: authentication failure, Claude SDK session, Enter send / Shift+Enter newline / IME guard, generic multi-file picker and exact payload bytes (Apply intercepted), reload without duplicate spawn, explicit session end, Codex selection, independent command viewers, producer survives close, exact replay, command ran once.' + (process.env.LAZYBOX_V2_REAL === '1' ? ' Real Claude reply and transcript replay verified.' : ' No model inference requested.'));
 } finally {

@@ -16,7 +16,7 @@ import {fileURLToPath} from 'node:url';
 import {readFile,mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const sequence=`sequenceDiagram
     participant U as User
@@ -135,13 +135,13 @@ try{
  // …but the theme Lazybox hands it is sanitized, so the diagram renders.
  assert.ok(viaApp.width>400,'the diagram renders with the sanitized theme');
  for(const colour of [viaApp.primary,viaApp.note,viaApp.text])assert.match(colour,/^#[0-9a-f]{6}([0-9a-f]{2})?$/);
- assert.deepEqual(main.log.errors,[]);assert.deepEqual(main.log.violations,[],'no CSP violation');
+ await drainPageErrors(main.log.errors);assert.deepEqual(main.log.errors,[]);assert.deepEqual(main.log.violations,[],'no CSP violation');
  await main.close();
  // The same colours as a person's overrides, through Settings' stored preferences.
  const themed=await open({preferences:{mode:'dark',darkTheme:'dark',lightTheme:'light',typography:{},minContrast:4.5,motion:'system',accent:'oklch(0.7 0.15 150)',tokens:{'accent-bg-strong':'oklch(0.42 0.09 290)','warn-bg':'color-mix(in srgb, red 20%, black)'}}});
  say('themed','```mermaid\n'+sequence+'\n```\n\nMARK_THEMED');
  await expect(themed.page.locator('.messages:visible')).toContainText('MARK_THEMED');await rendered(block(themed.page,'MARK_THEMED'));
- assert.deepEqual(themed.log.errors,[]);
+ await drainPageErrors(themed.log.errors);assert.deepEqual(themed.log.errors,[]);
  await themed.close();
 
  // 6. The renderer fails to load: the reason shows, and it renders once it can load again.

@@ -25,7 +25,7 @@ import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const shots = fileURLToPath(new URL('../.cache/', import.meta.url));
 mkdirSync(shots, { recursive: true });
@@ -110,11 +110,13 @@ try {
   const phoneContext = async (colorScheme, userAgent = devices['Pixel 7'].userAgent) => {
     const context = await browser.newContext({ ...devices['Pixel 7'], userAgent, viewport: { width: 390, height: 844 }, colorScheme });
     await context.grantPermissions(['notifications'], { origin });
+    // Every window of the phone, the one a notification's tap opens included.
+    await collectContextPageErrors(context, errors);
     await context.addInitScript(mockPush);
     return context;
   };
   const pairPhone = async (context, name, grants = ['respond']) => {
-    const page = await context.newPage(); await collectPageErrors(page, errors);
+    const page = await context.newPage();
     await page.goto((await owner('BeginDevicePairing', { grants })).url);
     await page.getByRole('textbox', { name: 'Name this phone' }).fill(name);
     await page.getByRole('button', { name: 'Pair this phone' }).click();
@@ -287,7 +289,7 @@ try {
   assert.deepEqual(sent, { title: 'Bump dependencies', kind: 'approval', url: '/?view=remote&session=approval-session', tag: 'approval-conversation' }, 'title, kind and link only');
   await phone.close();
   await cdp.send('ServiceWorker.deliverPushMessage', { origin: `${origin}/`, registrationId: registrations.get(`${origin}/`), data: JSON.stringify(sent) });
-  phone = await context.newPage(); await collectPageErrors(phone, errors);
+  phone = await context.newPage();
   // This page's device credential lasts seconds, so it renews while the steps below run.
   let signIns = 0;
   await phone.route('**/remote/v1/session', async route => { const response = await route.fetch(); const body = await response.json(); body.expiresAt = Date.now() + 90_000 + 5_500; signIns++; await route.fulfill({ response, json: body }); });
@@ -365,6 +367,6 @@ try {
   assert.deepEqual(f.remote.deviceDenied, []);
   const used = [...new Set(f.calls.filter(c => c.device).map(c => c.method))].sort();
   assert.deepEqual(used.filter(m => !['Apply', 'GetPushSettings', 'GetSession', 'Info', 'ListCollections', 'ListCommands', 'ListLinks', 'PinConversation', 'ReadSessionTail', 'SendTestPush', 'SetPushSettings', 'WatchEvents', 'WatchOutput'].includes(m)), [], 'the phone used an RPC it does not need');
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS remote push: row approvals with Undo, flagged commands confirmed, deny with reason, question chips, swipe pin/read/stop, action sheet, pull to refresh, offline, live command output, push permission and subscription, per-kind toggles, quiet hours, test push, closed-page push → notification → conversation → approve, iPhone Home Screen guidance, revoke; screenshots in .cache/remote-*.png.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

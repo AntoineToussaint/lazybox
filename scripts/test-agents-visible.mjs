@@ -17,7 +17,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -99,8 +99,9 @@ try {
   }
 
   const context = await browser.newContext({viewport: {width: 1440, height: 900}, colorScheme: 'dark'});
+  await collectContextPageErrors(context, errors);
   await context.addInitScript(() => { window.__copied = []; Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async text => { window.__copied.push(text); }}}); });
-  const page = await context.newPage(); page.setDefaultTimeout(15000); await watch(page);
+  const page = await context.newPage(); page.setDefaultTimeout(15000);
   await page.goto(url);
   const workspaces = page.locator('.panel-collections'), agents = page.locator('.panel-agents');
   const sessionChoice = page.getByRole('combobox', {name: 'Session', exact: true});
@@ -311,6 +312,6 @@ try {
   await expect(agents.locator('.agent-row').first()).toBeFocused();
 
   assert.equal(f.mutations.filter(m => ['Apply', 'OpenSession', 'CloseSession', 'DeleteConversation'].includes(m.method)).length, 0, 'nothing started, stopped, answered or deleted an agent');
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS agents visible: Workspaces above Agents in dark/light at 1440 and 1024, no scrolling tab strip, no pin over an age, a full-height background; every workspace lists its conversations with status and age, folds and remembers; Priority/By workspace, folded counts, unread dots, nested sub-agents, j/k/Space/Enter, filter as you type; one conversation menu in order with Delete last; rename, mark read, pin kept by the Runner and shown on the phone, open beside, archive confirmed and deletion undone; the Inbox opens the Agents panel. Fake Runner.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

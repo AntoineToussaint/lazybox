@@ -10,7 +10,7 @@ import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -109,7 +109,7 @@ try {
   await page.waitForTimeout(500);
   assert.equal((await composer.inputValue()).split('Output of `make lint`').length - 1, 1, 'a shared run is added to one message box once');
 
-  assert.equal(errors.length, 0, errors.join('\n'));
+  await drainPageErrors(errors);assert.equal(errors.length, 0, errors.join('\n'));
   console.log('PASS: a terminal run shows in the workspace console; Send to agent and `--to` put its compact view, never the full output, in the message box, and the person decides when to send. Explicitly fake RPC fixture.');
 } finally {
   await browser?.close(); await server.close(); await fixture.close();

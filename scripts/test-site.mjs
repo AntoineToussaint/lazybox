@@ -4,6 +4,7 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
 import { chromium } from 'playwright';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const base = process.env.DOCS_BASE || '/';
 const root = resolve('.cache/site');
@@ -27,6 +28,7 @@ try {
   const url = 'http://127.0.0.1:' + server.address().port + base;
   browser = await chromium.launch();
   const page = await browser.newPage();
+  const errors = await collectPageErrors(page);
   await page.goto(url);
   assert.equal(await page.locator('h1').innerText(), 'A workspace for\nyour coding agents.');
   assert.ok(await page.locator('.hero img').evaluate(img => img.complete && img.naturalWidth > 0));
@@ -42,6 +44,8 @@ try {
   const href = await result.evaluate(a => a.href);
   assert.ok(href.startsWith(url + 'docs/'), href);
   assert.equal((await page.goto(href)).status(), 200);
+  await drainPageErrors(errors);
+  assert.deepEqual(errors, [], 'no page errors');
   console.log('Homepage, V2 guides, legacy redirect and archive search passed at ' + base);
 } finally {
   await browser?.close();

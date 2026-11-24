@@ -19,7 +19,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {longConversation,deliveredQueuedTurn} from './fixtures/long-conversation.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f=await startRunnerFixture();
 const now=Date.now();
@@ -113,6 +113,6 @@ try{
  await expect(strip).toBeVisible();
  await expect(strip.getByRole('listitem').locator('q')).toHaveText('QUEUED_BEHIND: ok so continue');
  await page.screenshot({path:'.cache/reload-latest-turn.png'});
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log(`PASS reload latest turn: a busy conversation of ${ch.events.length} events follows a Runner restart (its stream ends Unavailable and reconnects from its cursor); a message queued mid-turn is in the strip only until Send now delivers it, then said once at the start of its turn; its turn's activity and the message queued behind it (in the strip, not the conversation) are all shown the same after a reload, at the end of the view, with only the latest messages mounted. Fixture only.`);
 }finally{await browser?.close();await server.close();await f.close();}

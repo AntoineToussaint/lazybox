@@ -29,7 +29,7 @@ import {createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 // Five conversations in Alpha, so the sidebar lists them under the workspace, and the review of the first.
@@ -52,10 +52,10 @@ await server.listen();
 await mkdir('.cache',{recursive:true});
 const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
 
-/** The page's errors, and a reload that waits for the chat to come back. */
-async function watchErrors(page){
- const errors=await collectPageErrors(page);
- const reload=async()=>{await page.reload();await page.locator('.page-layout .panel-chat').first().waitFor({state:'attached'});await page.waitForTimeout(400);};
+/** The errors of every page of the context (collected before its init scripts), and a reload of `page()` that waits for the chat to come back. */
+async function watchErrors(context,page){
+ const errors=await collectContextPageErrors(context);
+ const reload=async()=>{await page().reload();await page().locator('.page-layout .panel-chat').first().waitFor({state:'attached'});await page().waitForTimeout(400);};
  return {errors,reload};
 }
 /** What every scenario reads of the chat tabs. */
@@ -118,9 +118,9 @@ async function tabsOn(){
  // Beta as builds before tabs saved it: one chat following the page.
  const beta=work('beta','beta-session',panel('beta-chat','chat'));
  const context=await browser.newContext({viewport:{width:1600,height:900}});
+ const watched=await watchErrors(context,()=>page);
  await context.addInitScript(([key,a,b])=>{if(sessionStorage.getItem('seeded'))return;sessionStorage.setItem('seeded','1');localStorage.setItem(`${key}:workspace:alpha:pages`,a);localStorage.setItem(`${key}:workspace:beta:pages`,b);},[scope,JSON.stringify(alpha),JSON.stringify(beta)]);
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const watched=await watchErrors(page);
  const {chatTabs,tab,titles,previews,row,inFront,workspace}=tabsOf(page);
  const all=['Review of the main conversation','Main alpha conversation','Second alpha conversation','Third alpha conversation','Fourth alpha conversation','Fifth alpha conversation'];
  await page.goto(`${origin}/?view=workspace&collection=alpha#token=${fixture.token}`);
@@ -233,16 +233,16 @@ async function tabsOn(){
  await tab('Third alpha conversation').locator('.dock-tab-close').click();
  await row('Third alpha conversation').click();
  await expect.poll(previews).toEqual(['Third alpha conversation']);
- assert.deepEqual(watched.errors,[]);
+ await drainPageErrors(watched.errors);assert.deepEqual(watched.errors,[]);
  await context.close();
 }
 
 /** With the setting off: the preview tab, kept tabs, and everything a tab does. */
 async function previewTabs(){
  const context=await browser.newContext({viewport:{width:1600,height:900},colorScheme:'dark'});
+ const watched=await watchErrors(context,()=>page);
  await context.addInitScript(()=>{try{localStorage.setItem('lazybox:workspace.conversation-tabs','off');}catch{/* a popup without storage */}});
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const watched=await watchErrors(page);
  const shot=name=>page.screenshot({path:`.cache/conversation-tabs-${name}.png`});
  await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const {chatTabs,tab,groupOf,titles,previews,row,inFront,fontStyle}=tabsOf(page);
@@ -386,6 +386,6 @@ async function previewTabs(){
  await expect(sessionPicker).toHaveValue('');
 
 
- assert.deepEqual(watched.errors,[]);
+ await drainPageErrors(watched.errors);assert.deepEqual(watched.errors,[]);
  await context.close();
 }

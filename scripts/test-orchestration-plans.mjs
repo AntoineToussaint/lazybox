@@ -16,7 +16,7 @@ import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const shots = fileURLToPath(new URL('../.cache/', import.meta.url));
 mkdirSync(shots, { recursive: true });
@@ -112,7 +112,7 @@ async function run(scheme, capped) {
     await expect(panel.getByText('Search restores the last query', { exact: true })).toBeVisible();
     await expect(panel.locator('.mission-orchestrator-budget')).toContainText('no cap');
     assert.equal(updates().find(u => u.approvePlan).approvePlan.capUsd ?? 0, 0);
-    assert.deepEqual(errors, []);
+    await drainPageErrors(errors);assert.deepEqual(errors, []);
     await context.close();
     return;
   }
@@ -162,6 +162,6 @@ async function run(scheme, capped) {
   await page.getByRole('navigation', {name: 'Pages'}).getByRole('button', {name: 'Workspaces', exact: true}).click();
   await expect(chat.locator('.lineage-line.kind-plan_decided')).toContainText('You approved the plan: 3 tasks, $12.00 cap.');
   await expect(line.locator('.lineage-state')).toHaveText('approved');
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   await context.close();
 }

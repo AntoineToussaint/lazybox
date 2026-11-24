@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const dev = await startRunnerFixture(), box = await startRunnerFixture();
 dev.versionInfo.version = '0.1.22-dev';
@@ -197,7 +197,7 @@ try {
       await expect.poll(() => state.removes).toEqual(['build-box']);
       await expect(page.getByRole('list', { name: 'Runners' }).locator('.runners-item[data-runner=buildbox]')).toHaveCount(0, { timeout: 10_000 });
     }
-    assert.deepEqual(errors, []);
+    await drainPageErrors(errors);assert.deepEqual(errors, []);
     await context.close();
   }
   console.log('remote-computers: ok');

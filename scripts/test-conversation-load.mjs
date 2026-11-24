@@ -20,7 +20,7 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {longConversation} from './fixtures/long-conversation.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const turns=Number(process.env.LOAD_TURNS||135),budget=Number(process.env.LOAD_BUDGET_MS||1500);
 const f=await startRunnerFixture();
@@ -81,7 +81,7 @@ try{
  for(let run=0;run<=3;run++){
   for(const [kind,collection,session] of [['replay','beta',beta.id],['tail','alpha',alpha.id]]){
    const {page,errors,ms}=await open(collection,session);
-   assert.deepEqual(errors,[]);if(run)measured[kind].push(ms);await page.close();
+   await drainPageErrors(errors);assert.deepEqual(errors,[]);if(run)measured[kind].push(ms);await page.close();
   }
  }
  const median=values=>[...values].sort((a,b)=>a-b)[Math.floor(values.length/2)];
@@ -114,7 +114,7 @@ try{
  const shown=order(await pane.innerText());
  assert.deepEqual(shown,Array.from({length:turns},(_,i)=>i),'every turn once, oldest first');
  await expect(chat.getByRole('button',{name:/Show earlier messages/})).toHaveCount(0);
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  await page.close();
 
  // ── A Runner restart while the earlier history loads.
@@ -139,6 +139,6 @@ try{
  assert.deepEqual(order(text),Array.from({length:turns},(_,i)=>i),'after the restart, every turn once, oldest first');
  assert.equal(text.split('LIVE_AFTER_RESTART').length-1,1,'the live record once');
  await restart.screenshot({path:'.cache/conversation-load.png'});
- assert.deepEqual(restartErrors,[]);
+ await drainPageErrors(restartErrors);assert.deepEqual(restartErrors,[]);
  console.log(`PASS conversation load: the last turn of a ${fast.events.length}-record conversation shows ${tailMs} ms after the window first reads it (the full replay: ${replayMs} ms; budget ${budget} ms; tail cursors and independent history loading asserted); scrolling up brings every earlier turn in order, once; switching back to it reads nothing it holds (${back} ms); a Runner restart while its earlier history loads loses and repeats nothing. Fixture only.`);
 }finally{await browser?.close();await server.close();await f.close();}

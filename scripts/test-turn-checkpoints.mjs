@@ -9,7 +9,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f=await startRunnerFixture();
 const session=f.sessions[0];
@@ -118,6 +118,6 @@ try{
  await page.getByLabel('Compare with').selectOption(':start');
  await expect(page.getByRole('region',{name:/Changes in turn/})).toHaveCount(0);
 
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: turn checkpoint markers (mid-turn and after), revert confirmation listing affected files and kept commits, cancel, revert with conversation notice and undo toast, refusal while another agent works, and a turn\'s changes on the Changes page.');
 }finally{await browser?.close();await server.close();await f.close();}

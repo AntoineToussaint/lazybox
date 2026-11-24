@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 fixture.sessions[0].title='Ship API contract';
@@ -102,6 +102,6 @@ try{
  await expect(card).toContainText('Merged');await expect(changes.getByRole('status').filter({hasText:'Merged #7 into main'})).toBeVisible();
  const merged=fixture.mutations.filter(m=>m.method==='MergePullRequest').at(-1).body;assert.equal(merged.method,'rebase');assert.equal(merged.expectedHead,api.head);assert.equal(String(merged.number),'7');
  await page.screenshot({path:'.cache/pull-request-merged.png'});
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: commit with an agent-drafted message, commit & push, PR from commits, checks with log links, failing checks to the composer unsent, protected merge explained, merge.');
 }finally{await browser?.close();await server.close();await fixture.close();}

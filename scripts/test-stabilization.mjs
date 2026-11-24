@@ -5,6 +5,7 @@ import {chromium,webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 const channel=fixture.openEvents('alpha-session');
 channel.push({type:'operation_accepted',text:'FIRST_PROMPT'});
@@ -15,7 +16,7 @@ const server=await createServer({...testViteCache(import.meta.url),configFile:fa
 let browser;
 try {
  await server.listen();browser=await(process.env.TEST_WEBKIT?webkit:chromium).launch({headless:true});
- const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(10000);
+ const page=await browser.newPage({viewport:{width:1440,height:900}});const errors=await collectPageErrors(page);page.setDefaultTimeout(10000);
  const url=`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`;
  await page.goto(url);
  await page.getByLabel('Actions for Alpha feature',{exact:true}).click();
@@ -52,7 +53,7 @@ try {
  assert.deepEqual(fixture.mutations.map(m=>m.method),['RenameCollection']);
  // A fresh window gets an independent reader, even if the main window cached Beta.
  const gap=fixture.openEvents('beta-session');gap.push({type:'message_delta',text:'gap'});gap.events[0].cursor='2';
- const gapPage=await browser.newPage();await gapPage.goto(url.replace('collection=alpha','collection=beta').replace('session=alpha-session','session=beta-session'));
+ const gapPage=await browser.newPage();await collectPageErrors(gapPage,errors);await gapPage.goto(url.replace('collection=alpha','collection=beta').replace('session=alpha-session','session=beta-session'));
  await expect(gapPage.getByRole('alert').filter({hasText:'history is missing'})).toBeVisible();await expect(gapPage.getByRole('alert').filter({hasText:'Replay gap'})).toHaveCount(0);
  await expect(gapPage.locator('.messages:visible')).not.toContainText('READY TO WORK');
  gap.events[0].cursor='1';await gapPage.getByRole('button',{name:'Retry conversation'}).click();
@@ -71,7 +72,7 @@ try {
  await expect.poll(()=>fixture.mutations.slice(before).filter(m=>m.method==='Apply').length).toBe(1);
  const sent=fixture.mutations.slice(before);assert.deepEqual(sent.map(m=>m.method),['ResumeSession','Apply']);assert.equal(sent[1].body.sessionId,'saved-session-continued');assert.equal(sent[0].body.processesStopped,undefined);
  // A reopened window anchored to an earlier attempt follows its successor without launching another.
- const restored=await browser.newPage();await restored.goto(url.replace('alpha-session','saved-session'));
+ const restored=await browser.newPage();await collectPageErrors(restored,errors);await restored.goto(url.replace('alpha-session','saved-session'));
  await expect(restored.locator('.messages:visible')).toContainText('saved-session-continued');
  assert.equal(fixture.mutations.filter(m=>m.method==='ResumeSession').length,1);await restored.close();
  // A conversation the Runner failed when it lost its stream from a live agent (Dev: its own write hit a full disk)
@@ -105,5 +106,5 @@ try {
  assert.deepEqual(fixture.mutations.filter(m=>m.method==='ResumeSession').at(-1).body,{sessionId:'alpha-session'});
  assert.equal(fixture.sessions.some(s=>s.id==='alpha-session-continued'),false,'Resume started a second conversation');
  await page.screenshot({path:'/tmp/lazybox-stabilization.png'});
- console.log('PASS: rename identity and placement, retained long transcript, earlier messages, reading position, deleted workspace history, visible replay failure/retry, file preview, send-to-resume and successor restoration, a conversation failed by a lost stream recovering on re-adoption and Resume reconnecting in place. Fixture only.');
+ await drainPageErrors(errors);assert.deepEqual(errors,[],'no page errors');console.log('PASS: rename identity and placement, retained long transcript, earlier messages, reading position, deleted workspace history, visible replay failure/retry, file preview, send-to-resume and successor restoration, a conversation failed by a lost stream recovering on re-adoption and Resume reconnecting in place. Fixture only.');
 } finally {await browser?.close();await server.close();await fixture.close();}

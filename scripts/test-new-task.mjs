@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 f.completeGitHub();
@@ -33,9 +33,9 @@ try {
 
   for (const scheme of ['dark', 'light']) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
+    const errors = await collectContextPageErrors(context);
     await context.addInitScript(() => localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'));
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    const errors = []; await collectPageErrors(page, errors);
     await page.goto(`${base}#token=${f.token}`);
 
     // An empty window says how to start, with the key.
@@ -265,6 +265,7 @@ try {
     await page.mouse.move(0, 0);
     await page.screenshot({ path: `.cache/new-sheet-1024-${scheme}.png` });
     await page.keyboard.press('Escape');
+    await drainPageErrors(errors);
     assert.deepEqual(errors, [], `no page errors (${scheme})`);
     await context.close();
   }

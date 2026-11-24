@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const E = '\x1b';
 const addresses = n => Array.from({ length: n }, (_, i) => i % 3 === 2 ? `[2a01:cb0d:5c4:${i}::1]:57771` : `192.168.${i}.21:57771`).join(' ');
@@ -54,11 +54,11 @@ try {
   browser = await chromium.launch();
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 }, colorScheme: 'dark' });
   // What Copy puts on the clipboard.
+  const errors = await collectContextPageErrors(context);
   await context.addInitScript(() => { window.__copied = []; Object.defineProperty(navigator, 'clipboard', { value: { writeText: async text => { window.__copied.push(text); }, readText: async () => window.__copied.at(-1) || '' } }); });
   // The dev server the log announces: a page, so a browser tab shows where it went.
   await context.route(/^http:\/\/localhost:5777[0-9]\//, route => route.fulfill({ contentType: 'text/html', body: '<h1>fte-tracker</h1>' }));
   const page = await context.newPage(); page.setDefaultTimeout(15000);
-  const errors = []; await collectPageErrors(page, errors);
   page.on('console', message => { if (message.type() === 'error' && /Maximum update depth|ResizeObserver loop|key/.test(message.text())) errors.push(message.text().slice(0, 300)); });
   await page.goto(`${base}/?view=workspace&collection=alpha&session=${session.id}#token=${fixture.token}`);
   await page.getByRole('tab', { name: 'Command output', exact: true }).click();
@@ -262,7 +262,7 @@ try {
     await bar.screenshot({ path: '.cache/console-log-live-bar.png' });
   }
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS console log: a multi-service log streams into a time gutter and aligned, coloured sources with chips that filter them, level badges, milestones whose ports open the Web panel (⌘-click: the browser), files that open the editor, folded address lists and repeats, and noise hidden per command across a reload; Copy stays raw; the chrome holds still while streaming; 4500 lines (430 KB) stay windowed; the classic window and the live bar read the same way. Fixture only.');
 } finally {
   await browser?.close(); await server.close(); await fixture.close();

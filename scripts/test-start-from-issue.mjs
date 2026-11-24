@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 f.completeGitHub();
@@ -248,7 +248,7 @@ try {
   await expect(sheet.locator('footer button.primary')).toBeInViewport({ ratio: 1 });
   await page.keyboard.press('Escape');
 
-  assert.deepEqual(errors, [], 'no page errors');
+  await drainPageErrors(errors);assert.deepEqual(errors, [], 'no page errors');
   await context.close();
   console.log('PASS: start from an issue — paste a link, the chip, its repository, name and branch; the exact context with a comments toggle; Ask by default; the origin recorded and shown in the header and the first message; the palette picker and its keys; already has a workspace (Open it / Start another); a repository not on the Runner. Fixture only.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

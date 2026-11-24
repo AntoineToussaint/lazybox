@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 const long='**Canonical instructions live in [AGENTS.md](AGENTS.md).** '+'This file is a forwarding note so tools looking for it find the same content every other agent uses. '.repeat(4);
 fixture.workspaceFiles.set('alpha/api/README.md',{path:'api/README.md',text:`# Title\n\n${long}\n`,version:'v1',binary:false,truncated:false});
@@ -35,6 +35,6 @@ try{
  await expect.poll(()=>rows(dialog)).toBeLessThanOrEqual(4);
  await dialog.getByRole('textbox',{name:'File source editor',exact:true}).focus();await page.keyboard.press('Alt+z');
  await expect.poll(()=>rows(dialog)).toBeGreaterThan(4);
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: Markdown wraps by default with nothing past the edge; Alt+Z toggles wrapping and is remembered.');
 }finally{await browser?.close();await server.close();await fixture.close();}

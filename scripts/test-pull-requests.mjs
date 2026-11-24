@@ -12,7 +12,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -262,6 +262,6 @@ try {
 
   await phoneRows.nth(1).getByRole('button', {name: 'Address the review'}).click();
   await expect.poll(() => f.tracked.sent.filter(item => item.method === 'ImportPullRequestReview').length, {timeout: 15_000}).toBe(1);
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS: header pills, sidebar badge, Pull requests panel and keys with confirmations, the chip in the conversation, Inbox reactions, phone rows.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

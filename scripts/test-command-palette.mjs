@@ -12,7 +12,7 @@ import {webkit, chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -35,6 +35,8 @@ try {
   await server.listen();
   browser = await (process.env.TEST_CHROMIUM ? chromium : webkit).launch();
   const context = await browser.newContext({viewport: {width: 1440, height: 900}});
+  // Every window of the context, the detached chat included.
+  const errors = await collectContextPageErrors(context);
   await context.addInitScript(() => {
     // A Mac, as far as the keymap is concerned (⌘ is Mod).
     Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});
@@ -52,7 +54,6 @@ try {
   });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
-  const errors = []; await collectPageErrors(page, errors);
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
   const workspace = page.getByRole('combobox', {name: 'Workspace', exact: true});
@@ -235,7 +236,6 @@ try {
 
   // A detached chat window has the palette too; going to a conversation drives the main window.
   const chat = await context.newPage();
-  await collectPageErrors(chat, errors);
   await chat.goto(`${origin}/?view=chat&panel=detached-test&collection=alpha&session=alpha-session#token=${f.token}`);
   await expect(chat.locator('[data-agent-composer]').filter({visible: true}).first()).toBeVisible();
   await chat.locator('[data-agent-composer]').filter({visible: true}).first().focus();
@@ -259,6 +259,6 @@ try {
   await expect(chatComposer).toHaveValue('a draft to keep');
 
   assert.deepEqual(f.mutations, [], 'the palette and keys never start, stop or answer an agent');
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS command palette: ⌘K/⌘⇧P, prefixes, recent, settings and panels; shortcuts overlay with Customize; ⌘1…9; ⌘]/⌘[; ⌘J across workspaces; toast and sound when focused, banner when not; detached palette drives the main window; a chat command run from it keeps the draft.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

@@ -5,7 +5,7 @@ import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 // WebKit is the desktop engine; Chromium has a different scroll pipeline
 // (threaded wheel scrolling, native scroll anchoring), so both are covered.
@@ -186,7 +186,7 @@ async function run(name,engine){
   await follows('Sending a message');
   streaming();await streamDone;streaming=undefined;
   await page.screenshot({path:`/tmp/lazybox-chat-scroll-${name}.png`});
-  assert.deepEqual(errors,[]);
+  await drainPageErrors(errors);assert.deepEqual(errors,[]);
   console.log(`PASS ${name}: true bottom after late header, resize and Mermaid; reading held mid-stream against wheel, PageUp, Home, ArrowUp and a scrollbar drag; Latest pill, End, wheel to bottom and send resume following; layout shifts above the viewport keep the reading position.`);
  }finally{streaming?.();await browser?.close();await server.close();await fixture.close();}
 }

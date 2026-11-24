@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
 import { designDocV2, seedDesignDoc } from './fixtures/artifact-sample.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const session = fixture.sessions[0];
@@ -65,9 +65,10 @@ try {
   const standalone = `${base}/?view=artifact&collection=alpha&artifact=${doc.id}#token=${fixture.token}`;
   const errors = [];
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+  await collectContextPageErrors(context, errors);
   // The system print dialog is stubbed: the print sheet stays for the print media checks.
   await context.addInitScript(() => { window.__printed = 0; window.print = () => { window.__printed++; }; });
-  const page = await context.newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors);
+  const page = await context.newPage(); page.setDefaultTimeout(15000);
   await page.goto(standalone);
   await page.getByLabel('Version', { exact: true }).selectOption('1');
   await page.getByLabel('Artifact actions', { exact: true }).click();
@@ -612,6 +613,6 @@ try {
     await shot.screenshot({ path: name('changes') });
     await shots.close();
   }
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS: the artifact reader shows a long design doc as a document (title block, outline with scroll-spy, callouts, tables, task lists, code, Mermaid, footnotes), keeps History closed until asked and remembers it per window, compares versions rendered side by side, prints the document alone with page margins, and marks artifacts updated since you looked. Screenshots in .cache/artifact-reader-*.png. Fixture only.');
 } finally { await browser?.close(); await server.close(); await fixture.close(); }

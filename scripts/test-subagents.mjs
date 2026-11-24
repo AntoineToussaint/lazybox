@@ -1,4 +1,4 @@
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 // Fixture only: sub-agents in a conversation. Realistic Claude worker journals
 // (two parallel sub-agents, one nested, one failed, one long finished run):
 // inline cards with live current action, their own timelines, the tray beside
@@ -432,6 +432,6 @@ try{
   const elapsed=Date.now()-started;assert.ok(elapsed<6000,`80 sub-agents opened in ${elapsed} ms`);
   const mounted=await fan.locator('.subagent-anchor').count();assert.ok(mounted>0&&mounted<=40,`only the latest cards are mounted (${mounted})`);
   console.log(`80 sub-agents, ${many.events.length} events: latest card in ${elapsed} ms`);}
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS sub-agent cards (order, "kind · task" title without placeholders or generic kinds, live action, one elapsed time on one clock, tools, tokens, progress, outcome, full result, controls inside the header row at any width), timeline (prompt, prose, steps as the chat’s one-line tool lines with facts on the right and no time under 1s, reads grouped and a re-read file counted, failed step stands out, latest 5 with "Show all", current step pinned, no duplicate tooltip, windowed long run), header and tray counts in words, tray (parallel chips, nested badge, keyboard, reveal), tree, panel (dock, follow, resize, float, move, Esc), stop, failed attention, reduced motion, phone sheet, background commands (short names, no card, script and output panel, header access), 80-sub-agent conversation opens fast. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

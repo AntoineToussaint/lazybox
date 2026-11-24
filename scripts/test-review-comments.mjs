@@ -12,7 +12,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 fixture.sessions[0].title='Harden the handler';
@@ -149,6 +149,6 @@ try{
  await removed.getByRole('button',{name:'Delete'}).click();
  await expect(removed.getByRole('group',{name:'Confirm delete'})).toBeVisible();await removed.getByRole('button',{name:'Delete'}).click();
  await expect(removed).toHaveCount(0);assert.equal(fixture.reviewOf('alpha').comments.length,1);
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: range and removed-line comments, edit, tray, moved and outdated anchors, one message delivered to the agent, shared across windows, resolve, reopen, delete.');
 }finally{await browser?.close();await server.close();await fixture.close();}

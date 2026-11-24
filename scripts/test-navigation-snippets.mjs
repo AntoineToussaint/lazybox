@@ -5,7 +5,7 @@ import { webkit, expect } from "./fixtures/playwright.mjs";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { startRunnerFixture } from "./fixtures/runner-ui.mjs";
-import { collectPageErrors } from "./fixtures/page-errors.mjs";
+import { collectPageErrors, drainPageErrors } from "./fixtures/page-errors.mjs";
 const f = await startRunnerFixture();
 Object.assign(f.library[0], {
   name: "handbook",
@@ -228,7 +228,7 @@ try {
   await expect(alpha.locator(".workspace-agent-more")).toHaveAttribute("title", "3 conversations");
   await expect(page.locator(".workspace-conversations")).toHaveCount(0);
   await page.screenshot({ path: "/tmp/lazybox-navigation-multiple.png" });
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log(
     "PASS unified single conversation, multiple children, icon actions, initial search focus, literal bracket, Vim/tmux navigation, snippet preview/insert/send and saved shortcut settings. Fixture only.",
   );

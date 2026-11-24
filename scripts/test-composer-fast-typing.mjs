@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { monacoVimCompat } from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 // Keys that land a millisecond apart (Playwright's fast type(), fast typing, a
 // paste then typing, dictation streaming words, an IME) never loop the message
@@ -57,7 +57,7 @@ try {
         await page.evaluate(() => { const busy = () => { const until = performance.now() + 12; while (performance.now() < until); }; window.__load = setInterval(busy, 15); });
         try { await input(); } finally { await page.evaluate(() => clearInterval(window.__load)); }
         await expect(message, `${engine.name()} ${label}, round ${round + 1}`).toHaveValue(expected);
-        assert.deepEqual(errors, [], `${engine.name()} ${label}, round ${round + 1}: no update loop`);
+        await drainPageErrors(errors);assert.deepEqual(errors, [], `${engine.name()} ${label}, round ${round + 1}: no update loop`);
       }
     };
 
@@ -97,7 +97,7 @@ try {
     await page.waitForTimeout(200);
     await page.reload();
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('kept draft');
-    assert.deepEqual(errors, [], `${engine.name()}: no page error`);
+    await drainPageErrors(errors);assert.deepEqual(errors, [], `${engine.name()}: no page error`);
   }
   console.log(`PASS: under load, ${rounds} rounds each of 500 keys with no delay, blank keys, a slash command (open and dismissed), streamed words, a paste then typing, IME composition (Chromium) and Vim insert mode, in Chromium and WebKit: every key lands, no update loop, and the draft survives a reload.`);
 } finally {

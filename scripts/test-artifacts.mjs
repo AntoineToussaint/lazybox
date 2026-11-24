@@ -17,7 +17,7 @@ import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
 import {reportTitle,seedReport} from './fixtures/artifact-sample.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];
 Object.assign(session,{busy:false,status:'done',conversationId:'conversation-alpha',agents:[{id:'root',status:'done'}]});
@@ -33,8 +33,9 @@ let browser;
 try{
  await mkdir('.cache',{recursive:true});await server.listen();browser=await (process.env.TEST_CHROMIUM?chromium:webkit).launch({headless:true});
  const context=await browser.newContext({viewport:{width:1400,height:900},acceptDownloads:true});
+ // Every window: the page, the artifact detached into its own window, another tab, the reopened window, the reader.
+ const errors=await collectContextPageErrors(context);
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const errors=[];await collectPageErrors(page, errors);
  // Copies are recorded; the rest of the real clipboard (which the editor uses) is left alone.
  await page.addInitScript(()=>{window.__copies=[];if(navigator.clipboard)navigator.clipboard.writeText=async text=>{window.__copies.push(text);};else Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__copies.push(text);}}});});
  // Printing is counted, not shown: the system dialog would block the page.
@@ -317,7 +318,7 @@ try{
 
  // Density: a report whose first heading nearly repeats its title, in its own window.
  const report=seedReport(fixture);
- const reader=await context.newPage();reader.setDefaultTimeout(15000);await collectPageErrors(reader, errors);
+ const reader=await context.newPage();reader.setDefaultTimeout(15000);
  await reader.setViewportSize({width:1000,height:800});
  await reader.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=artifact&collection=alpha&artifact=${report.id}#token=${fixture.token}`);
  const reportPage=reader.getByRole('article',{name:reportTitle});
@@ -374,7 +375,8 @@ try{
  assert.ok(phone.title>=26&&phone.title<=32,`a ${phone.title}px title at 360 px`);
  await expect(reportPage.getByLabel('Kind',{exact:true})).toBeVisible();
  await reader.screenshot({path:'.cache/artifacts-report-360.png'});
+ await drainPageErrors(errors);
  await reader.close();
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: track a chat message as an artifact (right-click and hover), update it after a reviewed diff, browse versions and changes, copy and download, rename, open in its own window, list an agent\'s artifact, track a Markdown file that follows disk changes, print from Changes (once), keyboard through the history, delete with confirmation, track a file an agent links (from the link, and offered first by a short message\'s Track), and read a report densely: one title, the kind once, a wide column, the outline as a toggle when narrow, no horizontal scroll at 360 px. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

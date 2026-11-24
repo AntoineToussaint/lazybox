@@ -1,11 +1,13 @@
 import {createServer} from 'node:http';
 import assert from 'node:assert/strict';
 import {webkit, chromium, expect} from './fixtures/playwright.mjs';
-import {collectPageErrors, collectContextPageErrors} from './fixtures/page-errors.mjs';
+import {collectPageErrors, collectContextPageErrors, drainPageErrors} from './fixtures/page-errors.mjs';
 
 const server=createServer((req,res)=>{
   if(req.url==='/slow'){setTimeout(()=>res.end('{}'),10);return;}
-  res.setHeader('content-type','text/html');res.end('<html><body>Navigation fixture</body></html>');
+  res.setHeader('content-type','text/html');
+  if(req.url==='/button'){res.end('<html><body><button onclick="throw new Error(\'the last click\')">Last</button></body></html>');return;}
+  res.end('<html><body>Navigation fixture</body></html>');
 });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const url=`http://127.0.0.1:${server.address().port}`;
@@ -51,6 +53,65 @@ try {
       await assert.rejects(collectPageErrors(page),/already loaded/);
       await page.close();
 
+      // Fail closed: an error is reported as it is dispatched, not a task later. One thrown while
+      // the document unloads (a pagehide handler), or by the last action before the page closes,
+      // arrives; a later task never runs.
+      const leaving=await browser.newPage();
+      const lost=await collectPageErrors(leaving);
+      await leaving.goto(url);
+      await leaving.evaluate(()=>{addEventListener('pagehide',()=>{throw new Error('thrown while leaving');});});
+      await leaving.goto(url+'/next');
+      await drainPageErrors(lost);
+      assert.deepEqual(lost,['Error: thrown while leaving'],'an error in a pagehide handler counts');
+      await leaving.goto(url+'/button');
+      await leaving.getByRole('button').click();
+      await drainPageErrors(lost);
+      assert.deepEqual(lost,['Error: thrown while leaving','Error: the last click'],'drained, the last action\'s error is there before the assertion');
+      await leaving.close();
+      await drainPageErrors(lost);
+
+      // Playwright's clock replaces the page's timers; with it paused, errors still arrive, and
+      // what the app handles is still retracted.
+      const paused=await browser.newPage();
+      const frozen=await collectPageErrors(paused);
+      await paused.clock.install({time:new Date('2026-01-01T00:00:00Z')});
+      await paused.goto(url);
+      await paused.clock.pauseAt(new Date('2026-01-01T00:01:00Z'));
+      await paused.evaluate(()=>{
+        addEventListener('error',event=>{if(String(event.error).includes('handled by the app'))event.preventDefault();});
+        dispatchEvent(new ErrorEvent('error',{error:new Error('handled by the app while paused'),cancelable:true}));
+        dispatchEvent(new ErrorEvent('error',{error:new Error('unhandled while paused'),cancelable:true}));
+      });
+      await drainPageErrors(frozen);
+      assert.deepEqual(frozen,['Error: unhandled while paused'],'a paused clock neither holds back an error nor keeps a handled one');
+      await paused.close();
+
+      // Drained at a boundary, every error dispatched before it is recorded with what was true then
+      // (the scenario runner names the step each error was dispatched in this way).
+      const steps=await browser.newPage();
+      let step='first';
+      const stamped=await collectPageErrors(steps,[],{format:message=>`${message} (during: ${step})`});
+      await steps.goto(url);
+      await steps.evaluate(()=>{for(let i=0;i<20;i++)setTimeout(()=>{throw new Error('in the first step');},0);});
+      await steps.evaluate(()=>new Promise(resolve=>setTimeout(resolve,10)));
+      await drainPageErrors(stamped);
+      step='second';
+      await steps.evaluate(()=>{setTimeout(()=>{throw new Error('in the second step');},0);});
+      await expect.poll(()=>stamped.length).toBe(21);
+      assert.deepEqual(stamped,[...Array(20).fill('Error: in the first step (during: first)'),'Error: in the second step (during: second)']);
+      await steps.close();
+
+      // Installed first, the collector hears an init script installed after it that throws.
+      const early=await browser.newContext();
+      const initErrors=await collectContextPageErrors(early);
+      await early.addInitScript(()=>{if(location.protocol==='http:')throw new Error('init script threw');});
+      const earlyPage=await early.newPage();
+      await earlyPage.goto(url);
+      await drainPageErrors(initErrors);
+      // An engine may mute an init script's error to "Script error.": what counts is that it arrives.
+      assert.equal(initErrors.length,1,'an init script installed after the collector is heard: '+JSON.stringify(initErrors));
+      await early.close();
+
       // A context collector hears every page, popups included; a label and a callback see each error.
       const context=await browser.newContext();
       const seen=[];
@@ -69,5 +130,5 @@ try {
       await context.close();
     } finally {await browser.close();}
   }
-  console.log('PASS: runtime errors and unhandled rejections are retained across navigation; caught fetch diagnostics and errors the app marks handled are not application errors; a context collector covers popups, labels and callbacks see each error, and late collection is refused.');
+  console.log('PASS: runtime errors and unhandled rejections are retained across navigation; caught fetch diagnostics and errors the app marks handled are not application errors; a context collector covers popups, labels and callbacks see each error, and late collection is refused; errors arrive as dispatched (pagehide, a last click), under a paused clock, and from later init scripts.');
 } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}

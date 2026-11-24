@@ -5,7 +5,7 @@ import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 // Exercise the real shared composer against fake RPC, without accounts/inference.
 const fixture = await startRunnerFixture();
@@ -204,7 +204,7 @@ try {
     await expect(attached.locator('li')).toHaveCount(2);
     await context.close();
   }
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS: standalone, detached and embedded chat file drops; exact text/binary payloads; retry identity; no auto-send; size/count/total limits; folder and ended-session rejection; text drops unaffected; pasted text, image and PDF boxes sent in order to Codex and ACP conversations with how each agent got them; the phone layout. Fake RPC, no credentials or inference.');
 } finally {
   await browser?.close(); await server.close(); await fixture.close();

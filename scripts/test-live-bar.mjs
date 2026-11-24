@@ -4,7 +4,7 @@
 // that command or interrupts the turn (saying which), and carries the
 // sub-agents at work. Narrow layouts and reduced motion included.
 import {testViteCache} from './fixtures/vite-cache.mjs';import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f=await startRunnerFixture();
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
@@ -162,6 +162,6 @@ try{
  Object.assign(session,{busy:false,status:'ready',agents:[{id:'root',status:'done'}]});live({type:'agent_status',agentId:'claude-tool:toolu_sa',status:'done',data:{toolUseId:'toolu_sa'}});live({type:'turn_ended',status:'completed'});
  // The "Moved to the background" notice may outlive the turn by a few seconds; the bar itself leaves.
  await expect(chat.locator('.live-bar:not([data-only="notice"])')).toHaveCount(0);
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS live bar: step with real command and directory, elapsed, managed output tail (3 lines, more, console), Stop command vs Interrupt, step in words, Move to background for a listening lazybox run (then out of the bar) and the may-never-end hint for a shell step, sub-agents in the bar, reduced motion, phone width, leaves when the turn ends. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

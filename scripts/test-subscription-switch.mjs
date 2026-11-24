@@ -1,4 +1,4 @@
-import {collectPageErrors} from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 // Fixture only: a subscription limit, as the person meets it. An automatic
 // switch is one quiet line; without one, one card offers to switch to the best
 // other subscription, or to wait for the reset; a message sent meanwhile goes
@@ -238,6 +238,6 @@ try{
  const checked=f.calls.filter(call=>call.method==='RefreshSubscription').slice(checkedBefore);
  assert.equal(checked.length,3);
  assert.equal(f.mutations.filter(m=>m.method==='SwitchSubscription').length,switchesBefore,'refresh does not switch or resume the execution');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS automatic switch line, one limit card in words (Switch to the best subscription, picker of the same provider in order, wait), the header chip opens Switch subscription, nothing switches by itself without an account policy, a message sent while limited goes once, wait-for-reset resumes once, ⋯ Switch subscription; with Subscription rotation allowed: Always switch automatically and the everywhere question. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

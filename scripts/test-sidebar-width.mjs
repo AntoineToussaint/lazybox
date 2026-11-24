@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),logLevel:'warn',plugins:[react(),monacoVimCompat()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
@@ -67,6 +67,6 @@ try{
  await page.mouse.move(chat.x+24,chat.y+chat.height/2,{steps:10});await page.waitForTimeout(150);await page.mouse.up();
  await page.waitForTimeout(500);
  assert.equal(await width(),dragged-16,'a drop beside the sidebar keeps its width');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log(`PASS: sidebar fixed at ${initial}px across workspaces and window sizes; drag (${dragged}px) and arrows apply everywhere; a drop beside it keeps it.`);
 }finally{await browser?.close();await server.close();await fixture.close();}

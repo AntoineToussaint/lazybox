@@ -1,6 +1,6 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {readFile,mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';import {NativeStatus} from '../workers/claude-sdk/src/status.ts';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const f=await startRunnerFixture();Object.assign(f.sessions[0],{busy:true,status:'running',provider:'claude',agents:[{id:'root',status:'running'}]});
 f.library[0].gitIdentity='github:codefly-dev/module-datasource';f.library[1].gitIdentity='github:codefly-dev/module-saas-starter';const channel=f.openEvents('alpha-session');
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:f.url}}}});let browser;
@@ -24,5 +24,5 @@ try{
  // The path is clickable: the folder segment brings the listing back.
  await file.getByRole('navigation',{name:'Path'}).getByRole('button',{name:'api',exact:true}).click();await expect(listing.getByRole('button',{name:/README.md/})).toBeVisible();await file.getByRole('button',{name:'Close file preview'}).click();await expect(page.getByRole('button',{name:'origin/main',exact:true})).toHaveCount(0);
  await page.getByRole('button',{name:'Context and token cost'}).click();const context=page.locator('.context-popover');await context.locator('.context-category>summary').filter({hasText:'System tools'}).click();await expect(context.locator('.context-details').first()).toContainText('Read');await expect(context.locator('.context-details').first()).toContainText('60');await page.screenshot({path:'.cache/context-detail-review.png'});await page.keyboard.press('Escape');
- assert.equal(channel.clients.size,1,'UI inspection restarted event stream');assert.deepEqual(errors,[]);console.log('PASS: headless native-event replay, provider wait vs compaction, collapsed tool results, per-repo rows, context menu, context detail, directory links, and one continuous stream.');
+ assert.equal(channel.clients.size,1,'UI inspection restarted event stream');await drainPageErrors(errors);assert.deepEqual(errors,[]);console.log('PASS: headless native-event replay, provider wait vs compaction, collapsed tool results, per-repo rows, context menu, context detail, directory links, and one continuous stream.');
 }finally{await browser?.close();await server.close();await f.close();}

@@ -5,7 +5,7 @@
 // dark and light.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {webkit,chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f=await startRunnerFixture();
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
@@ -298,7 +298,7 @@ try{
  assert.ok(branchRequests[2].requestKey);
  await branchPage.getByRole('button',{name:'Open previous conversation'}).click();
  await expect(branchMessages.locator('article.message').filter({hasText:'A completed reply for the branching fixture.'})).toBeVisible();
- assert.deepEqual(branchErrors,[]);
- assert.deepEqual(errors,[]);
+ await drainPageErrors(branchErrors);assert.deepEqual(branchErrors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS Lazybox messages as one-line events (icon, summary, detail, copy, open to the exact text, grouped, legacy journals, never "You", not recalled), one restart mark for 13 restarts and one line for an uncertain one, background work counted by kind (newest first, failed visible, older folded, whole titles), usage by part with cost and unpriced reasons, dark and light. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

@@ -17,7 +17,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const id = 'alpha-session';
@@ -340,7 +340,7 @@ try {
   assert.ok(overflow <= 0, `the page scrolls sideways by ${overflow}px`);
   await page.screenshot({ path: '.cache/agent-browser-narrow.png' });
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('agent browser: chip, panel, frames, steps, cards, take over, stop, give the browser, preview and settings (install, off, per workspace) verified');
 } finally {
   await browser?.close();

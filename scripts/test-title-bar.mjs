@@ -21,7 +21,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { monacoVimCompat } from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error',
@@ -265,7 +265,7 @@ try {
       assert.ok(px(padding) <= 16, `a browser's header keeps its own padding at ${width}px (${padding})`);
       await page.close();
     }
-    assert.deepEqual(errors, [], `page errors: ${errors.join('\n')}`);
+    await drainPageErrors(errors);assert.deepEqual(errors, [], `page errors: ${errors.join('\n')}`);
     await context.close();
   }
   console.log('title bar: every window kind leaves the buttons their room, moves by its empty header, and drops the room in full screen');

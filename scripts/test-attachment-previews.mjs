@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 // Exercise the desktop image policy with the shared surface in Chromium.
 const desktop = JSON.parse(await readFile(new URL('../apps/desktop/src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
@@ -56,13 +56,13 @@ try {
   const errors = [];
   const open = async (view, session = 'alpha-session', collection = 'alpha') => {
     const context = await browser.newContext({ viewport: VIEWPORT, permissions: ['clipboard-read', 'clipboard-write'] });
+    await collectContextPageErrors(context, errors);
     await context.addInitScript(trackObjectUrls);
     await context.route(base + '/?*', async route => {
       const response = await route.fetch();
       await route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': imagePolicy.trim() } });
     });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    await collectPageErrors(page, errors);
     await page.goto(`${base}/?view=${view}&session=${session}&collection=${collection}#token=${fixture.token}`);
     const chat = view === 'workspace' ? page.getByRole('region', { name: 'Agent chat', exact: true }) : page.locator('.agent-window');
     const composer = chat.getByRole('textbox', { name: 'Message', exact: true });
@@ -478,7 +478,7 @@ try {
     } finally { await engine.close(); }
   }
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS: pasted/dropped images as thumbnails, text paste unaffected, hover and keyboard preview fitted to 60% of the window, lightbox with Esc and focus return, reduced motion, object URLs revoked, sent thumbnails read once and only when in view, unavailable attachments as named chips, in the workspace, detached chat and agent windows, and in WebKit. Fake RPC, isolated clipboard.');
 } finally {
   await browser?.close(); await server.close(); await fixture.close();

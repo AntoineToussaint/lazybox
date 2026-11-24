@@ -11,7 +11,7 @@ import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {acpJournal} from './fixtures/acp-ui-fake.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 fixture.acp.install('gemini','0.68.0');
@@ -160,6 +160,6 @@ try{
  await expect(agyCard.locator('.shared-credential-note')).toContainText('"modelProvider": "gemini"');
  await expect(page.locator('body')).not.toContainText('gemini-secret-456');
  await page.screenshot({path:'.cache/acp-shared-credentials.png'});
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: Antigravity shows Gemini CLI’s shared API key by name (Agents, Subscriptions → Google); ACP agents labelled Preview (picker, Settings) and a failed launch-flag check shown in Settings; ACP conversation from the real adapter journal (tool lines, plan, command, reply, approval with the agent’s Always), Settings → Agents (installed with version, missing with install command, custom agent added/edited/removed, env values never shown), keyboard agent picker with icons. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

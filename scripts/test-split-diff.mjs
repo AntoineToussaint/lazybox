@@ -13,7 +13,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const api=fixture.shipState('alpha','api');
@@ -153,6 +153,6 @@ try{
  await page.setViewportSize({width:1600,height:1000});
  await expect(diff).toHaveClass(/is-split/);
 
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: unified/split toggle remembered and narrow fallback, word marks, folded and expanded unchanged lines, n/p hunks, Shift+N/P files, comments on both sides of the split view, viewed files kept until their diff changes.');
 }finally{await browser?.close();await server.close();await fixture.close();}

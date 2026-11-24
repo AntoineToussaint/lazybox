@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const proxy = { '/lazybox.bench.v1.RunnerService/': { target: f.url }, '/remote/v1/': { target: f.url } };
@@ -150,7 +150,7 @@ try {
   assert.ok(![...phoneBearers].some(value => value.includes(f.token)), 'the owner bearer reached the phone');
   assert.deepEqual(f.remote.deviceDenied, [], 'the phone called an RPC off the device allowlist');
   assert.ok(f.remote.deviceCalls.every(call => call.device === null || f.calls.some(c => c.device === call.device)), 'device calls are attributed');
-  assert.deepEqual(errors, []);
-  assert.deepEqual(phoneErrors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
+  await drainPageErrors(phoneErrors);assert.deepEqual(phoneErrors, []);
   console.log('PASS remote pairing: route on, one-time QR with grants, new code on change, phone pairs with its own key, matching fingerprint, used code refused, expiry and withdrawal, revoke signs the phone out, device credentials only.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

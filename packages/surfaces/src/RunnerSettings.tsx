@@ -20,11 +20,11 @@ import './pricing.css';
  * A local change wins over a reload already on its way: that reload read the
  * settings before the change, and would flip a switch back until the save answers.
  */
-export function useRunnerSettings(enabled = true){
+export function useRunnerSettings(enabled = true, refreshMs = 0){
  const {api}=useRunner();const [settings,setLoaded]=useState<RunnerSettings>(),[error,setError]=useState(''),[loading,setLoading]=useState(true);
  const changes=useRef(0);
  const setSettings=useCallback<Dispatch<SetStateAction<RunnerSettings|undefined>>>(value=>{changes.current++;setLoaded(value);},[]);
- useEffect(()=>{if(!enabled)return;const control=new AbortController();const load=()=>{const since=changes.current;void api.getRunnerSettings({}, {signal:control.signal,timeoutMs:5000}).then(value=>{if(!control.signal.aborted&&changes.current===since){setLoaded(value);setError('');}},e=>{if(!control.signal.aborted)setError(settingsError(e,'load'));}).finally(()=>{if(!control.signal.aborted)setLoading(false);});};load();window.addEventListener('lazybox-settings-saved',load);return()=>{control.abort();window.removeEventListener('lazybox-settings-saved',load);};},[api,enabled]);
+ useEffect(()=>{if(!enabled)return;const control=new AbortController();const load=()=>{const since=changes.current;void api.getRunnerSettings({}, {signal:control.signal,timeoutMs:5000}).then(value=>{if(!control.signal.aborted&&changes.current===since){setLoaded(value);setError('');}},e=>{if(!control.signal.aborted)setError(settingsError(e,'load'));}).finally(()=>{if(!control.signal.aborted)setLoading(false);});};load();const timer=refreshMs ? window.setInterval(load,refreshMs) : undefined;window.addEventListener('lazybox-settings-saved',load);return()=>{window.clearInterval(timer);control.abort();window.removeEventListener('lazybox-settings-saved',load);};},[api,enabled,refreshMs]);
  return {settings,setSettings,error,setError,loading};
 }
 const announce=()=>window.dispatchEvent(new Event('lazybox-settings-saved'));

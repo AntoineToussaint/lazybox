@@ -43,6 +43,11 @@ func (s *Service) GetRunnerSettings(context.Context, *pb.InfoRequest) (*pb.Runne
 	w := &pb.RunnerSettings{Revision: d.Revision, Naming: d.Naming, Permission: d.Permission, Context: d.Context, ClaudeContext: d.ClaudeContext, CodexContext: d.CodexContext, ProcessBackend: d.ProcessBackend, RotationExcludedProfileIds: d.RotationExcluded, ClaudeAiConnectors: d.ClaudeAIConnectors, PlainTitles: d.PlainTitles, SuggestedName: petname.Generate(3, "-"),
 		ClaudeSubscriptionSignIn: d.ClaudeSubscriptionSignIn, ClaudeSignInCarriedOver: d.ClaudeSignInCarriedOver, Notices: d.Notices, AutomaticSwitchingProviders: s.Bench.AutomaticSwitchingProviders(),
 		Review: &pb.ReviewSettings{Reviewer: d.Review.Reviewer, Template: d.Review.Template, AutoStart: d.Review.AutoStart, DefaultTemplate: reviews.DefaultTemplate, Loop: firstNonEmptyString(d.Review.Loop, reviews.LoopAsk), MaxRounds: uint32(reviews.ClampRounds(d.Review.MaxRounds)), ReviewerMode: d.Review.ReviewerModeOf(), ReviewerModel: d.Review.ReviewerModel}}
+	if ext := s.Bench.Extensions(); ext != nil {
+		if notice := ext.DiskPressureNotice(); notice != "" {
+			w.Notices = append(w.Notices, notice)
+		}
+	}
 	for key, r := range rates {
 		provider, model, _ := strings.Cut(key, "/")
 		_, custom := d.Prices[key]

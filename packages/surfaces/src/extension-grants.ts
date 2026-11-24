@@ -10,6 +10,7 @@ export type GrantTone = 'read' | 'act' | 'send';
 export type GrantText = { grant: string; icon: string; title: string; detail: string; tone: GrantTone };
 
 const fixed: Record<string, Omit<GrantText, 'grant'>> = {
+  'scan:disk': { icon: 'activity', title: 'Scan this Runner for reclaimable space', detail: 'Run a daily dev-cleaner dry run and see candidate paths and sizes', tone: 'act' },
   'read:workspaces': { icon: 'collections', title: 'See your workspaces', detail: 'Their names and repositories', tone: 'read' },
   'read:sessions': { icon: 'history', title: 'See your conversations', detail: 'Titles, workspace, provider, model and status — not their messages', tone: 'read' },
   'read:attention': { icon: 'inbox', title: 'See what needs you', detail: 'The Inbox: which conversations wait for you, with the question or the agent’s last line', tone: 'read' },

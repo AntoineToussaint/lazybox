@@ -129,6 +129,16 @@ func (c *contentServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// opaque origin; the files are static and the base is the secret.
 	h.Set("Access-Control-Allow-Origin", "*")
 	if name, ok := strings.CutPrefix(file, "_lazybox/"); ok {
+		if name == "disk-report.html" && HasGrant(s.Grants, GrantDiskScan) {
+			h.Set("Content-Type", "text/html; charset=utf-8")
+			h.Set("Content-Security-Policy", ExtensionPolicy(s.Base, s.Hosts))
+			c.ext.mu.Lock()
+			report := c.ext.diskReport
+			c.ext.mu.Unlock()
+
+			_, _ = io.WriteString(w, report.page())
+			return
+		}
 		kind, known := runtimeFiles[name]
 		data, err := extensionAssets.ReadFile("extensions/runtime/" + name)
 		if !known || err != nil {

@@ -137,7 +137,7 @@ func TestCheckExtensionHost(t *testing.T) {
 
 func TestBundledExtensionsLoadCleanly(t *testing.T) {
 	examples := ExtensionExamples()
-	if len(examples) != 9 {
+	if len(examples) != 10 {
 		t.Fatalf("examples: %+v", examples)
 	}
 	dir := t.TempDir()

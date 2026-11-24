@@ -67,6 +67,11 @@ func (b *Bench) openPower() {
 	b.power.Actions = power.NewManager(path)
 	b.power.Config = power.NewConfig(filepath.Dir(path))
 	b.power.Extensions = power.NewExtensions(filepath.Join(filepath.Dir(path), "extensions"), filepath.Join(b.Config.State, "extensions.json"))
+	b.watchers.Add(1)
+	go func() {
+		defer b.watchers.Done()
+		b.power.Extensions.WatchDiskScans(b.ctx)
+	}()
 	b.power.UI = power.NewBroker()
 	b.power.Hooks = power.NewDispatcher(b.power.Actions, b.launchHook)
 	b.power.hookCreds = map[string][]string{}

@@ -15,9 +15,14 @@
 // page closes still arrives; only once every listener has run, a task later,
 // is it retracted if the app turned out to handle it. That task is a
 // MessageChannel message, which Playwright's clock (page.clock) never fakes
-// or pauses. `drainPageErrors(errors)` waits until everything the pages have
-// dispatched so far has arrived (and been retracted or not): call it before
-// asserting on `errors`.
+// or pauses. While the document unloads that task never comes: a pagehide
+// listener, moved behind the app's own when beforeunload fires, reads the
+// verdicts instead, and a retraction the unload drops is sent again by the
+// tab's next same-origin document. (Limit: a page left without beforeunload,
+// or for a cross-origin page, keeps an error the app handled in pagehide:
+// it fails closed.) `drainPageErrors(errors)` waits until everything the
+// pages and their frames have dispatched so far has arrived (and been
+// retracted or not): call it before asserting on `errors`.
 //
 // The collector is an init script, so it covers every document the page loads
 // from then on and nothing loaded before: call it before the page's first
@@ -51,13 +56,31 @@ function installer(binding) {
     const save = list => { try { if (list.length) sessionStorage.setItem(key, JSON.stringify(list)); else sessionStorage.removeItem(key); } catch {} };
     const settle = id => save(pending().filter(entry => entry[0] !== id));
     const deliver = entry => send('report', ...entry).then(() => settle(entry[0]), () => {});
+    // A retraction can be dropped the same way: it waits too, and the next
+    // document sends it after the reports it waited behind.
+    const retractedKey = ${JSON.stringify(binding + 'Retracted')};
+    const retracted = () => { try { return JSON.parse(sessionStorage.getItem(retractedKey) || '[]'); } catch { return []; } };
+    const saveRetracted = list => { try { if (list.length) sessionStorage.setItem(retractedKey, JSON.stringify(list)); else sessionStorage.removeItem(retractedKey); } catch {} };
+    const withdraw = id => send('retract', id).then(() => saveRetracted(retracted().filter(other => other !== id)), () => {});
+    const retract = id => { settle(id); saveRetracted([...retracted(), id]); void withdraw(id); };
+    // Each error's verdict, read once every listener has run: a task later, or,
+    // while the document unloads (that task never comes), from a pagehide
+    // listener moved behind the app's own as the page is about to be left.
+    const checks = new Map();
+    const check = id => { const event = checks.get(id); if (!event) return; checks.delete(id); if (event.defaultPrevented) retract(id); };
+    const checkAll = () => { for (const id of [...checks.keys()]) check(id); };
+    const last = () => { removeEventListener('pagehide', checkAll); addEventListener('pagehide', checkAll); };
+    addEventListener('beforeunload', last);
+    addEventListener('pagehide', checkAll);
     const report = (event, value) => {
       const entry = [doc + '.' + (++ids), String(value), value && value.stack ? String(value.stack) : ''];
       save([...pending(), entry]);
       void deliver(entry);
-      afterListeners(() => { if (event.defaultPrevented) { settle(entry[0]); void call('retract', entry[0]); } });
+      checks.set(entry[0], event);
+      afterListeners(() => check(entry[0]));
     };
     for (const entry of pending()) void deliver(entry);
+    for (const id of retracted()) void withdraw(id);
     window[installed] = { drain: () => new Promise(resolve => afterListeners(resolve)).then(() => send('drain')) };
     window.addEventListener('error', event => report(event, event.error || event.message));
     window.addEventListener('unhandledrejection', event => report(event, event.reason));
@@ -86,8 +109,9 @@ async function install(target, errors, {label, format, onError} = {}) {
   });
   await target.addInitScript({content: installer(binding)});
   const pages = () => typeof target.pages === 'function' ? target.pages() : [target];
-  const drain = () => Promise.all(pages().filter(page => !page.isClosed()).map(page =>
-    page.evaluate(name => window[name]?.drain(), binding + 'Installed').catch(() => {})));
+  // Every frame runs the collector (init scripts reach them all) and reports on its own.
+  const drain = () => Promise.all(pages().filter(page => !page.isClosed()).flatMap(page => page.frames().map(frame =>
+    frame.evaluate(name => window[name]?.drain(), binding + 'Installed').catch(() => {}))));
   if (!errors[drainers]) Object.defineProperty(errors, drainers, {value: [], enumerable: false});
   errors[drainers].push(drain);
   return errors;
@@ -115,11 +139,14 @@ export async function collectContextPageErrors(context, errors = [], options = {
 }
 
 /**
- * Waits until every error the collected pages have dispatched so far has
- * reached `errors`, and every one the app handled has left it. A page that
- * is closed or between documents has nothing left to wait for.
+ * Waits until every error the collected pages, and each of their frames, have
+ * dispatched so far has reached `errors`, and every one the app handled has
+ * left it. A page that is closed or between documents has nothing left to
+ * wait for. Throws for an array no collector fills.
  */
 export async function drainPageErrors(errors) {
-  await Promise.all((errors[drainers] ?? []).map(drain => drain()));
+  // An array no collector fills would always look clean: a mistake, not a pass.
+  if (!errors?.[drainers]?.length) throw new Error('drainPageErrors: no collector fills this array; pass the one collectPageErrors or collectContextPageErrors returned or filled');
+  await Promise.all(errors[drainers].map(drain => drain()));
   return errors;
 }

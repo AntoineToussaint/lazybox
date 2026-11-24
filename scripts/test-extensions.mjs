@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const listen = handler => new Promise(resolve => { const s = createHttp(handler); s.listen(0, '127.0.0.1', () => resolve(s)); });
 // Where a malicious extension would send what it read: nothing may arrive.
@@ -237,6 +237,7 @@ async function scenario(browser, scheme, full) {
     await shot('settings');
   }
   // WebKit reports the malicious frame's refused top navigation on the page; nothing else may fail.
+  await drainPageErrors(errors);
   assert.deepEqual(errors.filter(e => !/Unsafe JavaScript attempt to initiate navigation .* from frame with URL 'http:\/\/127\.0\.0\.1:\d+\/x\//.test(e)), []);
   await context.close();
 }

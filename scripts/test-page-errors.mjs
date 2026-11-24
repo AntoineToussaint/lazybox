@@ -6,10 +6,13 @@ import {collectPageErrors, collectContextPageErrors, drainPageErrors} from './fi
 const server=createServer((req,res)=>{
   if(req.url==='/slow'){setTimeout(()=>res.end('{}'),10);return;}
   res.setHeader('content-type','text/html');
+  // A page whose frame is another site (localhost, beside 127.0.0.1): its own process in Chromium.
+  if(req.url==='/framed'){res.end(`<html><body><iframe src="http://localhost:${server.address().port}/frame"></iframe></body></html>`);return;}
   if(req.url==='/button'){res.end('<html><body><button onclick="throw new Error(\'the last click\')">Last</button></body></html>');return;}
   res.end('<html><body>Navigation fixture</body></html>');
 });
-await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+// Every interface: the framed page's frame is reached as localhost.
+await new Promise(resolve=>server.listen(0,resolve));
 const url=`http://127.0.0.1:${server.address().port}`;
 try {
   for(const engine of [webkit,chromium]) {
@@ -63,6 +66,16 @@ try {
       await leaving.goto(url+'/next');
       await drainPageErrors(lost);
       assert.deepEqual(lost,['Error: thrown while leaving'],'an error in a pagehide handler counts');
+      // One the app handles in its own error listener while the page is left is not: the retraction
+      // task never runs once the document is gone, so the verdict is read during pagehide itself.
+      await leaving.goto(url);
+      await leaving.evaluate(()=>{
+        addEventListener('error',event=>{if(String(event.error).includes('handled while leaving'))event.preventDefault();});
+        addEventListener('pagehide',()=>{throw new Error('handled while leaving');});
+      });
+      await leaving.goto(url+'/next');
+      await drainPageErrors(lost);
+      assert.deepEqual(lost,['Error: thrown while leaving'],'an error the app handled in pagehide is not counted');
       await leaving.goto(url+'/button');
       await leaving.getByRole('button').click();
       await drainPageErrors(lost);
@@ -101,6 +114,9 @@ try {
       assert.deepEqual(stamped,[...Array(20).fill('Error: in the first step (during: first)'),'Error: in the second step (during: second)']);
       await steps.close();
 
+      // An array no collector fills would always look clean: draining it is a mistake.
+      await assert.rejects(drainPageErrors([]),/no collector fills/);
+
       // Installed first, the collector hears an init script installed after it that throws.
       const early=await browser.newContext();
       const initErrors=await collectContextPageErrors(early);
@@ -130,5 +146,25 @@ try {
       await context.close();
     } finally {await browser.close();}
   }
-  console.log('PASS: runtime errors and unhandled rejections are retained across navigation; caught fetch diagnostics and errors the app marks handled are not application errors; a context collector covers popups, labels and callbacks see each error, and late collection is refused; errors arrive as dispatched (pagehide, a last click), under a paused clock, and from later init scripts.');
+  // Draining waits for every frame, not only the page's. A frame of another site in its own
+  // process (site isolation on) that reports an error, which its app handles and then stays
+  // busy, has not retracted it yet when the page's own frame is drained.
+  const isolated=await chromium.launch({args:['--site-per-process']});
+  try {
+    const framed=await isolated.newPage();
+    const frameErrors=await collectPageErrors(framed);
+    await framed.goto(url+'/framed');
+    await expect.poll(()=>framed.frames().length).toBe(2);
+    const frame=framed.frames()[1];
+    await frame.waitForLoadState();
+    const busy=frame.evaluate(()=>{
+      addEventListener('error',event=>{event.preventDefault();const until=Date.now()+1500;while(Date.now()<until);});
+      dispatchEvent(new ErrorEvent('error',{error:new Error('handled in the frame'),cancelable:true}));
+    }).catch(error=>error);
+    await expect.poll(()=>frameErrors.length).toBe(1);
+    await drainPageErrors(frameErrors);
+    assert.deepEqual(frameErrors,[],'drained, the frame has retracted what its app handled');
+    assert.equal(await busy,undefined);
+  } finally {await isolated.close();}
+  console.log('PASS: runtime errors and unhandled rejections are retained across navigation; caught fetch diagnostics and errors the app marks handled are not application errors; a context collector covers popups, labels and callbacks see each error, and late collection is refused; errors arrive as dispatched (pagehide, a last click) and a pagehide error the app handles is not kept; draining waits for frames, under a paused clock, and from later init scripts.');
 } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}

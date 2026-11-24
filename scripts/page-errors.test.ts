@@ -33,6 +33,8 @@ const self = 'scripts/page-errors.test.ts';
 const marker = 'raw-' + 'page' + 'error';
 const optOut = 'page-errors-' + 'opt-out';
 const initOrder = 'init-before-' + 'page-errors';
+const undrained = 'undrained-' + 'page-errors';
+const rawMethod = 'page' + 'Errors';
 
 function sources(folder: string): string[] {
   return readdirSync(folder).flatMap(name => {
@@ -50,8 +52,10 @@ export function rawPageErrorListeners(text: string): number[] {
   const named = new RegExp(`['"\`](${events.join('|')})['"\`]`);
   // An event name that is not a string literal could be anything. A process signal is not a page event.
   const unnamed = /(?<!\bprocess)\.(on|once|addListener|prependListener|waitForEvent)\(\s*(?!['"`])[^)\s]/;
+  // Playwright's page.pageErrors() returns the same raw errors, after the fact.
+  const method = new RegExp(`\\.${rawMethod}\\s*\\(|\\[\\s*['"\`]${rawMethod}['"\`]\\s*\\]`);
   const allowed = new RegExp(`${marker}:[ \\t]*\\S`);
-  return lines.flatMap((line, i) => (named.test(joined(line)) || unnamed.test(line)) && !allowed.test(line) && !allowed.test(lines[i - 1] ?? '') ? [i + 1] : []);
+  return lines.flatMap((line, i) => (named.test(joined(line)) || unnamed.test(line) || method.test(joined(line))) &&!allowed.test(line) && !allowed.test(lines[i - 1] ?? '') ? [i + 1] : []);
 }
 
 /** Whether a script that opens a page collects its errors through the fixture, or says why not. */
@@ -62,22 +66,58 @@ export function collectsPageErrors(text: string): boolean {
 
 /**
  * The lines of `text` that install an init script on a page or context no
- * collector covers yet: one that throws would go unheard. A context's init
- * scripts run before its pages', so only a context collector covers them.
+ * collector covers yet: one that throws would go unheard. The collector must
+ * be on the same variable, installed since that variable was last assigned:
+ * a context's (`X = … .newContext(`) by collectContextPageErrors(X); a page's
+ * by collectPageErrors(page), or by collectContextPageErrors on the context the
+ * page came from (`page = … ctx.newPage(`), whose init scripts run first.
  */
 export function initScriptsBeforeCollector(text: string): number[] {
   const lines = text.split('\n');
-  const collectors = [...text.matchAll(/collect(Context)?PageErrors\(\s*([\w$]+)/g)];
+  const assignments = [...text.matchAll(/([\w$]+)\s*=\s*(?:await\s+)?(?:([\w$]+)\.newPage|[\w$.()]*?\.newContext)\(/g)]
+    .map(m => ({ name: m[1], index: m.index!, context: m[0].includes('newContext'), from: m[2] }));
+  const collectors = [...text.matchAll(/collect(Context)?PageErrors\(\s*([\w$]+)/g)].map(m => ({ context: !!m[1], name: m[2], index: m.index! }));
+  const latest = (name: string, before: number) => assignments.filter(a => a.name === name && a.index < before).at(-1);
+  const collected = (name: string, context: boolean, after: number, before: number) =>
+    collectors.some(c => c.name === name && c.context === context && c.index > after && c.index < before);
   const allowed = new RegExp(`${initOrder}:[ \\t]*\\S`);
   return [...text.matchAll(/([\w$]+)\.addInitScript\(/g)].flatMap(init => {
-    const line = text.slice(0, init.index).split('\n').length;
+    const at = init.index!, line = text.slice(0, at).split('\n').length;
     if (allowed.test(lines[line - 1]) || allowed.test(lines[line - 2] ?? '')) return [];
-    const target = init[1];
-    // A context collector covers its own init scripts and any page's (a context's run first); a page collector, its page's.
-    const isContext = /context/i.test(target);
-    const covered = collectors.some(c => c.index! < init.index! && (c[1] ? c[2] === target || !isContext : c[2] === target && !isContext));
-    return covered ? [] : [line];
+    const target = init[1], assigned = latest(target, at), after = assigned?.index ?? -1;
+    if (assigned?.context) return collected(target, true, after, at) ? [] : [line];
+    if (collected(target, false, after, at)) return [];
+    // A page of a context: that context's collector, installed since the context was made, covers it.
+    const source = assigned?.from ? latest(assigned.from, assigned.index) : undefined;
+    if (source?.context && collected(source.name, true, source.index, at)) return [];
+    // A name the script never assigns (a parameter): a collector of either kind on it.
+    if (!assigned && collected(target, true, -1, at)) return [];
+    return [line];
   });
+}
+
+/**
+ * The lines of `text` that assert on an array a collector fills without
+ * draining it first (on the same line or the three before): an error the
+ * last action raised may still be on its way.
+ */
+export function undrainedAssertions(text: string): number[] {
+  const lines = text.split('\n');
+  const names = new Set<string>();
+  for (const m of text.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*await\s+collect(?:Context)?PageErrors\(/g)) names.add(m[1]);
+  for (const m of text.matchAll(/collect(?:Context)?PageErrors\(\s*[\w$.()]+\s*,\s*([\w$.]+)/g)) names.add(m[1].split('.').at(-1)!);
+  if (!names.size) return [];
+  const allowed = new RegExp(`${undrained}:[ \\t]*\\S`);
+  return lines.flatMap((line, i) => [...line.matchAll(/(?:assert\.\w+|expect)\(\s*([\w$.]+)/g)].flatMap(m => {
+    const path = m[1].split('.');
+    const at = path.findIndex(part => names.has(part));
+    if (at < 0) return [];
+    const array = path.slice(0, at + 1).join('.');
+    const before = [...lines.slice(Math.max(0, i - 3), i), line.slice(0, m.index)].join('\n');
+    if (before.includes(`drainPageErrors(${array})`)) return [];
+    if (allowed.test(line) || allowed.test(lines[i - 1] ?? '')) return [];
+    return [i + 1];
+  }));
 }
 
 test('the init-order check finds an init script installed before its collector', () => {
@@ -86,6 +126,23 @@ test('the init-order check finds an init script installed before its collector',
   assert.deepEqual(initScriptsBeforeCollector(`await collectPageErrors(page, errors);\nawait context.addInitScript(stub);`), [2], "a page collector does not cover its context's init scripts");
   assert.deepEqual(initScriptsBeforeCollector(`await collectPageErrors(page, errors);\nawait page.addInitScript(stub);`), []);
   assert.deepEqual(initScriptsBeforeCollector(`// ${initOrder}: the stub cannot throw, and the page is not collected\nawait context.addInitScript(stub);`), []);
+  assert.deepEqual(initScriptsBeforeCollector(`const plain = await browser.newContext();\nawait plain.addInitScript(stub);`), [2], 'a context whose name does not say so');
+  assert.deepEqual(initScriptsBeforeCollector(`const ctx = await browser.newContext();\nawait collectContextPageErrors(ctx, errors);\nawait ctx.addInitScript(stub);`), []);
+  assert.deepEqual(initScriptsBeforeCollector(`const a = await browser.newContext();\nawait collectContextPageErrors(a, errors);\nconst b = await browser.newContext();\nawait b.addInitScript(stub);`), [4], "context a's collector does not cover context b");
+  assert.deepEqual(initScriptsBeforeCollector(`const ctx = await browser.newContext();\nawait collectContextPageErrors(ctx, errors);\nconst page = await ctx.newPage();\nawait page.addInitScript(stub);`), [], 'a page of a collected context');
+  assert.deepEqual(initScriptsBeforeCollector(`const ctx = await browser.newContext();\nawait collectPageErrors(page, errors);\nawait ctx.addInitScript(stub);`), [3], 'a page collector does not cover a context, whatever its name');
+  assert.deepEqual(initScriptsBeforeCollector(`let context = await browser.newContext();\nawait collectContextPageErrors(context, errors);\ncontext = await browser.newContext();\nawait context.addInitScript(stub);`), [4], 'a collector on the context the name held before does not count');
+});
+
+test('the drain check finds an assertion on collected errors that was not drained first', () => {
+  const collect = 'const errors = await collectPageErrors(page);\n';
+  assert.deepEqual(undrainedAssertions(`${collect}await page.click('a');\nassert.deepEqual(errors, []);`), [3]);
+  assert.deepEqual(undrainedAssertions(`${collect}await drainPageErrors(errors);\nassert.deepEqual(errors, []);`), []);
+  assert.deepEqual(undrainedAssertions(`${collect}await drainPageErrors(errors);assert.deepEqual(errors.filter(e => !/x/.test(e)), []);`), []);
+  assert.deepEqual(undrainedAssertions(`${collect}assert.deepEqual(errors.filter(e => !/x/.test(e)), []);`), [2], 'a filtered list');
+  assert.deepEqual(undrainedAssertions(`const log = {errors: []};\nawait collectPageErrors(page, log.errors);\nassert.deepEqual(main.log.errors, []);`), [3], 'the array reached through another object');
+  assert.deepEqual(undrainedAssertions(`${collect}// ${undrained}: asserts what arrived before the reload\nassert.equal(errors.length, 1);`), []);
+  assert.deepEqual(undrainedAssertions(`const other = [];\nassert.deepEqual(other, []);`), [], 'no collector, nothing to say');
 });
 
 test('the detector finds raw listeners and honours a justified exception', () => {
@@ -100,6 +157,8 @@ test('the detector finds raw listeners and honours a justified exception', () =>
   assert.deepEqual(rawPageErrorListeners(`page.on('${page}', e => seen.push(e)); // ${marker}: why`), []);
   assert.deepEqual(rawPageErrorListeners(`// ${marker}:\npage.on('${page}', e => seen.push(e));`), [2], 'an exception needs a reason');
   assert.deepEqual(rawPageErrorListeners(`const errors = await collectPageErrors(page); // not the raw ${page} event`), []);
+  assert.deepEqual(rawPageErrorListeners(`const raw = await page.${rawMethod}();\nconst also = await page['${rawMethod}']();`), [1, 2], "Playwright's page.pageErrors()");
+  assert.deepEqual(rawPageErrorListeners(`await drainPageErrors(errors);`), [], 'the fixture is not the raw method');
 });
 
 test('the inverse check asks a script that opens a page to collect, or say why not', () => {
@@ -133,6 +192,10 @@ test('every script of a UI gate, and every test-*.mjs, that opens a page collect
   files.add('scenarios/lib/runner.ts');
   const missing = [...files].sort().filter(file => !collectsPageErrors(readFileSync(join(v2, file), 'utf8')));
   assert.deepEqual(missing, [], `collect through ${fixture} (collectPageErrors, collectContextPageErrors) and assert none, or mark "${optOut}: <why>"`);
+  // The fixture's own test times its assertions itself: it polls, and asserts what arrived before a drain on purpose.
+  const unsettled = [...files].sort().filter(file => file !== 'scripts/test-page-errors.mjs')
+    .flatMap(file => undrainedAssertions(readFileSync(join(v2, file), 'utf8')).map(line => `${file}:${line}`));
+  assert.deepEqual(unsettled, [], `await drainPageErrors(errors) before asserting on them, or mark "${undrained}: <why>"`);
   const early = [...files].sort().flatMap(file => initScriptsBeforeCollector(readFileSync(join(v2, file), 'utf8')).map(line => `${file}:${line}`));
   assert.deepEqual(early, [], `install the collector (collectContextPageErrors for a context) before the init script, or mark "${initOrder}: <why>"`);
 });

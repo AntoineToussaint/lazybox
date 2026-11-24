@@ -244,6 +244,10 @@ notices in the conversation.
   `TestAnObservedExitIsNotSettledByReadoption`).
 - A newer client attaching to a host supersedes the old one and tells it so; the
   superseded Runner stands down and never stops a program it no longer owns.
+  Whatever closes the superseded connection (the notice, the old Runner's next
+  frame, a failed write) writes the notice first, within two seconds: a Runner
+  that read a bare end of connection would take the host for lost, re-attach
+  and displace the Runner that adopted it.
 - A host whose program exited while no Runner was attached keeps the remaining
   output and the exit status until a Runner collects them, or until the orphan
   limit below.
@@ -611,6 +615,7 @@ directory, in `hosts/` and `command-hosts/`.
   `TestUnreadStdinDoesNotBlockAcknowledgements`,
   `TestOversizedHelloIsRefusedAtOnce`,
   `TestIncompatibleHelloDoesNotSupersede`,
+  `TestASupersededClientIsToldBeforeItsConnectionEnds`,
   `TestCommandAdoptedElsewhereEndsHereWithoutStopping`,
   `TestRedeliveredDeclinedCallIsDeclinedAgain`,
   `TestRedeliveredAnsweredApprovalIsAnsweredAgain`,

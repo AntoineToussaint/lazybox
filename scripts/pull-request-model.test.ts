@@ -61,6 +61,13 @@ test('failing checks become an agent message with names and log links', () => {
   assert.equal(checksSummary(status), '2 failing · 1 passed');
 });
 
+test('checks the Runner could not all read never offer a merge', () => {
+  const status = pr({ checksState: 'incomplete', checks: [{ name: 'matrix-1', status: 'completed', conclusion: 'success' }] });
+  assert.equal(mergeBlocker(status), 'More checks than Lazybox reads; check them on GitHub');
+  assert.equal(checksSummary(status), '1 passed · more on GitHub');
+  assert.equal(nextStep(repo({ upstream: 'origin/feature/steady-otter', githubRepository: 'team/api', commits: [create(CommitSchema, { subject: 'Add' })] }), status), 'none');
+});
+
 test('agent drafts are read back from their fenced block only', () => {
   const request = draftRequest('commit', 'api', ['a.ts', 'b.ts'], 'n1');
   assert.match(request, /```lazybox-commit/);

@@ -1066,7 +1066,8 @@ message PullRequestStatus {
   // approved, changes_requested, review_required, or empty when no review is asked for.
   string review_decision = 15;
   repeated PullRequestCheck checks = 16;
-  // success, failure, pending, or none when the head has no checks.
+  // success, failure, pending, none when the head has no checks, or incomplete
+  // when it has more than the Runner reads at once and none of those read fails.
   string checks_state = 17;
   string merge_commit = 18; string author = 19;
 }
@@ -1098,7 +1099,8 @@ message ItemCheck { string name = 1; string url = 2; }
 // What a code review item adds (a GitHub pull request; later a merge request).
 message ItemPullRequest {
   string head = 1; string base = 2; bool draft = 3;
-  // success, failure, pending, or none when the head has no checks.
+  // success, failure, pending, none when the head has no checks, or incomplete
+  // when it has more than the Runner reads at once and none of those read fails.
   string checks = 4;
   // approved, changes_requested, review_required, or empty when none is asked for.
   string review = 5;
@@ -1205,7 +1207,7 @@ message PullRequestSummary {
   int64 number = 1; string title = 2; string url = 3;
   // open, closed or merged.
   string state = 4; bool draft = 5;
-  // success, failure, pending, or none.
+  // success, failure, pending, none, or incomplete (as PullRequestStatus).
   string checks_state = 6;
   // approved, changes_requested, review_required, or empty.
   string review_decision = 7;

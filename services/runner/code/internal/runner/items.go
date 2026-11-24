@@ -36,7 +36,7 @@ import (
 type GitHubItemsAPI interface {
 	workitems.GitHubAPI
 	JobLog(ctx context.Context, token, fullName string, jobID int64) ([]byte, error)
-	ReviewComments(ctx context.Context, token, fullName string, number int64) ([]github.ReviewComment, []github.Review, error)
+	ReviewComments(ctx context.Context, token, fullName string, number int64) (github.ReviewFeedback, error)
 	PullRequestByNumber(ctx context.Context, token, fullName string, number int64) (github.PullRequestStatus, error)
 }
 

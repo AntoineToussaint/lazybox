@@ -5685,7 +5685,8 @@ type PullRequestStatus struct {
 	// approved, changes_requested, review_required, or empty when no review is asked for.
 	ReviewDecision string              `protobuf:"bytes,15,opt,name=review_decision,json=reviewDecision,proto3" json:"review_decision,omitempty"`
 	Checks         []*PullRequestCheck `protobuf:"bytes,16,rep,name=checks,proto3" json:"checks,omitempty"`
-	// success, failure, pending, or none when the head has no checks.
+	// success, failure, pending, none when the head has no checks, or incomplete
+	// when it has more than the Runner reads at once and none of those read fails.
 	ChecksState   string `protobuf:"bytes,17,opt,name=checks_state,json=checksState,proto3" json:"checks_state,omitempty"`
 	MergeCommit   string `protobuf:"bytes,18,opt,name=merge_commit,json=mergeCommit,proto3" json:"merge_commit,omitempty"`
 	Author        string `protobuf:"bytes,19,opt,name=author,proto3" json:"author,omitempty"`
@@ -6082,7 +6083,8 @@ type ItemPullRequest struct {
 	Head  string                 `protobuf:"bytes,1,opt,name=head,proto3" json:"head,omitempty"`
 	Base  string                 `protobuf:"bytes,2,opt,name=base,proto3" json:"base,omitempty"`
 	Draft bool                   `protobuf:"varint,3,opt,name=draft,proto3" json:"draft,omitempty"`
-	// success, failure, pending, or none when the head has no checks.
+	// success, failure, pending, none when the head has no checks, or incomplete
+	// when it has more than the Runner reads at once and none of those read fails.
 	Checks string `protobuf:"bytes,4,opt,name=checks,proto3" json:"checks,omitempty"`
 	// approved, changes_requested, review_required, or empty when none is asked for.
 	Review        string       `protobuf:"bytes,5,opt,name=review,proto3" json:"review,omitempty"`
@@ -6926,7 +6928,7 @@ type PullRequestSummary struct {
 	// open, closed or merged.
 	State string `protobuf:"bytes,4,opt,name=state,proto3" json:"state,omitempty"`
 	Draft bool   `protobuf:"varint,5,opt,name=draft,proto3" json:"draft,omitempty"`
-	// success, failure, pending, or none.
+	// success, failure, pending, none, or incomplete (as PullRequestStatus).
 	ChecksState string `protobuf:"bytes,6,opt,name=checks_state,json=checksState,proto3" json:"checks_state,omitempty"`
 	// approved, changes_requested, review_required, or empty.
 	ReviewDecision       string `protobuf:"bytes,7,opt,name=review_decision,json=reviewDecision,proto3" json:"review_decision,omitempty"`

@@ -227,6 +227,66 @@ const failingJob = "2026-11-17T10:00:02.0000000Z ##[group]Run go test ./...\n" +
 	"2026-11-17T10:00:04.0000000Z FAIL\tteam/api/refund\t0.015s\n" +
 	"2026-11-17T10:00:04.0000000Z ##[error]Process completed with exit code 1.\n"
 
+// A pull request with more review comments than one read takes: the newest
+// are sent, and the person and the agent both hear that older feedback was
+// not read and stays on GitHub.
+func TestReviewImportSaysWhenOlderFeedbackWasNotRead(t *testing.T) {
+	f := newItemsFixture(t)
+	b, ctx := f.bench, context.Background()
+	owner := bearer(timeout(t), ownerToken)
+	agentCredential := bearer(timeout(t), agentToken(t, f.agent.Open.Env))
+	total := int64(github.MaxListed + 50)
+	// The oldest 50 fall outside the read; the first one read starts a
+	// thread the rest reply to.
+	comments := make([]githubtest.Comment, 0, total)
+	for id := int64(1); id <= total; id++ {
+		c := githubtest.Comment{ID: id, Author: "ana", Body: fmt.Sprintf("Note %d.", id), Path: "handler.go", Line: 1, Side: "RIGHT", Hunk: "@@ -0,0 +1 @@\n+package api"}
+		if id > 51 {
+			c.InReplyTo = 51
+		}
+		comments = append(comments, c)
+	}
+	f.github.Update(func(s *githubtest.Server) {
+		s.Pulls["team/api"] = []*githubtest.PR{{Number: 3, Title: "Fix refunds", Head: "agent/fix", Base: "main", HeadSHA: "sha-three", State: "open", MergeableState: "clean",
+			Reviews: []string{"ana:CHANGES_REQUESTED:See the notes."}, Comments: comments}}
+	})
+	if err := os.WriteFile(filepath.Join(f.worktree, "handler.go"), []byte("package api\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.LinkItem(agentCredential, &pb.LinkItemRequest{SessionId: f.session.ID, Url: "https://github.com/team/api/pull/3"}); err != nil {
+		t.Fatal(err)
+	}
+	b.TrackItems(ctx)
+	imported, err := f.client.ImportPullRequestReview(owner, &pb.PullRequestReactionRequest{CollectionId: f.mine.Id, Ref: &pb.ItemRef{Provider: "github", Key: "team/api#3"}})
+	// Only the comments were cut (the pull request has one review): the note names them alone.
+	commentsCut := fmt.Sprintf("the pull request has more review feedback than Lazybox reads at once: only its newest %d review comments were read; read the older ones on GitHub", github.MaxListed)
+	if err != nil || imported.Comments != 1 || len(imported.Notes) != 1 || imported.Notes[0] != commentsCut {
+		t.Fatalf("import: %+v %v", imported, err)
+	}
+	message := f.applied(t)
+	if !strings.Contains(message.Text, "read the older ones on GitHub") || !strings.Contains(message.Text, fmt.Sprintf("Note %d.", total)) || strings.Contains(message.Text, "Note 50.") {
+		t.Fatalf("the agent's message: %s", message.Text)
+	}
+
+	// Only the reviews cut: the note names the reviews alone.
+	f.github.Update(func(s *githubtest.Server) {
+		reviews := make([]string, 0, github.MaxListed+1)
+		for range github.MaxListed {
+			reviews = append(reviews, "ana:COMMENTED:Looked.")
+		}
+		s.Pulls["team/api"][0].Reviews = append(reviews, "bo:CHANGES_REQUESTED:Rename the package.")
+		s.Pulls["team/api"][0].Comments = nil
+	})
+	imported, err = f.client.ImportPullRequestReview(owner, &pb.PullRequestReactionRequest{CollectionId: f.mine.Id, Ref: &pb.ItemRef{Provider: "github", Key: "team/api#3"}})
+	reviewsCut := fmt.Sprintf("the pull request has more review feedback than Lazybox reads at once: only its newest %d reviews were read; read the older ones on GitHub", github.MaxListed)
+	if err != nil || len(imported.Notes) != 1 || imported.Notes[0] != reviewsCut {
+		t.Fatalf("reviews cut: %+v %v", imported, err)
+	}
+	if message = f.applied(t); !strings.Contains(message.Text, "only its newest 1000 reviews were read") || strings.Contains(message.Text, "review comments were read") {
+		t.Fatalf("the agent's message names the reviews alone: %s", message.Text)
+	}
+}
+
 func (f *itemsFixture) applied(t *testing.T) agent.Operation {
 	t.Helper()
 	select {
@@ -576,6 +636,42 @@ func TestMissionRefreshesDeliveredPRByNumber(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// A pull request with more checks than one read takes, none of those read
+// failing, is no pass for a task: its evidence says the checks were not all read.
+func TestMissionEvidenceOfIncompleteChecksIsNoPass(t *testing.T) {
+	f := newItemsFixture(t)
+	ctx := bearer(timeout(t), ownerToken)
+	mission, task := missionWithTask(t, f.terminalFixture, ctx)
+	if _, err := f.client.UpdateMission(ctx, &pb.UpdateMissionRequest{MissionId: mission, OperationId: "assign", Change: &pb.UpdateMissionRequest_Assign{Assign: &pb.TaskAssign{TaskId: task, SessionId: f.session.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	f.github.Update(func(s *githubtest.Server) {
+		s.Pulls["team/api"] = []*githubtest.PR{{Number: 7, Title: "Big matrix", Head: "other-branch", Base: "main", HeadSHA: "matrix-head", State: "open"}}
+		for id := range github.MaxListed + 1 {
+			s.Checks["matrix-head"] = append(s.Checks["matrix-head"], githubtest.Check{ID: int64(id + 1), Name: fmt.Sprintf("matrix-%d", id), Status: "completed", Conclusion: "success"})
+		}
+	})
+	if _, err := f.client.LinkItem(ctx, &pb.LinkItemRequest{SessionId: f.session.ID, Url: "https://github.com/team/api/pull/7", Role: "delivers"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.GetMission(ctx, &pb.GetMissionRequest{MissionId: mission, RefreshEvidence: true}); err != nil {
+		t.Fatal(err)
+	}
+	var evidence *pb.MissionEvidence
+	until(t, "evidence from the linked PR did not arrive", func() bool {
+		for _, e := range taskOf(t, getMission(t, f.terminalFixture, ctx, mission), task).Evidence {
+			if e.Head == "matrix-head" {
+				evidence = e
+				return true
+			}
+		}
+		return false
+	})
+	if evidence.Outcome == "pass" || !strings.Contains(evidence.Detail, "more checks than Lazybox reads") {
+		t.Fatalf("incomplete checks: %s %q", evidence.Outcome, evidence.Detail)
+	}
 }
 
 // A cached pass from before the task was linked is evidence only once GitHub

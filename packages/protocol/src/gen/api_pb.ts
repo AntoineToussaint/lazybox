@@ -3014,7 +3014,8 @@ export type PullRequestStatus = Message$1<"lazybox.bench.v1.PullRequestStatus"> 
   checks: PullRequestCheck[];
 
   /**
-   * success, failure, pending, or none when the head has no checks.
+   * success, failure, pending, none when the head has no checks, or incomplete
+   * when it has more than the Runner reads at once and none of those read fails.
    *
    * @generated from field: string checks_state = 17;
    */
@@ -3167,7 +3168,8 @@ export type ItemPullRequest = Message$1<"lazybox.bench.v1.ItemPullRequest"> & {
   draft: boolean;
 
   /**
-   * success, failure, pending, or none when the head has no checks.
+   * success, failure, pending, none when the head has no checks, or incomplete
+   * when it has more than the Runner reads at once and none of those read fails.
    *
    * @generated from field: string checks = 4;
    */
@@ -3643,7 +3645,7 @@ export type PullRequestSummary = Message$1<"lazybox.bench.v1.PullRequestSummary"
   draft: boolean;
 
   /**
-   * success, failure, pending, or none.
+   * success, failure, pending, none, or incomplete (as PullRequestStatus).
    *
    * @generated from field: string checks_state = 6;
    */

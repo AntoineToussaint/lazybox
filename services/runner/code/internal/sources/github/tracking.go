@@ -2,12 +2,14 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,62 +20,100 @@ import (
 // delivers, with conditional requests: GitHub answers an unchanged resource
 // with 304 Not Modified, which costs no rate limit.
 
-// RateLimitError is GitHub asking the client to wait (a primary or secondary
-// rate limit, HTTP 403 or 429). Reset is when it may read again, when known.
-type RateLimitError struct{ Reset time.Time }
-
-func (e *RateLimitError) Error() string {
-	return "GitHub's rate limit was reached; reading again later"
-}
-
 // ErrActionsLogs is GitHub refusing a job's logs to this connection.
 var ErrActionsLogs = errors.New("GitHub refused the job's logs: the connection needs Actions read access (a fine-grained token: Repository permissions → Actions → Read-only; the GitHub App: Actions read)")
 
 // ErrLogsGone is a job whose logs GitHub no longer keeps.
 var ErrLogsGone = errors.New("GitHub no longer has this job's logs")
 
-// trackError keeps a rate limit apart, so tracking can wait for its reset.
-func trackError(err error, response *sdk.Response) error {
-	var limit *sdk.RateLimitError
-	if errors.As(err, &limit) {
-		return &RateLimitError{Reset: limit.Rate.Reset.Time}
-	}
-	var abuse *sdk.AbuseRateLimitError
-	if errors.As(err, &abuse) {
-		out := &RateLimitError{}
-		if abuse.RetryAfter != nil {
-			out.Reset = time.Now().Add(*abuse.RetryAfter)
-		}
-		return out
-	}
-	if response != nil && response.Response != nil && response.StatusCode == http.StatusTooManyRequests {
-		return &RateLimitError{}
-	}
-	return apiError(err, response)
-}
-
 // get reads path into out, conditionally when etag is set. notModified means
 // GitHub answered 304 and out is untouched.
 func get(ctx context.Context, client *sdk.Client, path, etag string, out any) (newETag string, notModified bool, err error) {
-	req, err := client.NewRequest(ctx, http.MethodGet, path, nil)
+	newETag, notModified, _, err = getPage(ctx, client, path, etag, out)
+	return newETag, notModified, err
+}
+
+// headChecks is a head's check runs or commit statuses, read to the end.
+type headChecks struct {
+	Checks []Check
+	// Tags, Same and Complete are as pagedRead's.
+	Tags           string
+	Same, Complete bool
+}
+
+// readRuns reads every check run on head, conditionally on tags.
+func readRuns(ctx context.Context, client *sdk.Client, owner, name, head, tags string) (headChecks, error) {
+	read, err := getPages[sdk.ListCheckRunsResults](ctx, client, fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=%d", owner, name, url.PathEscape(head), perPage), tags)
 	if err != nil {
-		return "", false, errors.New("invalid GitHub request")
+		return headChecks{}, err
 	}
-	if etag != "" {
-		req.Header.Set("If-None-Match", etag)
+	out := headChecks{Tags: read.Tags, Same: read.Same, Complete: read.Complete}
+	seen, total := map[int64]bool{}, 0
+	for i, page := range read.Pages {
+		if i == 0 {
+			total = page.GetTotal()
+		}
+		for _, run := range page.CheckRuns {
+			// A run started while the list was read shifts it: one run can show twice.
+			id := run.GetID()
+			if id != 0 && seen[id] {
+				continue
+			}
+			seen[id] = true
+			out.Checks = append(out.Checks, checkRuns([]*sdk.CheckRun{run})...)
+		}
 	}
-	response, err := client.Do(req, out)
-	if response != nil && response.Response != nil && response.StatusCode == http.StatusNotModified {
-		return etag, true, nil
-	}
+	return out.counted(total), nil
+}
+
+// readStatuses reads every commit status on head (the latest per context),
+// conditionally on tags.
+func readStatuses(ctx context.Context, client *sdk.Client, owner, name, head, tags string) (headChecks, error) {
+	read, err := getPages[sdk.CombinedStatus](ctx, client, fmt.Sprintf("repos/%s/%s/commits/%s/status?per_page=%d", owner, name, url.PathEscape(head), perPage), tags)
 	if err != nil {
-		return "", false, trackError(err, response)
+		return headChecks{}, err
 	}
-	return response.Header.Get("ETag"), false, nil
+	out := headChecks{Tags: read.Tags, Same: read.Same, Complete: read.Complete}
+	seen, total := map[string]bool{}, 0
+	for i, page := range read.Pages {
+		if i == 0 {
+			total = page.GetTotalCount()
+		}
+		for _, status := range page.Statuses {
+			if seen[status.GetContext()] {
+				continue
+			}
+			seen[status.GetContext()] = true
+			out.Checks = append(out.Checks, commitStatuses([]*sdk.RepoStatus{status})...)
+		}
+	}
+	return out.counted(total), nil
+}
+
+// counted holds a read to GitHub's own count: a list that moved while its
+// pages were read can come out short, and is then not complete.
+func (h headChecks) counted(total int) headChecks {
+	if !h.Same && len(h.Checks) < total {
+		h.Complete, h.Tags = false, ""
+	}
+	return h
+}
+
+// readReviews reads a pull request's submitted reviews, oldest first: all
+// of them, or the newest MaxListed (complete false).
+func readReviews(ctx context.Context, client *sdk.Client, owner, name string, number int) ([]*sdk.PullRequestReview, bool, error) {
+	return listNewest(func(page int) ([]*sdk.PullRequestReview, *sdk.Response, error) {
+		list, response, err := client.PullRequests.ListReviews(ctx, owner, name, number, &sdk.ListOptions{Page: page, PerPage: perPage})
+		if err != nil {
+			return nil, nil, apiError(err, response)
+		}
+		return list, response, nil
+	})
 }
 
 // PullETags are the validators of a pull request's parts, and the head they
-// were read on (the head's checks are other resources once it moves).
+// were read on (the head's checks are other resources once it moves). Runs
+// and Statuses hold one validator per page, space-separated.
 type PullETags struct {
 	Pull     string `json:"pull,omitempty"`
 	Runs     string `json:"runs,omitempty"`
@@ -128,43 +168,46 @@ func (c *Client) ReadPullRequest(ctx context.Context, token, fullName string, nu
 		out.Status = pullStatus(&pr, out.Status)
 		out.CreatedAt, out.UpdatedAt = pr.GetCreatedAt().Time, pr.GetUpdatedAt().Time
 		out.ClosedAt = pr.GetClosedAt().Time
-		reviews, response, err := client.PullRequests.ListReviews(ctx, owner, name, int(number), &sdk.ListOptions{PerPage: 100})
+		reviews, _, err := readReviews(ctx, client, owner, name, int(number))
 		if err != nil {
-			return PullRead{}, trackError(err, response)
+			return PullRead{}, err
 		}
 		out.Status.ReviewDecision = reviewDecision(reviews, len(pr.RequestedReviewers)+len(pr.RequestedTeams))
 	}
 	head := out.Status.HeadSHA
 	out.ETags.Head = head
 	sameHead := previous != nil && etags.Head == head && head != ""
-	runsSame, statusesSame := false, false
+	runsSame, statusesSame, complete := false, false, true
 	if head != "" {
 		runsTag, statusesTag := "", ""
 		if sameHead {
 			runsTag, statusesTag = etags.Runs, etags.Statuses
 		}
-		var runs sdk.ListCheckRunsResults
-		if out.ETags.Runs, runsSame, err = get(ctx, client, fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=100", owner, name, url.PathEscape(head)), runsTag, &runs); err != nil {
+		runs, err := readRuns(ctx, client, owner, name, head, runsTag)
+		if err != nil {
 			return PullRead{}, err
 		}
+		out.ETags.Runs, runsSame = runs.Tags, runs.Same
 		if runsSame {
 			out.Runs = previous.Runs
 		} else {
-			out.Runs = checkRuns(runs.CheckRuns)
+			out.Runs = runs.Checks
 		}
-		var combined sdk.CombinedStatus
-		if out.ETags.Statuses, statusesSame, err = get(ctx, client, fmt.Sprintf("repos/%s/%s/commits/%s/status?per_page=100", owner, name, url.PathEscape(head)), statusesTag, &combined); err != nil {
+		statuses, err := readStatuses(ctx, client, owner, name, head, statusesTag)
+		if err != nil {
 			return PullRead{}, err
 		}
+		out.ETags.Statuses, statusesSame = statuses.Tags, statuses.Same
 		if statusesSame {
 			out.Statuses = previous.Statuses
 		} else {
-			out.Statuses = commitStatuses(combined.Statuses)
+			out.Statuses = statuses.Checks
 		}
+		complete = runs.Complete && statuses.Complete
 	}
 	out.Status.Checks = append(append([]Check{}, out.Runs...), out.Statuses...)
 	sort.SliceStable(out.Status.Checks, func(i, j int) bool { return checkRank(out.Status.Checks[i]) < checkRank(out.Status.Checks[j]) })
-	out.Status.ChecksState = checksState(out.Status.Checks)
+	out.Status.ChecksState = checksState(out.Status.Checks, complete)
 	out.NotModified = pullSame && runsSame && statusesSame
 	return out, nil
 }
@@ -233,6 +276,29 @@ type BranchPull struct {
 	CreatedAt time.Time
 }
 
+// branchPulls reads every pull request from owner:branch in the repository
+// (open and closed, newest first), conditionally on tags; at most MaxPages
+// pages, the newest. GitHub filters by head, so one page is the usual read.
+func branchPulls(ctx context.Context, client *sdk.Client, owner, name, branch, tags string) ([]*sdk.PullRequest, pagedRead[[]*sdk.PullRequest], error) {
+	query := url.Values{"head": {owner + ":" + branch}, "state": {"all"}, "sort": {"created"}, "direction": {"desc"}, "per_page": {strconv.Itoa(perPage)}}
+	read, err := getPages[[]*sdk.PullRequest](ctx, client, fmt.Sprintf("repos/%s/%s/pulls?%s", owner, name, query.Encode()), tags)
+	if err != nil {
+		return nil, read, err
+	}
+	var list []*sdk.PullRequest
+	seen := map[int]bool{}
+	for _, page := range read.Pages {
+		for _, pr := range page {
+			if pr.GetHead().GetRef() != branch || seen[pr.GetNumber()] {
+				continue
+			}
+			seen[pr.GetNumber()] = true
+			list = append(list, pr)
+		}
+	}
+	return list, read, nil
+}
+
 // PullRequestsForBranch lists the pull requests whose head is branch in the
 // repository (open and closed, newest first), conditionally on etag.
 func (c *Client) PullRequestsForBranch(ctx context.Context, token, fullName, branch, etag string) ([]BranchPull, string, bool, error) {
@@ -247,24 +313,19 @@ func (c *Client) PullRequestsForBranch(ctx context.Context, token, fullName, bra
 	if err != nil {
 		return nil, "", false, err
 	}
-	var list []*sdk.PullRequest
-	query := url.Values{"head": {owner + ":" + branch}, "state": {"all"}, "sort": {"created"}, "direction": {"desc"}, "per_page": {"10"}}
-	tag, same, err := get(ctx, client, fmt.Sprintf("repos/%s/%s/pulls?%s", owner, name, query.Encode()), etag, &list)
-	if err != nil || same {
-		return nil, tag, same, err
+	list, read, err := branchPulls(ctx, client, owner, name, branch, etag)
+	if err != nil || read.Same {
+		return nil, read.Tags, read.Same, err
 	}
 	var out []BranchPull
 	for _, pr := range list {
-		if pr.GetHead().GetRef() != branch {
-			continue
-		}
 		state := pr.GetState()
 		if pr.MergedAt != nil {
 			state = "merged"
 		}
 		out = append(out, BranchPull{Number: int64(pr.GetNumber()), State: state, Head: branch, HeadSHA: pr.GetHead().GetSHA(), CreatedAt: pr.GetCreatedAt().Time})
 	}
-	return out, tag, false, nil
+	return out, read.Tags, false, nil
 }
 
 // JobLogLimit bounds a job's log as read: the full log is saved, so a
@@ -305,9 +366,13 @@ func (c *Client) JobLog(ctx context.Context, token, fullName string, jobID int64
 	case http.StatusFound, http.StatusMovedPermanently, http.StatusTemporaryRedirect, http.StatusSeeOther:
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
-	case http.StatusForbidden:
-		if response.Header.Get("X-RateLimit-Remaining") == "0" {
-			return nil, &RateLimitError{}
+	case http.StatusForbidden, http.StatusTooManyRequests:
+		var refusal struct {
+			Message string `json:"message"`
+		}
+		_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&refusal)
+		if limit := rateLimitOf(response.StatusCode, response.Header, refusal.Message); limit != nil {
+			return nil, limit
 		}
 		return nil, ErrActionsLogs
 	case http.StatusNotFound, http.StatusGone:
@@ -379,41 +444,57 @@ type Review struct {
 	SubmittedAt time.Time
 }
 
-// ReviewComments lists a pull request's inline review comments, oldest first
-// (at most 300), and its submitted reviews.
-func (c *Client) ReviewComments(ctx context.Context, token, fullName string, number int64) ([]ReviewComment, []Review, error) {
+// ReviewFeedback is a pull request's review feedback as read.
+type ReviewFeedback struct {
+	// Comments are the inline review comments, oldest first.
+	Comments []ReviewComment
+	// Reviews are the submitted reviews, oldest first.
+	Reviews []Review
+	// CommentsTruncated and ReviewsTruncated: GitHub has older comments, or
+	// older reviews, than these, the newest MaxListed of that list.
+	CommentsTruncated, ReviewsTruncated bool
+}
+
+// Truncated: GitHub has older comments or reviews than were read.
+func (f ReviewFeedback) Truncated() bool { return f.CommentsTruncated || f.ReviewsTruncated }
+
+// ReviewComments reads a pull request's inline review comments and its
+// submitted reviews from their newest end: all of them, or the newest
+// MaxListed of each (CommentsTruncated, ReviewsTruncated).
+func (c *Client) ReviewComments(ctx context.Context, token, fullName string, number int64) (ReviewFeedback, error) {
 	owner, name, err := splitName(fullName)
 	if err != nil {
-		return nil, nil, err
+		return ReviewFeedback{}, err
 	}
 	client, err := c.client(token)
 	if err != nil {
-		return nil, nil, err
+		return ReviewFeedback{}, err
 	}
-	var comments []ReviewComment
-	for page := 1; page <= 3; page++ {
-		list, response, err := client.PullRequests.ListComments(ctx, owner, name, int(number), &sdk.PullRequestListCommentsOptions{Sort: "created", Direction: "asc", ListOptions: sdk.ListOptions{Page: page, PerPage: 100}})
+	list, commentsComplete, err := listNewest(func(page int) ([]*sdk.PullRequestComment, *sdk.Response, error) {
+		list, response, err := client.PullRequests.ListComments(ctx, owner, name, int(number), &sdk.PullRequestListCommentsOptions{Sort: "created", Direction: "asc", ListOptions: sdk.ListOptions{Page: page, PerPage: perPage}})
 		if err != nil {
-			return nil, nil, trackError(err, response)
+			return nil, nil, apiError(err, response)
 		}
-		for _, c := range list {
-			comments = append(comments, ReviewComment{ID: c.GetID(), ReviewID: c.GetPullRequestReviewID(), InReplyTo: c.GetInReplyTo(), Path: c.GetPath(),
-				Line: c.GetLine(), StartLine: c.GetStartLine(), Side: c.GetSide(), Outdated: c.Line == nil, OriginalLine: c.GetOriginalLine(),
-				Body: c.GetBody(), Author: c.GetUser().GetLogin(), Association: c.GetAuthorAssociation(), URL: c.GetHTMLURL(), DiffHunk: c.GetDiffHunk(), CommitID: c.GetCommitID(), CreatedAt: c.GetCreatedAt().Time})
-		}
-		if !hasMore(response) {
-			break
-		}
-	}
-	list, response, err := client.PullRequests.ListReviews(ctx, owner, name, int(number), &sdk.ListOptions{PerPage: 100})
+		return list, response, nil
+	})
 	if err != nil {
-		return nil, nil, trackError(err, response)
+		return ReviewFeedback{}, err
 	}
-	var reviews []Review
-	for _, r := range list {
-		reviews = append(reviews, Review{ID: r.GetID(), Author: r.GetUser().GetLogin(), Association: r.GetAuthorAssociation(), State: r.GetState(), Body: r.GetBody(), URL: r.GetHTMLURL(), SubmittedAt: r.GetSubmittedAt().Time})
+	var out ReviewFeedback
+	for _, c := range list {
+		out.Comments = append(out.Comments, ReviewComment{ID: c.GetID(), ReviewID: c.GetPullRequestReviewID(), InReplyTo: c.GetInReplyTo(), Path: c.GetPath(),
+			Line: c.GetLine(), StartLine: c.GetStartLine(), Side: c.GetSide(), Outdated: c.Line == nil, OriginalLine: c.GetOriginalLine(),
+			Body: c.GetBody(), Author: c.GetUser().GetLogin(), Association: c.GetAuthorAssociation(), URL: c.GetHTMLURL(), DiffHunk: c.GetDiffHunk(), CommitID: c.GetCommitID(), CreatedAt: c.GetCreatedAt().Time})
 	}
-	return comments, reviews, nil
+	reviews, reviewsComplete, err := readReviews(ctx, client, owner, name, int(number))
+	if err != nil {
+		return ReviewFeedback{}, err
+	}
+	for _, r := range reviews {
+		out.Reviews = append(out.Reviews, Review{ID: r.GetID(), Author: r.GetUser().GetLogin(), Association: r.GetAuthorAssociation(), State: r.GetState(), Body: r.GetBody(), URL: r.GetHTMLURL(), SubmittedAt: r.GetSubmittedAt().Time})
+	}
+	out.CommentsTruncated, out.ReviewsTruncated = !commentsComplete, !reviewsComplete
+	return out, nil
 }
 
 // PullRequestByNumber reads a pull request by its number, as the PR loop

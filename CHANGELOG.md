@@ -134,6 +134,10 @@ leave out.
 
 ### Pull requests and issues
 
+- **Green means every check passed** A pull request with more than 100 checks or commit statuses is read to the last one, so a failure on a later page shows as failing. Past 1000, Lazybox says it could not read them all and does not offer Merge or report the checks as passed.
+- **The latest review decides** A reviewer's newest review sets the review decision, however many reviews came before it, and a pull request is found from its branch however many older ones the branch had.
+- **Newest review comments first** Address the review sends the newest comments. On a pull request with more than 1000, a note tells you and the agent that the older ones stay on GitHub.
+- **A rate limit is not a bad token** When GitHub rate limits Lazybox, the message says your connection still works and when to try again, instead of asking you to check the token's permissions.
 - **Update a pull request that is behind** When a repository requires branches to be up to date and a pull request is behind its base, the Inbox, the Pull requests panel and the workspace's pull request card offer Update branch instead of a Merge GitHub would refuse. It asks first, updates only the head you saw, and the checks run again. A refused merge now shows why.
 - **Review feedback on GitHub** When there is nothing eligible to send to the agent, the Inbox points you to the review on GitHub.
 - **Every pull request tracked** The pull requests your agents open, push or link are tracked, with a pill in the header and one badge per sidebar row: checks failed, changes requested or ready to merge.

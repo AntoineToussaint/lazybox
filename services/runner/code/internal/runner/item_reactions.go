@@ -367,16 +367,16 @@ func (b *Bench) importPullRequestReview(ctx context.Context, workspace string, r
 	}
 	ctx, cancel := context.WithTimeout(ctx, reactionTimeout)
 	defer cancel()
-	var comments []github.ReviewComment
-	var submitted []github.Review
+	var feedback github.ReviewFeedback
 	err = b.githubCredential(ctx, func(token string) error {
 		var err error
-		comments, submitted, err = b.githubItems().ReviewComments(ctx, token, repository, number)
+		feedback, err = b.githubItems().ReviewComments(ctx, token, repository, number)
 		return err
 	})
 	if err != nil {
 		return Reaction{}, err
 	}
+	comments, submitted := feedback.Comments, feedback.Reviews
 	var member *collectionsMember
 	for _, m := range w.Members {
 		if m.Ready && (m.Name == link.Member || (link.Member == "" && strings.EqualFold(b.githubOrigin(ctx, m.Path), repository))) {
@@ -481,9 +481,20 @@ func (b *Bench) importPullRequestReview(ctx context.Context, workspace string, r
 	if skipped > 0 {
 		notes = append(notes, fmt.Sprintf("%d %s from people who are not the repository's owners, members or collaborators %s not sent; read %s on GitHub", skipped, noun(skipped, "review or comment", "reviews and comments"), noun(skipped, "was", "were"), noun(skipped, "it", "them")))
 	}
+	// Name only the list that was cut.
+	var cut []string
+	if feedback.CommentsTruncated {
+		cut = append(cut, fmt.Sprintf("%d review comments", github.MaxListed))
+	}
+	if feedback.ReviewsTruncated {
+		cut = append(cut, fmt.Sprintf("%d reviews", github.MaxListed))
+	}
+	if len(cut) > 0 {
+		notes = append(notes, fmt.Sprintf("the pull request has more review feedback than Lazybox reads at once: only its newest %s were read; read the older ones on GitHub", strings.Join(cut, " and ")))
+	}
 	if len(added) == 0 && len(unanchored) == 0 && len(summaries) == 0 {
-		if skipped > 0 {
-			return Reaction{Summary: "No new review feedback was sent. Open review to read feedback on GitHub."}, nil
+		if skipped > 0 || feedback.Truncated() {
+			return Reaction{Notes: notes, Summary: "No new review feedback was sent. Open review to read feedback on GitHub."}, nil
 		}
 		return Reaction{Summary: "No new review feedback to send."}, nil
 	}
@@ -506,8 +517,8 @@ func (b *Bench) importPullRequestReview(ctx context.Context, workspace string, r
 	}
 	parts := []string{fmt.Sprintf("[Lazybox] The review of %s on GitHub asks for changes. Lazybox imported its comments into the workspace's Review; address them in the code, then commit and push. When you are done, say which comments you addressed and how, and which you did not and why.", key),
 		itemtext.QuoteExternal("GitHub pull request", key, pullURL("", repository, number), reviewFraming, strings.Join(quoted, "\n\n"))}
-	if skipped > 0 {
-		parts = append(parts, "[Lazybox] "+capitalFirst(notes[0])+".")
+	for _, note := range notes {
+		parts = append(parts, "[Lazybox] "+capitalFirst(note)+".")
 	}
 	text := strings.Join(parts, "\n\n")
 	origin := &agent.Origin{Kind: originPRReview, Summary: fmt.Sprintf("Review of %s#%d on GitHub", repository, number), Detail: fmt.Sprintf("%d %s", len(added)+len(unanchored), noun(len(added)+len(unanchored), "comment", "comments")), Copy: "https://github.com/" + repository + "/pull/" + fmt.Sprint(number)}

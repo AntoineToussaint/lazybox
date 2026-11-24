@@ -46,8 +46,13 @@ full access:
 | `a` | Always allow in this workspace |
 | `n` | Deny…, with a reason the agent reads |
 
-Downloads and submitting a sign-in form ask too. The agent never types
-passwords; when it needs one it asks you to take over.
+A redirect to another site asks before that site is contacted. Downloads and
+submitting a sign-in form ask too, however the agent would submit it. The
+agent never types or sees passwords: when it needs one it asks you to take
+over, and a password you type is hidden from its snapshots and masked in its
+screenshots. Sites you go to yourself while you hold the browser become the
+agent's to stay on; a page that moves itself to another site meanwhile does
+not.
 
 To stop being asked in one conversation, choose **Browse freely in this
 conversation** from the panel's menu.

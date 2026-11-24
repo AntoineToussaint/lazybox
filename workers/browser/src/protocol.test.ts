@@ -15,7 +15,7 @@ test('the JSON-lines protocol: open, ask the Runner, act, stream frames, refuse,
   const root = fileURLToPath(new URL('../../..', import.meta.url));
   const child = spawn(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('./main.ts', import.meta.url))], { cwd: root, stdio: ['pipe', 'pipe', 'inherit'] });
   const replies = new Map<string, (line: any) => void>();
-  const asks: any[] = [], events: any[] = [];
+  const asks: any[] = [], events: any[] = [], orphans: any[] = [];
   const write = (line: unknown) => child.stdin.write(JSON.stringify(line) + '\n');
   createInterface({ input: child.stdout }).on('line', text => {
     const line = JSON.parse(text);
@@ -24,6 +24,7 @@ test('the JSON-lines protocol: open, ask the Runner, act, stream frames, refuse,
       asks.push(line);
       write({ id: line.id, result: { allow: line.params.origin === sites.home } });
     } else if (line.method) events.push(line);
+    else if (line.id === null) orphans.push(line);
     else replies.get(line.id)?.(line);
   });
   let next = 0;
@@ -40,7 +41,10 @@ test('the JSON-lines protocol: open, ask the Runner, act, stream frames, refuse,
     assert.ok(events.some(e => e.method === 'frame' && e.params.browser === 'conv' && e.params.data.startsWith('/9j/')), 'a JPEG frame');
     const refused = await call('act', { browser: 'conv', actor: 'agent', action: 'navigate', url: `${sites.forbidden}/` });
     assert.match(refused.error.message, /not one of the workspace's previews/);
+    // Regression: a line that is JSON but no object (null crashed the service) is answered and dropped.
+    for (const line of ['null', '42', '[]', '"open"']) child.stdin.write(line + '\n');
     const unknown = await call('teleport', {});
+    assert.deepEqual(orphans.map(o => o.error.message), Array(4).fill('A protocol line must be a JSON object'));
     assert.match(unknown.error.message, /Unsupported browser operation/);
     const exited = new Promise<number | null>(resolve => child.on('exit', code => resolve(code)));
     child.stdin.end();

@@ -207,9 +207,26 @@ the agent typed the URL or clicked a link, and **in full access (YOLO) too**,
 unless the site is on the allow-list, always allowed in the workspace, allowed
 for the conversation, or the person chose *browse freely* (or *Allow any
 site*). *Allow once* covers that visit: same-origin pages are not asked again,
-and coming back after visiting another site asks again. Sites the person
-navigates to during Take over count as their choice. A request no one answers
-is refused after 10 minutes; at most 8 wait per conversation.
+and coming back after visiting another site asks again. A redirect is a
+navigation too: a document's redirect to another origin is held at its
+response (CDP Fetch), before the browser follows it, so the other site gets no
+request until the person allows it; refused, the page stays where it was. An
+origin becomes the agent's only once allowed, never while the question is
+open. `browser_open` with no URL after the browser closed goes back to the
+last page through the same check, asking if its site is no longer allowed.
+
+Sites the person goes to during Take over count as their choice — the address
+they type, back, forward, reload, and a navigation a press of theirs in the
+page started (it carries their user activation, `hasUserGesture`). A page that
+moves itself while they hold the browser (a timer, a meta refresh) is no
+choice of theirs: the agent asks before acting there. The service reports the
+origin it accepts (`PageState.origin`), and that is what the Runner grants
+when the person gives the browser back, not the page's address. The service
+reads the page's title from its history, never by running script, so its own
+calls give the page no user activation to borrow. A navigation the service
+asks about while the person holds the browser (the page moved before their
+first input) is asked like the agent's. A request no one answers is refused
+after 10 minutes; at most 8 wait per conversation.
 
 **What a page may never reach**, whoever drives it and whatever the person
 answered: anything but http(s)/ws(s) (and data:/blob: inside a page) — so no
@@ -224,13 +241,28 @@ through, which vets the resolved address and connects to that address, so a
 redirect, a WebSocket, a service worker or DNS rebinding cannot get around it;
 request interception only attributes and explains refusals in the log. The
 Runner checks the same rules before asking, so a blocked URL is refused
-without a card.
+without a card. Both read a host as a browser does: a trailing dot
+(`localhost.`), the numeric IPv4 forms (`2130706433`, `0x7f000001`, `127.1`,
+`0177.0.0.1`) and an IPv4 address inside IPv6 (`[::127.0.0.1]`,
+`[64:ff9b::a9fe:a9fe]`) are the address they name, and a host whose last label
+is a number but no IPv4 address is refused, as a browser refuses it.
 
-**Credentials.** The agent may not type into a password field: it is told to
-ask the person to Take over and type it. Submitting a form that holds a filled
-password field (filled by the person, or by the profile) asks first (*sign
-in*). What the person types during Take over goes to the page only; the agent
-sees the page afterwards like any page, never the keystrokes.
+**Credentials.** A password field is an `<input type=password>` or one whose
+`autocomplete` says it holds a password (a password shown as text). The agent
+may not type into one: it is told to ask the person to Take over and type it.
+It never reads one either: a filled password field shows in its snapshot as
+`"(password hidden)"`, and its screenshots mask such fields in every frame.
+Submitting a form that holds a filled password field (filled by the person, or
+by the profile) asks first (*sign in*), however the agent's action submits it:
+a submit button or Enter (asked before acting), or anything else — Space on the
+button, NumpadEnter, a plain button or a link whose script calls
+`form.submit()` or `requestSubmit()`. For those, an init script in every frame,
+armed only while an agent action runs, holds the submission (a capture-phase
+`submit` listener and `HTMLFormElement.prototype.submit`) until the person
+answers; refused, the form is not sent and the action fails saying so. A login
+that never submits a form (a script posting the password itself) is not seen
+by this guard. What the person types during Take over goes to the page only;
+the agent sees the page afterwards like any page, never the keystrokes.
 
 **Downloads** ask (or are blocked, per Settings); an allowed file is saved
 under the conversation's downloads folder and its path given to the agent.
@@ -281,13 +313,20 @@ watches and a slow watcher gets the latest frame, never a backlog.
   type and submit, select, press, back/forward, wait_for, screenshots; the site
   gate for typed URLs and clicked links; blocked schemes, loopback ports,
   private addresses, the Runner's address, a redirect and a page's fetch to a
-  refused port; downloads denied and allowed; password typing refused; sign-in
-  asks; popups, dialogs, screencast frames, Take over input; the stdio protocol.
+  refused port; a redirect to another site asked about before that site gets a
+  request; only the person's own navigations becoming the agent's site;
+  downloads denied and allowed; password typing refused; passwords hidden from
+  snapshots and masked in screenshots; sign-in asks for a click, Enter,
+  NumpadEnter, Space and a script-submitted form; popups, dialogs, screencast
+  frames, Take over input; the stdio protocol (a line that is no JSON object is
+  answered with an error, not a crash).
 - Runner (`go test ./internal/runner/browser`): asks and answers (once,
   conversation, workspace, deny with a reason), grants across a restart, YOLO
   still asking, allow-list and browse freely, blocked URLs without a card,
   navigation the service asks about, read-only, Take over pausing and Give
-  back resuming, Stop and Resume, watchers' history, frames and boxes,
+  back resuming, a page that moved itself during Take over granting nothing,
+  reopening asking for a site no longer allowed, hosts read as a browser reads
+  them, Stop and Resume, watchers' history, frames and boxes,
   screenshots, downloads, Off, settings validation, Clear browser data; and
   `TestRealServiceNavigatesReadsClicksAndShowsFrames` with the real service.
 - Transport: the RPCs are the owner's; an agent's request lands on its own

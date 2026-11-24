@@ -195,6 +195,11 @@ leave out.
 - **GitHub text is information** An issue's text reaches the agent quoted as content from GitHub, not as instructions to follow.
 - **An orchestrator never answers for you** It never approves, passes a gate or accepts a task, and its agents never get more permission than it has.
 - **Feedback without secrets** A feedback report removes tokens, keys, passwords and e-mail addresses, and shows your home folder as ~.
+- **The agent's browser never shows it your password** A password you type during Take over is hidden from the agent's page snapshots and masked in its screenshots, including a password shown as text.
+- **A redirect asks before it leaves** When a page the agent opened redirects to another site, you are asked before that site receives anything; decline and the page stays where it was.
+- **Every way of signing in asks** Submitting a sign-in form you filled asks you first however the agent would send it: a button, Enter, Space, the keypad's Enter, or a script on the page.
+- **Only the sites you choose become the agent's** While you hold the browser, a page that moves itself to another site does not let the agent stay there without asking, and reopening the browser asks again for a site no longer allowed.
+- **Disguised local addresses are refused** Addresses such as localhost., 2130706433, 0x7f000001, 127.1 or an IPv4 address written as IPv6 are judged as the address they name, so the agent's browser cannot reach this computer or the cloud metadata service through them.
 - **Allow exactly what is asked** When Codex asks for the network or a folder outside its sandbox, the card names it and Allow grants just that, for the turn or the conversation. What you always allow in a Claude conversation outlives its agent; the session menu lists it, and × removes it.
 - **A phone starts conversations your way** A phone allowed to start conversations picks only the model and its effort: it cannot leave plan-by-default, change the behavior profile or rotate onto other accounts.
 - **Your API key goes only to Anthropic** With an API key saved, an ANTHROPIC_BASE_URL or similar endpoint inherited by the Runner no longer receives it.

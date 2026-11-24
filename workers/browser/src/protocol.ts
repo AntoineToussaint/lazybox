@@ -23,8 +23,13 @@ export type Policy = {
 
 export type Box = { x: number; y: number; width: number; height: number };
 
-/** What the page shows now. */
-export type PageState = { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; viewportWidth: number; viewportHeight: number };
+/**
+ * What the page shows now. `origin` is the site the agent may act on without
+ * asking: one the person allowed, or went to themselves (a page that moved
+ * itself while they held the browser is neither). The Runner grants it to the
+ * agent when the person gives the browser back. Empty when there is none.
+ */
+export type PageState = { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; viewportWidth: number; viewportHeight: number; origin: string };
 
 // ───────────── Runner → service ─────────────
 
@@ -103,7 +108,11 @@ export type CloseProfileParams = { profile: string };
 export type SiteParams = { browser: string; url: string; origin: string };
 /** download: the page started a download. → { allow: boolean, path?: string } — when allowed, the service saves it to `path`. */
 export type DownloadParams = { browser: string; url: string; fileName: string };
-/** sign_in: the agent is about to submit a form holding a filled password field. → { allow: boolean } */
+/**
+ * sign_in: the agent is about to submit a form holding a filled password field
+ * (or a field whose autocomplete says it holds one), by any means: a click, a
+ * key, a script the action set off. The submission waits for the answer. → { allow: boolean }
+ */
 export type SignInParams = { browser: string; url: string; origin: string };
 
 // ───────────── service → Runner events ─────────────

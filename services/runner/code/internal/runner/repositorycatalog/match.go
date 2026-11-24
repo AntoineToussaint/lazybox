@@ -2,7 +2,9 @@ package repositorycatalog
 
 import (
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -88,7 +90,24 @@ func Match(entries []Entry, query string, limit int) []Candidate {
 	return out
 }
 
+var (
+	repositoryIDQuery = regexp.MustCompile(`^(?:(?:github[-:])?([0-9]+)|(?:local|github)-[0-9a-f]{64})$`)
+	bareDigits        = regexp.MustCompile(`^[0-9]+$`)
+)
+
 func matchName(entries []Entry, query string) []Candidate {
+	if id := repositoryIDQuery.FindStringSubmatch(strings.ToLower(query)); id != nil {
+		var matches []Candidate
+		for _, e := range entries {
+			if strings.EqualFold(query, e.RepositoryID) || (e.GitHubID > 0 && strconv.FormatInt(e.GitHubID, 10) == id[1]) {
+				matches = append(matches, Candidate{Entry: e, Score: 100})
+			}
+		}
+		// Bare digits may also be a repository's name (2048): only an ID-shaped query that is no name stops here.
+		if len(matches) > 0 || !bareDigits.MatchString(query) {
+			return matches
+		}
+	}
 	owner, repo := splitName(NormalizeName(query))
 	if repo == "" {
 		return nil
@@ -100,18 +119,15 @@ func matchName(entries []Entry, query string) []Candidate {
 			full = strings.ToLower(e.Name)
 		}
 		entryOwner, entryRepo := splitName(full)
+		if owner != "" {
+			if owner == entryOwner && repo == entryRepo {
+				out = append(out, Candidate{Entry: e, Score: 100})
+			}
+			continue
+		}
 		score := nameScore(repo, entryRepo)
 		if e.LocalPath != "" {
 			score = max(score, nameScore(repo, strings.ToLower(filepath.Base(e.LocalPath)))-5)
-		}
-		if owner != "" && score > 0 {
-			switch {
-			case owner == entryOwner && repo == entryRepo:
-				score = 100
-			case owner != entryOwner:
-				// Another owner's repository of the same name is a weaker match.
-				score -= 25
-			}
 		}
 		if score >= MinScore {
 			out = append(out, Candidate{Entry: e, Score: score})

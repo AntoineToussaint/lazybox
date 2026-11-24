@@ -42,53 +42,66 @@ func repoFixture() github.Repository {
 	return github.Repository{ID: 42, Name: "api", FullName: "team/api", CloneURL: "https://github.com/team/api.git", HTMLURL: "https://github.com/team/api", DefaultBranch: "main"}
 }
 func TestImportRetryRestartAndCollection(t *testing.T) {
-	source := t.TempDir()
-	gitTest(t, source, "init", "-b", "main")
-	gitTest(t, source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-m", "initial")
-	root := t.TempDir()
-	library, err := collections.New(root, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cloner := &localClone{source: source}
-	imports := t.TempDir()
-	manager, err := New(imports, library, cloner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := manager.Import(context.Background(), repoFixture(), "fake-token")
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := manager.Import(context.Background(), repoFixture(), "fake-token")
-	if err != nil || first != second || cloner.calls != 1 {
-		t.Fatal("retry cloned again", err)
-	}
-	library.Close()
-	library, err = collections.New(root, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer library.Close()
-	if len(library.Repositories()) != 1 || library.Repositories()[0].Name != "api" {
-		t.Fatal("library not restored")
-	}
-	collection, err := library.Create(context.Background(), "work", collections.Spec{Name: "my-feature", Members: []collections.MemberSpec{{RepositoryID: first.ID}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if collection.Members[0].Name != "api" || collection.Members[0].Branch != "feature/"+collection.Slug {
-		t.Fatal(collection)
-	}
-	if gitTest(t, source, "branch", "--show-current") != "main" {
-		t.Fatal("source branch changed")
-	}
-	config, err := os.ReadFile(filepath.Join(first.Path, "config"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(config), "fake-token") {
-		t.Fatal("credential in repository config")
+	for _, name := range []string{"api", ".github"} {
+		t.Run(name, func(t *testing.T) {
+			repo := repoFixture()
+			repo.Name = name
+			repo.FullName = "team/" + name
+			repo.HTMLURL = "https://github.com/" + repo.FullName
+			repo.CloneURL = repo.HTMLURL + ".git"
+			wantName := name
+			if name == ".github" {
+				wantName = "github-42"
+			}
+			source := t.TempDir()
+			gitTest(t, source, "init", "-b", "main")
+			gitTest(t, source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-m", "initial")
+			root := t.TempDir()
+			library, err := collections.New(root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cloner := &localClone{source: source}
+			imports := t.TempDir()
+			manager, err := New(imports, library, cloner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err := manager.Import(context.Background(), repo, "fake-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := manager.Import(context.Background(), repo, "fake-token")
+			if err != nil || first != second || cloner.calls != 1 {
+				t.Fatal("retry cloned again", err)
+			}
+			library.Close()
+			library, err = collections.New(root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer library.Close()
+			if len(library.Repositories()) != 1 || library.Repositories()[0].Name != wantName {
+				t.Fatal("library not restored")
+			}
+			collection, err := library.Create(context.Background(), "work", collections.Spec{Name: "my-feature", Members: []collections.MemberSpec{{RepositoryID: first.ID}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if collection.Members[0].Name != wantName || collection.Members[0].Branch != "feature/"+collection.Slug {
+				t.Fatal(collection)
+			}
+			if gitTest(t, source, "branch", "--show-current") != "main" {
+				t.Fatal("source branch changed")
+			}
+			config, err := os.ReadFile(filepath.Join(first.Path, "config"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(config), "fake-token") {
+				t.Fatal("credential in repository config")
+			}
+		})
 	}
 }
 func TestImportFailureAndUnknownDestinationPreserved(t *testing.T) {

@@ -126,9 +126,9 @@ lazybox workspace repos                      # this workspace's repositories, pa
 lazybox workspace request-repo acme/module-directory --reason "the parser imports its tokenizer"
 ```
 
-`request-repo` takes a name, `owner/repo`, a GitHub URL or a path (made
+`request-repo` takes a name, numeric GitHub ID (including `github-42`), `owner/repo`, a GitHub URL or a path (made
 absolute). The Runner matches it against the [catalog](#create-or-extend-a-workspace)
-— case, separators and small typos do not matter; a path inside a catalog
+— IDs and qualified names require an exact identity. Bare names allow alternate separators and small typos; a path inside a catalog
 checkout finds that repository; a git folder the catalog does not know yet is
 offered as itself — and records a **pending request on the asking
 conversation**. It adds nothing. If the best match is already in the

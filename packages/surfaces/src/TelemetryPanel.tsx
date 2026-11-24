@@ -153,7 +153,9 @@ export function TelemetryPanel({workspaceId,executionId,conversationId,messages,
   const update=async()=>{if(reading)return;reading=true;try{const r=await api.getTelemetry(conversationId?{conversation:conversationId}:executionId?{execution:executionId}:{workspace:workspaceId},{signal:controller.signal,timeoutMs:5000});if(!controller.signal.aborted){setReport(r);setError('');}}catch(e){if(!controller.signal.aborted)setError(String(e));}finally{reading=false;}};
   void update();const timer=setInterval(()=>void update(),3000);return()=>{controller.abort();clearInterval(timer);};
  },[api,workspaceId,executionId,conversationId]);
- useEffect(()=>{popover.current?.hidePopover();},[workspaceId,executionId,conversationId]);
+ // Another workspace or conversation closes the popover. Not conversationId: it is the execution's
+ // conversation, known once the session is read (often after the popover was opened), never a new one.
+ useEffect(()=>{popover.current?.hidePopover();},[workspaceId,executionId]);
  useEffect(()=>{const close=()=>popover.current?.hidePopover();window.addEventListener('resize',close);return()=>window.removeEventListener('resize',close);},[]);
  // `/cost` and `/context` (and the palette) open this conversation's popover, at the part asked for.
  const trigger=useRef<HTMLButtonElement>(null),costDetails=useRef<HTMLDetailsElement>(null);
@@ -194,6 +196,6 @@ export function TelemetryPanel({workspaceId,executionId,conversationId,messages,
  if(!compact)return <section className="telemetry-panel" aria-label="Workspace usage">{content}</section>;
  return <div className="telemetry-panel compact"><button ref={trigger} className="context-trigger" popoverTarget={id} aria-expanded={open} data-empty={percent===undefined&&!tokensLabel&&!known.length&&!open&&!asked?true:undefined} aria-label="Context and token cost" onClick={event=>{event.currentTarget.focus();if(popover.current)placeUsagePopover(popover.current,event.currentTarget.getBoundingClientRect());}} title={`Context ${percent===undefined?(tokensLabel?`${tokensLabel} used`:'not reported yet'):`${percentLabel(percent)} used`}${known.length?` · ${costLabel}`:''}`}><span className="context-mini-bar" aria-hidden="true" data-level={percent===undefined?undefined:contextLevel(percent)}><i style={{width:`${Math.max(0,Math.min(100,percent??0))}%`}}/></span><span className="context-trigger-percent">{percent===undefined?(tokensLabel||'Context'):percentLabel(percent)}</span>{known.length>0&&<span className="context-trigger-cost">{cost>=0.01?`$${cost.toFixed(2)}`:costLabel}</span>}</button>
   {/* On the page, not in the header: a chip folded into "⋯" is hidden, and the message box opens this too. */}
-  {createPortal(<div id={id} ref={popover} popover="auto" className="context-popover" onToggle={event=>{setOpen(event.newState==='open');if(event.newState!=='open')setAsked(false);}}><header><strong>Context</strong><button aria-label="Close context" popoverTarget={id} popoverTargetAction="hide">×</button></header>{content}</div>,document.body)}
+  {createPortal(<div id={id} ref={popover} popover="auto" className="context-popover" onToggle={event=>{if(event.target!==event.currentTarget)return;/* a <details> inside toggled, not the popover */setOpen(event.newState==='open');if(event.newState!=='open')setAsked(false);}}><header><strong>Context</strong><button aria-label="Close context" popoverTarget={id} popoverTargetAction="hide">×</button></header>{content}</div>,document.body)}
  </div>;
 }

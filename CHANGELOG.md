@@ -123,6 +123,7 @@ leave out.
 
 - **Send now** While the agent works, ↵ queues your message and ⌘↵ sends it now: the current step stops and your message is the next turn. A queued message shows once, above the message box.
 - **Who answers, and how full the context is** Under your message: the agent and model, and a context meter that turns amber at 60% and red at 85%. /model lists the models you can switch to.
+- **The context popover stays open** Opening context and cost as a conversation loads no longer closes it a moment later, and folding a group of its transcript sizes keeps the breakdown.
 - **The ⋯ menu shows what is current** A conversation's permission mode and model are shown selected, like Activity detail: YOLO no longer looks unavailable when it is the mode in use, and only a mode the agent cannot take (YOLO in plan mode) is greyed, with why. A conversation on its agent's default model shows Default as current, a Codex conversation names its model from the start, and a long list of models shows the first few, then More.
 - **Attachments are boxes** Files, images, PDFs and big pastes sit above the message as boxes you preview, reorder and remove. Claude, Codex and ACP agents all receive them.
 - **A quieter conversation** What Lazybox tells an agent is one event line, a restart is a small mark, background work is counted, and the usage popover breaks down what tokens cost.

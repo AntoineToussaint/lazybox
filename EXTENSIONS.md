@@ -57,7 +57,7 @@ person read.
 | `read:artifacts` | workspace artifact titles and kinds | `ListArtifacts` without document content |
 | `show:github` | open a GitHub item or deployment in the browser | Client navigation |
 | `show:runtime` | open an Actions or Preview panel | Client navigation for the current workspace |
-| `manage:reminders` | create, list and cancel the extension’s follow-ups on this device | Client storage scoped by Runner and extension. Previously scheduled reminders persist until dismissed. |
+| `manage:reminders` | create, list and cancel the extension’s follow-ups on this device | Client storage scoped by Runner and extension. The client discards reminders when it observes that their extension was removed, disabled or lost this grant. |
 | `scan:disk` | enables a daily background scan, including with every panel closed, and reveals candidate paths and sizes | runs the first `dev-cleaner` on the Runner PATH with `--dry-run --sizes --json` and serves the report to approved sessions |
 | `draft:artifact` | open a draft for the person to review and save | Client-side confirmation |
 | `read:missions` | missions and their tasks | `ListMissions` |
@@ -116,7 +116,7 @@ it acts on.
 
 | Plugin | What you can do |
 | --- | --- |
-| Reminders | Enter a follow-up and choose a delay or local date and time. The Lazybox main window on this device displays it until you choose **Done**. When the main window is in the background, Lazybox also requests a system notification. Close the panel freely. If Lazybox is closed at the due time, the reminder appears when you return to this Runner. Cancel upcoming reminders in the panel. |
+| Reminders | Enter a follow-up and choose a delay or local date and time. The Lazybox main window on this device displays it until you choose **Done**. Settings → Notifications → Reminders controls background banners and reminder sounds. Reminder sounds also follow the Needs you sound setting. Close the panel freely. If Lazybox is closed at the due time, the reminder appears when you return to this Runner. Cancel upcoming reminders in the panel. |
 | Mailbox | Read review requests, assignments, mentions and unread GitHub discussions. Enable Inbox delivery in **Settings → Repositories → Connections & folders**. Mailbox uses the Runner's connected classic personal token or a compatible GitHub CLI OAuth token. |
 | Preview Desk | See the selected workspace's services and ports. Open the live preview or the command log in Lazybox. |
 | Workspace Bootstrap | See what the Runner automatically set up from approved configuration, copied and missing files, and service status. Open the setup row in Actions to review or retry. |

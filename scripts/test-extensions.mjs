@@ -263,11 +263,14 @@ try {
   await cancelled.getByRole('button', { name: 'Cancel' }).click();
   await expect(cancelled).toHaveCount(0);
 
+  const revoked = await frame.evaluate(() => lazybox.reminders.create('Disabled follow-up', Date.now() + 3600000));
+
   // Set a short deadline through the same SDK used by the panel and leave it.
   await frame.evaluate(() => lazybox.reminders.create('Review results', Date.now() + 1500));
   await page.getByRole('combobox', { name: 'Extension panel' }).selectOption({ label: 'Agent board' });
   const live = page.locator('.account-notice').filter({ hasText: 'Review results' });
   await expect(live).toBeVisible();
+  await expect(live.locator('small')).toContainText('Reminders ·');
   await live.getByRole('button', { name: 'Done' }).click();
   await page.goto('about:blank');
   await page.clock.install({ time: new Date(Date.now() + 16 * 60000) });
@@ -275,7 +278,9 @@ try {
   const due = page.locator('.account-notice').filter({ hasText: 'Check the build' });
   await expect(due).toBeVisible();
   await due.getByRole('button', { name: 'Done' }).click();
+  await f.extensions.handle('SetExtensionEnabled', { id: 'reminders', enabled: false });
   await page.reload();
+  await expect.poll(() => page.evaluate(id => Object.keys(localStorage).some(key => key.endsWith(':' + id)), revoked)).toBe(false);
   await expect(page.locator('.page-layout')).toBeVisible();
   await expect(due).toHaveCount(0);
   await page.close();

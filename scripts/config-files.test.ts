@@ -57,8 +57,8 @@ test('keymap → keys.yaml edits: only what differs from the preset, ⌘ written
 
 test('settings.yaml ↔ notification preferences', () => {
   assert.deepEqual(notificationsFromFile({ notifications: { review: true } }), { ...defaultNotificationPreferences, review: true });
-  assert.deepEqual(settingsEdits({ ...defaultNotificationPreferences, review: true, soundNeedsYou: false }, undefined), [
-    { path: ['notifications', 'review'], json: 'true' }, { path: ['notifications', 'sound-needs-you'], json: 'false' },
+  assert.deepEqual(settingsEdits({ ...defaultNotificationPreferences, review: true, reminders: false, soundNeedsYou: false }, undefined), [
+    { path: ['notifications', 'review'], json: 'true' }, { path: ['notifications', 'reminders'], json: 'false' }, { path: ['notifications', 'sound-needs-you'], json: 'false' },
   ]);
   assert.deepEqual(settingsEdits({ ...defaultNotificationPreferences, review: true }, { notifications: { review: true } }), []);
 });

@@ -320,6 +320,7 @@ notifications:
   review: false              # an agent finished its turn
   dock-badge: true
   sound-needs-you: true
+  reminders: true
   sound-done: false
 appearance:                  # Settings → Appearance and Settings → Chat (chat text)
   mode: system               # system, light or dark

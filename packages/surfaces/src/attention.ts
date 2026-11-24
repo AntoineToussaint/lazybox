@@ -191,8 +191,8 @@ export function seenMark(row: Pick<Attention, 'at' | 'turnEndedAt'>): number {
 }
 
 /** Notifications (a system notification, or a toast in a focused window) per kind; sounds apart from them. */
-export type NotificationPreferences = { needsInput: boolean; failed: boolean; review: boolean; badge: boolean; soundNeedsYou: boolean; soundDone: boolean };
-export const defaultNotificationPreferences: NotificationPreferences = { needsInput: true, failed: true, review: false, badge: true, soundNeedsYou: true, soundDone: false };
+export type NotificationPreferences = { needsInput: boolean; failed: boolean; review: boolean; reminders: boolean; badge: boolean; soundNeedsYou: boolean; soundDone: boolean };
+export const defaultNotificationPreferences: NotificationPreferences = { needsInput: true, failed: true, review: false, reminders: true, badge: true, soundNeedsYou: true, soundDone: false };
 export type AttentionSpeech = { id: string; text: string; at: number; requestId?: string };
 export type AttentionNotice = { speech?: AttentionSpeech; key: string; kind: 'needs-input' | 'failed' | 'review'; title: string; body: string; collectionId: string; sessionId: string; runner?: string };
 

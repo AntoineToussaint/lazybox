@@ -29,7 +29,7 @@ export function createReminder(storage: Storage, root: string, owner: string, te
   return id;
 }
 
-export function removeReminder(storage: Storage, root: string, owner: string, id: string) {
+export function removeReminder(storage: Storage, root: string, owner: string, id: string, notify = true) {
   storage.removeItem(key(root, owner, id));
-  window.dispatchEvent(new Event(remindersChanged));
+  if (notify) window.dispatchEvent(new Event(remindersChanged));
 }

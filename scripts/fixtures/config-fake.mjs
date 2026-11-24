@@ -9,7 +9,7 @@
 const now = () => String(Date.now());
 const DIR = '/fixture/config/lazybox';
 const PANELS = ['collections', 'agents', 'chat', 'console', 'terminal', 'assistant', 'changes', 'usage', 'sessions', 'missions', 'pulls', 'processes', 'actions', 'preview', 'web', 'browser', 'files', 'editor', 'artifacts'];
-const NOTIFICATIONS = { 'needs-input': 'needsInput', failed: 'failed', review: 'review', 'dock-badge': 'badge', 'sound-needs-you': 'soundNeedsYou', 'sound-done': 'soundDone' };
+const NOTIFICATIONS = { 'needs-input': 'needsInput', failed: 'failed', review: 'review', reminders: 'reminders', 'dock-badge': 'badge', 'sound-needs-you': 'soundNeedsYou', 'sound-done': 'soundDone' };
 // settings.yaml's appearance names → the app's (internal/power/settings.go, AppearanceFields).
 const APPEARANCE = { mode: 'mode', 'dark-theme': 'darkTheme', 'light-theme': 'lightTheme', accent: 'accent', 'min-contrast': 'minContrast', motion: 'motion', density: 'density', 'interface-font': 'uiFont', 'interface-font-size': 'uiFontSize', 'code-font': 'codeFont', 'code-font-size': 'codeFontSize', ligatures: 'ligatures', 'chat-font-size': 'chatFontSize', 'chat-line-height': 'chatLineHeight', 'chat-paragraph-gap': 'chatParagraphGap', 'chat-line-width': 'chatMaxWidth', zoom: 'zoom' };
 

@@ -118,7 +118,7 @@ export function defaultKeys(state: { map: Keymap; menu: MenuEntry[]; vim: VimPre
 // ---- settings.yaml --------------------------------------------------------
 
 /** The file's names for the notification preferences, in its order. */
-export const notificationFields: [string, keyof NotificationPreferences][] = [['needs-input', 'needsInput'], ['failed', 'failed'], ['review', 'review'], ['dock-badge', 'badge'], ['sound-needs-you', 'soundNeedsYou'], ['sound-done', 'soundDone']];
+export const notificationFields: [string, keyof NotificationPreferences][] = [['needs-input', 'needsInput'], ['failed', 'failed'], ['review', 'review'], ['reminders', 'reminders'], ['dock-badge', 'badge'], ['sound-needs-you', 'soundNeedsYou'], ['sound-done', 'soundDone']];
 export function notificationsFromFile(settings: SettingsValue): NotificationPreferences {
   return { ...defaultNotificationPreferences, ...Object.fromEntries(Object.entries(settings.notifications || {}).filter(([, v]) => typeof v === 'boolean')) };
 }

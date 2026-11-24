@@ -2,7 +2,7 @@ import {test} from 'node:test';import assert from 'node:assert/strict';
 import {actionDefinitions,actionMenuItems,actionsFor,bindings,canonicalKey,chordFromEvent,displayBinding,displayKey,isChord,nativeMenuItems,resolveMod,runAction,runMenuAction} from '../packages/surfaces/src/actions';
 import {keyboardPreset} from '../packages/surfaces/src/keyboard';
 import {fuzzyMatch,bestMatch} from '../packages/surfaces/src/fuzzy';
-import {alertSoundFor} from '../packages/surfaces/src/attention-alerts';
+import {alertSoundFor, notificationRefusal, sendSystemNotice} from '../packages/surfaces/src/attention-alerts';
 import {defaultNotificationPreferences} from '../packages/surfaces/src/attention';
 
 test('every action is declared once, with a title, group and icon',()=>{
@@ -50,3 +50,13 @@ test('alert sounds: needs you on by default, done off',()=>{
  assert.equal(alertSoundFor([notice('review')],defaultNotificationPreferences),undefined);
  assert.equal(alertSoundFor([notice('review')],{...defaultNotificationPreferences,soundDone:true}),'done');
  assert.equal(alertSoundFor([notice('needs-input')],{...defaultNotificationPreferences,soundNeedsYou:false}),undefined);});
+
+test('a successful system banner clears the previous refusal', async () => {
+  const notice = { key: 'reminder:1', title: 'Reminder', body: 'Check CI', collectionId: '', sessionId: '' };
+  sendSystemNotice({ notifyAttention: async () => { throw new Error('Permission denied'); } }, notice);
+  await Promise.resolve();
+  assert.equal(notificationRefusal(), 'Permission denied');
+  sendSystemNotice({ notifyAttention: async () => {} }, notice);
+  await Promise.resolve();
+  assert.equal(notificationRefusal(), '');
+});

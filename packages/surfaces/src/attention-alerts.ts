@@ -1,11 +1,11 @@
-import type { AttentionHost } from '@lazybox/platform';
+import type { AttentionHost, AttentionNotice as SystemNotice } from '@lazybox/platform';
 import type { Attention, AttentionNotice, NotificationPreferences } from './attention';
 import { noticeFor } from './attention';
 import { playAlert } from './sounds';
 import { showToast } from './toasts';
 
 const wanted: Record<AttentionNotice['kind'], keyof NotificationPreferences> = { 'needs-input': 'needsInput', failed: 'failed', review: 'review' };
-const everything: NotificationPreferences = { needsInput: true, failed: true, review: true, badge: true, soundNeedsYou: true, soundDone: true };
+const everything: NotificationPreferences = { needsInput: true, failed: true, review: true, reminders: true, badge: true, soundNeedsYou: true, soundDone: true };
 
 /** Pure: what changed between two observations, before any preference applies. */
 export function attentionChanges(before: Map<string, Attention>, rows: readonly Attention[], viewing: (row: Attention) => boolean, workspaceName: (row: Attention) => string | undefined): AttentionNotice[] {
@@ -42,7 +42,11 @@ export function deliverAttention(notices: readonly AttentionNotice[], preference
   }
   // A burst (many agents failing at once) is one summary, not a wall of banners.
   const banners = shown.length > 3 ? [...shown.slice(0, 2), { ...shown[2], title: `${shown.length - 2} more conversations need you`, body: 'Open the Lazybox inbox to see them all.' }] : shown;
-  for (const notice of banners) void host.notifyAttention?.(notice).then(() => reportRefusal(''), error => reportRefusal(error));
+  for (const notice of banners) sendSystemNotice(host, notice);
+}
+
+export function sendSystemNotice(host: AttentionHost | undefined, notice: SystemNotice) {
+  void host?.notifyAttention?.(notice).then(() => reportRefusal(''), reportRefusal);
 }
 
 /**

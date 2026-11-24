@@ -44,6 +44,8 @@ function schedule(api: RunnerClient, store: Store) {
   }, POLL_MS);
 }
 
+export const extensionsChanged = 'lazybox-extensions-changed';
+
 export type ExtensionsStore = {
   value?: Extensions;
   error: string;
@@ -70,7 +72,11 @@ export function useExtensions(): ExtensionsStore {
     value: snapshot, error,
     refresh: () => load(api, store),
     async change(run) {
-      try { publish(store, await run(api), ''); return ''; }
+      try {
+        publish(store, await run(api), '');
+        window.dispatchEvent(new Event(extensionsChanged));
+        return '';
+      }
       catch (error) { const message = ConnectError.from(error).rawMessage || String(error); return message; }
     },
   };

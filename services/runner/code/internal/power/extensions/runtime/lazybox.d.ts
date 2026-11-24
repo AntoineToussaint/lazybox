@@ -107,13 +107,13 @@ declare namespace Lazybox {
     mailbox: { list(): Promise<{ items: { id: string; repository: string; title: string; reason: string; url: string; updatedAt: string }[]; truncated: boolean }> };
     /** read:sessions — titles and status, never messages. */
     sessions: { list(options?: { workspaceId?: string; limit?: number }): Promise<{ conversations: Conversation[] }> };
-    /** read:attention — what needs the person, as the Inbox shows it. */
     /** manage:reminders. Due times are Unix milliseconds. */
     reminders: {
       list(): Promise<{ id: string; text: string; due: number }[]>;
       create(text: string, due: number): Promise<string>;
       remove(id: string): Promise<void>;
     };
+    /** read:attention — what needs the person, as the Inbox shows it. */
     attention: { list(): Promise<{ items: AttentionItem[]; counts: Record<AttentionState, number> }> };
     /** read:commands — a conversation's command runs, never their output. */
     commands: { list(sessionId: string): Promise<{ commands: Command[] }> };

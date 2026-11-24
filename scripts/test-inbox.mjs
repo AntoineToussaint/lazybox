@@ -32,7 +32,7 @@ let browser;
 try {
   await server.listen();
   browser = await (process.env.TEST_CHROMIUM ? chromium : webkit).launch();
-  const page = await browser.newPage({viewport: {width: 1440, height: 900}});
+  const page = await (await browser.newContext({viewport: {width: 1440, height: 900}})).newPage();
   const errors = []; page.on('pageerror', e => errors.push(String(e)));
   // A recording stand-in for the browser's Notification API, already allowed.
   await page.addInitScript(() => {
@@ -229,6 +229,25 @@ try {
   // Nothing typed: Escape closes the Inbox as before.
   await page.keyboard.press('Escape');
   await expect(inbox).toHaveCount(0);
+
+  // A window opened on a finished conversation and left (another app in front) before it loaded:
+  // the conversation is not seen until that window is in front.
+  Object.assign(session('review-session'), {status: 'done', busy: false, agents: root('done', Date.now(), {turnEndedAtUnixMillis: ms(Date.now()), lastTurnStatus: 'completed'}), lastMessage: 'Split it again.'});
+  await expect(reviewRow).toHaveAttribute('data-unread', 'review', {timeout: 10_000});
+  const late = await page.context().newPage(); late.on('pageerror', e => errors.push(String(e)));
+  await late.addInitScript(() => { window.__focused = true; document.hasFocus = () => window.__focused; });
+  const loaded = Promise.withResolvers();
+  await late.route(/\/(Info|GetSession)$/, async route => { await loaded.promise; await route.continue(); });
+  await late.goto(`http://127.0.0.1:${server.httpServer.address().port}/?session=review-session&collection=alpha#token=${f.token}`);
+  await late.locator('.agent-window').waitFor();
+  await late.evaluate(() => { window.__focused = false; window.dispatchEvent(new Event('blur')); });
+  loaded.resolve();
+  await expect(late.locator('.agent-window')).toContainText('Refactor the parser');
+  await late.waitForTimeout(1500);
+  await expect(reviewRow, 'a conversation in a window in the background is not seen').toHaveAttribute('data-unread', 'review');
+  await late.evaluate(() => { window.__focused = true; window.dispatchEvent(new Event('focus')); });
+  await expect(reviewRow).not.toHaveAttribute('data-unread', /.+/);
+  await late.close();
 
   // Settings → Notifications saves to settings.yaml (UpdateConfigFile, package C): a preference, not an agent action.
   assert.deepEqual(f.mutations.filter(m => m.method !== 'UpdateConfigFile'), [], 'the inbox never starts, stops or answers an agent');

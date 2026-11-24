@@ -164,12 +164,17 @@ export function useMarkViewed(session: Session | undefined, enabled = true) {
   useEffect(() => {
     if (!active) return;
     const update = () => setFocused(looking());
+    // Focus may have left while this view was inactive (it listened to nothing then): read it now.
+    update();
     window.addEventListener('focus', update); window.addEventListener('blur', update); document.addEventListener('visibilitychange', update);
     return () => { window.removeEventListener('focus', update); window.removeEventListener('blur', update); document.removeEventListener('visibilitychange', update); };
   }, [active]);
-  useEffect(() => { if (active && focused && at) mark([{ key, at }]); }, [active, focused, key, at, mark]);
+  // `focused` can still be the stale value in the commit that makes the view active (the read
+  // above lands in the next render), so the window is asked again before marking or publishing:
+  // a conversation opened in a window in the background is not "seen".
+  useEffect(() => { if (active && focused && at && looking()) mark([{ key, at }]); }, [active, focused, key, at, mark]);
   useEffect(() => {
-    if (!active || !focused) return;
+    if (!active || !focused || !looking()) return;
     const publish = () => write(viewingKey(root), JSON.stringify({ key: latest.current.key, window: windowId, at: Date.now() }));
     publish();
     const timer = setInterval(publish, viewingFresh / 3);

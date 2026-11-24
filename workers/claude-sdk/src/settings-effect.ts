@@ -18,7 +18,7 @@ import type { StreamEnd } from './stream.js';
  * session stops only when Claude rejected Lazybox's own permission settings
  * (or did not say which settings it rejected); when it rejected only the
  * person's settings files, or Lazybox's other settings, the warning shows in
- * the conversation, naming them, and the agent goes on.
+ * the conversation as a notice, naming them, and the agent goes on.
  */
 /** Claude's name for the settings the SDK passes inline: the worker's own. */
 export const inlineSettingsName = 'SDK inline settings';
@@ -75,18 +75,21 @@ export function asksBySettings(options: Pick<Options, 'settings'>): boolean {
  * and Resume starts Claude again, which checks its settings again) when its
  * approvals rest on Lazybox's permission settings and those are not in
  * effect; otherwise report it, naming what did not load, and go on
- * (`report`, a provider error).
+ * (`report`, a `provider_notice`: one line in the conversation that never
+ * faults it, as a failure would while the agent keeps working).
  */
-export function settingsFailure(warning: string, asks: boolean): { end: StreamEnd } | { report: { type: 'failure'; status: 'provider_error'; text: string } } {
+export type SettingsNotice = { type: 'provider_notice'; status: 'settings_not_in_effect'; text: string };
+
+export function settingsFailure(warning: string, asks: boolean): { end: StreamEnd } | { report: SettingsNotice } {
   if (asks && rejectsLazyboxPermissions(warning)) return { end: { type: 'failure', status: 'sdk_error', text: `Claude did not apply Lazybox's approval settings, which this conversation relies on, so it stopped rather than run a command without asking you. Claude said: ${warning}` } };
   const still = asks ? ' Lazybox\'s approval settings are in effect, and the agent goes on.' : '';
-  return { report: { type: 'failure', status: 'provider_error', text: `Claude did not apply some settings.${still} Claude said: ${warning}` } };
+  return { report: { type: 'provider_notice', status: settingsNotInEffectTag, text: `Claude did not apply some settings.${still} Claude said: ${warning}` } };
 }
 
 /** Watches the SDK stream for the warning and applies settingsFailure. */
 export class SettingsWatch {
   private ended: StreamEnd | undefined;
-  constructor(private readonly asks: boolean, private readonly stop: () => void, private readonly report: (failure: { type: 'failure'; status: 'provider_error'; text: string }) => void) {}
+  constructor(private readonly asks: boolean, private readonly stop: () => void, private readonly report: (notice: SettingsNotice) => void) {}
   /** Whether the message goes on to be read; once the watch ended the session, none does. */
   pass(message: SDKMessage): boolean {
     if (this.ended) return false;

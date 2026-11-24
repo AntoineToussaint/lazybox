@@ -100,6 +100,40 @@ func TestAGrantTheProviderDroppedIsNoLongerKept(t *testing.T) {
 	}
 }
 
+// A provider's notice (the Claude worker's settings_not_in_effect while the
+// agent goes on) is one line in the conversation: it never faults it, as the
+// failure it once was did.
+func TestAProviderNoticeNeverFaultsTheConversation(t *testing.T) {
+	ctx := contextFor(t)
+	spool, err := journal.Open(filepath.Join(t.TempDir(), "session"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &agenttest.Adapter{}
+	e, err := New(ctx, a, agent.Open{ID: "execution"}, spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close(); _ = spool.Dispose() })
+	a.Session.Events <- agent.Event{Type: "provider_notice", Status: "settings_not_in_effect", Text: "Claude did not apply some settings."}
+	a.Session.Events <- agent.Event{Type: "message_delta", Text: "done"}
+	deadline := time.Now().Add(5 * time.Second)
+	for e.Snapshot().LastMessage != "done" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fault := e.Snapshot().Fault; fault != "" {
+		t.Fatalf("a notice faulted the conversation: %q", fault)
+	}
+	// The failure it replaces would have.
+	a.Session.Events <- agent.Event{Type: "failure", Status: "provider_error", Text: "Claude did not apply some settings."}
+	for e.Snapshot().Fault == "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fault := e.Snapshot().Fault; fault != "provider_error" {
+		t.Fatalf("a failure left the fault %q", fault)
+	}
+}
+
 func TestGrantListIsBounded(t *testing.T) {
 	var grants []agent.Grant
 	for i := range agent.GrantLimit + 5 {

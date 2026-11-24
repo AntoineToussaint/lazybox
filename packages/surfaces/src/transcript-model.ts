@@ -552,7 +552,7 @@ function noticeOf(record: JournalEvent): { notice: RunnerNotice; text: string } 
     return { notice: 'agent-lost', text: event.text || 'Lazybox restarted after this agent stopped. Send a message to resume its session.' };
   // The Runner could not save (a full disk): its own failure, said once; the agent kept running.
   if (event?.type === 'storage_error' && event.text) return { notice: 'storage', text: event.text };
-  // Something about the agent program itself, said once at its start: a Codex outside the versions Lazybox is tested with.
+  // Something about the agent program itself, said once: a Codex outside the versions Lazybox is tested with, or settings Claude did not apply while the agent goes on.
   if (event?.type === 'provider_notice' && event.text) return { notice: 'provider', text: event.text };
   if (event?.type === 'request_resolved' && event.status === 'outcome_unknown_after_restart')
     return { notice: 'outcome-unknown', text: 'The Runner restarted while a command the agent started was in flight. Its outcome is unknown, so it was not run again; the agent was told to check before retrying.' };

@@ -61,30 +61,31 @@ test('only Lazybox’s own permission settings, or an unknown source, stop an as
 test('an ask session goes on, with a warning naming the file, when only other settings were rejected', () => {
   for (const [what, content, named] of [
     ['the person’s settings file did not load', notLoaded(userFile), '/work/repo/.claude/settings.json'],
+    ['entries of the person’s own files were skipped', skipped('  /work/repo/.claude/settings.local.json (permissions.allow[0]): Invalid rule', '  /Users/me/.claude/settings.json (permissions.deny): Expected array'), '/work/repo/.claude/settings.local.json'],
     ['an inline setting that is not a permission was skipped', skipped('  SDK inline settings (disableClaudeAiConnectors): Expected boolean'), 'disableClaudeAiConnectors'],
     ['a settings file in a connector-downloads folder', 'These settings files are not used: they are in a connector-downloads folder, where Claude Code saves files from claude.ai connectors:\n  /Users/me/Downloads/claude/settings.json', '/Users/me/Downloads/claude/settings.json'],
   ] as const) {
     let stopped = 0;
-    const reported: { status: string; text: string }[] = [];
+    const reported: { type: string; status: string; text: string }[] = [];
     const watch = new SettingsWatch(true, () => { stopped++; }, f => reported.push(f));
     assert.equal(watch.pass(warning(content)), true, what);
     assert.equal(stopped, 0, what);
     assert.equal(watch.end, undefined, what);
     assert.equal(reported.length, 1, what);
-    assert.equal(reported[0].status, 'provider_error', what);
+    assert.deepEqual([reported[0].type, reported[0].status], ['provider_notice', 'settings_not_in_effect'], `${what}: a notice, never a failure that faults the conversation`);
     assert.ok(reported[0].text.includes(named), `${what}: names ${named}`);
     assert.match(reported[0].text, /approval settings are in effect/, what);
   }
 });
 
-test('any other session reports the warning as a failure and goes on', () => {
+test('any other session reports the warning as a notice and goes on', () => {
   let stopped = 0;
-  const reported: { status: string; text: string }[] = [];
+  const reported: { type: string; status: string; text: string }[] = [];
   const watch = new SettingsWatch(false, () => { stopped++; }, f => reported.push(f));
   assert.equal(watch.pass(warning(listed)), true);
   assert.equal(stopped, 0);
   assert.equal(watch.end, undefined);
   assert.equal(reported.length, 1);
-  assert.equal(reported[0].status, 'provider_error');
+  assert.deepEqual([reported[0].type, reported[0].status], ['provider_notice', 'settings_not_in_effect']);
   assert.ok(reported[0].text.includes(listed));
 });

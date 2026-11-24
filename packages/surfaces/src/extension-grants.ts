@@ -10,6 +10,7 @@ export type GrantTone = 'read' | 'act' | 'send';
 export type GrantText = { grant: string; icon: string; title: string; detail: string; tone: GrantTone };
 
 const fixed: Record<string, Omit<GrantText, 'grant'>> = {
+  'manage:reminders': { icon: 'bell', title: 'Manage follow-up reminders', detail: 'Schedule, view and cancel this extension’s reminders on this device', tone: 'act' },
   'scan:disk': { icon: 'activity', title: 'Scan this Runner for reclaimable space', detail: 'Run a daily dev-cleaner dry run and see candidate paths and sizes', tone: 'act' },
   'read:workspaces': { icon: 'collections', title: 'See your workspaces', detail: 'Their names and repositories', tone: 'read' },
   'read:sessions': { icon: 'history', title: 'See your conversations', detail: 'Titles, workspace, provider, model and status — not their messages', tone: 'read' },

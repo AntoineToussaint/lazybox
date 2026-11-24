@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Reminders</title>
+<link rel="stylesheet" href="_lazybox/lazybox.css">
+<link rel="stylesheet" href="reminders.css">
+<script src="_lazybox/lazybox.js"></script><script src="app.js" defer></script>
+<h1>Reminders</h1>
+<p><label>What should you check? <input id="message" required maxlength="240"></label></p>
+<label>Remind me <select id="delay"><option value="15">in 15 minutes</option><option value="60">in an hour</option><option value="1440">in 24 hours</option><option value="custom">at a specific time</option></select></label>
+<input id="when" type="datetime-local" aria-label="Local date and time" hidden>
+<button class="primary" id="save" type="button">Set reminder</button>
+<p role="status" id="status"></p><h2>Scheduled</h2><ul id="scheduled"></ul></html>

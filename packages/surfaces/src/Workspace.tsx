@@ -21,6 +21,7 @@ import { UserThemeSync } from './appearance/useUserThemes';
 import { consolePlace, noteConsoleUse, readFollowRuns, useRunFollowing } from './console-follow';
 import { requestTerminal } from './TerminalPanel';
 import { writeWhenReady } from './home-shell';
+import { ReminderNotices } from './ReminderNotices';
 import { AccountNotices } from './AccountNotices';
 import { groups, retireMonitor, defaultLayout, emptyTarget, parseLayout, resolveTarget, detachedFor, pinnedTarget, defaultDock, isDockSide, showPanel, dedupeChats, repairLayout, returnDetached, detachedChats, showCodePanel, adoptGeometry, allPanels, shownPanels, activatePanel, removeFromPage, insertDocked, mapPageGroups, mapPagePanels, groupOf, splitBeside, addToGroup, detachChat, sidebarKinds, pageGroups, fitAgentsEverywhere, isSidebarAgents, sidebarAgentsGroup, PANEL_LIMIT, settleLayout, sameConversation, tabFor, withSelection, closeTab, keepTab, previewTab, followFrontTab, isChatTab, openConversation, type DockSide, type SidebarAgents, type Panel, type ViewTarget, type WorkspaceLayout, type WorkspacePage } from './workspace-model';
 import { useConversationTabs, useTabsSetting } from './useConversationTabs';
@@ -1104,7 +1105,10 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         <span>{error}</span>
         <button type="button" className="icon-button" aria-label="Dismiss" title="Dismiss" onClick={() => setError('')}><Icon name="close" size={14}/></button>
       </div>)}
-    {!fixedWorkspaceId && <AccountNotices onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }}/>}
+    {!fixedWorkspaceId && <div className="account-notices">
+      <ReminderNotices/>
+      <AccountNotices onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }}/>
+    </div>}
     {surface === 'missions'
       ? <MissionsPanel openMission={host?.openMission} collections={collections} viewState={viewState} onReturn={() => setSettings(false)}
           onShowSession={target => { setSettings(false); showSession(target); }}

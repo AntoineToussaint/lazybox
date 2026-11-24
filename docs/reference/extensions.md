@@ -44,6 +44,9 @@ second (twenty at once).
 | `lazybox.ready` | — | `{protocol, extension: {id, name, version}, panel: {id, title}, grants, hosts, theme}` |
 | `lazybox.workspaces.list()` | `read:workspaces` | `{workspaces: [{id, name, repositories}]}` |
 | `lazybox.sessions.list({workspaceId?, limit?})` | `read:sessions` | `{conversations: [{sessionId, conversationId, title, workspaceId, workspaceName, provider, model, status, busy, closed, createdAt, updatedAt}]}` |
+| `lazybox.reminders.create(text, due)` | `manage:reminders` | ID of the saved reminder. Supply up to 240 characters and a future Unix timestamp in milliseconds. |
+| `lazybox.reminders.list()` | `manage:reminders` | This extension’s reminders for this Runner on this device, ordered by due time. Each has an ID, text and due time. |
+| `lazybox.reminders.remove(id)` | `manage:reminders` | Cancels or dismisses the extension’s reminder. |
 | `lazybox.attention.list()` | `read:attention` | `{items: [{sessionId, conversationId, title, workspaceId, workspaceName, state, reason, line, at, unread}], counts}` — `state` is `needs-input`, `failed`, `review`, `working` or `idle` |
 | `lazybox.commands.list(sessionId)` | `read:commands` | `{commands: [{id, title, state, exitCode?, startedAt}]}` — `running`, `succeeded`, `failed`, `stopped` |
 | `lazybox.missions.list()` | `read:missions` | `{missions: [{id, title, canceled, awaitingReview, tasks: [{id, title, status, reason}]}]}` |

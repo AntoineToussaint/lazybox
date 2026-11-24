@@ -26,7 +26,7 @@ export function AccountNotices({ onOpenSettings }: { onOpenSettings(tab: 'extens
       window.dispatchEvent(new Event('lazybox-settings-saved'));
     } catch (e) { setError(settingsError(e)); } finally { setBusy(''); }
   };
-  return <div className="account-notices">
+  return <>
     {ids.map(id => { const notice = accountNotices[id]; return <section key={id} className="account-notice" role="status" aria-label={notice.title}>
       <Icon name="bell" size={15}/>
       <div className="account-notice-body">
@@ -39,5 +39,5 @@ export function AccountNotices({ onOpenSettings }: { onOpenSettings(tab: 'extens
         {error && <p className="settings-error" role="alert">{error}</p>}
       </div>
     </section>; })}
-  </div>;
+  </>;
 }

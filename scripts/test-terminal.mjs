@@ -246,7 +246,10 @@ try {
  const shared=page.getByRole('article',{name:'Interactive command'}).last();
  await expect(shared.locator('pre')).toHaveText('example deploy');
  await expect(shared).toContainText('additional commands without asking again');
+ const decided=calls('DecideTerminalHandoff').length;
  await shared.getByRole('button',{name:'Run with agent input'}).click();
+ // The decision is sent after the click returns: wait for that request, then read it.
+ await expect.poll(()=>calls('DecideTerminalHandoff').length).toBe(decided+1);
  assert.equal(calls('DecideTerminalHandoff').at(-1).body.allowAgentInput,true);
  await expect(shared).toContainText('Interactive command running');
  fixture.terminals.get('interactive-agent-input').done=true;

@@ -9,10 +9,15 @@
     "@lazybox/platform": "0.0.0",
     "@lazybox/surfaces": "0.0.0",
     "@tauri-apps/api": "2.12.5",
-    "@tauri-apps/plugin-http": "2.8.3",
-    "react": "19.3.1",
+    "@tauri-apps/plugin-http": "2.9.0",
+    "react": "^19.3.1",
     "react-dom": "19.3.1"
   },
-  "devDependencies": { "@tauri-apps/cli": "2.12.6" },
-  "scripts": { "build": "vite build && tauri build --debug --bundles app", "build:ui": "vite build" }
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.6"
+  },
+  "scripts": {
+    "build": "vite build && tauri build --debug --bundles app",
+    "build:ui": "vite build"
+  }
 }

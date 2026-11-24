@@ -7,7 +7,8 @@
 //                       30 s, terminate-after 1), never `cargo test`
 //
 // unitTestTimeoutViolations() reads the places tests are started from (npm
-// scripts, the Makefile, the CI workflows, the nextest config) and says what
+// scripts, the Makefile, the CI workflows, the scripts under scripts/, the
+// nextest config) and says what
 // breaks the rule. The release gate catalog refuses to load while anything
 // does (release-gates.mjs), so the rule cannot erode without CI and staging
 // failing first.
@@ -31,6 +32,12 @@ export const NOT_UNIT_GO_TARGETS = {
   'release-smoke': 'smoke test of a built release app (RELEASING.md), not a unit test',
 };
 
+/** Scripts that run Go tests that are not unit tests, the same way. */
+export const NOT_UNIT_GO_SCRIPTS = {
+  'scripts/release/build.mjs': 'the release smoke test of the built app (TestRelease, as make release-smoke)',
+  'scripts/test-mobile-simulator.mjs': 'serves the iOS Simulator gateway for minutes; test:mobile-simulator is external in the catalog',
+};
+
 // One shell command at a time: `a && b | c; d` is four.
 const commands = line => line.split(/&&|\|\||[;|]/).map(part => part.trim()).filter(Boolean);
 const words = command => command.split(/\s+/);
@@ -38,8 +45,25 @@ const runsNodeTest = command => {
   const all = words(command), node = all.findIndex(word => /(^|\/)node$/.test(word));
   return node >= 0 && all.slice(node + 1).includes('--test');
 };
-const runsGoTest = command => /(^|\s)go\s+test(\s|$)/.test(command);
-const runsCargoTest = command => /(^|\s)cargo\s+test(\s|$)/.test(command);
+// The program, however it is named (`go`, `/usr/local/go/bin/go`, `$GO`,
+// `$$GO`, `$(GO)`, `"${GO}"`), then its global flags, then the subcommand.
+const program = name => new RegExp(`^["']?((\\S*/)?${name}|\\$\\$?\\{?${name.toUpperCase()}\\}?|\\$\\(${name.toUpperCase()}\\))["']?$`);
+const runs = (name, subcommand, skip) => command => {
+  const all = words(command);
+  for (let at = all.findIndex(word => program(name).test(word)); at >= 0 && at < all.length; ) {
+    let next = at + 1;
+    while (next < all.length && skip(all[next])) next += all[next] === '-C' ? 2 : 1;
+    if (all[next] === subcommand) return true;
+    const again = all.slice(at + 1).findIndex(word => program(name).test(word));
+    at = again < 0 ? -1 : at + 1 + again;
+  }
+  return false;
+};
+// go's one global flag is -C <dir> (or -C=<dir>); cargo's are +toolchain and --flags.
+const runsGoTest = runs('go', 'test', word => word === '-C' || word.startsWith('-C='));
+const runsCargoTest = runs('cargo', 'test', word => word.startsWith('+') || word.startsWith('--'));
+// A test file run directly rather than by a runner with a per-test deadline.
+const testFile = word => /(_test\.sh|\.test\.(mjs|cjs|js|ts))["']?$/.test(word);
 const runsNextest = command => /(^|\s)cargo\s+nextest\s+run(\s|$)/.test(command);
 const usesGuard = command => /go-test-guard\.mjs\b/.test(command);
 
@@ -53,6 +77,7 @@ function commandViolations(line, where) {
     if (runsNodeTest(full) && !words(full).includes(NODE_TEST_TIMEOUT_FLAG)) found.push(`${where}: node --test without ${NODE_TEST_TIMEOUT_FLAG}: ${command}`);
     if (runsCargoTest(full)) found.push(`${where}: cargo test has no per-test deadline; use cargo nextest run --config-file ${NEXTEST_CONFIG}: ${command}`);
     if (runsNextest(full) && !/--config-file\s+(\$\(abspath\s+)?\S*\.config\/nextest\.toml\)?(\s|$)/.test(full)) found.push(`${where}: cargo nextest run without --config-file ${NEXTEST_CONFIG}: ${command}`);
+    if (!runsNodeTest(full) && words(full).some(testFile)) found.push(`${where}: a test file run outside node --test ${NODE_TEST_TIMEOUT_FLAG}, so its tests have no per-test deadline: ${command}`);
     if (usesGuard(full) && /--limit-ms/.test(full)) found.push(`${where}: the Go guard's deadline is ${UNIT_TEST_TIMEOUT_MS / 1000} s; --limit-ms is for its own tests: ${command}`);
   }
   return found;
@@ -108,6 +133,46 @@ export function workflowViolations(text, name) {
   return found;
 }
 
+/**
+ * The scripts under scripts/ that start tests themselves (stress.mjs, a shell
+ * harness): JavaScript that spawns `go test`, `cargo test` or `node --test`
+ * without the deadline, and shell lines, as in the Makefile. Test files are
+ * left out (their fixtures quote commands) and so is the guard, which is the
+ * one place `go test` runs.
+ */
+export function scriptFileViolations(files) {
+  const found = [];
+  const quoted = word => `['"\`]${word}['"\`]`;
+  const spawnsGoTest = new RegExp(`${quoted('go')}\\s*,\\s*\\[\\s*(${quoted('-C')}\\s*,\\s*[^,\\]]+,\\s*)?${quoted('test')}`);
+  const spawnsCargoTest = new RegExp(`${quoted('cargo')}\\s*,\\s*\\[\\s*${quoted('test')}`);
+  for (const [path, text] of Object.entries(files)) {
+    if (/\.test\.[cm]?[jt]s$|_test\.(sh|go)$/.test(path) || path === 'scripts/go-test-guard.mjs') continue;
+    if (path.endsWith('.sh')) {
+      for (const line of text.split('\n')) {
+        if (/^\s*#/.test(line)) continue;
+        found.push(...commandViolations(line, path));
+        if (commands(line).some(runsGoTest)) found.push(`${path}: go test without scripts/go-test-guard.mjs: ${clip(line.trim())}`);
+      }
+      continue;
+    }
+    if (spawnsGoTest.test(text) && !(path in NOT_UNIT_GO_SCRIPTS)) found.push(`${path}: spawns go test without scripts/go-test-guard.mjs`);
+    if (spawnsCargoTest.test(text)) found.push(`${path}: spawns cargo test, which has no per-test deadline; use cargo nextest run --config-file ${NEXTEST_CONFIG}`);
+    if (new RegExp(quoted('--test')).test(text) && !text.includes(NODE_TEST_TIMEOUT_FLAG)) found.push(`${path}: spawns node --test without ${NODE_TEST_TIMEOUT_FLAG}`);
+  }
+  return found;
+}
+
+/** Every script file under `dir`, by path relative to `root`. */
+function scriptFiles(root, dir = 'scripts', files = {}) {
+  if (!existsSync(join(root, dir))) return files;
+  for (const entry of readdirSync(join(root, dir), { withFileTypes: true })) {
+    const path = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) { if (entry.name !== 'node_modules') scriptFiles(root, path, files); }
+    else if (/\.(mjs|cjs|js|ts|sh)$/.test(entry.name)) files[path] = readFileSync(join(root, path), 'utf8');
+  }
+  return files;
+}
+
 /** The nextest config: the default profile ends a test at 30 s; the version CI installs is the one it requires. */
 export function nextestViolations(toml, workflows = {}) {
   if (toml === undefined) return [`${NEXTEST_CONFIG} is missing`];
@@ -140,6 +205,7 @@ export function unitTestTimeoutViolations(root) {
   const dir = join(root, '.github/workflows');
   if (existsSync(dir)) for (const file of readdirSync(dir).filter(file => /\.ya?ml$/.test(file)).sort()) workflows[`.github/workflows/${file}`] = read(`.github/workflows/${file}`);
   for (const [name, text] of Object.entries(workflows)) found.push(...workflowViolations(text, name));
+  found.push(...scriptFileViolations(scriptFiles(root)));
   if (/cargo\s+nextest/.test(makefile) || existsSync(join(root, NEXTEST_CONFIG))) found.push(...nextestViolations(read(NEXTEST_CONFIG), workflows));
   return found;
 }

@@ -11,7 +11,12 @@
 // A parent's time includes its subtests. When a test has run for longer than
 // UNIT_TEST_TIMEOUT_MS, the guard sends its test binary SIGQUIT, so the binary
 // prints every goroutine's stack and exits (SIGKILL if it has not exited
-// KILL_GRACE_MS later), and the run fails naming the test.
+// KILL_GRACE_MS later), and the run fails naming the test: the deepest one
+// still running under it, since a hung subtest runs its parent out first.
+//
+// Only tests are timed. Package initialisation, a TestMain's work outside
+// m.Run, and the binary's start and exit belong to no test; go test's
+// -timeout, which bounds the whole binary, is what stops those.
 //
 // The output is go test's own text, not JSON: with -v every line, otherwise a
 // top-level test's lines (its subtests' included) only when it fails or was
@@ -19,7 +24,7 @@
 // (`ok`, `FAIL`, `?`, build errors). The exit status is go test's, or 1 when a
 // test ran over its deadline.
 import { spawn, spawnSync } from 'node:child_process';
-import { readlinkSync } from 'node:fs';
+import { readlinkSync, realpathSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,26 +98,52 @@ export class TestGuard {
     return lines;
   }
 
-  /** The tests that went over their deadline since the last call, longest-named (most specific) first. */
+  /**
+   * The tests that went over their deadline since the last call. A parent's
+   * clock includes its subtests, so it crosses first when a subtest hangs: the
+   * report names the deepest test still running under it (`test`), with the
+   * test whose clock ran out (`over`). Each culprit is reported once.
+   */
   check(now) {
     const found = [];
     for (const [key, clock] of this.running) {
       const ranMs = clock.ranMs + (clock.since == null ? 0 : now - clock.since);
       if (ranMs <= this.limitMs || this.reported.has(key)) continue;
       this.reported.add(key);
-      found.push({ package: clock.package, test: clock.test, ranMs });
+      const test = this.deepestRunning(clock.package, clock.test);
+      const culprit = `${clock.package}\0${test}`;
+      if (this.reported.has(`culprit\0${culprit}`)) continue;
+      this.reported.add(`culprit\0${culprit}`);
+      found.push({ package: clock.package, test, over: clock.test, ranMs });
     }
-    found.sort((a, b) => b.test.length - a.test.length);
     this.overdue.push(...found);
     return found;
+  }
+
+  /** The most deeply nested test running (not paused) under `test`, or `test` itself. */
+  deepestRunning(pkg, test) {
+    let deepest = test;
+    for (const clock of this.running.values()) {
+      if (clock.package !== pkg || clock.since == null || !clock.test.startsWith(`${test}/`)) continue;
+      if (clock.test.split('/').length > deepest.split('/').length) deepest = clock.test;
+    }
+    return deepest;
   }
 
   /** The closing report: every test that ran over, or nothing. */
   summary() {
     if (!this.overdue.length) return '';
-    const lines = this.overdue.map(item => `    ${item.test} (${item.package}): stopped after ${seconds(item.ranMs)}`);
+    const lines = this.overdue.map(item => `    ${item.test} (${item.package}): stopped after ${seconds(item.ranMs)}${item.over === item.test ? '' : ` of ${item.over}`}`);
     return `\nFAIL: ${this.overdue.length === 1 ? 'a test' : `${this.overdue.length} tests`} ran over the ${seconds(this.limitMs)} limit on every unit test (AGENTS.md):\n${lines.join('\n')}\n`;
   }
+}
+
+/** What the guard prints the moment a test runs over. */
+export function timeoutLine(item, limitMs) {
+  const over = `${seconds(item.ranMs)}, over the ${seconds(limitMs)} limit`;
+  return item.over === item.test
+    ? `--- TIMEOUT: ${item.test} (${item.package}) has run for ${over}\n`
+    : `--- TIMEOUT: ${item.test} (${item.package}) is still running; ${item.over} has run for ${over}\n`;
 }
 
 /** The test binaries the go command at `goPid` is running: [{ pid, path }]. */
@@ -159,7 +190,7 @@ async function main() {
   const signalled = new Set(), kills = [];
   const stop = () => {
     for (const item of guard.check(performance.now())) {
-      process.stdout.write(`--- TIMEOUT: ${item.test} (${item.package}) has run for ${seconds(item.ranMs)}, over the ${seconds(guard.limitMs)} limit\n`);
+      process.stdout.write(timeoutLine(item, guard.limitMs));
       if (signalled.has(item.package)) continue;
       signalled.add(item.package);
       const binary = binaryFor(go.pid, item.package, process.cwd());
@@ -187,4 +218,7 @@ async function main() {
   process.exitCode = summary && !code ? 1 : code ?? (signal ? 1 : 0);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { console.error(`go-test-guard: ${error.message}`); process.exitCode = 1; });
+// Run as a program, also through a symlink (macOS's /tmp is /private/tmp):
+// node resolves the module's own path, not argv[1], so both are compared real.
+const real = path => { try { return realpathSync(path); } catch { return resolve(path); } };
+if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.url))) main().catch(error => { console.error(`go-test-guard: ${error.message}`); process.exitCode = 1; });

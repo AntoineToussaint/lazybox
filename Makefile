@@ -136,8 +136,7 @@ environments:
 share-subscriptions:
 	node scripts/environments.mjs share-subscriptions '$(SUBSCRIPTION_STATE)'
 test-environments:
-	node --test --test-timeout=30000 scripts/go-test-guard.test.mjs scripts/managed-build.test.mjs scripts/environments.test.mjs scripts/runner-service.test.mjs scripts/runner-restart.test.mjs scripts/release-gates.test.mjs scripts/user-config.test.mjs scripts/release/release.test.mjs scripts/release/install.test.mjs scripts/export-check.test.mjs scripts/check-private.test.mjs
-	bash scripts/release/publish-cask_test.sh
+	node --test --test-timeout=30000 scripts/go-test-guard.test.mjs scripts/managed-build.test.mjs scripts/environments.test.mjs scripts/runner-service.test.mjs scripts/runner-restart.test.mjs scripts/release-gates.test.mjs scripts/user-config.test.mjs scripts/release/release.test.mjs scripts/release/install.test.mjs scripts/release/publish-cask.test.mjs scripts/export-check.test.mjs scripts/check-private.test.mjs
 
 # An installable release (RELEASING.md): dist/$(VERSION)/ with the DMG, the
 # updater archive, latest.json, the cask, notes and checksums. Signs with the

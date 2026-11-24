@@ -5,7 +5,8 @@
 //
 // go runs `go test -race` with GOMAXPROCS=1 (one P makes goroutine interleavings
 // coarse and late, which is how a missing wait shows up) while --load busy
-// loops compete for every core. ui runs each npm `test:<suite>` --runs times,
+// loops compete for every core, through scripts/go-test-guard.mjs so each run
+// of a test has the 30 s deadline every unit test has. ui runs each npm `test:<suite>` --runs times,
 // with --parallel copies of the whole list at once, so suites share the machine
 // and anything they share (servers, caches, ports) is contended.
 //
@@ -50,10 +51,13 @@ try {
   if (mode === 'go') {
     const count = options.count ?? '50';
     const packages = names.length ? names : ['./internal/...'];
-    const args = ['test', '-race', `-count=${count}`, ...(options.run ? ['-run', options.run] : []), ...packages];
-    console.log(`go ${args.join(' ')}  (GOMAXPROCS=1, ${spinners.length} busy loops)`);
-    const { code, out } = await run('go', args, join(v2, 'services/runner/code'), { GOMAXPROCS: '1' });
-    const failures = out.split('\n').filter(line => line.startsWith('--- FAIL'));
+    const args = ['-race', `-count=${count}`, ...(options.run ? ['-run', options.run] : []), ...packages];
+    console.log(`go test ${args.join(' ')}  (GOMAXPROCS=1, ${spinners.length} busy loops, 30 s per test)`);
+    // Through the per-test guard, as make test runs them: a run that hangs is
+    // stopped at 30 s and counted against its test (--- TIMEOUT), not left to
+    // spend the package's -timeout.
+    const { code, out } = await run(process.execPath, [join(v2, 'scripts/go-test-guard.mjs'), ...args], join(v2, 'services/runner/code'), { GOMAXPROCS: '1' });
+    const failures = out.split('\n').filter(line => line.startsWith('--- FAIL') || line.startsWith('--- TIMEOUT'));
     const byTest = new Map();
     for (const line of failures) {
       const name = line.split(' ')[2];

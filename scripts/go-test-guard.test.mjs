@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestGuard, testBinaries } from './go-test-guard.mjs';
+import { TestGuard, testBinaries, timeoutLine } from './go-test-guard.mjs';
 import { UNIT_TEST_TIMEOUT_MS } from './unit-test-timeouts.mjs';
 
 const pkg = 'example.com/m/p';
@@ -27,16 +27,32 @@ test('a test over its deadline is named once; a passing one is forgotten', () =>
   assert.match(guard.summary(), /TestSlow \(example\.com\/m\/p\): stopped after 1\.0 s/);
 });
 
-test('time paused by t.Parallel does not count; a parent counts its subtests, and the most specific is named first', () => {
+test('time paused by t.Parallel does not count', () => {
   const guard = new TestGuard({ limitMs: 1000 });
   at(guard, 0, 'run', 'TestParallel');
   at(guard, 100, 'pause', 'TestParallel');
   at(guard, 5000, 'cont', 'TestParallel');
   assert.deepEqual(guard.check(5800), [], '100 ms before the pause and 800 ms after it');
   assert.equal(guard.check(5901)[0].test, 'TestParallel');
-  at(guard, 6000, 'run', 'TestParent');
-  at(guard, 6000, 'run', 'TestParent/sub');
-  assert.deepEqual(guard.check(7001).map(item => item.test), ['TestParent/sub', 'TestParent']);
+});
+
+test('a parent that runs over while a subtest hangs names the deepest running subtest, once', () => {
+  const guard = new TestGuard({ limitMs: 1000 });
+  at(guard, 0, 'run', 'TestParent');
+  at(guard, 600, 'run', 'TestParent/done');
+  at(guard, 650, 'pass', 'TestParent/done');
+  at(guard, 700, 'run', 'TestParent/waits');
+  at(guard, 700, 'run', 'TestParent/waits/hangs');
+  at(guard, 700, 'run', 'TestParent/paused');
+  at(guard, 700, 'pause', 'TestParent/paused');
+  at(guard, 700, 'run', 'TestOther');
+  const [item, ...rest] = guard.check(1001);
+  assert.deepEqual(rest, [], 'the subtests are not over; TestOther is not either');
+  assert.deepEqual(item, { package: pkg, test: 'TestParent/waits/hangs', over: 'TestParent', ranMs: 1001 });
+  at(guard, 1100, 'pass', 'TestOther');
+  assert.deepEqual(guard.check(1702), [], 'TestParent/waits crossing later names the same subtest: no second report');
+  assert.equal(timeoutLine(item, 1000), `--- TIMEOUT: TestParent/waits/hangs (${pkg}) is still running; TestParent has run for 1.0 s, over the 1.0 s limit\n`);
+  assert.match(guard.summary(), /TestParent\/waits\/hangs \(example\.com\/m\/p\): stopped after 1\.0 s of TestParent/);
 });
 
 test('without -v a test prints only when it fails, its subtests with it, and package lines as go test prints them', () => {
@@ -81,7 +97,7 @@ test('a hung test is stopped with a goroutine dump and named; the run fails and 
   const dir = await mkdtemp(join(tmpdir(), 'lazybox-go-guard-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, 'go.mod'), 'module example.com/guard\n\ngo 1.21\n');
-  await writeFile(join(dir, 'hang_test.go'), 'package guard\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestFine(t *testing.T) {}\n\nfunc TestHangs(t *testing.T) {\n\tt.Run("inner", func(t *testing.T) { t.Log("waiting"); time.Sleep(time.Hour) })\n}\n');
+  await writeFile(join(dir, 'hang_test.go'), 'package guard\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestFine(t *testing.T) {}\n\nfunc TestHangs(t *testing.T) {\n\ttime.Sleep(time.Second)\n\tt.Run("inner", func(t *testing.T) { t.Log("waiting"); time.Sleep(time.Hour) })\n}\n');
   await mkdir(join(dir, 'other'));
   await writeFile(join(dir, 'other', 'other_test.go'), 'package other\n\nimport "testing"\n\nfunc TestOther(t *testing.T) {}\n');
   const guard = fileURLToPath(new URL('go-test-guard.mjs', import.meta.url));
@@ -91,14 +107,16 @@ test('a hung test is stopped with a goroutine dump and named; the run fails and 
   child.stderr.on('data', data => { out += data; });
   const code = await new Promise(done => child.once('close', done));
   assert.equal(code, 1, out);
-  assert.match(out, /--- TIMEOUT: TestHangs\/inner \(example\.com\/guard\) has run for \d+\.\d s, over the 1\.5 s limit/);
+  // The parent ran a second before its subtest hung, so its clock runs out first: the subtest is named.
+  assert.match(out, /--- TIMEOUT: TestHangs\/inner \(example\.com\/guard\) is still running; TestHangs has run for \d+\.\d s, over the 1\.5 s limit/);
+  assert.equal(out.match(/--- TIMEOUT/g).length, 1, out);
   assert.match(out, /sending SIGQUIT to \S+guard\.test \(pid \d+\)/);
   assert.match(out, /=== RUN   TestHangs\/inner\n\s+hang_test\.go:\d+: waiting\n[\s\S]*SIGQUIT: quit[\s\S]*goroutine \d+ .*\[sleep\]/, 'the hung test\'s lines and its stacks');
   assert.match(out, /^FAIL\texample\.com\/guard\t/m);
   assert.match(out, /^ok  \texample\.com\/guard\/other\t/m);
   assert.doesNotMatch(out, /TestFine/, 'a passing test stays quiet');
   assert.doesNotMatch(out, /"Action"/, 'go test\'s text, not its JSON');
-  assert.match(out, /FAIL: 2 tests ran over the 1\.5 s limit on every unit test \(AGENTS\.md\):\n    TestHangs\/inner \(example\.com\/guard\)/);
+  assert.match(out, /FAIL: a test ran over the 1\.5 s limit on every unit test \(AGENTS\.md\):\n    TestHangs\/inner \(example\.com\/guard\): stopped after \d+\.\d s of TestHangs\n/);
 });
 
 test('a passing run passes, with go test\'s exit status', { skip: !hasGo && 'needs go' }, async t => {
@@ -112,4 +130,11 @@ test('a passing run passes, with go test\'s exit status', { skip: !hasGo && 'nee
   assert.match(run.stdout, /^ok  \texample\.com\/pass\t/m);
   const broken = spawnSync(process.execPath, [guard, '-count=1', './nowhere'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GOFLAGS: '' } });
   assert.notEqual(broken.status, 0, 'go test\'s own failure is the guard\'s');
+  // Started through a symlink, it still runs (and still fails), rather than exiting 0 having done nothing.
+  const linked = join(dir, 'linked-guard.mjs');
+  await symlink(guard, linked);
+  const viaLink = spawnSync(process.execPath, [linked, '-count=1', './...'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GOFLAGS: '' } });
+  assert.equal(viaLink.status, 0, viaLink.stdout + viaLink.stderr);
+  assert.match(viaLink.stdout, /^ok  \texample\.com\/pass\t/m);
+  assert.notEqual(spawnSync(process.execPath, [linked, '-count=1', './nowhere'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GOFLAGS: '' } }).status, 0);
 });

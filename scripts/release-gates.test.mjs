@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { loadGateCatalog, selectGates, shardGates, runGateCatalog, validateReleaseReceipt, executeGate, summarizeGateReport, changedFiles } from './release-gates.mjs';
 import { digestTree } from './environments.mjs';
-import { makefileViolations, nextestViolations, scriptViolations, unitTestTimeoutViolations, workflowViolations } from './unit-test-timeouts.mjs';
+import { makefileViolations, nextestViolations, scriptFileViolations, scriptViolations, unitTestTimeoutViolations, workflowViolations } from './unit-test-timeouts.mjs';
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'lazybox-gates-'));
@@ -62,6 +62,26 @@ test('a unit test without its per-test deadline fails admission, wherever it is 
   assert.match(make('\tcargo nextest run --manifest-path a/Cargo.toml')[0], /without --config-file \.config\/nextest\.toml/);
   assert.match(make('\t$(GO_TEST) --limit-ms=60000 ./...')[0], /--limit-ms is for its own tests/);
   assert.deepEqual(makefileViolations('test-real: build-worker\n\tcd code && LAZYBOX_V2_REAL=1 go test -timeout 12m -v ./tests/integration\n'), [], 'real-provider targets are not unit tests');
+  for (const bare of ['\tgo -C services/runner/code test ./...', '\tgo -C=services/runner/code test ./...', '\t$$GO test ./...', '\t$(GO) test ./...', '\t/usr/local/go/bin/go test ./...', '\tcd code && GOFLAGS=-p=1 go vet ./... && go test ./...'])
+    assert.match(make(bare)[0] || '', /go test without scripts\/go-test-guard\.mjs/, bare);
+  assert.deepEqual(make('\tgo -C services/runner/code vet ./...\n\tgo build ./...'), [], 'other go commands are not tests');
+  assert.match(make('\tcargo +stable test --locked')[0], /cargo test has no per-test deadline/);
+  assert.match(make('\tbash scripts/release/publish-cask_test.sh')[0], /a test file run outside node --test --test-timeout=30000/);
+  assert.match(make('\tnode scripts/release/install.test.mjs')[0], /a test file run outside node --test/);
+
+  assert.deepEqual(scriptFileViolations({
+    'scripts/stress.mjs': "run(process.execPath, [join(v2, 'scripts/go-test-guard.mjs'), '-race'])",
+    'scripts/go-test-guard.mjs': "spawn('go', ['test', '-json', ...args])",
+    'scripts/release/build.mjs': "run('go', ['test', '-run', '^TestRelease'])",
+    'scripts/activity.test.ts': "assert.equal(title('go test ./...'), 'go test')",
+    'scripts/fixtures/page.mjs': "tool('Bash', { command: 'go test ./...' })",
+  }), [], 'the guard, a listed non-unit script, test fixtures and quoted commands');
+  assert.match(scriptFileViolations({ 'scripts/stress.mjs': "run('go', ['test', '-race', '-count=50'])" })[0], /scripts\/stress\.mjs: spawns go test without/);
+  assert.match(scriptFileViolations({ 'scripts/x.mjs': 'spawn("go", ["-C", dir, "test", "./..."])' })[0], /spawns go test without/);
+  assert.match(scriptFileViolations({ 'scripts/x.mjs': "spawn('cargo', ['test'])" })[0], /spawns cargo test/);
+  assert.match(scriptFileViolations({ 'scripts/x.mjs': "spawn(process.execPath, ['--test', file])" })[0], /spawns node --test without --test-timeout=30000/);
+  assert.deepEqual(scriptFileViolations({ 'scripts/x.mjs': "spawn(process.execPath, ['--test', '--test-timeout=30000', file])" }), []);
+  assert.match(scriptFileViolations({ 'scripts/check.sh': '#!/bin/sh\n# go test used to run here\ncd code && "$GO" test ./...\n' })[0], /scripts\/check\.sh: go test without/);
 
   assert.deepEqual(workflowViolations('    steps:\n      # cargo test used to run here\n      - run: make test\n', 'ci.yml'), []);
   assert.match(workflowViolations('      - run: cd services/runner/code && go test ./...\n', 'ci.yml')[0], /ci\.yml: go test without/);

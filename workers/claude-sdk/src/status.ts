@@ -73,7 +73,12 @@ export class NativeStatus {
   private streamed = new Set<string>();
   normalize(message: SDKMessage): Event[] {
     const out: Event[] = [];
-    const emit = (e: Event) => out.push({ sessionId: this.reference, ...e });
+    const emit = (e: Event) => {
+      if (e.type === 'agent_status' && e.agentId && (e.status === 'unknown' || TERMINAL.includes(e.status || ''))) {
+        this.contexts.delete(e.agentId);
+      }
+      out.push({ sessionId: this.reference, ...e });
+    };
     const m = message;
     const parentCall = 'parent_tool_use_id' in m ? m.parent_tool_use_id : undefined;
     // The SDK can attach lifecycle events to an MCP invocation. The managed

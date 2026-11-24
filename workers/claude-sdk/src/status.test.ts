@@ -268,3 +268,14 @@ test('a hook heartbeat (tool_progress naming no tool call) reports nothing', () 
   assert.deepEqual(status.normalize(message({ type: 'tool_progress', tool_use_id: 'hook-1', tool_name: 'PreToolUse', parent_tool_use_id: 'hook-parent', elapsed_time_seconds: 5, heartbeat: true })), []);
   assert.deepEqual(status.normalize(message({ type: 'tool_progress', tool_use_id: 'hook-2', tool_name: 'Stop', parent_tool_use_id: null, elapsed_time_seconds: 5, heartbeat: true })), []);
 });
+
+test('later results refresh context only for agents still running', () => {
+  const status = new NativeStatus();
+  for (const id of ['finished', 'active']) {
+    status.normalize(message({ type: 'system', subtype: 'task_started', task_id: id, tool_use_id: id, is_backgrounded: true }));
+    status.normalize(message({ type: 'assistant', parent_tool_use_id: id, message: { content: [], model: 'fixture', usage: { input_tokens: 20 } } }));
+  }
+  status.normalize(message({ type: 'system', subtype: 'task_notification', task_id: 'finished', status: 'completed' }));
+  const result = status.normalize(message({ type: 'result', subtype: 'success', modelUsage: {fixture: {contextWindow: 100}} }));
+  assert.deepEqual(result.filter(event => event.type === 'context').map(event => event.agentId), ['claude-tool:active']);
+});

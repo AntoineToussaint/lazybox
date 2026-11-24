@@ -228,11 +228,12 @@ each member's home; `ListWorkspaceRepositories` (so `lazybox workspace repos`,
 `ListRepositoryHomes`, `SetRepositoryHome` and `OpenRepositoryHome` are the
 owner's alone.
 
-**Run in … home.** The conversation's last message, once its turn is over,
-gets one button per command it hands to the person (`home-run.ts`): the
+**Run in … home.** Use **Select commands…** to choose steps, then **Run selected in order**. Each selected command runs in its named location after the previous command exits successfully. Leave alternative commands unchecked. Cancel remaining commands to let the current command finish and skip the rest. After a failure, completed steps are unchecked for retry. Earlier replies keep their buttons when the agent continues.
+
+A reply gets one button per distinct command it hands to the person (`home-run.ts`): the
 briefing's phrase is read for certain; otherwise a command the message plainly
 hands over ("run … yourself", "you'll need to run", "needs a real terminal",
-a login) is offered, at most three, never one the agent says it ran or one for
+a login) is offered, never one the agent says it ran or one for
 later. The command is kept exactly (`env -u VAR`, every argument; in a fenced
 `sh` block too), less a leading `cd` into another absolute folder (a temporary
 checkout the home replaces, whose name also picks the repository). A click

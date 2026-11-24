@@ -126,7 +126,7 @@ const FENCE = /^([ \t]*)(`{3,}|~{3,})[ \t]*([\w-]*)[^\n]*\n([\s\S]*?)\n[ \t]*\2[
  * inline command with the phrase before it in its line or sentence, and a
  * fenced shell block with the paragraph before it.
  */
-export function homeOffers(markdown: string, limit = 3, standaloneInline = false, offset?: number): HomeOffer[] {
+export function homeOffers(markdown: string, limit = Infinity, standaloneInline = false, offset?: number): HomeOffer[] {
   const out: HomeOffer[] = [];
   const seen = new Set<string>();
   const add = (command: string, found: { target: HomeTarget; explicit: boolean } | undefined) => {

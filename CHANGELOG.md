@@ -63,7 +63,7 @@ leave out.
 - **Saved state survives a power cut** Linked items, reviews, artifacts, code checkpoints, the repository catalog and workspace settings finish every save on disk, and a failed save no longer shows a change that was never written. An unreadable items file is kept aside under its own name, never over an earlier one.
 - **Verification checkouts are cleaned up** Each acceptance check's checkout is removed once its command finishes, so verification no longer fills the disk with full clones.
 - **Open here from a peek goes to the right place** Open here (⌘↵) on a peeked mission task opens its conversation, not the Missions page; a peeked file or conversation keeps the title it read.
-- **A chat window that cannot open stays in its workspace** When the browser refuses a chat's own window after you switched workspace, the chat goes back to the workspace it came from, and the one you switched to keeps its page.
+- **A chat window that cannot open stays in its workspace** When the browser refuses a chat's own window after you switched workspace, the chat goes back to the workspace it came from, and the one you switched to keeps its page. Likewise the shell of Install Claude Code waits in its workspace when you have moved on, and shows when you go back.
 - **Typing while a link is checked is kept** Pasting a link into New task that turns out not to be an issue puts it where you pasted it, and keeps what you typed while Lazybox asked.
 - **Rename keeps your place** Esc, Cancel or saving a workspace's F2 rename puts the keyboard back on its row.
 - **The agent browser follows a slow page** A click that sends the page elsewhere is waited for even when the page is slow to leave, so the agent learns where it landed instead of reading the page it left.

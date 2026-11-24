@@ -1,8 +1,10 @@
 // A chat that cannot get its own window (the browser blocks it) comes back
 // where it left: on the page, or, when the person switched workspace while the
 // window was being opened, in the workspace it left, never in the one now on
-// screen. WebKit (the desktop app's engine), the browser build's host, against
-// the fake Runner fixture.
+// screen. Likewise the shell Settings → Install Claude Code opens in a workspace
+// the person left meanwhile: it waits there, and its panel opens on return.
+// WebKit (the desktop app's engine), the browser build's host, against the fake
+// Runner fixture.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';
 import react from '@vitejs/plugin-react';
@@ -53,6 +55,31 @@ try{
  await expect(sessionChoice).toHaveValue('alpha-session');
  await expect(chat.getByRole('textbox',{name:'Message',exact:true}),'Alpha has its chat back on the page').toBeEnabled();
  await expect(page.getByRole('region',{name:'In other windows'})).toHaveCount(0);
+
+ // 3. Settings → Install Claude Code opens a shell in Alpha; the person switches to Beta before it
+ // is open: Beta stays on screen, and the shell (its installer typed in) waits in Alpha.
+ fixture.availability.claude.installed=false;
+ await page.getByRole('button',{name:'Settings',exact:true}).click();
+ await page.getByRole('tab',{name:'Agents & workspaces'}).click();
+ const claude=page.locator('section.claude-settings');
+ await claude.getByRole('button',{name:'Check again'}).click();
+ const opening=Promise.withResolvers(),asked=Promise.withResolvers();
+ await page.route('**/OpenTerminal',async route=>{asked.resolve();await opening.promise;await route.continue();});
+ await claude.getByRole('button',{name:'Install Claude Code'}).click();
+ await asked.promise;
+ await page.keyboard.press('Meta+k');const palette=page.getByRole('dialog',{name:'Command palette'});await palette.getByRole('combobox',{name:'Search commands'}).fill('Beta release');await palette.getByRole('option',{name:/Beta release/}).first().click();
+ await expect(betaLink).toHaveAttribute('aria-current','page');
+ opening.resolve();
+ const installer=()=>[...fixture.terminals.values()].find(t=>t.input.join('').includes('install.sh'));
+ await expect.poll(()=>installer()?.input.join('')).toBe('curl -fsSL https://claude.ai/install.sh | bash\r');
+ assert.equal(installer().collectionId,'alpha');
+ await expect(betaLink,'the shell did not take the person back, or elsewhere').toHaveAttribute('aria-current','page');
+ await expect(page.locator('.panel-terminal')).toHaveCount(0);
+ await page.unroute('**/OpenTerminal');
+ fixture.availability.claude.installed=true;
+ // Back in Alpha, the shell is there.
+ await alphaLink.click();
+ await expect(page.locator('.panel-terminal').getByTestId('terminal')).toContainText('ran: curl -fsSL https://claude.ai/install.sh | bash');
  assert.deepEqual(errors,[]);
- console.log('PASS: a chat whose window is refused comes back on its page, and after a workspace switch meanwhile, in the workspace it left, not the one on screen. Fixture only.');
+ console.log('PASS: a chat whose window is refused comes back on its page, and after a workspace switch meanwhile, in the workspace it left, not the one on screen; an installer shell opened after a switch waits in its workspace and shows on return. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

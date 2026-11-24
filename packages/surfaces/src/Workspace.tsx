@@ -485,9 +485,9 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   });
   /** Show this workspace's terminal: the open panel, or one docked beside the work. It starts a shell only when none is running. */
   const showTerminal = () => { if (workspaceID && showModule('terminal')) requestTerminal(workspaceID); };
-  // A panel asked for in another workspace is shown once that workspace's page is.
-  const pendingModule = useRef('');
-  useEffect(() => { const kind = pendingModule.current; if (!kind) return; pendingModule.current = ''; showModule(kind); }, [workspaceID]);
+  // A panel asked for in another workspace is shown once that workspace's page is (and only there).
+  const pendingModule = useRef<{ workspace: string; kind: string }>(undefined);
+  useEffect(() => { const pending = pendingModule.current; if (!pending || pending.workspace !== workspaceID) return; pendingModule.current = undefined; showModule(pending.kind); }, [workspaceID]);
   /**
    * Types a command into a new shell of this workspace (or the first ready
    * one) and shows the shell panel, where the person watches it run. Settings
@@ -496,10 +496,13 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const runInShell = async (command: string) => {
     const target = workspaceID || collections.find(c => c.state === 'ready')?.id || '';
     if (!target) throw new Error(`Create a workspace first: the shell runs in one. Or run this in a terminal: ${command}`);
+    const startedIn = workspaceID;
     const terminal = await api.openTerminal({ collectionId: target, directory: '', cols: 100, rows: 30, requestKey: crypto.randomUUID() });
     requestTerminal(target, terminal.id);
-    showPanelFor('terminal', { collectionId: target, sessionId: '', commandId: '' });
-    setSettings(false);
+    // Shown only if the person is still where they asked: after a switch meanwhile, this
+    // render's page is another workspace's, and the shell's panel opens when its own is shown.
+    if (shownWorkspace.current === startedIn) { showPanelFor('terminal', { collectionId: target, sessionId: '', commandId: '' }); setSettings(false); }
+    else pendingModule.current = { workspace: target, kind: 'terminal' };
     // Written once the shell can read it: earlier, the terminal echoes it and the prompt shows it again.
     await writeWhenReady(api, target, terminal.id, command + '\r');
   };
@@ -509,7 +512,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     if (requested && switched(requested)) return;
     const target = requested && localTarget(requested);
     if (target && target.collectionId !== workspaceID && !fixedWorkspaceId) {
-      pendingModule.current = kind;
+      pendingModule.current = { workspace: target.collectionId, kind };
       if (target.sessionId) showSession(target); else select(target);
       setSettings(false);
       return;

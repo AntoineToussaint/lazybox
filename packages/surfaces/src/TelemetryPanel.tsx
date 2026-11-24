@@ -149,8 +149,13 @@ export function TelemetryPanel({workspaceId,executionId,conversationId,messages,
  const {api,info,error:connectionError}=useRunner();
  const [report,setReport]=useState<TelemetryReport>(),[error,setError]=useState(''),[open,setOpen]=useState(false),[asked,setAsked]=useState(false);
  const id=useId(),popover=useRef<HTMLDivElement>(null);
+ // What the figures are about: another workspace or execution drops them at once. The execution's
+ // conversation becoming known only widens the read, so the figures shown stay until it answers
+ // (an open popover keeps its content and what is unfolded in it).
+ const subject=`${workspaceId||''}\0${executionId||''}`,readFor=useRef(subject);
  useEffect(()=>{
-  setReport(undefined);setError('');if(!workspaceId&&!executionId&&!conversationId)return;
+  if(readFor.current!==subject){readFor.current=subject;setReport(undefined);}
+  setError('');if(!workspaceId&&!executionId&&!conversationId)return;
   const controller=new AbortController();let reading=false;
   const update=async()=>{if(reading)return;reading=true;try{const r=await api.getTelemetry(conversationId?{conversation:conversationId}:executionId?{execution:executionId}:{workspace:workspaceId},{signal:controller.signal,timeoutMs:5000});if(!controller.signal.aborted){setReport(r);setError('');}}catch(e){if(!controller.signal.aborted)setError(String(e));}finally{reading=false;}};
   void update();const timer=setInterval(()=>void update(),3000);return()=>{controller.abort();clearInterval(timer);};

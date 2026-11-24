@@ -131,3 +131,14 @@ export function conversationDetails(session:Session,profiles:readonly Profile[],
  const agent=agentTitle(provider,profiles);
  return [agent,sessionModelLabel(session),includeAccount&&!isAcp(provider)?sessionAccountLabel(session,profile):''].filter(Boolean).join(' · ');
 }
+/**
+ * The session a conversation window shows for the execution it is on. When the
+ * window moves to another execution (a successor, a linked conversation), the
+ * session it holds is the previous one until GetSession answers, and its
+ * conversation would be read for the new one (usage, prompts, links). What the
+ * new execution's reader already knows (a continuation carries its session)
+ * stands in meanwhile; otherwise there is none yet.
+ */
+export function currentSession(sessionId:string,held?:Session,known?:Session):Session|undefined{
+ return held?.id===sessionId?held:known?.id===sessionId?known:undefined;
+}

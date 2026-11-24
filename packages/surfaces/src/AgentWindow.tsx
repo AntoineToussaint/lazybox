@@ -28,7 +28,7 @@ import type { SurfaceTarget, ViewStateStore } from '@lazybox/platform';
 import { readDraft, writeDraft, writePreference } from './view-state';
 import { RunnerProvider, useRunner, type RunnerConnection } from './RunnerContext';
 import { AttentionScope, PanelShownContext, useMarkViewed } from './useAttention';
-import { conversationName } from './conversation-model';
+import { conversationName, currentSession } from './conversation-model';
 import { useComposeRequests } from './compose';
 import { queuedMessages } from './transcript-model';
 export type { RunnerConnection } from './RunnerContext';
@@ -188,7 +188,8 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const [retryDraft, setRetryDraft] = useState('');
   const [branchFromCheckpoint, setBranchFromCheckpoint] = useState(false);
   const [handoffMessage, setHandoffMessage] = useState<HandoffMessage>();
-  const [session, setSession] = useState<Session | undefined>(transcript.reader.session);
+  const [heldSession, setSession] = useState<Session | undefined>(transcript.reader.session);
+  const session = currentSession(sessionID, heldSession, transcript.reader.session);
   useMarkViewed(session, mode === 'agent');
   const workspace = useSessionWorkspace(api, session?.collectionId || collectionId, !!info, revision);
   const { recent: events, messages: conversation, status: stream } = transcript;

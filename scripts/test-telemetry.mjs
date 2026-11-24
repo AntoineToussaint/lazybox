@@ -56,29 +56,39 @@ try{
  channel.push({type:'message_delta',text:'New reply'});
  channel.push({type:'tool_activity',providerDataJson:Buffer.from(JSON.stringify({type:'tool_call',id:'check',name:'Bash',status:'completed',input:{command:'/bin/zsh -lc "make check"'},output:'check output '.repeat(2000)})).toString('base64')});
  for(let i=0;i<6;i++) channel.push({type:'tool_activity',providerDataJson:Buffer.from(JSON.stringify({type:'tool_call',id:'small'+i,name:'Bash',status:'completed',input:{command:'pwd'},output:'x'.repeat(1000)})).toString('base64')});
- const codex = await browser.newPage({viewport:{width:1500,height:1100}});
- await codex.route('**/GetTelemetry',route=>route.fulfill({json:{
+ // The conversation an execution belongs to is known once its session is read, after the usage chip.
+ // Usage is read by execution until then, by conversation after: each read's scope is kept, and the
+ // conversation's figures differ from the execution's, so the page shows which one it applied.
+ fixture.sessions.find(s=>s.id==='alpha-session').conversationId='alpha-conversation';
+ const usageReport=used=>({
    groups:[{scope:{execution:'alpha-session'},source:'sdk',model:'gpt-6.2-sol',records:'1',nanos:'340500000',tokens:{input:'66000',cacheRead:'300000',output:'1100'}}],
-   contexts:[{scope:{execution:'alpha-session'},agent:'root',model:'gpt-6.2-sol',used:'367100',capacity:'475000',source:'sdk_token_breakdown',
+   contexts:[{scope:{execution:'alpha-session'},agent:'root',model:'gpt-6.2-sol',used,capacity:'475000',source:'sdk_token_breakdown',
      categories:[['uncached_input','66000'],['cached_input','300000'],['reasoning_output','800'],['other_output','300']].map(([name,tokens])=>({name,tokens,kind:'used',included:true}))}]
- }}));
- // The conversation's details arrive after the usage chip: held here until the popover is open, so
- // resolving which conversation this is (no change of conversation) is shown not to close it.
+ });
+ const codex = await browser.newPage({viewport:{width:1500,height:1100}});
+ const reads=[];
+ await codex.route('**/GetTelemetry',route=>{const scope=route.request().postDataJSON();reads.push(scope);return route.fulfill({json:usageReport(scope.conversation==='alpha-conversation'?'380000':'367100')});});
+ // The session is held until the popover is open with a group unfolded.
  let releaseSession;const sessionHeld=new Promise(resolve=>{releaseSession=resolve;});
  await codex.route('**/GetSession',async route=>{await sessionHeld;await route.continue();});
  await codex.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  await codex.getByRole('button',{name:'Context and token cost'}).click();
  const codexPanel=codex.locator('.context-popover');
- await expect(codexPanel).toBeVisible();
- await expect(codex.getByRole('button',{name:'Rename conversation'})).toBeDisabled();
- releaseSession();
- await expect(codex.getByRole('button',{name:'Rename conversation'})).toBeEnabled();
- await expect(codexPanel).toBeVisible();
+ await expect(codexPanel).toContainText('367.1K');
  const contributors=codexPanel.getByRole('region',{name:'Transcript size'});
  await expect(contributors.locator('summary').first()).toHaveText('Tool outputs32 kB');
  await expect(contributors.getByText('Ran make check')).toBeHidden();
  await contributors.locator('summary').first().click();
  await expect(contributors.locator('.context-items').first().locator('details')).toHaveCount(5);
+ assert.ok(reads.length>0&&reads.every(scope=>scope.execution==='alpha-session'&&!scope.conversation),'read by execution until the conversation is known');
+ // The session answers: the read moves to the conversation. The popover stays open, keeps its
+ // breakdown and what is unfolded in it, and shows the conversation's figures once they come.
+ releaseSession();
+ await expect.poll(()=>reads.some(scope=>scope.conversation==='alpha-conversation')).toBe(true);
+ await expect(codexPanel).toContainText('380K');
+ await expect(codexPanel).toBeVisible();
+ await expect(contributors.locator('.context-items').first().locator('details')).toHaveCount(5);
+ await expect(contributors.locator('.context-items').first()).toBeVisible();
  await contributors.getByText('Ran make check').click();
  await expect(contributors.locator('pre').first()).toBeVisible();
  await expect(contributors).toContainText('check output');
@@ -95,6 +105,37 @@ try{
  await expect(codexPanel).toContainText('Token types from the latest Codex request.');
  await expect(codexPanel.locator('.token-cost>summary')).toContainText('$0.3405');
  await expect(codexPanel).not.toContainText('Category breakdown not reported.');
+ // Another workspace, by keyboard (no click outside to dismiss it): the popover closes.
+ await expect(codexPanel).toBeVisible();
+ await codex.keyboard.press('Meta+2');
+ await expect(codex.getByRole('combobox',{name:'Workspace',exact:true})).toHaveValue('beta');
+ await expect(codexPanel).toBeHidden();
  await codex.close();
+
+ // A window that moves to another conversation reads that one's usage, never the one it left,
+ // even before the new session is read: a fork opens the conversation it came from in its window.
+ const alpha=fixture.sessions.find(s=>s.id==='alpha-session');
+ fixture.sessions.push({...structuredClone(alpha),id:'fork-session',conversationId:'fork-conversation',title:'Forked',forkedFromSessionId:'alpha-session',forkedFromCursor:'0'});
+ const forkWindow=await browser.newPage({viewport:{width:1200,height:900}});
+ await forkWindow.route('**/GetTelemetry',route=>{const scope=route.request().postDataJSON();return route.fulfill({json:usageReport(scope.conversation==='fork-conversation'?'100000':'237500')});});
+ // Opening the linked conversation reads its session once; the window's own reads of it wait.
+ let alphaReads=0,releaseAlpha;const alphaHeld=new Promise(resolve=>{releaseAlpha=resolve;});
+ await forkWindow.route('**/GetSession',async route=>{if(route.request().postDataJSON().sessionId==='alpha-session'&&++alphaReads>1)await alphaHeld;await route.continue();});
+ await forkWindow.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=agent&collection=alpha&session=fork-session#token=${fixture.token}`);
+ const chip=forkWindow.getByRole('button',{name:'Context and token cost'});
+ await expect(chip).toContainText('21.1%');
+ // With the popover open, the window moves to the other conversation by keyboard (no click outside):
+ // the popover closes, and the usage shown is the new conversation's.
+ await chip.click();
+ const forkPanel=forkWindow.locator('.context-popover');
+ await expect(forkPanel).toContainText('100K');
+ await forkWindow.getByRole('button',{name:'Open previous conversation'}).focus();
+ await expect(forkPanel).toBeVisible();
+ await forkWindow.keyboard.press('Enter');
+ await expect.poll(()=>new URL(forkWindow.url()).searchParams.get('session')).toBe('alpha-session');
+ await expect(forkPanel).toBeHidden();
+ await expect(chip).toContainText('50%');
+ releaseAlpha();
+ await forkWindow.close();
  assert.deepEqual(errors,[]);assert.equal(fixture.mutations.length,0);console.log('PASS: normalized context, deferred counts, partial pricing, disconnect/retry recovery. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

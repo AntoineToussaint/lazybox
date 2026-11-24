@@ -221,9 +221,12 @@ try {
   await row('Deploy preview').getByRole('button', { name: 'Actions for Deploy preview' }).click();
   const sheet = phone.getByRole('dialog', { name: 'Actions' });
   await expect(sheet.getByRole('button')).toHaveText(['Open conversation', 'Pin', 'Cancel']);
+  // It opens on Cancel, not on its first action, and Esc gives focus back to the ⋯ that opened it.
+  await expect(sheet.getByRole('button', { name: 'Cancel' })).toBeFocused();
   await phone.screenshot({ path: `${shots}remote-action-sheet-dark.png`, animations: 'disabled' });
   await phone.keyboard.press('Escape');
   await expect(sheet).toHaveCount(0);
+  await expect(row('Deploy preview').getByRole('button', { name: 'Actions for Deploy preview' })).toBeFocused();
   for (const box of await phone.locator('.remote-row button:visible').evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height))) assert.ok(box >= 40, `row targets are thumb-sized (${box})`);
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'no sideways scrolling at 390');
 
@@ -309,7 +312,10 @@ try {
   Object.assign(f.sessions.find(s => s.id === 'approval-session'), { status: 'waiting_approval', pending: [{ type: 'approval', requestId: 'a-force', text: 'Bash', providerDataJson: data({ input: { command: 'git push --force origin main' } }) }] });
   await phone.locator('.request').getByRole('button', { name: 'Allow once' }).click({ timeout: 10_000 });
   await expect(phone.getByRole('dialog', { name: 'Allow this?' })).toContainText('Can discard work');
+  // The sheet opens on Cancel (a stray Enter allows nothing), and closing it gives focus back to Allow once.
+  await expect(phone.getByRole('dialog', { name: 'Allow this?' }).getByRole('button', { name: 'Cancel' })).toBeFocused();
   await phone.getByRole('dialog', { name: 'Allow this?' }).getByRole('button', { name: 'Cancel' }).click();
+  await expect(phone.locator('.request').getByRole('button', { name: 'Allow once' })).toBeFocused();
   await phone.waitForTimeout(500);
   assert.deepEqual(applies(b => b.approval?.requestId === 'a-force'), [], 'Cancel sent nothing');
   await phone.locator('.request').getByRole('button', { name: 'Allow once' }).click();

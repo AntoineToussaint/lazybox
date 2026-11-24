@@ -334,6 +334,40 @@ func TestStartReviewTemplateCapturesInputAndPublishesFindings(t *testing.T) {
 	}
 }
 
+func TestReviewPRCISendsReportToOriginalAuthor(t *testing.T) {
+	for _, withFinding := range []bool{false, true} {
+		name := "clean"
+		if withFinding {
+			name = "with finding"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newReviewFixture(t)
+			start, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, TemplateId: reviews.ReviewPRCITemplate})
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-f.codex.Session.Applied
+			if withFinding {
+				reviewer := bearer(timeout(t), agentToken(t, f.codex.Session.Open.Env))
+				_, err = f.client.AddReviewFinding(reviewer, &pb.AddReviewFindingRequest{SessionId: start.Session.Id, File: "api/handler.go", StartLine: 3, Severity: "major", Title: "Check handler behavior", Body: "Exercise the changed handler."})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "Review coverage: inspected the changed handler."}
+			f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+			select {
+			case op := <-f.claude.Session.Applied:
+				if op.Origin == nil || op.Origin.Kind != agent.OriginReviewFindings || !strings.Contains(op.Text, "lazybox artifact get "+start.Run.Id) || !strings.Contains(op.Text, "latest PR head") {
+					t.Fatalf("wrong author handoff: %+v", op)
+				}
+			case <-time.After(12 * time.Second):
+				t.Fatal("completed review did not reach the original author")
+			}
+		})
+	}
+}
+
 func TestStartReviewTemplateRequiresReportedCoverage(t *testing.T) {
 	f := newReviewFixture(t)
 	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, TemplateId: "code-review-v1"})

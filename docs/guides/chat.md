@@ -434,6 +434,7 @@ Select text in a workspace shell beside your chat and click **Send to agent** to
   on the resulting chat card, select the findings you want, and choose the
   current conversation or **Fix in new conversation**. Both prepare a draft
   containing the selected findings for you to send.
+- **Review, PR and CI:** Select the **review-pr-ci** snippet (or type `/review-pr-ci`, select it, and send). Your configured default reviewer inspects the changes. When its report is ready, the Runner gives the original conversation the report and instructions to fix confirmed findings, update the branch’s PR or create one, and monitor checks on its latest commit. The author investigates failed checks, pushes repairs, and reports green CI or a specific blocker. A clean review also proceeds to the PR. The workflow leaves the PR open.
 - **Your own leader keys:** Settings → Shortcuts can add `]]` menu entries that
   send or insert a snippet with one key.
 

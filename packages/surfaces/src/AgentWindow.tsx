@@ -307,15 +307,20 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     const signal = lifetime.current!.signal;
     try {
       const reviewKey = snippetKey ?? (draftSnippet.current?.text === text ? draftSnippet.current.key : undefined);
-      if ((uncertainSend.startsWith('review-') || (reviewKey && isReviewSnippet(reviewKey))) && !files.length) {
+      let prWorkflow = uncertainSend.startsWith('review-pr-ci-');
+      if (!uncertainSend && reviewKey === 'review-pr-ci') {
+        const catalog = await api.listSnippets({});
+        prWorkflow = catalog.snippets.some(row => row.key === reviewKey && row.origin === 'workflow' && row.body === text);
+      }
+      if ((prWorkflow || uncertainSend.startsWith('review-') || (reviewKey && isReviewSnippet(reviewKey))) && !files.length) {
         const launcher = chatReview.launcher;
         if (launcher.unavailable) { setError(launcher.unavailable); return false; }
-        const requestKey = uncertainSend || 'review-' + crypto.randomUUID();
+        const requestKey = uncertainSend || (prWorkflow ? 'review-pr-ci-' : 'review-') + crypto.randomUUID();
         draftSnippet.current = {key: reviewKey || "review", text};
         setUncertainSend(requestKey);
         setMessage(text);
         persistDraft(text, [], [], requestKey);
-        const started = await launcher.start({ scope: 'changes' }, undefined, text, 'code-review-v1', requestKey);
+        const started = await launcher.start({ scope: 'changes' }, undefined, prWorkflow ? '' : text, prWorkflow ? 'review-pr-ci-v1' : 'code-review-v1', requestKey);
         if (!started?.run) return false;
         if (started.run.state === 'failed') {
           if (!signal.aborted) { setUncertainSend(''); persistDraft(text, [], []); }

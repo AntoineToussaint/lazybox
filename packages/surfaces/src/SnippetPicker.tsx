@@ -102,7 +102,7 @@ export function SnippetPicker({
         onClose();
       } else
         setError(
-          isReviewSnippet(selected.key) ? "Review start was not confirmed. Close the picker and retry the retained draft." : "The send was not confirmed. Close this picker to retry the retained draft.",
+          isReviewSnippet(selected.key, selected.origin) ? "Review start was not confirmed. Close the picker and retry the retained draft." : "The send was not confirmed. Close this picker to retry the retained draft.",
         );
     } catch (e) {
       setError(String(e));
@@ -212,7 +212,7 @@ export function SnippetPicker({
           disabled={!selected || !canSend || busy}
           onClick={() => void send()}
         >
-          {busy ? "Starting…" : selected && isReviewSnippet(selected.key) ? "Start review" : "Send snippet"}
+          {busy ? "Starting…" : selected && isReviewSnippet(selected.key, selected.origin) ? "Start review" : "Send snippet"}
         </button>
       </footer>
     </DraggableDialog>

@@ -81,6 +81,31 @@ func (b *Bench) reviewAct(workspace string, run reviews.Run, action reviews.Acti
 	}
 }
 
+// A completed result is the durable handoff. The review watcher retries it
+// after restart; the same operation ID is safe if the receipt preceded a crash.
+func (b *Bench) sendReviewPRHandoff(workspace string, run reviews.Run) {
+	source, err := b.Get(run.SourceSession)
+	if err == nil {
+		source, err = b.latest(source)
+	}
+	if err == nil {
+		message := fmt.Sprintf(`Your requested review is complete. Read the review report with lazybox artifact get %s, including its findings, evidence and coverage gaps. Inspect each finding against the current diff, fix confirmed issues, and explain any you decline. Proceed even when there are no findings.
+
+Run the relevant tests and repository pre-push checks. Commit and push the intended changes. For each affected repository, update the existing pull request for this branch or create one if missing. Link it to the workspace.
+
+Monitor the checks for the latest PR head until they finish. If CI fails, inspect the failing job logs, diagnose and fix the cause, run the relevant checks locally, push, and monitor the new head. Verify that reported checks belong to that head. Allow time for CI to register after a push. If no checks are configured, say so. If access, an external outage, or a decision blocks progress, report the PR, failing check and blocker. Finish with the PR link and verified CI status. Leave the PR open.`, run.ResultArtifact)
+		err = b.sendLazyboxMessage(b.ctx, source, "review-pr-ci-"+run.ID, message, &agent.Origin{Kind: agent.OriginReviewFindings, Summary: "Review complete · prepare PR and follow CI", From: run.ReviewerLabel})
+	}
+	if b.ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		b.stopLoop(workspace, run.ID, "Could not deliver the PR and CI workflow to the author: "+err.Error())
+		return
+	}
+	_, _ = b.Reviews.UpdateRun(workspace, run.ID, func(r *reviews.Run) error { r.PRHandoffSent = true; return nil })
+}
+
 // stopLoop ends a loop on an error, says why, and tells the person.
 func (b *Bench) stopLoop(workspace, id, why string) {
 	var run reviews.Run

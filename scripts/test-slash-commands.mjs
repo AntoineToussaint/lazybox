@@ -437,6 +437,13 @@ try{
  await page.keyboard.press('Enter');
  await expect.poll(()=>applies().at(-1)?.body.permission?.mode).toBe('read-only');
 
+ await message.fill('/review-pr-ci');
+ await expect(menu.getByRole('option',{selected:true})).toContainText('review-pr-ci');
+ await message.press('Enter');
+ await expect(message).toHaveValue(/Start the default reviewer/);
+ await message.press('Enter');
+ await expect.poll(()=>f.mutations.filter(m=>m.method==='StartReview').at(-1)?.body.templateId).toBe('review-pr-ci-v1');
+
  assert.deepEqual(errors,[]);
  console.log('PASS: / opens the grouped command menu (Lazybox · Claude · Snippets) with icons, names, hints and descriptions; it filters and ranks as you type, Esc closes it; /permissions and /model run for real (for Claude and Codex: the provider\'s models, the Runner\'s list where the agent lists none, the current one marked and a no-op, a live switch, one clear restart card where needed) and leave one line in the conversation; a restart card (model or permissions) takes the keyboard, Enter restarts, Esc cancels, and the message box has the keyboard back, with no click; the agent\'s commands complete for arguments and go as the prompt; a snippet is inserted; an unknown /word passes through; a path is a message; /detail and /help act; ⌘K lists the commands and gives a borrowed draft back, a command run from it keeps the draft (and its saved copy), and its Open the review tray opens the tray without starting a review; the ⋯ menu offers the models; the header\'s model name and the message box\'s model label open the /model choices, by click or Tab and Enter; Vim insert mode works. Fixture only.');
 }finally{releasePermissionRestart();await browser?.close();await server.close();await f.close?.();}

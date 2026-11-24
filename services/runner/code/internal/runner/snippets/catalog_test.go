@@ -13,7 +13,7 @@ func TestCommandCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows, err := (Command{Binary: p}).List(context.Background())
-	if err != nil || len(rows) != 1 || rows[0].Key != "review" {
+	if err != nil || len(rows) != 2 || rows[0].Key != "review" || rows[1].Key != "review-pr-ci" {
 		t.Fatal(rows, err)
 	}
 	if _, err = (Command{}).List(context.Background()); err == nil {
@@ -39,7 +39,7 @@ func TestPackIsDataAndCannotReplaceCatalogEntry(t *testing.T) {
 	}
 	cmd := Command{Binary: helper, Packs: []string{path}}
 	entries, err := cmd.List(context.Background())
-	if err != nil || len(entries) != 1 || entries[0].Origin != "pack: release.yaml" {
+	if err != nil || len(entries) != 2 || entries[0].Origin != "pack: release.yaml" {
 		t.Fatal(entries, err)
 	}
 	cmd.Packs = append(cmd.Packs, path)

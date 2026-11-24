@@ -3,6 +3,7 @@ package reviews
 import "fmt"
 
 const (
+	ReviewPRCITemplate     = "review-pr-ci-v1"
 	CodeReviewTemplate     = "code-review-v1"
 	SecurityReviewTemplate = "security-review-v1"
 	VerificationTemplate   = "behavior-verification-v1"
@@ -17,6 +18,8 @@ type Template struct {
 // TemplateFor resolves a persisted template revision.
 func TemplateFor(id string) (Template, error) {
 	switch id {
+	case ReviewPRCITemplate:
+		return Template{Title: "Review for pull request", Guidance: "Review the captured changes and file actionable findings with their evidence. The author will apply fixes and handle the pull request and CI after your report."}, nil
 	case "", CodeReviewTemplate:
 		return Template{Title: "Review"}, nil
 	case VerificationTemplate:

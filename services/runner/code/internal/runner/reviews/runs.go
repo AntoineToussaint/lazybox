@@ -57,6 +57,7 @@ type Run struct {
 	ID             string        `json:"id"`
 	TemplateID     string        `json:"templateId,omitempty"`
 	Input          []ReviewInput `json:"input,omitempty"`
+	PRHandoffSent  bool          `json:"prHandoffSent,omitempty"`
 	ResultArtifact string        `json:"resultArtifact,omitempty"`
 	// The reviewer: its conversation (session and conversation id, which
 	// outlives a resumed session), title, how people name the agent, and the

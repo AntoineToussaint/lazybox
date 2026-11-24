@@ -50,6 +50,10 @@ export async function startSites(): Promise<Sites> {
       case '/welcome': return { body: page('Welcome', '<h1>Signed in</h1>') };
       // A password shown as text (a "show password" toggle): only its autocomplete says what it holds.
       case '/signin-shown': return { body: page('Sign in', `<form action="/welcome"><label>Password <input type="text" autocomplete="current-password" name="password" style="font: 40px monospace; width: 600px; height: 80px; color: black; background: white"></label><button>Sign in</button></form>`) };
+      // A password field with a "show password" toggle that turns it into a text field.
+      case '/signin-toggle': return { body: page('Sign in', `<form action="/welcome"><label>Password <input type="password" name="password" style="font: 40px monospace; width: 600px; height: 80px; color: black; background: white"></label><button type="button" onclick="const f = this.form.password; f.type = f.type === 'password' ? 'text' : 'password'">Show password</button></form>`) };
+      // A sign-in a script submits well after the click: once a slow check answers.
+      case '/signin-late': return { body: page('Sign in', `<form action="/welcome"><label>Password <input type="password" name="password"></label><button type="button" onclick="setTimeout(() => this.form.requestSubmit(), 1000)">Continue</button></form>`) };
       // A sign-in a script submits: a plain button calling form.submit(), and a link calling requestSubmit().
       case '/signin-scripted': return { body: page('Sign in', `<form action="/welcome"><label>Email <input name="email"></label><label>Password <input type="password" name="password"></label><button type="button" onclick="this.form.submit()">Continue</button> <a href="#" onclick="document.forms[0].requestSubmit(); return false">Sign in with a link</a></form>`) };
       // The usual sign-in: the form posts, the server redirects, and the next page is slow to answer.

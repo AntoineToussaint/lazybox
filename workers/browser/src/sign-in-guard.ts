@@ -21,14 +21,26 @@ export const signInHeldBinding = '__lazyboxSignInHeld';
 
 const key = "Symbol.for('lazybox.signInGuard')";
 
-/** Whether a field holds a password: type password, or an autocomplete that says so (a shown password). */
-export const secretFieldSelector = 'input[type=password i], input[autocomplete*=password i]';
+/** Set by the guard on an input that has been a password field: a "show password" toggle makes it type=text. */
+export const passwordMark = 'data-lazybox-password';
+
+/**
+ * Whether a field holds a password: type password, an autocomplete that says
+ * so, or one that was a password field before the page showed it as text.
+ */
+export const secretFieldSelector = `input[type=password i], input[autocomplete*=password i], input[${passwordMark}]`;
 
 export const signInGuardScript = `(() => {
   const key = ${key};
   if (window[key]) return;
   let armed = false, approved = false, releasing = 0;
   const held = [];
+  // A field that was a password field stays one when the page shows it as text (a "show password" toggle).
+  new MutationObserver(records => {
+    for (const record of records) {
+      if (record.target instanceof HTMLInputElement && String(record.oldValue).toLowerCase() === 'password') record.target.setAttribute(${JSON.stringify(passwordMark)}, '');
+    }
+  }).observe(document, { subtree: true, attributes: true, attributeFilter: ['type'], attributeOldValue: true });
   const elements = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'elements').get;
   const holdsSecret = form => Array.prototype.some.call(elements.call(form), el =>
     el instanceof HTMLInputElement && el.value !== '' && el.matches(${JSON.stringify(secretFieldSelector)}));

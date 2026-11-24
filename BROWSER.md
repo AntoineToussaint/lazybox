@@ -219,7 +219,9 @@ Sites the person goes to during Take over count as their choice — the address
 they type, back, forward, reload, and a navigation a press of theirs in the
 page started (it carries their user activation, `hasUserGesture`). A page that
 moves itself while they hold the browser (a timer, a meta refresh) is no
-choice of theirs: the agent asks before acting there. The service reports the
+choice of theirs: when the agent next acts on that page — reads it, clicks,
+types — the person is asked first, and if they say no the browser leaves it
+for a blank page. The service reports the
 origin it accepts (`PageState.origin`), and that is what the Runner grants
 when the person gives the browser back, not the page's address. The service
 reads the page's title from its history, never by running script, so its own
@@ -247,8 +249,10 @@ without a card. Both read a host as a browser does: a trailing dot
 `[64:ff9b::a9fe:a9fe]`) are the address they name, and a host whose last label
 is a number but no IPv4 address is refused, as a browser refuses it.
 
-**Credentials.** A password field is an `<input type=password>` or one whose
-`autocomplete` says it holds a password (a password shown as text). The agent
+**Credentials.** A password field is an `<input type=password>`, one whose
+`autocomplete` says it holds a password, or one that was a password field
+before the page showed it as text (a "show password" toggle: the init script
+below marks an input whose `type` leaves `password`). The agent
 may not type into one: it is told to ask the person to Take over and type it.
 It never reads one either: a filled password field shows in its snapshot as
 `"(password hidden)"`, and its screenshots mask such fields in every frame.
@@ -256,10 +260,13 @@ Submitting a form that holds a filled password field (filled by the person, or
 by the profile) asks first (*sign in*), however the agent's action submits it:
 a submit button or Enter (asked before acting), or anything else — Space on the
 button, NumpadEnter, a plain button or a link whose script calls
-`form.submit()` or `requestSubmit()`. For those, an init script in every frame,
-armed only while an agent action runs, holds the submission (a capture-phase
-`submit` listener and `HTMLFormElement.prototype.submit`) until the person
-answers; refused, the form is not sent and the action fails saying so. A login
+`form.submit()` or `requestSubmit()`. For those, an init script in every frame
+holds the submission (a capture-phase `submit` listener and
+`HTMLFormElement.prototype.submit`) until the person answers; refused, the form
+is not sent and the action fails saying so. It is armed from the agent's action
+until the person's next input or action — so a script that submits after the
+action returned (once a slow check answers) is held and asked about too — and
+in documents the page loads meanwhile. A login
 that never submits a form (a script posting the password itself) is not seen
 by this guard. What the person types during Take over goes to the page only;
 the agent sees the page afterwards like any page, never the keystrokes.

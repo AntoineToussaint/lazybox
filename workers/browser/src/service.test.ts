@@ -209,6 +209,25 @@ describe('browser service', () => {
     assert.equal(runner.asked('site').length, asked + 1);
   });
 
+  // Regression (review of the above): the page that moved itself was not the agent's, but the agent could still
+  // read it and act on it without being asked once the person gave the browser back.
+  it('asks before the agent acts on a page that moved itself to another site', async () => {
+    await act({ action: 'navigate', url: `${sites.home}/` });
+    await act({ action: 'navigate', url: `${sites.home}/moves-itself`, actor: 'person' });
+    await act({ action: 'wait_for', text: 'Other origin page', actor: 'person' });
+    const asked = runner.asked('site').length;
+    runner.answers.site = () => ({ allow: false, reason: 'not that one' });
+    await assert.rejects(act({ action: 'snapshot' }), new RegExp(`The person did not allow ${sites.other}: not that one; the browser left that page`));
+    assert.equal(runner.asked('site').length, asked + 1);
+    assert.equal((await service.open({ browser: 'c1', profile, policy })).url, 'about:blank');
+    // Allowed, the agent goes on there.
+    await act({ action: 'navigate', url: `${sites.home}/moves-itself`, actor: 'person' });
+    await act({ action: 'wait_for', text: 'Other origin page', actor: 'person' });
+    runner.answers.site = () => ({ allow: true });
+    assert.match((await act({ action: 'snapshot' })).text, /Other origin page/);
+    assert.equal(runner.asked('site').length, asked + 2);
+  });
+
   it('refuses a download the person declines, and saves one they allow', async () => {
     await act({ action: 'navigate', url: `${sites.home}/download` });
     const link = refIn(await snapshot(), 'link "Get the report"');
@@ -267,6 +286,47 @@ describe('browser service', () => {
     const shot = await act({ action: 'screenshot' }), box = field.box!;
     const row = await pixelRow(shot.image!.data, box.x + 10, box.y + box.height / 2, 150);
     assert.ok(row.every(([r, g, b]) => r > 200 && g < 80 && b > 200), `unmasked pixels: ${JSON.stringify(row.filter(([r, g, b]) => !(r > 200 && g < 80 && b > 200)).slice(0, 5))}`);
+  });
+
+  // Regression (review): a "show password" toggle turned the field into type=text, and its value reached the
+  // agent's snapshot and screenshot, and the agent could type into it.
+  it('keeps a password secret after the page shows it as text', async () => {
+    await act({ action: 'navigate', url: `${sites.home}/signin-toggle` });
+    const page = await snapshot();
+    const field = await act({ action: 'click', ref: refIn(page, 'textbox "Password"'), actor: 'person' });
+    await service.input({ browser: 'c1', type: 'text', text: 'hunter2' });
+    await act({ action: 'click', ref: refIn(page, 'button "Show password"'), actor: 'person' });
+    const shown = await snapshot();
+    assert.ok(!shown.includes('hunter2'), shown);
+    assert.match(shown, /textbox "Password" .*: "\(password hidden\)"/);
+    await assert.rejects(act({ action: 'type', ref: refIn(shown, 'textbox "Password"'), text: 'x' }), /password field/);
+    const shot = await act({ action: 'screenshot' }), box = field.box!;
+    const row = await pixelRow(shot.image!.data, box.x + 10, box.y + box.height / 2, 150);
+    assert.ok(row.every(([r, g, b]) => r > 200 && g < 80 && b > 200), `unmasked pixels: ${JSON.stringify(row.filter(([r, g, b]) => !(r > 200 && g < 80 && b > 200)).slice(0, 5))}`);
+  });
+
+  // Regression (review): the guard was disarmed when the action returned, so a script that submitted the form a
+  // moment later (after a slow check) sent the password without asking.
+  it('asks before a sign-in form the agent\'s action submits late', async () => {
+    const fill = async () => {
+      await act({ action: 'navigate', url: `${sites.home}/signin-late` });
+      const page = await snapshot();
+      await act({ action: 'click', ref: refIn(page, 'textbox "Password"'), actor: 'person' });
+      await service.input({ browser: 'c1', type: 'text', text: 'hunter2' });
+      return page;
+    };
+    let page = await fill(), asked = runner.asked('sign_in').length;
+    const clicked = await act({ action: 'click', ref: refIn(page, 'button "Continue"') });
+    assert.equal(new URL(clicked.state.url).pathname, '/signin-late');
+    await runner.until(() => runner.asked('sign_in').length === asked + 1);
+    // Declined: the form stays unsent; the next look at the page is still the sign-in.
+    assert.equal(new URL((await act({ action: 'snapshot' })).state.url).pathname, '/signin-late');
+    runner.answers.sign_in = () => ({ allow: true });
+    page = await fill(); asked = runner.asked('sign_in').length;
+    await act({ action: 'click', ref: refIn(page, 'button "Continue"') });
+    await act({ action: 'wait_for', text: 'Signed in' });
+    assert.equal(runner.asked('sign_in').length, asked + 1);
+    runner.answers.sign_in = () => ({ allow: false });
   });
 
   // Regression: only Enter and real submit buttons were checked, so Space on the button, NumpadEnter, and a

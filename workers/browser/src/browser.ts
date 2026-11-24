@@ -5,6 +5,9 @@ import { NavigationWatch, navigationWait } from './navigation-watch.js';
 import { capSnapshot, filledTextboxes, hiddenValue, pageLine, quote, refLabels } from './snapshot.js';
 import { armExpression, dropExpression, pendingExpression, releaseExpression, secretFieldSelector } from './sign-in-guard.js';
 
+/** Actions that leave the page through a gate of their own: the site they go to is asked about there. */
+const leavingActions = new Set(['navigate', 'back', 'forward', 'reload']);
+
 /** What a browser needs from the service that owns it. */
 export type Host = {
   /** Asks the Runner (site, download, sign_in) and waits for its answer. */
@@ -28,9 +31,13 @@ const buttonBits: Record<string, number> = { left: 1, right: 2, middle: 4 };
 /** The person's input that gives the page a user activation (Chromium's list): a press, not a move or a wheel. */
 const activatingInputs = new Set(['mouse_down', 'key_down', 'text']);
 
-/** Whether `el` holds a password: a password field, or one whose autocomplete says so (a shown password). */
+/**
+ * Whether `el` holds a password: a password field, one whose autocomplete says
+ * so, or one the page turned from a password field into text (the guard marks
+ * it; secretFieldSelector).
+ */
 function isSecretField(el: Element): boolean {
-  return el instanceof HTMLInputElement && el.matches('input[type=password i], input[autocomplete*=password i]');
+  return el instanceof HTMLInputElement && el.matches('input[type=password i], input[autocomplete*=password i], input[data-lazybox-password]');
 }
 
 /**
@@ -45,8 +52,9 @@ function submitsPassword(el: Element | null, enter: boolean): boolean {
   const submitter = enter ? el.tagName === 'INPUT' || el.matches(submitButton) : el.matches(submitButton) || !!el.closest(submitButton);
   if (!submitter) return false;
   const form = (el as HTMLInputElement).form || el.closest('form');
-  if (form) return Array.from(form.querySelectorAll<HTMLInputElement>('input[type=password i], input[autocomplete*=password i]')).some(input => input.value !== '');
-  return el instanceof HTMLInputElement && el.matches('input[type=password i], input[autocomplete*=password i]') && el.value !== '';
+  const secret = 'input[type=password i], input[autocomplete*=password i], input[data-lazybox-password]';
+  if (form) return Array.from(form.querySelectorAll<HTMLInputElement>(secret)).some(input => input.value !== '');
+  return el instanceof HTMLInputElement && el.matches(secret) && el.value !== '';
 }
 
 /** The first line of a Playwright error, in words an agent can act on. */
@@ -94,8 +102,12 @@ export class AgentBrowser {
   private personActivated = false;
   /** Main-frame document loads (by loader id) and whether the person started each. */
   private started = new Map<string, boolean>();
-  /** Frames where the sign-in guard is armed for the running action. */
-  private armed: Frame[] = [];
+  /**
+   * The sign-in guard is armed: from the agent's first action that may submit
+   * a form until the person's next input or action, so a script that submits
+   * late (after a slow check) is held too.
+   */
+  private guarding = false;
   /** The person's answer about submitting a sign-in form during the running action, once asked. */
   private signInAnswer?: Promise<boolean>;
   /** Held submissions being released or dropped, by the answer. */
@@ -109,7 +121,11 @@ export class AgentBrowser {
     page.on('requestfailed', request => { if (request.isNavigationRequest() && request.frame() === main()) { this.loading = false; this.changed(); } });
     page.on('load', () => { this.loading = false; this.changed(); });
     page.on('domcontentloaded', () => this.changed());
-    page.on('framenavigated', frame => { if (frame === main()) this.changed(); });
+    page.on('framenavigated', frame => {
+      if (frame === main()) this.changed();
+      // A new document starts with its guard unarmed: while the agent holds the browser, it is armed too.
+      if (this.guarding) void frame.evaluate(armExpression(true, false)).catch(() => {});
+    });
     // A new document only: an address changed in place (pushState, a hash link) keeps its origin.
     cdp.on('Page.frameNavigated', event => { if (!event.frame.parentId) void this.committed(event.frame.url, event.frame.loaderId); });
     cdp.on('Network.requestWillBeSent', event => this.requested(event));
@@ -246,12 +262,28 @@ export class AgentBrowser {
     this.started.delete(loaderId);
     const origin = originOf(url);
     if (!origin || origin === this.origin) return;
+    // A page that moved itself while the person held the browser is asked about when the agent next acts on it.
     if (this.actor === 'person') {
       if (person ?? this.personNavigating) { this.origin = origin; this.changed(); }
       return;
     }
     if (await this.allowSite(url, origin)) return;
     if (originOf(this.page.url()) === origin) await this.page.goto('about:blank').catch(() => {});
+  }
+
+  /**
+   * Before the agent acts on the page: a page on an origin it was not allowed
+   * (one that moved itself while the person held the browser) asks first, and
+   * is left for a blank page if the person says no.
+   */
+  private async onAllowedSite() {
+    const url = this.page.url(), origin = originOf(url);
+    if (!origin || origin === this.origin) return;
+    if (await this.allowSite(url, origin)) return;
+    const denial = this.denial;
+    this.denial = undefined;
+    if (originOf(this.page.url()) === origin) await this.page.goto('about:blank').catch(() => {});
+    throw new Error(`The person did not allow ${origin}${denial?.reason ? ': ' + denial.reason : ''}; the browser left that page.`);
   }
 
   private async download(download: Download) {
@@ -282,14 +314,20 @@ export class AgentBrowser {
       this.actor = p.actor === 'person' ? 'person' : 'agent';
       this.denial = undefined; this.blocked = '';
       if (this.actor === 'agent') { this.personActivated = false; this.signInAnswer = undefined; }
-      else if (['navigate', 'back', 'forward', 'reload'].includes(p.action)) this.personNavigating = true;
-      else if (['click', 'type', 'select', 'press'].includes(p.action)) this.personActivated = true;
-      try { return await this.run(p); }
-      finally {
+      else {
+        await this.disarm();
+        if (leavingActions.has(p.action)) this.personNavigating = true;
+        else if (['click', 'type', 'select', 'press'].includes(p.action)) this.personActivated = true;
+      }
+      try {
+        if (this.actor === 'agent' && !leavingActions.has(p.action)) await this.onAllowedSite();
+        return await this.run(p);
+      } finally {
         // An action that failed before it settled stops watching the page all the same.
         this.watch?.dispose(); this.watch = undefined;
         this.personNavigating = false;
-        await this.disarm();
+        // The guard stays armed past the action, but what the person allowed was this action's submission only.
+        if (this.actor === 'agent' && this.guarding) { this.signInAnswer = undefined; await this.arm(false); }
       }
     });
   }
@@ -317,6 +355,7 @@ export class AgentBrowser {
   input(p: InputParams): Promise<PageState> {
     return this.serial('inputs', async () => {
       this.actor = 'person';
+      await this.disarm();
       if (activatingInputs.has(p.type)) this.personActivated = true;
       const modifiers = p.modifiers || 0, x = p.x || 0, y = p.y || 0;
       switch (p.type) {
@@ -408,22 +447,24 @@ export class AgentBrowser {
     return new Error(`The person did not allow submitting the sign-in form on ${originOf(url) || url}.`);
   }
 
-  /** Arms the in-page guard in every frame for the running agent action. */
+  /** Arms the in-page guard in every frame, `approved` when the person already allowed this action's submission. */
   private async arm(approved: boolean) {
-    const frames = this.page.frames();
-    await Promise.all(frames.map(frame => frame.evaluate(armExpression(true, approved)).catch(() => {})));
-    this.armed = frames;
+    this.guarding = true;
+    await Promise.all(this.page.frames().map(frame => frame.evaluate(armExpression(true, approved)).catch(() => {})));
   }
 
+  /** The person takes the page back: their own submissions are never held. */
   private async disarm() {
-    const frames = this.armed.splice(0);
-    await Promise.all(frames.map(frame => frame.evaluate(armExpression(false, false)).catch(() => {})));
+    if (!this.guarding) return;
+    this.guarding = false;
+    await Promise.all(this.page.frames().map(frame => frame.evaluate(armExpression(false, false)).catch(() => {})));
   }
 
   /**
-   * The guard in `frame` held a sign-in form the agent's action submitted:
-   * the person is asked (once an action), and the submission goes on or is
-   * dropped by their answer.
+   * The guard in `frame` held a sign-in form the agent's action submitted,
+   * during the action or after it (a script that submits once a slow check
+   * answers): the person is asked (once an action), and the submission goes on
+   * or is dropped by their answer.
    */
   signInHeld(frame: Frame) {
     const answer = this.signInAnswer ??= this.askSignIn();
@@ -433,7 +474,7 @@ export class AgentBrowser {
   /** Waits for a held sign-in form's answer; the action fails if the person refused. */
   private async heldSignIn() {
     // What the action submitted as it was handled is held by now, whether or not its binding call has arrived.
-    await Promise.all(this.armed.map(async frame => { if (await frame.evaluate(pendingExpression).catch(() => 0)) this.signInHeld(frame); }));
+    if (this.guarding) await Promise.all(this.page.frames().map(async frame => { if (await frame.evaluate(pendingExpression).catch(() => 0)) this.signInHeld(frame); }));
     const answer = this.signInAnswer;
     if (!answer) return;
     const allow = await answer;

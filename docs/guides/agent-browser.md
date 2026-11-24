@@ -51,8 +51,8 @@ submitting a sign-in form ask too, however the agent would submit it. The
 agent never types or sees passwords: when it needs one it asks you to take
 over, and a password you type is hidden from its snapshots and masked in its
 screenshots. Sites you go to yourself while you hold the browser become the
-agent's to stay on; a page that moves itself to another site meanwhile does
-not.
+agent's to stay on; if a page moves itself to another site meanwhile, the
+agent asks you before it uses that page.
 
 To stop being asked in one conversation, choose **Browse freely in this
 conversation** from the panel's menu.

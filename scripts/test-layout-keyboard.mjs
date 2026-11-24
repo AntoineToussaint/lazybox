@@ -21,6 +21,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 // A second conversation in Alpha, so ⌘] has somewhere to go.
@@ -36,7 +37,7 @@ async function scenario(browser,scheme){
  // The default arrangement with one chat (the preview tab): "Open a workspace's conversations as tabs" off; test-conversation-tabs covers it on.
  await context.addInitScript(()=>{try{localStorage.setItem('lazybox:workspace.conversation-tabs','off');}catch{/* a popup without storage */}});
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  const shot=name=>page.screenshot({path:`.cache/layout-keyboard-${name}-${scheme}.png`});
  await page.goto(url);
  const tab=kind=>page.locator('.dv-tab').filter({has:page.locator(`[data-kind="${kind}"]`)});

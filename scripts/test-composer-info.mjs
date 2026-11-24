@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const session = f.sessions[0];
@@ -53,9 +54,7 @@ try {
     capacity = '1000000';
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    // Leaving a page cuts its in-flight polls, which WebKit reports as page errors ("access control checks") on the page being left: not failures. Anything else is.
-    const errors = []; let leaving = 0; page.on('pageerror', e => { const text = String(e); if (leaving && /access control checks/.test(text)) return; errors.push(text); });
-    const leave = async to => { leaving++; try { await page.goto(to); } finally { leaving--; } };
+    const errors = await collectPageErrors(page);
     let reads = 0, usageAvailable = true;
     await page.route('**/GetTelemetry', route => { reads++; return route.fulfill({ json: usageAvailable ? telemetry() : { contexts: [], groups: [], recent: [] } }); });
     await page.goto(url(session.id));
@@ -151,7 +150,7 @@ try {
 
     // A phone: the percentage alone.
     await page.setViewportSize({ width: 390, height: 844 });
-    await leave(url(session.id));
+    await page.goto(url(session.id));
     await expect(contextButton).toHaveText('91.2%');
     await expect(modelButton).toBeVisible();
     await expect(contextButton.locator('.composer-info-meter')).toBeHidden();
@@ -166,7 +165,7 @@ try {
     // A first turn can pick a model. The context slot explains why usage is unavailable.
     await page.setViewportSize({ width: 1440, height: 900 });
     usageAvailable = false;
-    await leave(url('beta-session'));
+    await page.goto(url('beta-session'));
     await expect(page.locator('.panel-chat form.composer')).toBeVisible();
     await expect(page.locator('.panel-chat').getByRole('button', {name: /Codex.*change model/})).toBeVisible();
     await expect(page.locator('.panel-chat .composer-info').getByTitle('Waiting for the provider to report context usage')).toHaveText('Context —');

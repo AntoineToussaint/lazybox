@@ -16,6 +16,7 @@ import {fileURLToPath} from 'node:url';
 import {readFile,mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const sequence=`sequenceDiagram
     participant U as User
@@ -53,7 +54,7 @@ try{
   const context=await browser.newContext({viewport:{width:1280,height:900}});
   const page=await context.newPage();page.setDefaultTimeout(15000);
   const log={errors:[],console:[],violations:[]};
-  page.on('pageerror',e=>log.errors.push(String(e)));
+  await collectPageErrors(page, log.errors);
   page.on('console',m=>{log.console.push(`${m.type()}: ${m.text()}`);if(/Content Security Policy|Refused to/i.test(m.text()))log.violations.push(m.text());});
   await page.route(url=>url.origin===origin&&url.pathname==='/',async route=>{const response=await route.fetch();await route.fulfill({response,headers:{...response.headers(),'content-security-policy':csp}});});
   if(preferences)await page.addInitScript(value=>localStorage.setItem('lazybox:appearance:last',value),JSON.stringify(preferences));

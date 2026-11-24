@@ -9,6 +9,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f=await startRunnerFixture();
 const session=f.sessions[0];
@@ -31,7 +32,7 @@ let browser;
 try{
  await server.listen();await mkdir('.cache',{recursive:true});
  browser=await webkit.launch();const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${session.id}#token=${f.token}`);
  const chat=page.locator('.messages:visible');
  await expect(chat).toContainText('REPLY_THREE');

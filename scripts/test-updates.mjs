@@ -14,6 +14,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 fixture.versionInfo.version = '0.1.0';
@@ -54,7 +55,7 @@ try {
   for (const scheme of ['dark', 'light']) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
     const page = await context.newPage(); page.setDefaultTimeout(10000);
-    const errors = []; page.on('pageerror', e => errors.push(String(e)));
+    const errors = []; await collectPageErrors(page, errors);
     state.feed = feed(); state.installed = []; fixture.versionInfo.version = '0.1.0';
 
     // (a) Offered, never forced: the automatic check finds 0.2.0 and the header says so; nothing downloads.

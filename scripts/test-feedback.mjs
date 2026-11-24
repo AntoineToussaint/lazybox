@@ -13,6 +13,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 // Fake credentials for the redaction tests, assembled so no source line looks like a real one (the secret scan in scripts/check-private.mjs).
 const FAKE_GITHUB_TOKEN = ['ghp', '0123456789abcdefghijABCDEFGHIJ012345'].join('_');
 
@@ -36,7 +37,7 @@ try {
   for (const scheme of ['dark', 'light']) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme, permissions: ['clipboard-read', 'clipboard-write'] });
     const page = await context.newPage(); page.setDefaultTimeout(10000);
-    const errors = []; page.on('pageerror', e => errors.push(String(e)));
+    const errors = []; await collectPageErrors(page, errors);
     saved.length = 0;
     await page.goto(`${origin}/?version=0.2.0&token=${fixture.token}&collection=${session.collectionId}&session=${session.id}`);
     await expect(page.locator('.workspace-header')).toBeVisible();

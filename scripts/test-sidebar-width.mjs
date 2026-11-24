@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),logLevel:'warn',plugins:[react(),monacoVimCompat()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
@@ -16,7 +17,7 @@ let browser;
 try{
  browser=await webkit.launch({headless:true});
  const page=await browser.newPage({viewport:{width:1400,height:850}});page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  const [first,second]=fixture.sessions;
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=${first.collectionId}#token=${fixture.token}`);
  const nav=page.getByRole('navigation',{name:'Workspaces'});

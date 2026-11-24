@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { monacoVimCompat } from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 // Keys that land a millisecond apart (Playwright's fast type(), fast typing, a
 // paste then typing, dictation streaming words, an IME) never loop the message
@@ -31,8 +32,7 @@ try {
     fixture.config.remove('keys');
     const page = await browser.newPage({ viewport: { width: 1300, height: 850 } });
     page.setDefaultTimeout(30000);
-    // The reload below cuts in-flight polls, which WebKit reports as page errors ("access control checks") on the page being left: not failures. Anything else is.
-    const errors = []; let leaving = 0; page.on('pageerror', error => { const text = String(error); if (leaving && /access control checks/.test(text)) return; errors.push(text); });
+    const errors = await collectPageErrors(page);
     page.on('console', message => { if (message.type() === 'error' && /Maximum update depth/.test(message.text())) errors.push(message.text()); });
     await page.goto(url);
     const message = page.getByRole('textbox', { name: 'Message', exact: true });
@@ -95,7 +95,7 @@ try {
     await message.focus();
     await page.keyboard.type('kept draft', { delay: 0 });
     await page.waitForTimeout(200);
-    leaving++; try { await page.reload(); } finally { leaving--; }
+    await page.reload();
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('kept draft');
     assert.deepEqual(errors, [], `${engine.name()}: no page error`);
   }

@@ -3,6 +3,7 @@ package acp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/adapters/jsonl"
@@ -83,17 +84,52 @@ func (s *session) answered(m jsonl.Message, emit func(agent.Event)) bool {
 		loaded <- m
 		return false
 	}
-	if s.state.Prompt == nil || string(m.ID) != string(s.state.Prompt) {
+	turn := ""
+	switch {
+	case s.state.Prompt != nil && string(m.ID) == string(s.state.Prompt):
+		turn = s.state.Turn
+	case !s.orphan(m.ID):
+		s.mu.Unlock()
+		return false
+	case s.state.Prompt == nil:
+		// A previous Runner wrote this prompt and died before it recorded
+		// so: the reply still ends the turn the journal may say is running.
+		s.state.Turns++
+		turn = fmt.Sprintf("turn-%d", s.state.Turns)
+	default:
+		// An orphaned prompt ended while one of this Runner's runs: that
+		// turn goes on, and the requests open are its own.
 		s.mu.Unlock()
 		return false
 	}
-	turn := s.state.Turn
 	s.state.Prompt, s.state.Turn = nil, ""
+	// The agent stopped waiting on what it asked in this turn: those
+	// requests are over. The host forgets them (never redelivered to a later
+	// Runner as if the agent still waited), and the conversation stops
+	// showing them.
+	open := s.requests
+	s.requests = map[string]pending{}
 	s.mu.Unlock()
+	for id, req := range open {
+		_ = s.p.Resolve(req.native)
+		emit(agent.Event{Type: "request_resolved", RequestID: id, TurnID: turn, Status: "turn_ended"})
+	}
 	for _, ev := range turnEnd(turn, m.Result, m.Error, s.title) {
 		emit(ev)
 	}
 	return true
+}
+
+// orphan reports whether id is an orphaned prompt's (durable.Orphans), and
+// forgets it: a prompt is answered once. s.mu is held.
+func (s *session) orphan(id json.RawMessage) bool {
+	for i, o := range s.state.Orphans {
+		if string(o) == string(id) {
+			s.state.Orphans = append(s.state.Orphans[:i:i], s.state.Orphans[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // turnEnd is the end of a turn as events: why it stopped, and a failure

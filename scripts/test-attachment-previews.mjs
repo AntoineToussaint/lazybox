@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 // Exercise the desktop image policy with the shared surface in Chromium.
 const desktop = JSON.parse(await readFile(new URL('../apps/desktop/src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
@@ -61,7 +62,7 @@ try {
       await route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': imagePolicy.trim() } });
     });
     const page = await context.newPage(); page.setDefaultTimeout(15000);
-    page.on('pageerror', error => errors.push(String(error)));
+    await collectPageErrors(page, errors);
     await page.goto(`${base}/?view=${view}&session=${session}&collection=${collection}#token=${fixture.token}`);
     const chat = view === 'workspace' ? page.getByRole('region', { name: 'Agent chat', exact: true }) : page.locator('.agent-window');
     const composer = chat.getByRole('textbox', { name: 'Message', exact: true });
@@ -458,7 +459,7 @@ try {
     const engine = await webkit.launch();
     try {
       const page = await engine.newPage({ viewport: VIEWPORT }); page.setDefaultTimeout(15000);
-      page.on('pageerror', error => errors.push('webkit: ' + String(error)));
+      await collectPageErrors(page, errors, { label: 'webkit' });
       await page.goto(`${base}/?view=chat&session=alpha-session&collection=alpha#token=${fixture.token}`);
       const composer = page.getByRole('textbox', { name: 'Message', exact: true });
       await expect(composer).toBeEnabled();

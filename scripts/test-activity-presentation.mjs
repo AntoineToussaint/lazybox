@@ -1,5 +1,6 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const f=await startRunnerFixture(),channel=f.openEvents('alpha-session');Object.assign(f.sessions[0],{status:'running',busy:true,agents:[{id:'root',status:'running'}]});
 let clock=Date.now()-120000;
 function push(data,at){channel.events.push({cursor:String(channel.events.length+1),capturedAt:new Date(at).toISOString(),event:{type:'tool_activity',providerDataJson:Buffer.from(JSON.stringify(data)).toString('base64')}});}
@@ -10,7 +11,7 @@ push({type:'tool_call',id:'failed',name:'Bash',status:'running',input:{descripti
 push({type:'tool_call',id:'running',name:'Bash',status:'running',input:{description:'Build the workspace',command:'go build ./...'}},Date.now()-5000);
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:f.url}}}});let browser;
 try{
- await server.listen();browser=await webkit.launch();const page=await browser.newPage({viewport:{width:1440,height:1000}});page.setDefaultTimeout(20000);const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ await server.listen();browser=await webkit.launch();const page=await browser.newPage({viewport:{width:1440,height:1000}});page.setDefaultTimeout(20000);const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);await page.getByRole('button',{name:'View tools and activity'}).click();const dialog=page.getByRole('dialog',{name:'Tools and activity'});
  await expect(dialog.locator('.tool-call')).toHaveCount(11);await expect(dialog.locator('.tool-call').first()).toContainText('Build the workspace');await expect(dialog.locator('.activity-note')).toHaveText('8 calls have no saved result. Completion and duration are unknown.');await expect(dialog.getByText('Result not reported',{exact:true})).toHaveCount(0);
  const completed=dialog.locator('.tool-call').filter({hasText:'Run workspace tests'});await expect(completed.locator('.tool-duration')).toHaveText('2.4s');await expect(completed.locator('time')).not.toHaveText('—');await expect(completed.locator('.tool-call-details')).toHaveCount(0);await completed.locator('summary').first().click();await expect(completed.getByLabel('Command',{exact:true})).toContainText('go test');await expect(completed.getByLabel('Output',{exact:true})).toContainText('ok  collections');await expect(completed.locator('.hljs-built_in')).not.toHaveCount(0);

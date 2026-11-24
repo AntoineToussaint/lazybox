@@ -14,6 +14,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const alpha=fixture.openEvents('alpha-session');
@@ -30,7 +31,7 @@ try{
  // A Mac, as far as the keymap is concerned (⌘ is Mod).
  await context.addInitScript(()=>{Object.defineProperty(navigator,'platform',{get:()=>'MacIntel'});});
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const chat=page.locator('.panel-chat');
  const composer=chat.getByRole('textbox',{name:'Message',exact:true});

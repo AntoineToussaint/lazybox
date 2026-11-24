@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -15,7 +16,7 @@ try {
   const context = await browser.newContext({ viewport: { width: 1400, height: 1000 }, permissions: ['clipboard-read', 'clipboard-write'] });
   // Keep this fixture entirely offline, including the sign-in browser handoff.
   await context.route('https://github.com/**', route => route.fulfill({ contentType: 'text/html', body: '<h1>GitHub fixture sign-in</h1>' }));
-  const page = await context.newPage(); page.setDefaultTimeout(10_000); const errors = []; page.on('pageerror', error => errors.push(String(error)));
+  const page = await context.newPage(); page.setDefaultTimeout(10_000); const errors = []; await collectPageErrors(page, errors);
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`);
   const settings = async () => { await page.getByRole('button', { name: 'Settings', exact: true }).click(); await page.getByRole('tab', { name: 'Repositories', exact: true }).click(); await page.getByRole('button',{name:'Connections & folders',exact:true}).first().click(); };
   await settings();

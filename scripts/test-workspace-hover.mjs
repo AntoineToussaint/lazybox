@@ -15,6 +15,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -56,7 +57,7 @@ try {
   const context = await browser.newContext({viewport: {width: 1400, height: 900}, colorScheme: 'dark'});
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
-  const errors = []; page.on('pageerror', e => errors.push(String(e)));
+  const errors = []; await collectPageErrors(page, errors);
   await page.clock.install({time:new Date(now - 3_600_000)});
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=beta#token=${f.token}`);
   const nav = page.getByRole('navigation', {name: 'Workspaces'});

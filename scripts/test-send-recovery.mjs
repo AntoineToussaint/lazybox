@@ -6,6 +6,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const session=fixture.sessions[0];
@@ -17,7 +18,7 @@ let browser;
 try{
  browser=await webkit.launch({headless:true});
  const page=await browser.newPage({viewport:{width:1300,height:850}});page.setDefaultTimeout(15000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  const url=`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=${session.collectionId}&session=${session.id}#token=${fixture.token}`;
  await page.goto(url);
  const composer=page.getByRole('textbox',{name:'Message',exact:true});

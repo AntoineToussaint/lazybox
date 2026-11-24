@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const fixture = await startRunnerFixture();
 // This suite enrolls Claude through Lazybox and toggles automatic switching per
 // account: both are opt-in (CLAUDE_COMPLIANCE.md). Claude sign-in in Lazybox
@@ -26,7 +27,7 @@ try {
  await server.listen(); browser=await chromium.launch({headless:true});
  const context=await browser.newContext({viewport:{width:1440,height:1050}});
  await context.addInitScript(()=>{window.__copiedCodes=[];Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{window.__copiedCodes.push(text);}}});window.__signInLinks=[];window.open=(url)=>{window.__signInLinks.push(String(url));return null;};});
- const page=await context.newPage(), errors=[]; activePage=page;page.on('pageerror',error=>errors.push(String(error)));
+ const page=await context.newPage(), errors=[]; activePage=page;await collectPageErrors(page, errors);
  const url=`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`;
  await page.goto(url);
  await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');

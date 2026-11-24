@@ -91,6 +91,7 @@ export function requestSummary(request: AgentEvent): string {
 
 const faults: Record<string, string> = {
   delivery_failed: 'A message could not be delivered to the agent',
+  delivery_rejected: 'The agent refused a message',
   provider_failure: 'The provider reported a failure',
   provider_error: 'The provider reported an error',
   'provider delivery failed; reconcile before continuing': 'A message could not be delivered to the agent',

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -17,7 +18,7 @@ let browser, page;
 try {
   await server.listen(); browser = await chromium.launch({ headless: true });
   page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
-  const errors = []; page.on('pageerror', error => errors.push(String(error)));
+  const errors = []; await collectPageErrors(page, errors);
   await page.addInitScript(() => localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'));
   let historyTimedOut = false;
   await page.route('**/ListHistory', async route => {

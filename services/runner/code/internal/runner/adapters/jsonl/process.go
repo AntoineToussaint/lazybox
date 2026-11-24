@@ -397,6 +397,10 @@ func (e *CallError) Reason() string {
 // by a phrase anywhere in it: Reason and Error keep only what the person reads.
 func (e *CallError) Full() string { return e.Message + " " + string(e.Raw) }
 
+// Is makes a CallError the peer's definite refusal (agent.ErrRejected): it
+// answered the call with an error, so nothing it asked for is in flight.
+func (e *CallError) Is(target error) bool { return target == agent.ErrRejected }
+
 // Error is the reason. Without one, it names the call that failed, with
 // the code: most callers pass the error on as it is, and that is then the
 // only clue to which step it was.

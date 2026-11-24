@@ -215,6 +215,12 @@ leave out.
 - **A stopped command never lingers** A command stopped while nothing read its output ends, and its host goes away.
 - **Slow hooks no longer block every hook** Four slow hooks used to make every later hook be skipped until the Runner restarted; each now frees its slot when it finishes.
 - **One terminal per open** Opening a terminal twice at once starts one shell, and once that shell exits the same request opens a new one.
+- **Reconnecting keeps the conversation live** When Resume reconnects to an agent the Runner lost track of, an open conversation follows it from where it was, where it used to stop updating as if the conversation had ended.
+- **Long conversations keep taking messages** A conversation no longer stops accepting messages, stops and approvals after 4,096 of them, and a full message queue no longer holds up an approval or a stop.
+- **Approvals that no one waits on clear** An approval a Codex sub-agent or an ACP agent stopped waiting on when its turn ended disappears instead of staying forever, and does not come back after the Runner restarts. An approval you answered before a restart is not offered again, and clears.
+- **An answer that did not reach the agent can be given again** If your answer to an approval could not be sent, the approval stays open and you can answer it again.
+- **A refused message is not a dead end** When the agent refuses a message outright, the conversation shows the error and your next message continues it; only a message whose delivery is unknown asks you to check first.
+- **No more stuck "working" after a crash** A Runner that stopped just as a turn ended, or just after sending an ACP agent your message, no longer leaves the conversation working forever.
 
 - **A Runner in Kubernetes** `lazybox remote add-kubernetes` reaches a Runner deployed in a cluster through `kubectl exec`, with the same owner handshake and pinned key as SSH; the desktop finds it like any remote Runner.
 

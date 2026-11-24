@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {longConversation} from './fixtures/long-conversation.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const turns=60;
 const fixture=await startRunnerFixture();
@@ -22,7 +23,7 @@ let browser;
 try{
  browser=await webkit.launch({headless:true});
  const page=await browser.newPage({viewport:{width:1300,height:850}});page.setDefaultTimeout(30000);
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${session.id}#token=${fixture.token}`);
  const pane=page.locator('.messages:visible');
  await expect(pane).toContainText(`ANSWER_END_${turns-1}`,{timeout:60000});

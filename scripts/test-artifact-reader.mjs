@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
 import { designDocV2, seedDesignDoc } from './fixtures/artifact-sample.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const session = fixture.sessions[0];
@@ -66,7 +67,7 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
   // The system print dialog is stubbed: the print sheet stays for the print media checks.
   await context.addInitScript(() => { window.__printed = 0; window.print = () => { window.__printed++; }; });
-  const page = await context.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', e => errors.push(String(e)));
+  const page = await context.newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors);
   await page.goto(standalone);
   await page.getByLabel('Version', { exact: true }).selectOption('1');
   await page.getByLabel('Artifact actions', { exact: true }).click();
@@ -538,7 +539,7 @@ try {
   // The Artifacts panel: kind icons, author and time, and the "updated since you looked" dot.
   fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Review findings', kind: 'report', content: '# Review findings\n\nNo blockers.\n' });
   const panelContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'light' });
-  const panelPage = await panelContext.newPage(); panelPage.setDefaultTimeout(15000); panelPage.on('pageerror', e => errors.push(String(e)));
+  const panelPage = await panelContext.newPage(); panelPage.setDefaultTimeout(15000); await collectPageErrors(panelPage, errors);
   await panelPage.goto(`${base}/?view=workspace&collection=alpha&session=${session.id}#token=${fixture.token}`);
   await panelPage.locator('summary[aria-label="Panels"]').click();
   await panelPage.getByRole('button', { name: 'Show Artifacts', exact: true }).click();
@@ -576,7 +577,7 @@ try {
 
   // Phone: no outline rail; On this page jumps instead. History opens over the page.
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme: 'dark', deviceScaleFactor: 2, hasTouch: true });
-  const mobile = await phone.newPage(); mobile.setDefaultTimeout(15000); mobile.on('pageerror', e => errors.push(String(e)));
+  const mobile = await phone.newPage(); mobile.setDefaultTimeout(15000); await collectPageErrors(mobile, errors);
   await mobile.goto(standalone);
   const small = mobile.getByRole('article', { name: 'Datasource migration' });
   await expect(small.getByRole('heading', { level: 1 })).toBeVisible();
@@ -591,7 +592,7 @@ try {
   // Screenshots for review: 1440 and 390, dark and light.
   for (const scheme of ['dark', 'light']) for (const [width, height] of [[1440, 900], [390, 844]]) {
     const shots = await browser.newContext({ viewport: { width, height }, colorScheme: scheme, deviceScaleFactor: width < 600 ? 2 : 1 });
-    const shot = await shots.newPage(); shot.setDefaultTimeout(15000); shot.on('pageerror', e => errors.push(String(e)));
+    const shot = await shots.newPage(); shot.setDefaultTimeout(15000); await collectPageErrors(shot, errors);
     await shot.goto(standalone);
     const view = shot.getByRole('article', { name: 'Datasource migration' });
     await expect.poll(() => view.getByRole('img', { name: 'Mermaid diagram' }).evaluate(img => img.complete && img.naturalWidth > 0).catch(() => false)).toBe(true);

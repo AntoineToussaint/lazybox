@@ -26,6 +26,7 @@ import { chromium } from '@playwright/test';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
 import { shots, CLOCK, TIMEZONE, DESKTOP, NARROW, settle } from './docs-shots.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 // ---- Arguments ---------------------------------------------------------------
 
@@ -148,7 +149,7 @@ for (const { name, entry, scheme, viewport, file } of jobs) {
       resetClock();
       current.runners = runners;
       const next = await context.newPage(); next.setDefaultTimeout(15000);
-      next.on('pageerror', e => errors.push(String(e)));
+      await collectPageErrors(next, errors);
       await prepare(next);
       await next.goto(`${origin}${path}#token=${f.token}`);
       return next;

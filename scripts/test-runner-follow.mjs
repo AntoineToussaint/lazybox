@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { readFile, mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const channel = fixture.openEvents('alpha-session');
@@ -28,7 +29,7 @@ let browser, page;
 try {
   await server.listen(); browser = await chromium.launch({ headless: true });
   page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
-  const errors = []; page.on('pageerror', error => errors.push(String(error)));
+  const errors = []; await collectPageErrors(page, errors);
   // The ordinary reread is slowed to a minute: only a refused or unreachable
   // request makes the window reread its locator, which is the path under test.
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;

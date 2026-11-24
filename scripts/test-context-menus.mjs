@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const AGENT='The parser fails on `api/src/main.go`, see [the routes](api/src/routes.ts).\n\n```ts\nconst answer = 42;\n```\n\nDocs: [example](https://example.com/guide).';
@@ -50,7 +51,7 @@ try{
  const newTabs=[];context.on('page',tab=>{if(tab!==page){newTabs.push(tab.url());void tab.close();}});
  // Every way a link could open: window.open, a new tab, a Web panel.
  const nothingOpened=async what=>{await page.waitForTimeout(150);assert.deepEqual({opened:await page.evaluate(()=>window.__opened),tabs:newTabs,web:await page.getByRole('region',{name:'Web page'}).count()},{opened:[],tabs:[],web:0},`${what} opens nothing`);};
- const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const chat=page.locator('.panel-chat');
  const composer=chat.getByRole('textbox',{name:'Message',exact:true});

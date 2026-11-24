@@ -2,6 +2,7 @@
 // usage, equal workspace cards, the workspace home and the naming flow.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const f=await startRunnerFixture();
 const repos=['authority','cli','core','module-datasource','web-console'];
 for(const [i,name] of repos.entries())f.library.push({id:'r'+i,name,path:'/fixture/'+name,gitIdentity:'github:codefly-dev/'+name});
@@ -25,10 +26,7 @@ for(const [id,title,command] of [['delta-left','Left approval','npm test'],['del
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,logLevel:'error',root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:f.url}}}});let browser;
 try{
  await server.listen();await mkdir('.cache',{recursive:true});browser=await webkit.launch();const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(15000);
- // Leaving a page (a goto below) cuts its in-flight polls, which WebKit reports as page errors
- // ("access control checks") on the page being left: not failures. Anything else is.
- const errors=[];let leaving=0;page.on('pageerror',e=>{const text=String(e);if(leaving&&/access control checks/.test(text))return;errors.push(text);});
- const leave=async(go,ready)=>{leaving++;try{await go();await ready();}finally{leaving--;}};
+ const errors=await collectPageErrors(page);
  const base=`http://127.0.0.1:${server.httpServer.address().port}`;
  await page.goto(`${base}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
 
@@ -191,7 +189,7 @@ try{
 
  // A fresh conversation is Ready (not "Starting"), leads with its branch, and keeps quiet about restarts.
  const betaChat=page.locator('.embedded-chat:visible').first(),betaHeader=betaChat.locator('.chat-heading');
- await leave(()=>page.goto(`${base}/?view=workspace&collection=beta&session=beta-session#token=${f.token}`),()=>expect(betaHeader.locator('.chat-status')).toHaveText('Ready'));
+ await page.goto(`${base}/?view=workspace&collection=beta&session=beta-session#token=${f.token}`);await expect(betaHeader.locator('.chat-status')).toHaveText('Ready');
  await expect(betaHeader.locator('.chat-branch')).toContainText('lazybox/beta/api');
  await expect(betaHeader.locator('.conversation-title-text'),'the folder name is not a title').toHaveCount(0);await expect(betaHeader.getByRole('button',{name:'Rename conversation'})).toContainText('Name it');
  await expect(betaHeader).not.toContainText('Model not reported');
@@ -233,7 +231,7 @@ try{
 
  // Two chats side by side, each waiting for an approval: a key on the page itself answers the chat in front only.
  const card=command=>page.locator('.embedded-chat .request').filter({hasText:command});
- await leave(()=>page.goto(`${base}/?view=workspace&collection=delta&session=delta-left#token=${f.token}`),()=>expect(card('npm test')).toBeVisible());
+ await page.goto(`${base}/?view=workspace&collection=delta&session=delta-left#token=${f.token}`);await expect(card('npm test')).toBeVisible();
  await page.locator('.page-layout .panel-collections .conversation-link').filter({hasText:'Right approval'}).click({button:'right'});
  await page.getByRole('menu').getByRole('menuitem',{name:/^Open beside/}).click();
  await expect(card('npm run lint')).toBeVisible();

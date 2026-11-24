@@ -6,13 +6,14 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
+import { collectPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();fixture.sessions[0].model='model-fixture';fixture.sessions[0].modelReported=true;fixture.sessions[0].provider='claude';fixture.sessions[0].profileId='claude-work';fixture.profiles.push({id:'claude-work',provider:'claude',label:'Work account',isolation:'environment'});
 const channel=fixture.openEvents('alpha-session');channel.push({type:'message_delta',text:'Open [README](api/README.md).'});
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react(),monacoVimCompat()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 let browser;
 try{
  await server.listen();browser=await webkit.launch({headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});page.setDefaultTimeout(20000);
- const errors=[];page.on('pageerror',error=>errors.push(String(error)));
+ const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  // The row names the task; provider, model and account are its tooltip.
  await expect(page.locator('.workspace-agent-label').first()).not.toHaveText(/^Claude/);await expect(page.locator('.workspace-agent').first()).toHaveAttribute('title',/Claude · model-fixture · Work account/);await expect(page.locator('.workspace-agent-status').first()).toHaveText(/^Running/);

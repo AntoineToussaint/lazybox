@@ -188,6 +188,20 @@ describe('browser service', () => {
     assert.match(submitted.text, /Now on "Welcome"/);
   });
 
+  it('follows a sign-in through its redirect, and one a script makes once its call answers', async () => {
+    for (const path of ['/signin-redirect', '/signin-script']) {
+      await act({ action: 'navigate', url: `${sites.home}${path}` });
+      const submitted = await act({ action: 'click', ref: refIn(await snapshot(), 'button "Sign in"') });
+      assert.match(submitted.text, /Now on "Dashboard"/, path);
+    }
+  });
+
+  it('follows a choice that submits its form', async () => {
+    await act({ action: 'navigate', url: `${sites.home}/choose` });
+    const chosen = await act({ action: 'select', ref: refIn(await snapshot(), 'combobox'), values: ['blue'] });
+    assert.match(chosen.text, /Now on "Done"/);
+  });
+
   // A requested navigation that never changes this tab's address returns promptly, not after a timeout:
   // a download, a form back to the same address, a link answered with no content.
   it('returns promptly from a click whose navigation keeps the address', async () => {

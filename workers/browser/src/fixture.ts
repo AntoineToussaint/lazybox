@@ -10,14 +10,17 @@ export type Sites = { home: string; other: string; forbidden: string; ports: { h
 
 const page = (title: string, body: string) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${body}</body></html>`;
 
-type Reply = { status?: number; headers?: Record<string, string>; body: string };
+/** `delay`: the reply comes this many ms late (a slow server). */
+type Reply = { status?: number; headers?: Record<string, string>; body: string; delay?: number };
 
 async function serve(handler: (path: string, query: URLSearchParams) => Reply): Promise<{ server: Server; port: number }> {
   const server = createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://fixture');
     const reply = handler(url.pathname, url.searchParams);
-    res.writeHead(reply.status || 200, { 'content-type': 'text/html; charset=utf-8', ...reply.headers });
-    res.end(reply.body);
+    setTimeout(() => {
+      res.writeHead(reply.status || 200, { 'content-type': 'text/html; charset=utf-8', ...reply.headers });
+      res.end(reply.body);
+    }, reply.delay || 0);
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
   return { server, port: (server.address() as AddressInfo).port };
@@ -38,6 +41,15 @@ export async function startSites(): Promise<Sites> {
       // once, but its request leaves only after this handler, well past a fixed short look.
       case '/signin-slow': return { body: page('Sign in', `<form action="/welcome"><label>Email <input name="email"></label><button>Sign in</button></form><script>addEventListener('beforeunload', () => { const end = Date.now() + 400; while (Date.now() < end); });</script>`) };
       case '/welcome': return { body: page('Welcome', '<h1>Signed in</h1>') };
+      // The usual sign-in: the form posts, the server redirects, and the next page is slow to answer.
+      case '/signin-redirect': return { body: page('Sign in', '<form method="post" action="/session"><label>Email <input name="email"></label><button>Sign in</button></form>') };
+      case '/session': return { status: 302, headers: { location: '/dashboard' }, body: '' };
+      case '/dashboard': return { delay: 800, body: page('Dashboard', '<h1>Your dashboard</h1>') };
+      // A sign-in by script: it posts with fetch, and goes on only once that answers.
+      case '/signin-script': return { body: page('Sign in', `<button onclick="fetch('/api/session', { method: 'POST' }).then(() => { location.href = '/dashboard'; })">Sign in</button>`) };
+      case '/api/session': return { delay: 400, headers: { 'content-type': 'application/json' }, body: '{}' };
+      // A choice that submits its form at once.
+      case '/choose': return { body: page('Choose', '<form action="/done"><select name="color" onchange="this.form.submit()"><option>red</option><option>blue</option></select></form>') };
       case '/download': return { body: page('Download', '<a href="/file">Get the report</a>') };
       // A form that comes back to the same address (a search, a post-back with errors).
       case '/same': return { body: page('Same', '<form method="post" action="/same"><button>Search again</button></form>') };

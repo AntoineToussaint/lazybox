@@ -167,23 +167,29 @@ export class AgentBrowser {
     return this.serial('queue', async () => {
       this.actor = p.actor === 'person' ? 'person' : 'agent';
       this.denial = undefined; this.blocked = '';
-      switch (p.action) {
-        case 'navigate': return this.navigate(p);
-        case 'snapshot': {
-          const snapshot = await this.snapshot(p.maxChars);
-          return this.result(p, `Page: ${await this.where()}\n\n${snapshot}`, 'Read the page', undefined, false);
-        }
-        case 'click': return this.click(p);
-        case 'type': return this.type(p);
-        case 'select': return this.select(p);
-        case 'press': return this.press(p);
-        case 'scroll': return this.scroll(p);
-        case 'screenshot': return this.screenshot(p);
-        case 'back': case 'forward': case 'reload': return this.history(p);
-        case 'wait_for': return this.waitFor(p);
-        default: throw new Error(`Unknown browser action ${JSON.stringify(p.action)}`);
-      }
+      try { return await this.run(p); }
+      // An action that failed before it settled stops watching the page all the same.
+      finally { this.watch?.dispose(); this.watch = undefined; }
     });
+  }
+
+  private async run(p: ActParams): Promise<ActResult> {
+    switch (p.action) {
+      case 'navigate': return this.navigate(p);
+      case 'snapshot': {
+        const snapshot = await this.snapshot(p.maxChars);
+        return this.result(p, `Page: ${await this.where()}\n\n${snapshot}`, 'Read the page', undefined, false);
+      }
+      case 'click': return this.click(p);
+      case 'type': return this.type(p);
+      case 'select': return this.select(p);
+      case 'press': return this.press(p);
+      case 'scroll': return this.scroll(p);
+      case 'screenshot': return this.screenshot(p);
+      case 'back': case 'forward': case 'reload': return this.history(p);
+      case 'wait_for': return this.waitFor(p);
+      default: throw new Error(`Unknown browser action ${JSON.stringify(p.action)}`);
+    }
   }
 
   /** The person's mouse and keyboard during Take over, in page CSS pixels. */
@@ -341,9 +347,11 @@ export class AgentBrowser {
   private async select(p: ActParams): Promise<ActResult> {
     const { locator, label, box } = await this.locate(p.ref);
     const values = p.values || [];
-    const chosen = await locator.selectOption(values, { timeout: elementTimeout }).catch(error => { throw new Error(`Could not select in ${label}: ${reason(error)}`); });
+    // A choice may submit its form (onchange): settle() follows it like a click's.
+    const before = this.beginAction();
+    const chosen = await locator.selectOption(values, { timeout: elementTimeout, noWaitAfter: true }).catch(error => { throw new Error(`Could not select in ${label}: ${reason(error)}`); });
     const summary = `Selected ${(chosen.length ? chosen : values).map(v => quote(v)).join(', ')} in ${label}`;
-    return this.result(p, `${summary}.`, summary, box);
+    return this.result(p, `${summary}.${await this.settle(before)}`, summary, box);
   }
 
   private async press(p: ActParams): Promise<ActResult> {

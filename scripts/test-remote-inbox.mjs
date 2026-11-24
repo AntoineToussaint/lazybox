@@ -120,6 +120,33 @@ try {
   await expect.poll(() => f.mutations.filter(m => m.method === 'Apply' && m.body.interrupt).length).toBe(1);
   await phone.getByRole('button', { name: 'Back to inbox' }).click();
 
+  // A notification opens another conversation while one is shown: the first leaves at once, and a
+  // reply goes to the one on screen. Both are read with GetSession (not in the live list), and the
+  // second one's answer is held, so for a moment the phone knows nothing about it.
+  f.sessions.push(
+    { ...base, id: 'earlier-a', collectionId: 'alpha', title: 'Old design notes', status: 'ready', createdAtUnixMillis: ms(now - 9_000_000), agents: root('ready', now - 9_000_000) },
+    { ...base, id: 'earlier-b', collectionId: 'alpha', title: 'Old release plan', status: 'ready', createdAtUnixMillis: ms(now - 9_500_000), agents: root('ready', now - 9_500_000) },
+  );
+  const earlier = new Set(['earlier-a', 'earlier-b']);
+  await phone.route('**/Info', async route => { const response = await route.fetch(); const body = await response.json(); body.sessions = (body.sessions || []).filter(s => !earlier.has(s.id)); await route.fulfill({ response, json: body }); });
+  const heldB = Promise.withResolvers();
+  await phone.route('**/GetSession', async route => { if (route.request().postDataJSON()?.sessionId === 'earlier-b') await heldB.promise; await route.continue(); });
+  const notificationOpens = id => phone.evaluate(url => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', { data: { type: 'lazybox-open', url } })), `/?view=remote&session=${id}`);
+  await notificationOpens('earlier-a');
+  await expect(phone.getByRole('heading', { name: 'Old design notes' })).toBeVisible();
+  await expect(composer).toBeVisible();
+  await notificationOpens('earlier-b');
+  await expect.poll(() => new URL(phone.url()).searchParams.get('session')).toBe('earlier-b');
+  await expect(phone.getByRole('heading', { name: 'Old design notes' }), 'the previous conversation left the screen').toHaveCount(0);
+  await expect(composer, 'nothing to reply to until the conversation is read').toHaveCount(0);
+  heldB.resolve();
+  await expect(phone.getByRole('heading', { name: 'Old release plan' })).toBeVisible();
+  await composer.fill('Use the 2.4 branch.');
+  await phone.getByRole('button', { name: 'Send message' }).click();
+  await expect.poll(() => f.mutations.filter(m => m.method === 'Apply' && m.body.message).map(m => [m.body.sessionId, m.body.message.text]).at(-1)).toEqual(['earlier-b', 'Use the 2.4 branch.']);
+  await phone.unroute('**/Info'); await phone.unroute('**/GetSession');
+  await phone.getByRole('button', { name: 'Back to inbox' }).click();
+
   // A read-only phone sees the same inbox and request, and can send nothing.
   const reader = await pairPhone([], 'Old phone');
   await reader.locator('.remote-row').filter({ hasText: 'Ship release notes' }).locator('.remote-row-open').click();

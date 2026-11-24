@@ -1,9 +1,11 @@
 package codecheckpoints
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -65,17 +67,23 @@ type gitCall struct {
 	limit int
 }
 
-// run executes Git in dir. index, when set, is the private index the call
-// reads and writes instead of the repository's own.
-func (c gitCall) run(ctx context.Context, args ...string) ([]byte, bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
-	defer cancel()
+// command is Git in c.dir with the call's index and stdin.
+func (c gitCall) command(ctx context.Context, args []string) *exec.Cmd {
 	base := []string{"-c", "core.fsmonitor=false", "-c", "core.safecrlf=false", "-c", "gc.auto=0", "-c", "advice.addEmbeddedRepo=false", "-c", "core.quotePath=false", "-C", c.dir}
 	cmd := exec.CommandContext(ctx, "git", append(base, args...)...)
 	cmd.Env = gitEnv(c.index)
 	if c.stdin != nil {
 		cmd.Stdin = bytes.NewReader(c.stdin)
 	}
+	return cmd
+}
+
+// run executes Git in dir. index, when set, is the private index the call
+// reads and writes instead of the repository's own.
+func (c gitCall) run(ctx context.Context, args ...string) ([]byte, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	cmd := c.command(ctx, args)
 	out := &bounded{limit: c.limit}
 	stderr := &bounded{limit: 4096}
 	cmd.Stdout, cmd.Stderr = out, stderr
@@ -91,6 +99,75 @@ func (c gitCall) run(ctx context.Context, args ...string) ([]byte, bool, error) 
 		return out.Bytes(), out.truncated, errors.New("git " + args[0] + ": " + message)
 	}
 	return out.Bytes(), out.truncated, nil
+}
+
+// maxField bounds one NUL-terminated field of streamed output: a path, or a
+// diff-tree status line.
+const maxField = 64 << 10
+
+// errStop, returned by a stream callback, ends the stream early without error.
+var errStop = errors.New("stop")
+
+// stream runs Git and hands each NUL-terminated field of its output to each,
+// in order, as it arrives, so output of any length is read in bounded memory.
+// When each returns errStop, Git is stopped and stream returns nil.
+func (c gitCall) stream(ctx context.Context, each func(field string) error, args ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	cmd := c.command(ctx, args)
+	stderr := &bounded{limit: 4096}
+	cmd.Stderr = stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err = cmd.Start(); err != nil {
+		return err
+	}
+	reader := bufio.NewReaderSize(stdout, maxField)
+	var readErr error
+	for {
+		field, err := reader.ReadSlice(0)
+		if errors.Is(err, io.EOF) {
+			if len(field) > 0 {
+				readErr = each(string(field))
+			}
+			break
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			readErr = errors.New("git " + args[0] + ": output field too long")
+			break
+		}
+		if err != nil {
+			readErr = err
+			break
+		}
+		if readErr = each(string(field[:len(field)-1])); readErr != nil {
+			break
+		}
+	}
+	if readErr != nil {
+		// Stop Git rather than wait for output nobody reads.
+		cancel()
+	}
+	waitErr := cmd.Wait()
+	if errors.Is(readErr, errStop) {
+		return nil
+	}
+	if readErr != nil {
+		return readErr
+	}
+	if ctx.Err() != nil {
+		return errors.New("git " + args[0] + " timed out")
+	}
+	if waitErr != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = waitErr.Error()
+		}
+		return errors.New("git " + args[0] + ": " + message)
+	}
+	return nil
 }
 
 func git(ctx context.Context, dir string, args ...string) (string, error) {

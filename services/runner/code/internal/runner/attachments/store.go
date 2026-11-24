@@ -20,6 +20,12 @@ import (
 const MaxFiles = 4
 const MaxFileBytes = 20 << 20
 const MaxMessageBytes = 20 << 20
+
+// MaxPayloadBytes bounds a message as it travels: its text, its images and
+// its attachments as base64 (4/3 of MaxMessageBytes, with room for images a
+// client sends without a file). An agent worker reads at least this much in
+// one line: the Claude worker's limit is claude.WorkerLineBytes.
+const MaxPayloadBytes = 34 << 20
 const SessionBudget = 64 << 20
 const SessionFiles = 256
 

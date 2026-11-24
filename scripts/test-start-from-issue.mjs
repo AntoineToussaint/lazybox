@@ -198,6 +198,19 @@ try {
   await prompt.fill('');
   await paste(prompt, `See ${ISSUE} for details`);
   await expect(sheet.locator('.item-source')).toHaveCount(0);
+  // A link the Runner says is not an item goes in as text where it was pasted, and what was
+  // typed while the Runner was asked stays.
+  await prompt.fill('Fix ');
+  const answer = Promise.withResolvers(), asked = Promise.withResolvers();
+  await page.route('**/ResolveItemUrl', async route => { asked.resolve(); await answer.promise; await route.fulfill({ status: 404, json: { code: 'not_found', message: 'not an issue or pull request' } }); });
+  const notAnItem = 'https://github.com/fixture-team/api/issues/9999';
+  await paste(prompt, notAnItem);
+  await asked.promise;
+  await prompt.press('End'); await prompt.pressSequentially(' before Friday');
+  answer.resolve();
+  await expect(prompt).toHaveValue(`Fix ${notAnItem} before Friday`);
+  await expect(sheet.locator('.item-source')).toHaveCount(0);
+  await page.unroute('**/ResolveItemUrl');
   await page.keyboard.press('Escape');
   await expect(sheet).toHaveCount(0);
 

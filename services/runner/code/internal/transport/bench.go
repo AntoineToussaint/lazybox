@@ -381,7 +381,7 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 			payloadBytes += base64.StdEncoding.EncodedLen(len(file.Data))
 			inputs = append(inputs, attachments.Input{Name: file.Name, MediaType: file.MediaType, Data: file.Data})
 		}
-		if payloadBytes > 34<<20 {
+		if payloadBytes > attachments.MaxPayloadBytes {
 			return errors.New("message exceeds the combined attachment/image limit")
 		}
 		var err error

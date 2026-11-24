@@ -3,6 +3,7 @@ package collections
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -428,5 +429,142 @@ func TestDeleteRefusesGitLinkPointingElsewhere(t *testing.T) {
 				t.Fatalf("member files touched: %v", err)
 			}
 		})
+	}
+}
+
+func commitTest(t *testing.T, path string, args ...string) {
+	t.Helper()
+	gitTest(t, path, append([]string{"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"}, args...)...)
+}
+
+// Commits only a detached HEAD reaches, and a rebase or merge stopped
+// part-way, leave `git status` empty. Removing the worktree deletes its HEAD
+// reflog and operation state, so deletion must ask for discard consent.
+func TestDeletionTreatsUnsavedHistoryAsDirty(t *testing.T) {
+	commitFile := func(t *testing.T, path, file string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(path, file), []byte(file), 0600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, path, "add", file)
+		commitTest(t, path, "commit", "-q", "-m", file)
+	}
+	cases := map[string]func(t *testing.T, path string){
+		"detached commit": func(t *testing.T, path string) {
+			gitTest(t, path, "checkout", "-q", "--detach")
+			commitFile(t, path, "detached.txt")
+		},
+		"stopped rebase": func(t *testing.T, path string) {
+			commitFile(t, path, "rebased.txt")
+			// A failing --exec stops the rebase with a clean tree, a
+			// rewritten commit no branch reaches and rebase-merge state.
+			cmd := exec.Command("git", "-C", path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+				"rebase", "--force-rebase", "--exec", "false", "HEAD~1")
+			cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+			if out, err := cmd.CombinedOutput(); err == nil {
+				t.Fatalf("rebase did not stop: %s", out)
+			}
+		},
+		"merge in progress on a branch": func(t *testing.T, path string) {
+			branch := gitTest(t, path, "symbolic-ref", "--short", "HEAD")
+			gitTest(t, path, "checkout", "-q", "-b", "empty-side")
+			commitTest(t, path, "commit", "-q", "--allow-empty", "-m", "empty")
+			gitTest(t, path, "checkout", "-q", branch)
+			commitTest(t, path, "merge", "-q", "--no-ff", "--no-commit", "empty-side")
+		},
+	}
+	for name, prepare := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			repo := repoTest(t)
+			m := newTest(t, t.TempDir(), repo)
+			c, err := m.Create(ctx, "unsaved", specTest(repo.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			member := c.Members[0]
+			prepare(t, member.Path)
+			head := gitTest(t, member.Path, "rev-parse", "HEAD")
+			if status := gitTest(t, member.Path, "status", "--porcelain", "--ignored"); status != "" {
+				t.Fatalf("fixture is not status-clean: %q", status)
+			}
+			inactive := func(string) bool { return false }
+			p, err := m.PreviewDeletion(ctx, c.ID, inactive)
+			if err != nil || len(p.Dirty) != 1 || p.Dirty[0] != member.Name {
+				t.Fatalf("preview did not report unsaved history: %+v, %v", p, err)
+			}
+			if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err == nil {
+				t.Fatal("deletion without discard consent accepted unsaved history")
+			}
+			if got := gitTest(t, member.Path, "rev-parse", "HEAD"); got != head {
+				t.Fatalf("HEAD moved: %s, want %s", got, head)
+			}
+			if _, err = m.BeginDeletion(ctx, c.ID, c.Name, true, false, false, inactive); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = m.FinishDeletion(ctx, c.ID, true, inactive); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A retried "add repositories" request must not provision into a workspace
+// whose deletion began or finished.
+func TestAddRepositoriesRetryDoesNotReviveADeletedWorkspace(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "revive", Spec{Name: "Revive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := []MemberSpec{{RepositoryID: repo.ID, Name: "api", BaseRef: "HEAD"}}
+	if _, err = m.AddRepositories(ctx, c.ID, "add-api", spec); err != nil {
+		t.Fatal(err)
+	}
+	inactive := func(string) bool { return false }
+	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.AddRepositories(ctx, c.ID, "add-api", spec); err == nil {
+		t.Fatal("retry provisioned into a workspace being deleted")
+	}
+	if got, _ := m.Get(c.ID); got.State != "deleting" {
+		t.Fatalf("state = %q, want deleting", got.State)
+	}
+	if _, err = m.FinishDeletion(ctx, c.ID, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.AddRepositories(ctx, c.ID, "add-api", spec); err == nil {
+		t.Fatal("retry provisioned into a deleted workspace")
+	}
+	if got, _ := m.Get(c.ID); got.State != "deleted" {
+		t.Fatalf("state = %q, want deleted", got.State)
+	}
+	if _, err = os.Lstat(c.Root); !os.IsNotExist(err) {
+		t.Fatal("deleted workspace folder was recreated", err)
+	}
+}
+
+func TestRemoveRepositoryMemberRefusesMergeInProgress(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "merging", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := c.Members[0]
+	gitTest(t, member.Path, "checkout", "-q", "-b", "empty-side")
+	commitTest(t, member.Path, "commit", "-q", "--allow-empty", "-m", "empty")
+	gitTest(t, member.Path, "checkout", "-q", member.Branch)
+	commitTest(t, member.Path, "merge", "-q", "--no-ff", "--no-commit", "empty-side")
+	_, err = m.RemoveRepositoryMember(ctx, c.ID, member.Name, func(string) bool { return false }, nil)
+	if err == nil || !strings.Contains(err.Error(), "merge is in progress") {
+		t.Fatalf("removed a worktree with a merge in progress: %v", err)
+	}
+	if _, err := os.Stat(member.Path); err != nil {
+		t.Fatal("worktree removed", err)
 	}
 }

@@ -36,6 +36,9 @@ func (c *Client) CreateIssue(ctx context.Context, token, fullName, title, body s
 	}
 	created, response, err := client.Issues.Create(ctx, owner, name, sdk.CreateIssueRequest{Title: title, Body: &body})
 	if err != nil {
+		if limit := rateLimit(err, response); limit != nil {
+			return Issue{}, limit
+		}
 		if response != nil && response.Response != nil && response.StatusCode == 403 {
 			return Issue{}, errors.New("GitHub refused to open the issue; the connection needs Issues write access (and SSO authorization for the organization)")
 		}

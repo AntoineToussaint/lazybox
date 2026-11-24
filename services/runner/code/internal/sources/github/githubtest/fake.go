@@ -1,7 +1,8 @@
 // Package githubtest is an in-memory GitHub REST API for PR-loop and
 // tracking tests: pull requests, reviews and their comments, check runs,
 // commit statuses, Actions job logs and merges, over httptest. Reads honour
-// If-None-Match as GitHub does (304, counted in NotModified), and RateLimited
+// If-None-Match as GitHub does (304, counted in NotModified), lists are paged
+// as GitHub pages them (per_page, page and Link headers), and RateLimited
 // answers as a primary rate limit. It never contacts GitHub.
 package githubtest
 
@@ -159,6 +160,41 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request, value any) {
 	_, _ = w.Write(body.Bytes())
 }
 
+// page answers one page of entries as GitHub does: per_page (30 unless
+// given, at most 100) and page, with a Link header naming the first,
+// previous, next and last pages. body wraps the page's entries; the answer
+// honours If-None-Match per page.
+func (s *Server) page(w http.ResponseWriter, r *http.Request, entries []map[string]any, body func([]map[string]any) any) {
+	query := r.URL.Query()
+	per, _ := strconv.Atoi(query.Get("per_page"))
+	if per <= 0 {
+		per = 30
+	}
+	per = min(per, 100)
+	number, _ := strconv.Atoi(query.Get("page"))
+	number = max(number, 1)
+	last := max((len(entries)+per-1)/per, 1)
+	start, end := min((number-1)*per, len(entries)), min(number*per, len(entries))
+	link := func(page int, rel string) string {
+		q := r.URL.Query()
+		q.Set("page", strconv.Itoa(page))
+		return fmt.Sprintf(`<%s%s?%s>; rel="%s"`, s.URL, r.URL.Path, q.Encode(), rel)
+	}
+	var links []string
+	if number > 1 {
+		links = append(links, link(1, "first"), link(number-1, "prev"))
+	}
+	if number < last {
+		links = append(links, link(number+1, "next"), link(last, "last"))
+	}
+	if len(links) > 0 {
+		w.Header().Set("Link", strings.Join(links, ", "))
+	}
+	s.read(w, r, body(entries[start:end]))
+}
+
+func list(entries []map[string]any) any { return entries }
+
 func (s *Server) wire(full string, pr *PR) map[string]any {
 	state := pr.State
 	if pr.Merged {
@@ -246,7 +282,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				out = append(out, s.wire(full, pulls[i]))
 			}
 		}
-		s.read(w, r, out)
+		s.page(w, r, out, list)
 	case len(rest) == 1 && rest[0] == "pulls" && r.Method == "POST":
 		if s.ReadOnly {
 			write(w, 403, map[string]any{"message": "Resource not accessible by integration"})
@@ -302,7 +338,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				}
 				out = append(out, entry)
 			}
-			write(w, 200, out)
+			s.page(w, r, out, list)
 		case len(rest) == 3 && rest[2] == "comments" && r.Method == "GET":
 			out := []map[string]any{}
 			for _, c := range pr.Comments {
@@ -319,7 +355,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				}
 				out = append(out, entry)
 			}
-			write(w, 200, out)
+			s.page(w, r, out, list)
 		case len(rest) == 3 && rest[2] == "merge" && r.Method == "PUT":
 			var body struct {
 				SHA         string `json:"sha"`
@@ -366,13 +402,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		for _, c := range s.Checks[rest[1]] {
 			runs = append(runs, map[string]any{"id": c.ID, "name": c.Name, "status": c.Status, "conclusion": c.Conclusion, "html_url": c.URL})
 		}
-		s.read(w, r, map[string]any{"total_count": len(runs), "check_runs": runs})
+		s.page(w, r, runs, func(page []map[string]any) any { return map[string]any{"total_count": len(runs), "check_runs": page} })
 	case len(rest) == 3 && rest[0] == "commits" && rest[2] == "status":
 		statuses := []map[string]any{}
 		for _, c := range s.Statuses[rest[1]] {
 			statuses = append(statuses, map[string]any{"context": c.Context, "state": c.State, "target_url": c.URL})
 		}
-		s.read(w, r, map[string]any{"state": "pending", "statuses": statuses})
+		s.page(w, r, statuses, func(page []map[string]any) any {
+			return map[string]any{"state": "pending", "total_count": len(statuses), "statuses": page}
+		})
 	case len(rest) == 4 && rest[0] == "actions" && rest[1] == "jobs" && rest[3] == "logs":
 		if s.LogsForbidden {
 			write(w, 403, map[string]any{"message": "Resource not accessible by personal access token"})

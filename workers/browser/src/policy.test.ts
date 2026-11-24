@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { isPrivateAddress, judgeNavigation, judgeURL, originOf } from './policy.js';
 import { GateProxy, splitAuthority, type Refusal } from './proxy.js';
-import { capSnapshot, refLabels } from './snapshot.js';
+import { capSnapshot, filledTextboxes, hiddenValue, refLabels } from './snapshot.js';
 
 const policy = { loopbackPorts: [5173], blockedHosts: ['127.0.0.1:7000', 'runner.tailnet.ts.net:443'] };
 
@@ -65,4 +65,18 @@ test('snapshots are capped at a line, and refs keep their role and name', () => 
   assert.ok(capped.length < 1200);
   assert.match(capped, /\[ref=e\d+\]\n\(truncated — \d+ more characters; scroll or use browser_snapshot with a larger maxChars\)$/);
   assert.equal(capSnapshot(snapshot), snapshot);
+});
+
+test('filled text fields are found by line and ref, and lose only their value when hidden', () => {
+  const snapshot = [
+    '- textbox "Email" [ref=e4]: "a: b"',
+    '- textbox "Pass [ref=e9]" [active] [ref=f2e6]: "hun\\"ter: 2"',
+    '- textbox "Empty" [ref=e7]',
+    '- button "Sign in" [ref=e8]',
+    '  - textbox [ref=e10]: x',
+  ].join('\n');
+  assert.deepEqual(filledTextboxes(snapshot), [{ line: 0, ref: 'e4' }, { line: 1, ref: 'f2e6' }, { line: 4, ref: 'e10' }]);
+  assert.equal(hiddenValue(snapshot.split('\n')[1]), '- textbox "Pass [ref=e9]" [active] [ref=f2e6]: "(password hidden)"');
+  assert.equal(hiddenValue('  - textbox [ref=e10]: x'), '  - textbox [ref=e10]: "(password hidden)"');
+  assert.equal(hiddenValue('- button "Sign in" [ref=e8]'), '- button "Sign in" [ref=e8]');
 });

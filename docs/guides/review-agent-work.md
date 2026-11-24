@@ -173,8 +173,10 @@ The report identifies ambiguous intent and remaining coverage gaps for the
 person to decide. Passing commands establish only the assertions they execute.
 
 Pause holds later rounds, Resume continues a pending recheck, and Cancel ends
-running verification commands and the review. Checkouts are retained with the
-review conversation and removed when its checkpoints are deleted.
+running verification commands and the review. Each checkout is removed once
+its command finishes (its exit status and output stay with the command), or at
+once when the command cannot start; any left are removed when the review
+conversation's checkpoints are deleted.
 
 ## Undo a turn: checkpoints
 
@@ -208,7 +210,7 @@ the pull request's card. Nothing happens without your click.
 
 | Step | What you get |
 | --- | --- |
-| **Commit…** | The changed files, all ticked (untick to leave some out), and a message drafted from the conversation. **Ask the agent to write it** asks the agent that did the work for a message. **Commit & push** does both. |
+| **Commit…** | The changed files, all ticked (untick to leave some out), and a message drafted from the conversation. **Ask the agent to write it** asks the agent that did the work for a message. **Commit & push** does both; when the commit is made but the push fails, the dialog says so and offers **Push again**. |
 | **Push** | Pushes the branch under its own name. Never forced; a diverged remote branch is refused and explained. |
 | **Create PR…** | Title and description prefilled from the commits, the default branch as base, a draft option. Unpushed commits are pushed first. |
 | **The card** | State, review decision, and every check, failing first, each with its **Logs**. Refreshes on its own while checks run. |

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -495,5 +496,151 @@ func TestRepositoryWithoutCommitsIsCheckpointed(t *testing.T) {
 	}
 	if exists(filepath.Join(dir, "second.txt")) || !exists(filepath.Join(dir, "first.txt")) {
 		t.Fatal("unborn repository not reverted")
+	}
+}
+
+// Untracked files past the limit are counted, never held: the checkpoint has
+// exactly MaxUntracked of them and says how many it left out.
+func TestUntrackedFilesPastTheLimitAreCountedExactly(t *testing.T) {
+	dir := newRepo(t)
+	for i := range 50 {
+		write(t, filepath.Join(dir, "gen", fmt.Sprintf("f%02d.txt", i)), "x\n")
+	}
+	w, err := snapshot(ctx(t), dir, t.TempDir(), Limits{MaxUntracked: 5}.withDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.SkippedCount != 45 || len(w.Skipped) != skippedListed {
+		t.Fatalf("skipped %d, listed %d", w.SkippedCount, len(w.Skipped))
+	}
+	untracked := 0
+	for _, f := range strings.Split(run(t, dir, "ls-tree", "-r", "--name-only", w.Tree), "\n") {
+		if strings.HasPrefix(f, "gen/") {
+			untracked++
+		}
+	}
+	if untracked != 5 {
+		t.Fatalf("checkpoint holds %d untracked files, want 5", untracked)
+	}
+}
+
+// A stream stopped by its reader ends Git without an error and reads nothing
+// more.
+func TestStreamStopsWhenTheReaderHasEnough(t *testing.T) {
+	dir := newRepo(t)
+	calls := 0
+	err := gitCall{dir: dir}.stream(ctx(t), func(string) error {
+		calls++
+		return errStop
+	}, "ls-files", "-z")
+	if err != nil || calls != 1 {
+		t.Fatalf("calls %d, err %v", calls, err)
+	}
+	if err = (gitCall{dir: dir}).stream(ctx(t), func(string) error { return nil }, "rev-parse", "--verify", "no-such-ref"); err == nil {
+		t.Fatal("a failing command streamed without an error")
+	}
+}
+
+// The change list stops one file past changeLimit and still counts lines,
+// renames included, for the files it shows.
+func TestChangesStopPastTheLimitAndCountRenames(t *testing.T) {
+	dir := newRepo(t)
+	before := run(t, dir, "write-tree")
+	run(t, dir, "mv", "old-name.txt", "a-renamed.txt")
+	write(t, filepath.Join(dir, "a-renamed.txt"), read(t, filepath.Join(dir, "a-renamed.txt"))+"one more line\n")
+	for i := range changeLimit + 5 {
+		write(t, filepath.Join(dir, "many", fmt.Sprintf("f%05d.txt", i)), "x\n")
+	}
+	run(t, dir, "add", "-A")
+	after := run(t, dir, "write-tree")
+	files, truncated, err := changes(ctx(t), dir, before, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated || len(files) != changeLimit {
+		t.Fatalf("truncated %v, %d files", truncated, len(files))
+	}
+	rename := files[0]
+	if rename.Status != "R" || rename.OriginalPath != "old-name.txt" || rename.Path != "a-renamed.txt" || rename.Additions != 1 || rename.Deletions != 0 {
+		t.Fatalf("rename = %+v", rename)
+	}
+	if last := files[len(files)-1]; last.Additions != 1 {
+		t.Fatalf("last listed file = %+v", last)
+	}
+}
+
+// The safety checkpoint skips some files (too large here; also ignored, past
+// the untracked limit, or nested repositories). A revert that would write a
+// path holding one of them must leave it alone: undo could not bring it back.
+func TestRevertLeavesFilesTheSafetyCheckpointSkipped(t *testing.T) {
+	dir := newRepo(t)
+	m := manager(t, Limits{MaxFileBytes: 1024})
+	repos := []Repository{{Member: "app", Path: dir}}
+	notes := filepath.Join(dir, "notes.txt")
+	write(t, notes, "small notes\n")
+	if _, err := m.BeginTurn(ctx(t), "conv", repos, "op", "one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(notes); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.EndTurn(ctx(t), "conv", repos, "op", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	large := strings.Repeat("row\n", 1000)
+	write(t, notes, large)
+	write(t, filepath.Join(dir, "README.md"), "changed\n")
+	r, err := m.Revert(ctx(t), "conv", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, notes); got != large {
+		t.Fatalf("revert overwrote a file the safety checkpoint skipped: %q", got)
+	}
+	if !strings.Contains(strings.Join(r.Problems, "\n"), "notes.txt: left as it is") {
+		t.Fatalf("problems = %q", r.Problems)
+	}
+	if got := read(t, filepath.Join(dir, "README.md")); got != "# Project\n" {
+		t.Fatalf("other files not reverted: %q", got)
+	}
+}
+
+// A directory the target replaces with a file can still hold ignored files
+// after its tracked files are removed; writing the file would delete them.
+func TestRevertKeepsIgnoredFilesInADirectoryTheTargetReplaces(t *testing.T) {
+	dir := newRepo(t)
+	m := manager(t, Limits{})
+	repos := []Repository{{Member: "app", Path: dir}}
+	out := filepath.Join(dir, "out")
+	write(t, out, "a file\n")
+	if _, err := m.BeginTurn(ctx(t), "conv", repos, "op", "one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(out); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(out, "kept.txt"), "tracked by the checkpoint\n")
+	write(t, filepath.Join(out, "run.log"), "ignored\n")
+	if err := m.EndTurn(ctx(t), "conv", repos, "op", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	r, err := m.Revert(ctx(t), "conv", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(out, "run.log")); got != "ignored\n" {
+		t.Fatalf("ignored file lost: %q", got)
+	}
+	if !strings.Contains(strings.Join(r.Problems, "\n"), "out: left as it is") {
+		t.Fatalf("problems = %q", r.Problems)
+	}
+	if exists(filepath.Join(out, "kept.txt")) {
+		t.Fatal("tracked file in the replaced directory was not removed")
+	}
+	if _, err = m.Undo(ctx(t), "conv", r.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(out, "kept.txt")); got != "tracked by the checkpoint\n" {
+		t.Fatalf("undo did not restore the directory: %q", got)
 	}
 }

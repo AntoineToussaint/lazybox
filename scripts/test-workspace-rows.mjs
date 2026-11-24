@@ -163,6 +163,16 @@ await nav.screenshot({path:'.cache/workspace-rows-narrow.png'});
  assert.ok(narrow,'badges stay inside a narrow row'); for(const row of [alpha,beta,comments]){const line=await oneLine(row);assert.ok(!line.elapsedCut&&line.inside&&line.label,`narrow: the agent line is whole: ${JSON.stringify(line)}`);}
  await nav.screenshot({path:'.cache/workspace-rows-narrow.png'});
 
+ // F2 renames in place; leaving the form (Esc, Cancel, or saving) puts focus back on the row, not on the page.
+ const betaLink=beta.locator('.workspace-link'),field=nav.getByRole('textbox',{name:'Workspace name'});
+ await betaLink.focus();await page.keyboard.press('F2');await expect(field).toBeFocused();
+ await page.keyboard.press('Escape');await expect(field).toHaveCount(0);
+ await expect(betaLink).toBeFocused();
+ await page.keyboard.press('F2');await nav.getByRole('button',{name:'Cancel',exact:true}).click();await expect(betaLink).toBeFocused();
+ await page.keyboard.press('F2');await field.fill('Beta release');await field.press('Enter');
+ await expect.poll(()=>fixture.mutations.filter(m=>m.method==='RenameCollection').length).toBe(1);
+ await expect(field).toHaveCount(0);await expect(betaLink).toBeFocused();
+
  // Only the owner's window asks, once for every workspace.
  const asks=fixture.calls.filter(c=>c.method==='ListWorkspaceGitSummaries');
  assert.ok(asks.length>=4&&asks.every(c=>!c.body.collectionIds?.length),'one request covers every workspace');

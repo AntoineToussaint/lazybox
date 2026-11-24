@@ -5,6 +5,7 @@ use std::{error::Error, fs, path::Path};
 mod appearance;
 mod attention;
 mod capture;
+mod children;
 mod feedback;
 mod host;
 mod layout;
@@ -193,6 +194,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             attention::request_notification_permission,
             terminal::terminal_apps,
             terminal::open_terminal,
+            terminal::terminal_command,
+            terminal::set_terminal_command,
             sounds::play_system_sound,
             title_bar::title_bar,
             title_bar::title_bar_drag,
@@ -270,6 +273,128 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The commands any of the app's own pages may call, each with why. Every
+    /// other command takes the calling webview or window and decides from its
+    /// label (host.rs `is_app_window`, `is_workspace_window`, …). Viewers and
+    /// popped-out panel windows hold no capability; this list keeps a new
+    /// command from skipping that decision by accident.
+    const ANY_APP_WINDOW: &[(&str, &str)] = &[
+        (
+            "default_ui_zoom",
+            "reads the app-wide zoom every window draws at",
+        ),
+        (
+            "set_ui_zoom",
+            "Settings → Appearance, in any window that shows it",
+        ),
+        (
+            "share_preference",
+            "an app-wide preference every window rereads",
+        ),
+        ("notification_permission", "reads what macOS allows"),
+        (
+            "request_notification_permission",
+            "macOS asks the person itself",
+        ),
+        ("check_for_update", "reads the update feed"),
+        ("setup_state", "reads the service status"),
+        ("app_info", "reads the app's version"),
+        ("save_view_state", "a window's own view state, by its key"),
+        ("open_console", "opens a Runner command's console window"),
+        ("open_chat", "opens a conversation's window"),
+        ("open_mission", "opens a mission's window"),
+        ("open_artifact", "opens an artifact's window"),
+        ("open_workspace", "opens a workspace's window"),
+        (
+            "set_action_menu",
+            "the menu bar lists actions; the host runs none",
+        ),
+        ("reopen_agent", "brings the main window forward"),
+        ("reopen_closed", "reopens the last closed window"),
+        ("expect_runner_restart", "follows this Runner's own locator"),
+        ("terminal_apps", "lists installed terminal apps"),
+        ("voice_status", "reads what macOS allows"),
+        ("voice_request_permission", "macOS asks the person itself"),
+        ("voice_languages", "lists recognition languages"),
+        ("voice_open_settings", "opens a fixed System Settings pane"),
+        ("voice_stop", "stops a recognition by its session"),
+        ("voice_cancel", "cancels a recognition by its session"),
+        ("speech_voices", "lists voices"),
+        ("speech_speak", "reads text aloud"),
+        ("speech_stop", "stops reading aloud"),
+        ("speech_speaking", "reads whether it is reading aloud"),
+    ];
+
+    /// Each `#[tauri::command]` in `source`: its name and whether it takes
+    /// the calling webview or window.
+    fn commands(source: &str) -> Vec<(String, bool)> {
+        source
+            .split("#[tauri::command]")
+            .skip(1)
+            .map(|rest| {
+                let signature = &rest[rest.find("fn ").expect("fn")..];
+                let signature = &signature[..signature.find('{').expect("body")];
+                let name = signature[3..]
+                    .split(|c: char| c == '(' || c == '<')
+                    .next()
+                    .expect("name")
+                    .trim()
+                    .to_string();
+                (
+                    name,
+                    signature.contains("Webview") || signature.contains("Window"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_command_decides_from_its_caller_or_says_why_any_app_window_may_call_it() {
+        let sources = [
+            include_str!("appearance.rs"),
+            include_str!("attention.rs"),
+            include_str!("capture.rs"),
+            include_str!("feedback.rs"),
+            include_str!("host.rs"),
+            include_str!("links.rs"),
+            include_str!("release.rs"),
+            include_str!("runners.rs"),
+            include_str!("sounds.rs"),
+            include_str!("terminal.rs"),
+            include_str!("title_bar.rs"),
+            include_str!("updates.rs"),
+            include_str!("viewer.rs"),
+            include_str!("voice.rs"),
+        ];
+        let all: Vec<_> = sources.iter().flat_map(|s| commands(s)).collect();
+        let listed = |name: &str| ANY_APP_WINDOW.iter().any(|(n, _)| *n == name);
+        let undecided: Vec<_> = all
+            .iter()
+            .filter(|(name, takes_caller)| !(takes_caller ^ listed(name)))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(
+            undecided.is_empty(),
+            "{undecided:?}: take the calling Webview and check its label, or list it in ANY_APP_WINDOW with why any app window may call it (not both)"
+        );
+        for (name, _) in ANY_APP_WINDOW {
+            assert!(all.iter().any(|(n, _)| n == name), "{name} is no command");
+        }
+        // Every command registered in main() is one of these.
+        let main = include_str!("main.rs");
+        let handler = &main[main.find("generate_handler![").expect("handler")..];
+        let handler = &handler[..handler.find(']').expect("end")];
+        for entry in handler["generate_handler![".len()..].split(',') {
+            let name = entry.trim().rsplit("::").next().unwrap_or("");
+            if !name.is_empty() {
+                assert!(
+                    all.iter().any(|(n, _)| n == name),
+                    "{name} was not inspected"
+                );
+            }
+        }
+    }
 
     #[test]
     fn bootstrap_reads_the_supplied_file_and_rejects_missing_or_invalid_authority() {

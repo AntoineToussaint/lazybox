@@ -8,12 +8,21 @@ export const UNDO_MS = 4500;
 /**
  * A bottom sheet: a modal dialog (focus stays inside, Esc and a tap outside
  * close it) that rises from the bottom edge, above the safe area, with
- * thumb-sized choices.
+ * thumb-sized choices. It opens with focus on its [data-autofocus] control
+ * (given after showModal(), which otherwise moves focus to its first choice),
+ * and gives focus back to what had it when it closes.
  */
 export function Sheet({ title, detail, onClose, children, label }: { title: ReactNode; detail?: ReactNode; label: string; onClose(): void; children: ReactNode }) {
   const dialog = useRef<HTMLDialogElement>(null);
   useBackdropDismiss(dialog);
-  useEffect(() => { const node = dialog.current; if (node && !node.open) node.showModal(); }, []);
+  // What had focus when the sheet was asked for, read before it exists (an effect may run twice).
+  const [opener] = useState(() => document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  useEffect(() => {
+    const node = dialog.current;
+    if (node && !node.open) node.showModal();
+    node?.querySelector<HTMLElement>('[data-autofocus]')?.focus();
+    return () => { if (opener?.isConnected) opener.focus({ preventScroll: true }); };
+  }, [opener]);
   return <dialog ref={dialog} className="remote-sheet" aria-label={label} onCancel={event => { event.preventDefault(); onClose(); }}>
     <div className="remote-sheet-body">
       <span className="remote-sheet-grip" aria-hidden="true"/>
@@ -33,7 +42,7 @@ export function ActionSheet({ title, detail, choices, onClose }: { title: ReactN
         {choice.glyph || (choice.icon && <Icon name={choice.icon} size={18}/>)}<span>{choice.label}</span>
       </button>)}
     </div>
-    <button type="button" className="remote-sheet-cancel" autoFocus onClick={onClose}>Cancel</button>
+    <button type="button" className="remote-sheet-cancel" data-autofocus onClick={onClose}>Cancel</button>
   </Sheet>;
 }
 
@@ -41,7 +50,7 @@ export function ActionSheet({ title, detail, choices, onClose }: { title: ReactN
 export function ConfirmSheet({ title, detail, confirm, tone = 'danger', onConfirm, onClose }: { title: ReactNode; detail?: ReactNode; confirm: string; tone?: 'danger' | 'primary'; onConfirm(): void; onClose(): void }) {
   return <Sheet title={title} detail={detail} label={typeof title === 'string' ? title : confirm} onClose={onClose}>
     <div className="remote-sheet-row">
-      <button type="button" autoFocus onClick={onClose}>Cancel</button>
+      <button type="button" data-autofocus onClick={onClose}>Cancel</button>
       <button type="button" className={tone} onClick={() => { onConfirm(); onClose(); }}>{confirm}</button>
     </div>
   </Sheet>;

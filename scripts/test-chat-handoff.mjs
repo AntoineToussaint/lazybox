@@ -121,13 +121,21 @@ try {
       await expect(header.locator('.conversation-title-text')).toHaveText('Add a response cache');
       const handoff = await moduleUrl(page, 'handoff.tsx');
       assert.ok(handoff, 'the handoff module is loaded');
-      await page.evaluate(async url => {
+      // A stand-in desktop host: it keeps the custom command line itself and
+      // saves one only when its (here simulated) native confirmation allows it.
+      const configure = (installed, failure = '') => page.evaluate(async ([url, installed, failure]) => {
         const m = await import(url);
-        window.__opened = [];
-        m.configureExternalTerminal({ installed: async () => ['iterm', 'terminal'], open: async request => { window.__opened.push(request); return { path: request.path }; } });
-      }, handoff);
+        m.configureExternalTerminal({
+          installed: async () => installed,
+          open: async request => { if (failure) throw new Error(failure); window.__opened.push(request); return { path: request.path }; },
+          customCommand: async () => window.__saved,
+          setCustomCommand: async command => { window.__asked.push(command); if (!window.__allow) throw new Error('Your terminal command was not saved'); window.__saved = command.trim(); return window.__saved; },
+        });
+      }, [handoff, installed, failure]);
+      await page.evaluate(() => { window.__opened = []; window.__asked = []; window.__saved = ''; window.__allow = false; });
+      await configure(['iterm', 'terminal']);
       await page.keyboard.press('Meta+k'); await page.keyboard.type('Open in Terminal'); await page.keyboard.press('Enter');
-      await expect.poll(() => page.evaluate(() => window.__opened.at(-1))).toEqual({ path: '/fixture/collections/alpha', app: 'iterm', command: '' });
+      await expect.poll(() => page.evaluate(() => window.__opened.at(-1))).toEqual({ path: '/fixture/collections/alpha', app: 'iterm' });
       // From a workspace row: that workspace's folder.
       await page.locator('.workspace-row', { hasText: 'Beta release' }).click({ button: 'right' });
       await page.getByRole('menuitem', { name: 'Open in Terminal' }).click();
@@ -140,10 +148,10 @@ try {
       await page.getByRole('menuitem', { name: 'Open in Terminal' }).click();
       await expect.poll(() => page.evaluate(() => window.__opened.at(-1)?.path)).toBe('/fixture/collections/alpha/api');
       // A failure says so, with the cd to fall back on.
-      await page.evaluate(async url => { const m = await import(url); m.configureExternalTerminal({ installed: async () => ['iterm'], open: async () => { throw new Error('iTerm is not installed'); } }); }, handoff);
+      await configure(['iterm'], 'iTerm is not installed');
       await page.keyboard.press('Meta+k'); await page.keyboard.type('Open in Terminal'); await page.keyboard.press('Enter');
       await expect(page.locator('.toast').filter({ hasText: 'Could not open iTerm' })).toContainText('iTerm is not installed');
-      await page.evaluate(async url => { const m = await import(url); m.configureExternalTerminal({ installed: async () => ['iterm', 'terminal'], open: async request => { window.__opened.push(request); return { path: request.path }; } }); }, handoff);
+      await configure(['iterm', 'terminal']);
       // Settings → Workspaces → Your terminal: installed ones, a custom command.
       await page.getByRole('button', { name: 'Settings', exact: true }).click();
       await page.getByRole('tab', { name: 'Agents & workspaces', exact: true }).click();
@@ -151,12 +159,35 @@ try {
       await expect(choice.locator('option:checked')).toHaveText('Automatic · iTerm');
       await expect(choice.locator('option', { hasText: 'Ghostty' })).toHaveText('Ghostty (not installed)');
       await choice.selectOption('custom');
-      await page.getByRole('textbox', { name: 'Command' }).fill('alacritty --working-directory {dir}');
+      const command = page.getByRole('textbox', { name: 'Command' });
+      const save = page.getByRole('button', { name: 'Save', exact: true });
+      await expect(command).toHaveValue('');
+      await command.fill('alacritty --working-directory {dir}');
+      // The host's confirmation refused: nothing is kept, and it says so.
+      await save.click();
+      await expect(page.getByRole('alert').filter({ hasText: 'Your terminal command was not saved' })).toBeVisible();
+      assert.equal(await page.evaluate(() => window.__saved), '');
+      // Allowed: the host keeps it.
+      await page.evaluate(() => { window.__allow = true; });
+      await save.click();
+      await expect(page.getByRole('status').filter({ hasText: 'Saved.' })).toBeVisible();
+      await expect(save).toBeDisabled();
+      assert.deepEqual(await page.evaluate(() => window.__asked), ['alacritty --working-directory {dir}', 'alacritty --working-directory {dir}']);
       await page.mouse.move(0, 0);
       await page.screenshot({ path: '.cache/handoff-terminal-settings-dark.png' });
       await page.getByRole('button', { name: 'Work', exact: true }).click();
       await page.keyboard.press('Meta+k'); await page.keyboard.type('Open in Terminal'); await page.keyboard.press('Enter');
-      await expect.poll(() => page.evaluate(() => window.__opened.at(-1))).toEqual({ path: '/fixture/collections/alpha', app: 'custom', command: 'alacritty --working-directory {dir}' });
+      // The request names the folder and "custom", never the command line: the host runs its own.
+      await expect.poll(() => page.evaluate(() => window.__opened.at(-1))).toEqual({ path: '/fixture/collections/alpha', app: 'custom' });
+      // A command line an earlier version kept in the page's storage is never run, only offered to save the same way.
+      await page.evaluate(() => { window.__saved = ''; window.__asked = []; localStorage.setItem('lazybox:external-terminal', JSON.stringify({ app: 'custom', command: 'kitty --directory {dir}' })); });
+      await page.keyboard.press('Meta+k'); await page.keyboard.type('Open in Terminal'); await page.keyboard.press('Enter');
+      await expect(page.locator('.toast').filter({ hasText: 'Your terminal command is empty' })).toBeVisible();
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      await page.getByRole('tab', { name: 'Agents & workspaces', exact: true }).click();
+      await expect(page.getByRole('textbox', { name: 'Command' })).toHaveValue('kitty --directory {dir}');
+      assert.deepEqual(await page.evaluate(() => window.__asked), [], 'nothing is saved without the person');
+      await page.getByRole('button', { name: 'Work', exact: true }).click();
     }
 
     // R12 · At 1024×680 the Review tray goes under the files; the diff keeps its height and width.

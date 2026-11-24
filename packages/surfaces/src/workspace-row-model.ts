@@ -47,8 +47,10 @@ function pullBadge(repo: RepositoryGitSummary): PullBadge | undefined {
   const pr = repo.pullRequest;
   if (!pr || !pr.number) return;
   const tone = pullTone(pr);
+  // More checks than the Runner reads at once: a neutral dot, never green, and words that say so.
+  const checks = tone === 'none' && pr.checksState === 'incomplete' ? 'checks not all read' : toneWords[tone];
   const review = pr.reviewDecision === 'changes_requested' ? ' · changes requested' : pr.reviewDecision === 'approved' ? ' · approved' : '';
-  return { member: repo.member, number: Number(pr.number), url: pr.url, tone, text: `#${pr.number}`, label: `Pull request #${pr.number} · ${toneWords[tone]}${review}${pr.title ? ` — ${pr.title}` : ''}` };
+  return { member: repo.member, number: Number(pr.number), url: pr.url, tone, text: `#${pr.number}`, label: `Pull request #${pr.number} · ${checks}${review}${pr.title ? ` — ${pr.title}` : ''}` };
 }
 
 /** One repository in words: "api · feature/x · 2 uncommitted · 1 not pushed · 3 behind main · PR #12 checks failing". */

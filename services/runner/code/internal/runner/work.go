@@ -281,6 +281,9 @@ func (b *Bench) recordPullRequest(link workitems.Link, item workitems.Item) erro
 		ev.Outcome, ev.Detail = work.OutcomeFail, "failed: "+strings.Join(pr.FailingNames(), ", ")
 	case "pending":
 		ev.Outcome, ev.Detail = work.OutcomePending, "checks running"
+	case "incomplete":
+		// Not a pass: a check Lazybox did not read may be failing.
+		ev.Outcome, ev.Detail = work.OutcomeUnknown, fmt.Sprintf("more checks than Lazybox reads at once (%d read, none failing); check them on GitHub", len(pr.CheckRuns))
 	default:
 		ev.Outcome, ev.Detail = work.OutcomeUnknown, "no checks"
 	}

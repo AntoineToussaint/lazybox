@@ -344,9 +344,13 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
         if (receipt.error || receipt.delivery === 'failed') throw new Error(receipt.error || 'The message failed to send.');
       }
       catch (e) { if (deadline.aborted && !signal.aborted) throw new Error('The Runner did not confirm this message within 30 seconds. Press Enter to send it again: it will not be delivered twice.'); throw e; }
+      // Delivered from here on: a bookkeeping failure below is reported as such, never as "not sent",
+      // and the draft is still cleared, so sending again cannot deliver the message twice.
+      let afterDelivery = '';
       const ids = [...new Set(reviewDrafts.current.filter(review => text.includes(review.text)).flatMap(review => review.ids))];
       if (ids.length && session?.collectionId) {
-        await api.setReviewDisposition({ collectionId: session.collectionId, ids, disposition: 'sent', sessionId: destination, sessionTitle: conversationName(session, '') });
+        try { await api.setReviewDisposition({ collectionId: session.collectionId, ids, disposition: 'sent', sessionId: destination, sessionTitle: conversationName(session, '') }); }
+        catch (e) { afterDelivery = `Sent. The review findings could not be marked as sent: ${humanError(e)}`; }
         refreshWorkspaceReview(session.collectionId);
       }
       savePrompt(viewState, text, session?.conversationId || sessionID); recall.reset();
@@ -354,7 +358,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       refreshSession();
       // Behind a busy turn the message was queued: it goes next, the turn stopped for it.
       if (now && destination === sessionID && session?.busy && !session.closed) void queuedDelivery.deliver(attempt.id, 'now', true);
-      if (!signal.aborted) { setMessage(''); setFiles([]); boxes.clearRejected(); setUncertainSend(''); sendAttempt.current = null; persistDraft('', [], []); if (destination !== sessionID) { persistDraft('', [], [], '', destination); setSessionID(destination); onSessionChange?.(destination); refresh(); } }
+      if (!signal.aborted) { setMessage(''); setFiles([]); boxes.clearRejected(); setUncertainSend(''); sendAttempt.current = null; persistDraft('', [], []); if (destination !== sessionID) { persistDraft('', [], [], '', destination); setSessionID(destination); onSessionChange?.(destination); refresh(); } if (afterDelivery) setError(afterDelivery); }
       return !signal.aborted;
     } catch (e) { if (!signal.aborted) { setError(humanError(e)); if (snippetText) setMessage(text); } return false; }
     finally { if (!signal.aborted) { sendingRef.current = false; setSending(false); } }

@@ -39,7 +39,7 @@ try{
  await expect(card.locator('.repository-facts')).toContainText('Already on this computer');
  await expect(card.getByRole('group',{name:'Matches'}).getByRole('button')).toHaveText(['acme/module-directory','other/module-directory']);
  await expect(card.locator('.decision-row')).toHaveText([/Add acme\/module-directory/,/Choose another…/,/Decline…/]);
- await expect(card.getByRole('button',{name:'Add acme/module-directory'})).toBeFocused();
+ await expect(card).toBeFocused();
  // The conversation waits on the person, and says so.
  await expect(page.locator('.chat-status [role=status]')).toHaveText('Waiting for a repository');
  await page.screenshot({path:'.cache/repository-request-card.png'});
@@ -87,7 +87,7 @@ try{
  // ── Choose another…: the picker opens on the likely repositories, the match preselected.
  session.pending=[ask('repo-tools','tool','The lint rules live there.',[candidate('acme/tools-legacy','registered',70)])];
  await expect(card.getByRole('heading')).toHaveText('Claude asks to add acme/tools-legacy to this workspace');
- await expect(card.getByRole('button',{name:'Add acme/tools-legacy'})).toBeFocused();
+ await expect(card).toBeFocused();
  await page.locator('.messages:visible').first().click({position:{x:5,y:5}});
  await page.keyboard.press('c');
  const dialog=page.getByRole('dialog',{name:'Add repository to workspace'});
@@ -125,7 +125,7 @@ try{
  await expect(card.getByRole('heading')).toHaveText('Claude asks for a repository: “billing-sdk”');
  await expect(card.locator('.repository-nomatch')).toBeVisible();
  await expect(card.locator('.decision-row')).toHaveText([/Choose a repository…/,/Decline…/]);
- await expect(card.getByRole('button',{name:'Choose a repository…'})).toBeFocused();
+ await expect(card).toBeFocused();
  // Escape leaves the reason without declining.
  await card.getByRole('button',{name:'Decline…'}).click();
  await expect(card.getByRole('textbox',{name:/Why not\?/})).toBeFocused();

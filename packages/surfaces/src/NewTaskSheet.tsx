@@ -21,7 +21,7 @@ import { healthLabel, type RunnerHealth } from './runner-directory';
 import { useRunnerSettings } from './RunnerSettings';
 import { showToast } from './toasts';
 import { conversationDefaults, readPreference, writeLaunchChoices, writePreference } from './view-state';
-import { modeOf, parseTaskChoices, rankRepositories, rememberTask, TASK_CHOICES_PREFERENCE, TASK_MODES, taskBranch, taskName, taskProblem, type TaskChoices, type TaskMode, type TaskProblem } from './new-task-model';
+import { insertPasted, modeOf, parseTaskChoices, rankRepositories, rememberTask, TASK_CHOICES_PREFERENCE, TASK_MODES, taskBranch, taskName, taskProblem, type TaskChoices, type TaskMode, type TaskProblem } from './new-task-model';
 import { itemBranch, itemMessage, itemReference, itemSafeMode, itemTaskName, type ItemLike } from './item-context';
 import { ItemPicker, ItemSource, StartedNotice, useItemDetail, useStartedFrom } from './WorkItems';
 import { forgetStarts, StartFromChip, StartFromPicker, useRepositoryStarts } from './StartFrom';
@@ -189,7 +189,8 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
       model: last.model, effort: last.effort, gateway: last.gateway, mode: remembered.mode,
     };
   });
-  const change = (next: Partial<Draft>) => setDraft(current => { const value = { ...current, ...next }; unsent = value; return value; });
+  /** A change to the draft; a function reads the draft as it is when the change applies (after an await, say). */
+  const change = (next: Partial<Draft> | ((current: Draft) => Partial<Draft>)) => setDraft(current => { const value = { ...current, ...(typeof next === 'function' ? next(current) : next) }; unsent = value; return value; });
   const behaviorProfile = behaviorForProvider(draft.behaviorProfile ?? readDefaultBehavior(viewState), draft.provider);
   const [query, setQuery] = useState(''), [listOpen, setListOpen] = useState(false), [active, setActive] = useState(0);
   const [editingName, setEditingName] = useState(draft.name !== undefined || draft.branch !== undefined);
@@ -269,11 +270,13 @@ function NewTaskSheet({ ref, viewState, failure, pickIssue = 0, onClose, onStart
     const text = event.clipboardData.getData('text/plain');
     if (!itemReference(text) || draft.item) return;
     event.preventDefault();
+    const field = event.currentTarget;
+    const at = { text: field.value, start: field.selectionStart ?? field.value.length, end: field.selectionEnd ?? field.value.length };
     void api.resolveItemUrl({ url: text.trim() }, { timeoutMs: 10_000 }).then(ref => attach({ provider: ref.provider, key: ref.key }), () => {
-      // Not an item after all (the Runner decides): the text goes in as typed.
-      const field = prompt.current; if (!field) return;
-      const at = field.selectionStart ?? draft.prompt.length, end = field.selectionEnd ?? at;
-      change({ prompt: draft.prompt.slice(0, at) + text + draft.prompt.slice(end) });
+      // Not an item after all (the Runner decides): the text goes in as typed,
+      // into the draft as it is now; what was typed meanwhile stays.
+      const now = prompt.current, caret = now && document.activeElement === now ? now.selectionEnd ?? undefined : undefined;
+      change(current => ({ prompt: insertPasted(current.prompt, at, text, caret) }));
     });
   };
 

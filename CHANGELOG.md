@@ -55,6 +55,17 @@ leave out.
 
 ### Workspaces and tabs
 
+- **Deleting a workspace keeps commits on no branch** A repository with commits only a detached HEAD reaches, or a rebase, merge, cherry-pick or bisect stopped part-way, counts as changed: deleting the workspace asks you to discard first instead of losing them.
+- **Reverting files keeps what the checkpoint could not save** A file the safety checkpoint skipped (ignored, too large, past the untracked limit, in a nested repository) is left as it is and named, instead of being overwritten where undo could not bring it back. Ignored files in a folder the revert would replace with a file stay too.
+- **A deleted workspace stays deleted** Retrying an add-repositories request no longer brings back a workspace that is being deleted or was deleted.
+- **Re-adding a removed repository from another clone** The new clone gets an entry of its own, so workspaces made from the removed clone can still be deleted.
+- **A missing repository folder does not stop the Runner** A registered repository whose folder was moved, deleted or unmounted is marked unavailable; every workspace still loads, and creating a workspace from that repository says why it cannot.
+- **Saved state survives a power cut** Linked items, reviews, artifacts, code checkpoints, the repository catalog and workspace settings finish every save on disk, and a failed save no longer shows a change that was never written. An unreadable items file is kept aside under its own name, never over an earlier one.
+- **Verification checkouts are cleaned up** Each acceptance check's checkout is removed once its command finishes, so verification no longer fills the disk with full clones.
+- **Open here from a peek goes to the right place** Open here (⌘↵) on a peeked mission task opens its conversation, not the Missions page; a peeked file or conversation keeps the title it read.
+- **A chat window that cannot open stays in its workspace** When the browser refuses a chat's own window after you switched workspace, the chat goes back to the workspace it came from, and the one you switched to keeps its page. Likewise the shell of Install Claude Code waits in its workspace when you have moved on, and shows when you go back.
+- **Typing while a link is checked is kept** Pasting a link into New task that turns out not to be an issue puts it where you pasted it, and keeps what you typed while Lazybox asked.
+- **Rename keeps your place** Esc, Cancel or saving a workspace's F2 rename puts the keyboard back on its row.
 - **The agent browser follows a slow page** A click that sends the page elsewhere is waited for even when the page is slow to leave, so the agent learns where it landed instead of reading the page it left.
 - **A Web panel opens in its own window** In the desktop app, Open in new window (or a drag into a panel window already open) takes the page with it, history, scroll and forms intact. Put it back or close that window and the page comes back the same way.
 - **The Dock shows the Inbox count** The badge on the app icon is the Inbox button's number, pull requests and tasks included, not only conversations waiting for an answer.
@@ -93,7 +104,7 @@ leave out.
 ### Home checkouts and your terminal
 
 - **Review interactive commands** Read the command with shell quoting and expand its working directory to inspect the full path.
-- **Start an artifact companion** The companion receives the pinned version and selection at startup. Its message box opens empty, and you can return to it from the artifact.
+- **Terminals stay through a Runner restart** An open terminal keeps its tab, its screen and its scrollback when the Runner restarts on a new port or with a new credential, and goes on where it was.
 - **Take over an interactive command** When Codex or Claude needs you to sign in, review the command in chat and run it in the workspace terminal. The agent resumes when it exits.
 
 - **Your own clone of each repository** A repository can have a home checkout: a regular clone outside every workspace, at ~/lazybox/repos/owner/name or a folder you already have, for logins, dev servers you keep running and trying a module by hand. Create one or pick a folder in Settings → Repositories or a workspace's repositories. Lazybox never deletes it and no agent changes it; its branch is yours. Update to latest main fetches, then moves main forward only when it is clean, and otherwise says why. On a phone, Settings → Repositories fits the screen: a long path keeps its last folders and the buttons wrap.
@@ -104,6 +115,9 @@ leave out.
 
 ### Chat and Send now
 
+- **No approval by a stray key** A question or approval that appears takes the focus itself, not its Allow button, so a Space or Enter meant for the conversation answers nothing. A request Claude marks default to no cannot be allowed with one key: only N works, and its allow rows show no key. Back from Deny's reason returns to Deny.
+- **Sent means sent** When your message reached the agent but marking the review comments it carried as sent failed, Lazybox says just that and clears the message box, instead of offering to send it again.
+- **Seen only when you look** A conversation that loads in a window you have left for another app stays unread until you come back to it.
 - **Draft attachments survive a reload** Reopen a conversation to pick up its unsent files and pasted text. If a file could not be saved, the composer identifies it before sending.
 
 - **Send now** While the agent works, ↵ queues your message and ⌘↵ sends it now: the current step stops and your message is the next turn. A queued message shows once, above the message box.
@@ -136,6 +150,11 @@ leave out.
 
 ### Pull requests and issues
 
+- **Green means every check passed** A pull request with more than 100 checks or commit statuses is read to the last one, so a failure on a later page shows as failing. Past 1000, Lazybox says it could not read them all and does not offer Merge or report the checks as passed.
+- **The latest review decides** A reviewer's newest review sets the review decision, however many reviews came before it, and a pull request is found from its branch however many older ones the branch had.
+- **Newest review comments first** Address the review sends the newest comments. On a pull request with more than 1000, a note tells you and the agent that the older ones stay on GitHub.
+- **A rate limit is not a bad token** When GitHub rate limits Lazybox, the message says your connection still works and when to try again, instead of asking you to check the token's permissions.
+- **Push again after a failed push** When Commit & push commits but the push fails, the dialog says the commit was made and offers Push again, instead of a commit that can only fail.
 - **Update a pull request that is behind** When a repository requires branches to be up to date and a pull request is behind its base, the Inbox, the Pull requests panel and the workspace's pull request card offer Update branch instead of a Merge GitHub would refuse. It asks first, updates only the head you saw, and the checks run again. A refused merge now shows why.
 - **Review feedback on GitHub** When there is nothing eligible to send to the agent, the Inbox points you to the review on GitHub.
 - **Every pull request tracked** The pull requests your agents open, push or link are tracked, with a pill in the header and one badge per sidebar row: checks failed, changes requested or ready to merge.
@@ -146,6 +165,7 @@ leave out.
 
 ### Artifacts
 
+- **Start an artifact companion** The companion receives the pinned version and selection at startup. Its message box opens empty, and you can return to it from the artifact.
 - **Work beside an artifact** Open Agent companion from the reader, inspect structured documents by type, or edit the latest source and save a new version.
 
 - **Versioned artifacts** Track a plan or a report from a message, a file or an agent; each update is a version you can compare with the last.
@@ -162,6 +182,9 @@ leave out.
 
 ### Phone
 
+- **A notification opens the right conversation** Tapping a notification while another conversation is open replaces it at once, and a reply goes to the conversation on screen.
+- **Notification settings stay as you set them** The phone hands its notification subscription to your computer once when it opens, not at every sign-in renewal, and never restates your kinds or quiet hours.
+- **Sheets start on Cancel** An action or confirmation sheet opens with Cancel focused, not its first action, and closing it returns the keyboard to what opened it.
 - **Your conversations on your phone** Pair a phone by QR code over Tailscale to follow and answer your conversations, and follow a command's output live.
 - **Notifications** Your phone tells you when an agent asks a question, waits for approval or fails, even with Lazybox closed. Choose the kinds and quiet hours.
 - **Answer from the Inbox** Allow, deny or answer a question from its row, with a few seconds to undo; swipe for more.
@@ -176,6 +199,7 @@ leave out.
 
 ### Runner reliability
 
+- **Gentler reconnecting** While the Runner is away, live conversations and command output try again after about a second, then less often, up to every 30 seconds, so windows do not all knock at once; once it answers, the next drop starts again at a second.
 - **Dev opens past the white screen** The desktop launcher allows React’s startup script under Dev’s content security policy.
 - **Resume Codex after restarting Dev** A Runner launched from an agent shell ignores that agent's sign-in overrides when it selects its own accounts.
 - **Slow Runners have their own status** Lazybox retries a late Runner response or history refresh and reconnects automatically.
@@ -188,14 +212,27 @@ leave out.
 
 ### Security
 
+- **No credential in the address bar** The browser build takes the Runner's credential out of the address bar and history as soon as it reads it.
 - **On this Mac only** The Runner answers only on loopback, to a credential in a file only you can read.
 - **Updates are signed** An update installs only when it matches the key built into your copy of Lazybox; anything else is refused before anything changes.
 - **GitHub text is information** An issue's text reaches the agent quoted as content from GitHub, not as instructions to follow.
 - **An orchestrator never answers for you** It never approves, passes a gate or accepts a task, and its agents never get more permission than it has.
 - **Feedback without secrets** A feedback report removes tokens, keys, passwords and e-mail addresses, and shows your home folder as ~.
+- **The agent's browser never shows it your password** A password you type during Take over is hidden from the agent's page snapshots and masked in its screenshots, including one a "show password" button turned into text.
+- **A redirect asks before it leaves** When a page the agent opened redirects to another site, you are asked before that site receives anything; decline and the page stays where it was.
+- **Every way of signing in asks** Submitting a sign-in form you filled asks you first however the agent would send it: a button, Enter, Space, the keypad's Enter, or a script on the page, even one that sends it a moment later.
+- **Only the sites you choose become the agent's** While you hold the browser, a page that moves itself to another site does not let the agent use it without asking, and reopening the browser asks again for a site no longer allowed.
+- **Disguised local addresses are refused** Addresses such as localhost., 2130706433, 0x7f000001, 127.1 or an IPv4 address written as IPv6 are judged as the address they name, so the agent's browser cannot reach this computer or the cloud metadata service through them.
 - **Allow exactly what is asked** When Codex asks for the network or a folder outside its sandbox, the card names it and Allow grants just that, for the turn or the conversation. What you always allow in a Claude conversation outlives its agent; the session menu lists it, and × removes it.
 - **A phone starts conversations your way** A phone allowed to start conversations picks only the model and its effort: it cannot leave plan-by-default, change the behavior profile or rotate onto other accounts.
 - **Your API key goes only to Anthropic** With an API key saved, an ANTHROPIC_BASE_URL or similar endpoint inherited by the Runner no longer receives it.
 - **Nobody on your tailnet can block pairing** Pairing attempts are limited per pairing code and sign-in challenges per phone, no longer shared by everyone, and the phone gateway answers only on this computer and its tailnet name.
 - **Notifications go only to push services** The notification sender also refuses benchmarking and "this network" addresses, and IPv6 addresses that carry an IPv4 one.
 - **What agents can and cannot reach** SECURITY.md now says plainly that an agent's narrower credential prevents accidents, not an agent that misbehaves on purpose, and describes the fix.
+- **Your terminal command, allowed by you** A custom "Open in Terminal" command is kept by the app, not the page: Save in Settings → Agents & workspaces shows the exact line in a macOS confirmation, and only a line you allowed ever runs. A command saved by an earlier version waits in Settings for you to save it once more.
+- **Each window asks only for its own** Links and media open only from Lazybox's own windows; setting up the service and removing an older Lazybox only from the setup window; feedback and linking the command only from Settings.
+- **Web pages cannot reach this Mac through their icons** A Web panel's icon is never fetched from this Mac or your local network, whatever its address resolves or redirects to, IPv6 included.
+- **A tighter page policy** Lazybox's windows frame only extension panels, and no link base or form can send a page elsewhere.
+- **A large attachment no longer stops Claude** The Claude worker takes the largest message Lazybox accepts, images included; anything larger fails that one message with the reason, and an unreadable line is set aside instead of ending the conversation's agent.
+- **No leftovers from sounds and terminals** Notification sounds and terminals that keep running are waited for, so none lingers as a zombie, and a terminal can keep writing its messages after Lazybox stops watching them.
+- **Add a computer finishes** Adding a computer no longer hangs when the lazybox command writes a long diagnostic.

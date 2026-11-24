@@ -204,9 +204,14 @@ pub async fn request_notification_permission() -> Result<String, String> {
 #[tauri::command]
 pub async fn notify_attention(
     app: tauri::AppHandle,
+    window: tauri::Webview,
     state: tauri::State<'_, Attention>,
     notice: Notice,
 ) -> Result<(), String> {
+    crate::host::allow(
+        window.label() == "main",
+        "Only the main window sends notifications",
+    )?;
     let notice = notice.validate()?;
     let id = state
         .sequence
@@ -239,8 +244,13 @@ pub async fn notify_attention(
 /// The conversation a clicked notification asked for, once.
 #[tauri::command]
 pub fn take_attention_destination(
+    window: tauri::Webview,
     state: tauri::State<'_, Attention>,
 ) -> Result<Option<Destination>, String> {
+    crate::host::allow(
+        window.label() == "main",
+        "Only the main window opens a notification's conversation",
+    )?;
     Ok(state.pending.lock().map_err(|e| e.to_string())?.take())
 }
 

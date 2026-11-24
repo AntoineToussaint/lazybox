@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Code, ConnectError } from '@connectrpc/connect';
-import { RunnerLink, follow, runnerLink, type RunnerAuthority } from '../packages/client-core/src/index.ts';
+import { RunnerLink, follow, reconnectDelay, runnerLink, type RunnerAuthority } from '../packages/client-core/src/index.ts';
 
 /** A fake Runner reachable at one origin with one bearer; it records every request it is sent. */
 function fakeRunner(origin: string, token: string) {
@@ -114,4 +114,23 @@ test('a followed stream keeps reconnecting after a refused bearer instead of end
   assert.equal(attempts, 2);
   assert.deepEqual(received, [1n]);
   assert.equal(statuses.at(-1), 'Complete');
+});
+
+test('a followed stream backs off while it keeps failing, and starts over once an event arrives', async () => {
+  const waits: number[] = [];
+  let attempt = 0;
+  // Three failures, one event, two more failures, then the rest.
+  const script = ['fail', 'fail', 'fail', 'event', 'fail', 'fail', 'end'];
+  let cursor = 0n;
+  await follow(async function* () {
+    for (let step = script[attempt++]; ; step = script[attempt++]) {
+      if (step === 'fail') throw new ConnectError('connection reset', Code.Unavailable);
+      if (step === 'event') { yield { cursor: ++cursor }; continue; }
+      return;
+    }
+  }, new AbortController().signal, () => {}, () => {}, undefined, 0n, { delay: failures => { waits.push(failures); return 0; } });
+  assert.deepEqual(waits, [1, 2, 3, 1, 2], 'the count grows while failing and resets on an event');
+  // About 1 s, doubling to 30 s, each between half and all of it.
+  assert.deepEqual([1, 2, 3, 6, 7, 20].map(n => reconnectDelay(n, () => 1)), [1000, 2000, 4000, 30000, 30000, 30000]);
+  assert.deepEqual([1, 2, 6].map(n => reconnectDelay(n, () => 0)), [500, 1000, 15000]);
 });

@@ -52,6 +52,13 @@ try {
     for (const alert of await page.getByRole('alert').allInnerTexts()) assert.doesNotMatch(alert, /unauthenticated|bearer|credentials/i, `a restart left an alarm: ${alert}`);
   };
 
+  // A terminal open across the restarts below: its shell outlives the Runner, so its tab and
+  // its view stay (the view is marked, to tell it from a rebuilt one).
+  await page.getByRole('button', { name: 'Open terminal', exact: true }).click();
+  const screen = page.locator('.panel-terminal').getByTestId('terminal');
+  await expect(screen).toContainText('fixture shell in Alpha feature');
+  await screen.locator('.xterm').evaluate(node => { node.dataset.sameView = 'yes'; });
+
   // 1. A Codefly hot reload: same port, new bearer, the Runner's streams end.
   const reloadedAt = fixture.calls.length;
   await fixture.hotReload();
@@ -74,6 +81,11 @@ try {
   await expect(indicator).toHaveText('Connected');
   await noAuthAlarm();
   assert(fixture.calls.slice(movedAt).some(call => call.method === 'ListCollections'), 'the window did not follow the Runner to its new port');
+  // The terminal kept its tab and its view through both restarts, and still reaches its shell.
+  await expect(page.locator('.panel-terminal [data-same-view=yes]'), 'the terminal view was rebuilt by a restart').toHaveCount(1);
+  await expect(page.locator('.panel-terminal .terminal-tab')).toHaveCount(1);
+  await screen.click(); await page.keyboard.type('pwd'); await page.keyboard.press('Enter');
+  await expect(screen).toContainText('ran: pwd');
   await mkdir('.cache', { recursive: true }); await page.screenshot({ path: '.cache/runner-follow-moved.png' });
 
   // 3. The Runner is unreachable after the list was known: the list stays, and says it is reconnecting.

@@ -72,6 +72,9 @@ test('pull requests: the tracked ones with state, checks and review pills, else 
   // Nothing tracked yet: what the sidebar's poll read for the branch.
   const fallback = hoverPulls('w', [], summary(repo({ githubRepository: 'acme/api', pullRequest: { number: 9n, title: 'Branch PR', url: 'u', state: 'open', checksState: 'success', reviewDecision: 'changes_requested' } as never })), now);
   assert.deepEqual(fallback.map(p => [p.number, p.tone, p.pills.map(pill => pill.text)]), [[9, 'success', ['Open', 'Checks', 'Changes requested']]]);
+  // More checks than the Runner reads at once: a neutral pill that says so, never a green one.
+  const big = hoverPulls('w', [], summary(repo({ githubRepository: 'acme/api', pullRequest: { number: 10n, title: 'Big matrix', url: 'u', state: 'open', checksState: 'incomplete', reviewDecision: '' } as never })), now);
+  assert.deepEqual(big.map(p => [p.tone, p.pills.map(pill => `${pill.tone}:${pill.text}`), p.label]), [['none', ['neutral:Open', 'neutral:Checks not all read'], 'Pull request #10 Big matrix: open, checks not all read']]);
 });
 
 test('agents: what needs you first, then work, failures and done; +N beyond four; waiting counts requests', () => {

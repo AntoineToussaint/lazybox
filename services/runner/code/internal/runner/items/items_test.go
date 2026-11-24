@@ -183,6 +183,14 @@ func TestTransitionsAreEmittedOnce(t *testing.T) {
 	if got := names(Transitions(&open, pr("closed", "pending", "", "", "a"))); !slices.Equal(got, []string{EventClosed}) {
 		t.Fatalf("closed: %v", got)
 	}
+	// More checks than one read takes: never passed, until a read reaches them all.
+	incomplete := pr("open", "incomplete", "", "clean", "a")
+	if got := Transitions(&open, incomplete); len(got) != 0 {
+		t.Fatalf("incomplete checks: %v", got)
+	}
+	if got := names(Transitions(&incomplete, pr("open", "success", "", "clean", "a"))); !slices.Equal(got, []string{EventChecksPassed}) {
+		t.Fatalf("incomplete, then read in full and green: %v", got)
+	}
 }
 
 func TestStorePersistsLinksAndPlacesEvents(t *testing.T) {
@@ -260,8 +268,75 @@ func TestStorePersistsLinksAndPlacesEvents(t *testing.T) {
 	if empty, err := Open(path); err != nil || len(empty.Links(Filter{})) != 0 {
 		t.Fatalf("corrupt: %v", err)
 	}
-	if _, err = os.Stat(path + ".corrupt"); err != nil {
-		t.Fatal("the corrupt file is kept")
+	if kept, _ := filepath.Glob(path + ".corrupt-*"); len(kept) != 1 {
+		t.Fatalf("the corrupt file is kept: %v", kept)
+	}
+	// A second corrupt file never replaces the first one kept aside.
+	if err = os.WriteFile(path, []byte("}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err != nil {
+		t.Fatal(err)
+	}
+	kept, _ := filepath.Glob(path + ".corrupt-*")
+	if len(kept) != 2 {
+		t.Fatalf("an earlier corrupt copy was overwritten: %v", kept)
+	}
+	contents := map[string]bool{}
+	for _, name := range kept {
+		data, _ := os.ReadFile(name)
+		contents[string(data)] = true
+	}
+	if !contents["{"] || !contents["}"] {
+		t.Fatalf("corrupt copies = %v", contents)
+	}
+}
+
+// A corrupt file that cannot be moved aside must not be treated as empty:
+// the next write would replace it.
+func TestOpenFailsWhenACorruptStoreCannotBeKeptAside(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "items.json")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if _, err := Open(path); err == nil {
+		t.Fatal("opened an unreadable store it could not keep aside")
+	}
+	if data, _ := os.ReadFile(path); string(data) != "{" {
+		t.Fatalf("corrupt store changed: %q", data)
+	}
+}
+
+// A change is kept in memory only once it is on disk: otherwise the next
+// write, or a restart, would disagree with what readers were shown.
+func TestFailedWriteLeavesMemoryUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "items.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	link := Link{Ref: GitHubRef("acme/api", 812), Workspace: "w1", Role: RoleDelivers, Source: SourceCLI}
+	if _, err = store.Link(link); err == nil {
+		t.Fatal("write into a read-only directory succeeded")
+	}
+	if links := store.Links(Filter{}); len(links) != 0 {
+		t.Fatalf("memory changed by a failed write: %+v", links)
+	}
+	if err = os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := store.Link(link); err != nil || !added {
+		t.Fatalf("retry: %v %v", added, err)
 	}
 }
 

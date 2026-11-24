@@ -100,7 +100,7 @@ type PullRequest struct {
 	Base    string `json:"base,omitempty"`
 	HeadSHA string `json:"headSha,omitempty"`
 	Draft   bool   `json:"draft,omitempty"`
-	// Checks is success, failure, pending or none.
+	// Checks is success, failure, pending, none or incomplete (github.PullRequestStatus).
 	Checks string `json:"checks,omitempty"`
 	// Review is approved, changes_requested, review_required or empty.
 	Review         string  `json:"review,omitempty"`

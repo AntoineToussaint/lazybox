@@ -3,7 +3,7 @@ import { ActionMenu } from './ActionMenu';
 import { ActionMenuItems } from './ActionMenuItems';
 import { contextMenu } from './ContextMenu';
 import type { MenuItem } from './context-menu-model';
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Collection, ItemLink, Session, WorkspaceGitSummary } from "@lazybox/protocol";
 import { branchSummary } from "./conversation-model";
 import { agentLine, type RowGit } from "./workspace-row-model";
@@ -91,6 +91,16 @@ export function WorkspaceRow({
   const marker = featured ? unread(featured) : "";
   const line = featured ? agentLine(featured, info?.profiles || [], Math.max(0, conversationCount - 1)) : undefined;
   const rename = () => { setName(workspace.name); setError(""); setEditing(true); };
+  // The rename form leaves (saved, Esc or Cancel) with the focus inside it: the row's link takes it
+  // back. Focus the person moved elsewhere meanwhile (during a save) stays where it is; the page, or
+  // a panel around the row (where a click on a button leaves it in WebKit), is not "elsewhere".
+  const link = useRef<HTMLButtonElement>(null), wasEditing = useRef(false);
+  useEffect(() => {
+    const node = link.current, row = node?.closest('.workspace-row'), active = document.activeElement;
+    const lost = !active || active === document.body || (!!row && (active.contains(row) || row.contains(active)));
+    if (wasEditing.current && !editing && lost) node?.focus();
+    wasEditing.current = editing;
+  }, [editing]);
   // What a previous Lazybox left here unconfirmed: shown and settled first,
   // then the action that waited for it goes on ("then").
   const [settling, setSettling] = useState<{ then(): void }>();
@@ -183,6 +193,7 @@ export function WorkspaceRow({
         </form>
       ) : (
         <button
+          ref={link}
           className="workspace-link"
           {...(featured ? peekProps({ kind: "conversation", sessionId: featured.id, workspaceId: workspace.id, title: featured.title }) : {})}
           data-navigation-item

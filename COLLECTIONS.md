@@ -143,7 +143,8 @@ across Runners remain future integration work.
   after an agent closes. Releasing one claim does not release its siblings.
 - `AddCollectionRepositories` appends worktrees to the existing root with an
   idempotent request key and pinned source commits. It retains existing files,
-  members and ownership. Failed additions retain evidence and can be retried.
+  members and ownership. Failed additions retain evidence and can be retried;
+  a retry is refused once the workspace's deletion has begun.
 - `RemoveCollectionRepository` removes one clean, branch-attached worktree
   from a ready workspace with no active sessions, terminals, or commands. It
   keeps the branch and repository library entry. The workspace can be empty.

@@ -1,7 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { modeOf, nameFromPrompt, NO_CHOICES, parseTaskChoices, rankRepositories, rememberTask, TASK_MODES, taskBranch, taskName, taskProblem } from '../packages/surfaces/src/new-task-model.ts';
+import { insertPasted, modeOf, nameFromPrompt, NO_CHOICES, parseTaskChoices, rankRepositories, rememberTask, TASK_MODES, taskBranch, taskName, taskProblem } from '../packages/surfaces/src/new-task-model.ts';
 import { isDefaultStart, rankBranches, startLabel, startsFor, validBranchName } from '../packages/surfaces/src/start-from-model.ts';
+
+test('a held paste that is plain text after all goes in without losing what was typed meanwhile', () => {
+  const at = { text: 'Fix ', start: 4, end: 4 };
+  const link = 'https://example.com/docs';
+  // Nothing typed since: where it was pasted, replacing the selection then.
+  assert.equal(insertPasted('Fix ', at, link), `Fix ${link}`);
+  assert.equal(insertPasted('Fix this', { text: 'Fix this', start: 4, end: 8 }, link), `Fix ${link}`);
+  // Typed after the paste point while the Runner was asked: kept, the link where it was pasted.
+  assert.equal(insertPasted('Fix  before Friday', at, link, 18), `Fix ${link} before Friday`);
+  // Text before the paste point changed: at the caret, else at the end.
+  assert.equal(insertPasted('Please fix', at, link, 6), `Please${link} fix`);
+  assert.equal(insertPasted('Please fix', at, link), `Please fix${link}`);
+});
 
 test('a task is named from its first message, at a word, capitalized', () => {
   assert.equal(nameFromPrompt('fix the login redirect loop when the session expires after a deploy'), 'Fix the login redirect loop');

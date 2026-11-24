@@ -53,25 +53,44 @@ export const TERMINAL_APPS = [
   { id: 'terminal', title: 'Terminal' },
 ] as const;
 export type TerminalAppId = (typeof TERMINAL_APPS)[number]['id'];
-/** The person's choice: '' lets Lazybox pick the first installed one. */
-export type TerminalChoice = { app: TerminalAppId | 'custom' | ''; command: string };
-export const DEFAULT_TERMINAL: TerminalChoice = { app: '', command: '' };
+/**
+ * The person's choice of app: '' lets Lazybox pick the first installed one.
+ * A custom command line is never part of it: the desktop host keeps that line
+ * itself, and saves it only once the person allowed it in a native
+ * confirmation, so nothing a page can write is ever run.
+ */
+export type TerminalChoice = { app: TerminalAppId | 'custom' | '' };
+export const DEFAULT_TERMINAL: TerminalChoice = { app: '' };
 
 export function parseTerminalChoice(raw: string | null | undefined): TerminalChoice {
   try {
     const value = JSON.parse(raw || 'null');
     const app = typeof value?.app === 'string' && (value.app === 'custom' || TERMINAL_APPS.some(t => t.id === value.app)) ? value.app : '';
-    const command = typeof value?.command === 'string' ? value.command.slice(0, 1000) : '';
-    return { app, command };
+    return { app };
   } catch { return DEFAULT_TERMINAL; }
 }
 
-/** The terminal a request goes to: the chosen one, else the first installed; undefined when none is known. */
-export function terminalFor(choice: TerminalChoice, installed: readonly string[]): { app: TerminalAppId | 'custom'; command: string } | undefined {
-  if (choice.app === 'custom') return choice.command.trim() ? { app: 'custom', command: choice.command.trim() } : undefined;
-  if (choice.app) return { app: choice.app, command: '' };
+/**
+ * A command line an earlier Lazybox kept in the page's storage, offered once
+ * in Settings to save through the host's confirmation; never run from there.
+ */
+export function legacyTerminalCommand(raw: string | null | undefined): string {
+  try {
+    const value = JSON.parse(raw || 'null');
+    return typeof value?.command === 'string' ? value.command.trim().slice(0, 1000) : '';
+  } catch { return ''; }
+}
+
+/**
+ * The terminal a request goes to: the chosen one, else the first installed;
+ * undefined when none is known. `custom` is the host's saved command line
+ * ('' when it has none), which only names it here: the host runs its own.
+ */
+export function terminalFor(choice: TerminalChoice, installed: readonly string[], custom = ''): { app: TerminalAppId | 'custom' } | undefined {
+  if (choice.app === 'custom') return custom.trim() ? { app: 'custom' } : undefined;
+  if (choice.app) return { app: choice.app };
   const first = TERMINAL_APPS.find(t => installed.includes(t.id));
-  return first ? { app: first.id, command: '' } : undefined;
+  return first ? { app: first.id } : undefined;
 }
 
 export function terminalTitle(app: string, command = ''): string {

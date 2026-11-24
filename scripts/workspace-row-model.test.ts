@@ -60,6 +60,11 @@ test('a pull request in the line, with its review in words', () => {
   assert.equal(repositoryLine(pushed), 'api · feature/x · Pull request #12 · checks failing · changes requested');
 });
 
+test('a pull request with more checks than the Runner reads says so, never "no checks"', () => {
+  const big = repo({ upstream: 'origin/feature/x', pullRequest: { number: 13n, title: 'Big matrix', url: 'u', state: 'open', draft: false, checksState: 'incomplete', reviewDecision: '', observedAtUnixMillis: 1n } as never });
+  assert.deepEqual(rowGit(summary(big))!.pulls.map(p => [p.tone, p.label]), [['none', 'Pull request #13 · checks not all read — Big matrix']]);
+});
+
 test('an unreadable repository is a problem, not a broken line', () => {
   const git = rowGit(summary(repo({ dirty: 1 }), repo({ member: 'web', error: 'worktree missing' })))!;
   assert.equal(git.problem, 'web: worktree missing');

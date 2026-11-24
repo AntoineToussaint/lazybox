@@ -138,8 +138,11 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
     await close(id);
     if (!listed.current.some(terminal => terminal.id !== id && !terminal.done)) onClosePanel?.();
   };
+  // Another workspace starts from an empty list. A Runner restart (a new
+  // address or bearer, so a new `api`) does not: its terminals outlive it, so
+  // the tabs and their views stay while the list is read again.
+  useEffect(() => { known.current = null; setTerminals([]); setError(''); setListError(''); }, [workspaceId]);
   useEffect(() => {
-    known.current = null; setTerminals([]); setError(''); setListError('');
     if (!workspaceId) return;
     const control = new AbortController(); let updating = false;
     const update = async () => {
@@ -216,6 +219,9 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
   const [status, setStatus] = useState<TerminalStatus>(terminal);
   const [connection, setConnection] = useState('Connecting');
   const id = terminal.id;
+  // The shell outlives a Runner restart, so its view does too: requests use the
+  // window's current client, and the stream picks up from its offset.
+  const client = useRef(api); client.current = api;
   useEffect(() => {
     const element = host.current; if (!element) return;
     // A right-click keeps the selection for the Lazybox menu instead of selecting a word.
@@ -265,7 +271,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
           const joined = new Uint8Array(pending.reduce((total, part) => total + part.length, 0));
           let at = 0; for (const part of pending) { joined.set(part, at); at += part.length; }
           pending = [];
-          for (let start = 0; start < joined.length; start += inputLimit) await api.writeTerminal({ terminalId: id, data: joined.subarray(start, start + inputLimit) }, { signal });
+          for (let start = 0; start < joined.length; start += inputLimit) await client.current.writeTerminal({ terminalId: id, data: joined.subarray(start, start + inputLimit) }, { signal });
         }
       } catch (error) { if (!signal.aborted && !done) onError(`Terminal input failed: ${String(error)}`); pending = []; }
       finally { sending = false; }
@@ -282,7 +288,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
       try { fit.fit(); } catch { return; }
       const value = `${view.cols}x${view.rows}`; if (value === sized || done) return; sized = value;
       onSize({ cols: view.cols, rows: view.rows });
-      void api.resizeTerminal({ terminalId: id, cols: view.cols, rows: view.rows }, { signal }).catch(error => { if (!signal.aborted && !done) onError(`Terminal resize failed: ${String(error)}`); });
+      void client.current.resizeTerminal({ terminalId: id, cols: view.cols, rows: view.rows }, { signal }).catch(error => { if (!signal.aborted && !done) onError(`Terminal resize failed: ${String(error)}`); });
     };
     const observer = new ResizeObserver(() => resize()); observer.observe(element);
     requestAnimationFrame(() => { resize(); view.focus(); });
@@ -310,7 +316,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
       while (!signal.aborted) {
         try {
           setConnection(offset ? 'Reconnecting' : 'Connecting');
-          for await (const event of api.watchTerminal({ terminalId: id, after: offset }, { signal })) {
+          for await (const event of client.current.watchTerminal({ terminalId: id, after: offset }, { signal })) {
             if (event.data.length) view.write(event.data, () => stageAtPrompt(event.status));
             else stageAtPrompt(event.status);
             offset = event.offset + BigInt(event.data.length);
@@ -334,7 +340,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
       }
     })();
     return () => { unfollow(); if (focusRef.current === focus) focusRef.current = null; control.abort(); clearTimeout(stageTimeout); observer.disconnect(); selectionListener.dispose(); input.dispose(); binary.dispose(); links.dispose(); element.removeEventListener('mousedown', press, true); hovered.current = ''; view.dispose(); };
-  }, [api, id]);
+  }, [id]);
   return <div className="terminal-view">
     <div ref={host} className="terminal-host" data-testid="terminal" data-terminal-id={id} onContextMenu={contextMenu('terminal', (): MenuItem[] => {
       const view = xterm.current, selection = view?.getSelection() || '';

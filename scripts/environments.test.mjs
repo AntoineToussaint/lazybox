@@ -169,6 +169,9 @@ test('desktop development CSP uses only its bound loopback origin', () => {
   assert.ok(config.app.security.devCsp.includes('ws://127.0.0.1:49177'));
   assert.equal(config.app.security.csp,undefined,'production CSP must not be overridden');
   assert.ok(config.app.security.devCsp.includes(`script-src 'self' 'nonce-${nonce}'`));
+  // Frames only from an extension content server's session path, no <base>, no form submission: as the release CSP.
+  const directives=config.app.security.devCsp.split(';').map(d=>d.trim());
+  for(const directive of ['frame-src http://127.0.0.1:*/x/',"base-uri 'none'","form-action 'none'"]) assert.ok(directives.includes(directive),directive);
   for(const url of ['http://example.com:49177','http://127.0.0.1','http://secret@127.0.0.1:49177','http://127.0.0.1:49177/path']) assert.throws(()=>desktopDevConfig(paths,url,nonce));
   assert.throws(()=>desktopDevConfig(paths,'http://127.0.0.1:49177','invalid'));
 });

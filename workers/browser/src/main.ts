@@ -51,9 +51,16 @@ async function stop() {
 
 const reader = createInterface({ input: process.stdin, crlfDelay: Infinity });
 reader.on('line', text => {
-  let line: Line;
+  let line: unknown;
   try { line = JSON.parse(text); } catch { process.stderr.write('browser: ignored a line that is not JSON\n'); return; }
-  void handle(line);
+  // Every protocol line is an object; anything else (null, a number, a list) has no id to answer, so the
+  // error goes back with none, as JSON-RPC does.
+  if (typeof line !== 'object' || line === null || Array.isArray(line)) {
+    process.stderr.write('browser: ignored a line that is not a JSON object\n');
+    send({ id: null, error: { message: 'A protocol line must be a JSON object' } });
+    return;
+  }
+  void handle(line as Line);
 });
 reader.on('close', () => void stop());
 process.on('SIGTERM', () => void stop());

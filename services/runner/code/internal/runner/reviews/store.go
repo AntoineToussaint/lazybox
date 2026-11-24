@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/atomicfile"
 )
 
 // Sides of a diff a comment can be on: the file as it is ("new": added and
@@ -191,19 +193,7 @@ func (s *Store) write(workspace string, review Review) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(s.dir, ".review-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	_, err = f.Write(raw)
-	if err == nil {
-		err = f.Sync()
-	}
-	if err = errors.Join(err, f.Close()); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), path)
+	return atomicfile.WriteFile(path, raw)
 }
 
 // update applies change to a workspace's review and persists it; nothing

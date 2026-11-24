@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitidentity"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/gitidentity"
 )
 
 // RegisterRepository enrolls a verified local Git repository without modifying
@@ -31,6 +32,47 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 		return Repository{}, err
 	}
 	r = m.resolveRepositorySource(ctx, r)
+	common, err := m.git(ctx, r.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return Repository{}, err
+	}
+	common, err = filepath.EvalSymlinks(common)
+	if err != nil {
+		return Repository{}, err
+	}
+	// An entry for this repository whose folder was missing at startup (it
+	// was moved, say) gives way to this working clone: it is hidden, as
+	// ReplaceRepository hides an old copy, and stays the source its
+	// workspaces name. The same folder back at the same path is revived in
+	// place instead.
+	identity := gitidentity.Repository(common, r.SourceURL)
+	gaveWay := map[string]Repository{}
+	for id, old := range m.repos {
+		if old.Unavailable == "" || old.Hidden || (id == r.ID && old.Path == r.Path) || m.identity(id) != identity {
+			continue
+		}
+		gaveWay[id] = old
+		old.Hidden = true
+		m.repos[id] = old
+	}
+	registered, err := m.registerResolved(r, common, identity)
+	if err != nil {
+		for id, old := range gaveWay {
+			m.repos[id] = old
+		}
+	}
+	return registered, err
+}
+
+// registerResolved finishes registerRepository for r, whose path, source and
+// Git common directory are resolved. The caller holds m.mu.
+func (m *Manager) registerResolved(r Repository, common, identity string) (Repository, error) {
+	// A hidden entry is the source of the workspaces made from it: their
+	// members name its Git directory. Registering a different clone under the
+	// same ID would strand them, so that clone gets an ID of its own.
+	if old, ok := m.repos[r.ID]; ok && old.Hidden && m.common[old.ID] != common {
+		r.ID += "-" + strings.TrimPrefix(gitidentity.ID(common), "local-")[:12]
+	}
 	// The home is the person's setting, not part of a registration: one
 	// survives registering the same repository again.
 	if old, ok := m.repos[r.ID]; ok && r.Home == "" {
@@ -40,22 +82,16 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 		if old == r {
 			return old, nil
 		}
-		return Repository{}, errors.New("repository identity already has a different registration")
+		// Only the same folder back at the same path reaches here unavailable.
+		if old.Unavailable == "" {
+			return Repository{}, errors.New("repository identity already has a different registration")
+		}
 	}
 	if len(m.repos) >= 512 {
 		return Repository{}, errors.New("repository library capacity reached")
 	}
-	common, err := m.git(ctx, r.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if err != nil {
-		return Repository{}, err
-	}
-	common, err = filepath.EvalSymlinks(common)
-	if err != nil {
-		return Repository{}, err
-	}
-	identity := gitidentity.Repository(common, r.SourceURL)
 	for _, old := range m.repositories() {
-		if gitidentity.Repository(m.common[old.ID], old.SourceURL) == identity {
+		if old.Unavailable == "" && m.identity(old.ID) == identity {
 			return old, nil
 		}
 	}
@@ -66,7 +102,7 @@ func (m *Manager) registerRepository(ctx context.Context, r Repository) (Reposit
 		}
 		list = append(list, old)
 	}
-	if err = m.saveRepositories(list); err != nil {
+	if err := m.saveRepositories(list); err != nil {
 		return Repository{}, err
 	}
 	m.repos[r.ID] = r
@@ -97,7 +133,7 @@ func (m *Manager) ReplaceRepository(ctx context.Context, r Repository) (Reposito
 	var replaced []Repository
 	previous := map[string]Repository{}
 	for _, old := range m.repositories() {
-		if gitidentity.Repository(m.common[old.ID], old.SourceURL) != identity {
+		if m.identity(old.ID) != identity {
 			continue
 		}
 		previous[old.ID] = old
@@ -179,7 +215,9 @@ func (m *Manager) AddLocalRepository(ctx context.Context, path, name string) (Re
 	source := m.resolveRepositorySource(ctx, Repository{Path: canonical})
 	identity := gitidentity.Repository(common, source.SourceURL)
 	for _, existing := range m.repositories() {
-		if gitidentity.Repository(m.common[existing.ID], existing.SourceURL) == identity {
+		// An entry whose folder is missing is not this working checkout;
+		// registering gives way to it (registerRepository).
+		if existing.Unavailable == "" && m.identity(existing.ID) == identity {
 			return existing, nil
 		}
 	}
@@ -211,6 +249,18 @@ func (m *Manager) Repository(id string) (Repository, bool) {
 	defer m.mu.Unlock()
 	r, ok := m.repos[id]
 	return r, ok
+}
+
+// identity is registration id's checkout-independent identity. A repository
+// whose Git directory could not be read at startup (Unavailable) and has no
+// GitHub origin has none to share, so it is only ever itself. The caller
+// holds m.mu.
+func (m *Manager) identity(id string) string {
+	r := m.repos[id]
+	if m.common[id] == "" && gitidentity.GitHubName(r.SourceURL) == "" {
+		return "unavailable:" + id
+	}
+	return gitidentity.Repository(m.common[id], r.SourceURL)
 }
 
 func (m *Manager) RepositoryIdentity(id string) string {
@@ -250,10 +300,10 @@ func (m *Manager) RemoveRepository(id string) error {
 	if repo.Hidden {
 		return nil
 	}
-	identity := gitidentity.Repository(m.common[id], repo.SourceURL)
+	identity := m.identity(id)
 	list := []Repository{}
 	for _, r := range m.repos {
-		if gitidentity.Repository(m.common[r.ID], r.SourceURL) == identity {
+		if m.identity(r.ID) == identity {
 			r.Hidden = true
 		}
 		list = append(list, r)

@@ -11,6 +11,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/atomicfile"
 )
 
 type Entry struct {
@@ -203,20 +205,7 @@ func (s FileStore) Save(value Snapshot) error {
 	if err = os.MkdirAll(filepath.Dir(s.Path), 0700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(s.Path), ".repository-catalog-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	_, err = f.Write(b)
-	if err == nil {
-		err = f.Sync()
-	}
-	err = errors.Join(err, f.Close())
-	if err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), s.Path)
+	return atomicfile.WriteFile(s.Path, b)
 }
 
 // Remove forgets discovery metadata, never a checkout. Explicit discovery may find it again.

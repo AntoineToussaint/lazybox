@@ -15,7 +15,7 @@ const question={type:'question',requestId:'question-1',text:'AskUserQuestion',pr
  {question:'Which checks should run before merge?',header:'Checks',multiSelect:true,options:[{label:'Unit tests'},{label:'Lint'},{label:'E2E'}]},
  {question:'What should the table be called?',header:'Name',multiSelect:false,options:[{label:'cache_entries'},{label:'kv'}]},
 ]}})};
-const approval=(id,command,always=[])=>({type:'approval',requestId:id,text:'Bash',providerDataJson:b64({tool:'Bash',toolUseId:`use-${id}`,input:{command,description:`Run ${command.split(' ')[0]}`},always})});
+const approval=(id,command,always=[],extra={})=>({type:'approval',requestId:id,text:'Bash',providerDataJson:b64({tool:'Bash',toolUseId:`use-${id}`,input:{command,description:`Run ${command.split(' ')[0]}`},always,...extra})});
 const npmAlways=[{id:'conversation',scope:'conversation',label:'commands starting with `npm run`',detail:'Claude stops asking until this conversation ends.'},{id:'workspace',scope:'workspace',label:'commands starting with `npm run`',detail:'Saved to this workspace’s .claude/settings.local.json.'}];
 session.pending=[question];session.status='waiting_input';
 const channel=fixture.openEvents(session.id);
@@ -39,7 +39,12 @@ try{
  // A question Lazybox reads shows no raw request: that is a diagnostic for one it cannot.
  await expect(card.locator('.request-metadata')).toHaveCount(0);
  await expect(card.getByRole('button',{name:'Send answer'})).toBeDisabled();
- // Keyboard: focus starts on the first option; 2 picks SQLite and moves on, showing its preview.
+ // Keyboard: focus starts on the card itself, never a choice; 2 picks SQLite and moves on, showing its preview.
+ await expect(card).toBeFocused();
+ // From the card, ↑ and ↓ go to the last and first option (the transcript does not scroll).
+ await page.keyboard.press('ArrowUp');
+ await expect(card.locator('[data-question="What should the table be called?"]').getByRole('radio',{name:/Other/})).toBeFocused();
+ await card.focus();await page.keyboard.press('ArrowDown');
  await expect(card.getByRole('radio',{name:/Postgres/})).toBeFocused();
  await page.keyboard.press('2');
  await expect(card.getByRole('radio',{name:/SQLite/})).toHaveAttribute('aria-checked','true');
@@ -74,7 +79,10 @@ try{
  await expect(first.getByRole('list',{name:'Worth a second look'}).getByRole('listitem')).toHaveText(['Deletes files recursively','Runs code it downloads','Uses the network']);
  await expect(first.locator('.request-count')).toHaveText('1 of 2');
  await expect(page.locator('.chat-status [role=status]')).toHaveText('Waiting for approval · 2 waiting');
- await expect(first.getByRole('button',{name:'Allow once'})).toBeFocused();
+ // The card takes focus, not "Allow once": Space (to page down) or Enter approves nothing.
+ await expect(first).toBeFocused();
+ await page.keyboard.press('Space');await page.keyboard.press('Enter');
+ assert.equal(applied('approval').length,0,'Space or Enter on an approval card that just appeared approves nothing');
  // Keys answer the first request only; the second shows none.
  await expect(page.locator('.request.approval-card').nth(1).locator('.request-key')).toHaveCount(0);
  await page.screenshot({path:'.cache/chat-decisions-approval.png'});
@@ -92,14 +100,51 @@ try{
  await expect(second.locator('.decision-row')).toHaveText([/Allow once/,/Always allow commands starting with npm runThis conversation/,/Always allow commands starting with npm runThis workspace/,/Deny…/]);
  await second.getByRole('button',{name:'Always allow commands starting with `npm run`'}).nth(1).click();
  await expect.poll(()=>applied('approval').at(-1)).toEqual({requestId:'always-me',decision:'DECISION_ACCEPT',always:'workspace'});
- session.pending=[approval('once-me','ls -la')];
- channel.push({type:'operation_accepted',requestId:'always-me',providerDataJson:b64({response:{kind:'approve',decision:'accept',always:'workspace'}})});channel.push({type:'request_resolved',requestId:'always-me'});channel.push(session.pending[0]);
+ session.pending=[];
+ channel.push({type:'operation_accepted',requestId:'always-me',providerDataJson:b64({response:{kind:'approve',decision:'accept',always:'workspace'}})});channel.push({type:'request_resolved',requestId:'always-me'});
  await expect(page.locator('.request-answered[data-kind=always]')).toHaveText('Always allowed commands starting with npm run in this workspace');
- // y: Allow once, from the chat (focus in the transcript, not a field).
- await expect(page.locator('.request.approval-card')).toContainText('ls -la');
- await page.locator('.messages:visible').first().click({position:{x:5,y:5}});await page.keyboard.press('y');
+ await expect(page.locator('.request')).toHaveCount(0);
+ // A click in the transcript, then an approval arrives: it takes focus as a card, so the Space
+ // and Enter meant for the transcript approve nothing; y (from the chat) still allows once.
+ await page.locator('.messages:visible').first().click({position:{x:5,y:5}});
+ session.pending=[approval('once-me','ls -la')];channel.push(session.pending[0]);
+ const once=page.locator('.request.approval-card');
+ await expect(once).toContainText('ls -la');await expect(once).toBeFocused();
+ await page.keyboard.press('Space');await page.keyboard.press('Enter');
+ assert.equal(applied('approval').length,2,'Space and Enter after a click in the transcript approve nothing');
+ await page.keyboard.press('y');
  await expect.poll(()=>applied('approval').at(-1)).toEqual({requestId:'once-me',decision:'DECISION_ACCEPT'});
- session.pending=[];session.status='running';channel.push({type:'request_resolved',requestId:'once-me'});
+ session.pending=[];channel.push({type:'request_resolved',requestId:'once-me'});
+ await expect(page.locator('.request')).toHaveCount(0);
+ // Default-to-no (Claude's defaultToNo): no digit or letter allows, and no allow row shows one; only N denies.
+ session.pending=[approval('careful-me','npm run deploy',npmAlways,{defaultToNo:true})];channel.push(session.pending[0]);
+ const careful=page.locator('.request.approval-card');
+ await expect(careful).toContainText('npm run deploy');await expect(careful).toBeFocused();
+ await expect(careful.locator('.request-key')).toHaveText(['N']);
+ await expect(careful.locator('.decision-row[data-tone=allow], .decision-row[data-tone=always]').first()).not.toHaveAttribute('aria-keyshortcuts',/./);
+ for(const key of ['1','2','3','y','a'])await page.keyboard.press(key);
+ await page.locator('.messages:visible').first().click({position:{x:5,y:5}});
+ for(const key of ['1','2','y','a'])await page.keyboard.press(key);
+ assert.equal(applied('approval').length,3,'no single key allows a default-to-no request');
+ // N opens the reason; leaving it (Esc, or Back) puts focus back on Deny…, not on the page.
+ await page.keyboard.press('n');
+ const why=careful.getByRole('textbox',{name:/Why not\?/});await expect(why).toBeFocused();
+ await page.keyboard.press('Escape');
+ await expect(careful.getByRole('button',{name:'Deny…'})).toBeFocused();
+ await page.keyboard.press('Enter');await expect(why).toBeFocused();
+ await careful.getByRole('button',{name:'Back',exact:true}).click();
+ await expect(careful.getByRole('button',{name:'Deny…'})).toBeFocused();
+ session.pending=[];session.status='running';channel.push({type:'request_resolved',requestId:'careful-me'});
+ await expect(page.locator('.request')).toHaveCount(0);
+ // A question answered only in words starts in its field, so what the person types goes there.
+ await page.locator('.messages:visible').first().click({position:{x:5,y:5}});
+ const words={type:'question',requestId:'question-words',text:'AskUserQuestion',providerDataJson:b64({tool:'AskUserQuestion',toolUseId:'ask-2',input:{questions:[{question:'What should the release be called?',header:'Name',multiSelect:false,options:[]}]}})};
+ session.pending=[words];session.status='waiting_input';channel.push(words);
+ const wordsCard=page.locator('.request.question-card');
+ await expect(wordsCard.getByRole('textbox')).toBeFocused();
+ await page.keyboard.type('Aurora');await page.keyboard.press('Meta+Enter');
+ await expect.poll(()=>applied('answer').at(-1)).toEqual({requestId:'question-words',answers:{'What should the release be called?':{values:['Aurora']}}});
+ session.pending=[];session.status='running';channel.push({type:'request_resolved',requestId:'question-words'});
  await expect(page.locator('.request')).toHaveCount(0);
  // Typing in the composer never answers anything.
  assert.equal(applied('approval').length,3);

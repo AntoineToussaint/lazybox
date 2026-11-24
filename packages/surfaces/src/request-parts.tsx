@@ -32,14 +32,33 @@ export function useChatKeys(card: React.RefObject<HTMLElement | null>, onKey: (e
   }, [card]);
 }
 
-/** Focus a card's control when it appears, unless the person is typing elsewhere. */
-export function useInitialFocus(card: React.RefObject<HTMLElement | null>, selector: string) {
+/**
+ * Brings a card that just appeared to the keyboard, unless the person is typing
+ * elsewhere. Focus goes to the card itself (it has tabIndex -1), never to one
+ * of its choices: a click in the transcript leaves focus on the page, and a
+ * Space or Enter that follows (to page down, say) would otherwise press "Allow
+ * once". From the card its keys (1–9, y, n, the arrows) still work, focusing it
+ * announces it to a screen reader, and Space still scrolls the transcript.
+ * `field` names a text field to focus instead (a question answered only in
+ * words): typing there cannot answer anything by accident, and what the person
+ * types is not dropped.
+ */
+export function useInitialFocus(card: React.RefObject<HTMLElement | null>, field?: string) {
   useEffect(() => {
     const node = card.current, active = document.activeElement;
     if (!node || (active && active !== document.body && (editable(active) || !node.closest('.messages')?.contains(active)))) return;
     if (node.closest('.messages')?.querySelector('.request') !== node) return;
-    node.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
-  }, [card, selector]);
+    ((field && node.querySelector<HTMLElement>(field)) || node).focus({ preventScroll: true });
+  }, [card, field]);
+}
+
+/** ↓ or ↑ on the card itself: its first or last choice, as Tab would reach them. */
+export function arrowIntoCard(event: React.KeyboardEvent<HTMLElement>, card: HTMLElement | null, choices: string): boolean {
+  if (!card || event.target !== card || (event.key !== 'ArrowDown' && event.key !== 'ArrowUp')) return false;
+  const all = [...card.querySelectorAll<HTMLElement>(choices)].filter(node => !node.matches(':disabled,[aria-disabled=true]'));
+  const next = event.key === 'ArrowDown' ? all[0] : all.at(-1);
+  if (!next) return false;
+  event.preventDefault(); next.focus(); return true;
 }
 
 export function CardHead({ eyebrow, tool, position }: { eyebrow: string; tool?: string; position?: RequestPosition }) {

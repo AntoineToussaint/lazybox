@@ -36,7 +36,8 @@ Object.assign(f.sessions.find(s => s.id === 'beta-session'), { title: 'Pick the 
 Object.assign(f.sessions.find(s => s.id === 'alpha-session'), { title: 'Fix the parser' });
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: f.url } } } });
 await server.listen(); await mkdir('.cache', { recursive: true });
-const url = `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`;
+const shown = `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session`;
+const url = `${shown}#token=${f.token}`;
 
 // Its script runs once the page is parsed (defer, as the examples do): lazybox.ready can answer before
 // the parser reaches <body> on a slow machine, and #out would not exist yet.

@@ -184,7 +184,10 @@ try {
   );
   await page.screenshot({ path: "/tmp/lazybox-unified-repositories.png" });
   // A long selection must not hide the primary action on small screens.
-  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${f.token}`);
+  // The app took the bearer out of the address bar when it read it, so the page is at
+  // /?view=workspace: going there again with #token= would only change the fragment and
+  // leave Settings open. A plain load signs in from the tab's session storage.
+  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace`);
   await page.route('**/GetRepositoryCatalog', route => route.fulfill({json:{
     entries:Array.from({length:20},(_,i)=>({identity:`github:large-team/service-with-a-long-name-${i}`,name:`large-team/service-with-a-long-name-${i}`})),
     sources:[{id:'github',state:'connected'}],refreshSeconds:300

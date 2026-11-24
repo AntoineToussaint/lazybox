@@ -509,6 +509,44 @@ func TestDeletionTreatsUnsavedHistoryAsDirty(t *testing.T) {
 	}
 }
 
+// A retried "add repositories" request must not provision into a workspace
+// whose deletion began or finished.
+func TestAddRepositoriesRetryDoesNotReviveADeletedWorkspace(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "revive", Spec{Name: "Revive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := []MemberSpec{{RepositoryID: repo.ID, Name: "api", BaseRef: "HEAD"}}
+	if _, err = m.AddRepositories(ctx, c.ID, "add-api", spec); err != nil {
+		t.Fatal(err)
+	}
+	inactive := func(string) bool { return false }
+	if _, err = m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.AddRepositories(ctx, c.ID, "add-api", spec); err == nil {
+		t.Fatal("retry provisioned into a workspace being deleted")
+	}
+	if got, _ := m.Get(c.ID); got.State != "deleting" {
+		t.Fatalf("state = %q, want deleting", got.State)
+	}
+	if _, err = m.FinishDeletion(ctx, c.ID, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.AddRepositories(ctx, c.ID, "add-api", spec); err == nil {
+		t.Fatal("retry provisioned into a deleted workspace")
+	}
+	if got, _ := m.Get(c.ID); got.State != "deleted" {
+		t.Fatalf("state = %q, want deleted", got.State)
+	}
+	if _, err = os.Lstat(c.Root); !os.IsNotExist(err) {
+		t.Fatal("deleted workspace folder was recreated", err)
+	}
+}
+
 func TestRemoveRepositoryMemberRefusesMergeInProgress(t *testing.T) {
 	ctx := context.Background()
 	repo := repoTest(t)

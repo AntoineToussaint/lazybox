@@ -499,6 +499,11 @@ func (m *Manager) AddRepositories(ctx context.Context, id, key string, specs []M
 	if m.closed || c.OwnershipUncertain || c.State == "archived" {
 		return Collection{}, errors.New("workspace is not available for repository additions")
 	}
+	// A retried request key must not provision into a workspace whose
+	// deletion began: that would recreate worktrees cleanup is removing.
+	if c.State == "deleting" || c.State == "deleted" || m.finishingDeletion[id] {
+		return Collection{}, errors.New("workspace was deleted or cleanup is in progress")
+	}
 	if strings.TrimSpace(key) == "" || len(key) > 128 || len(specs) == 0 || len(specs) > 64 {
 		return Collection{}, errors.New("request key and repositories required")
 	}

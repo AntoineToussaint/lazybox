@@ -598,26 +598,35 @@ func (b *Bench) List() []*Execution {
 }
 
 func (b *Bench) Open(profile, cwd, resume string, options accounts.Options, gatewayID, workID, previous string) (*Execution, error) {
-	return b.open(profile, cwd, resume, options, gatewayID, workID, previous, "", "coding", "", false)
+	return b.open(profile, cwd, resume, options, gatewayID, workID, previous, "", agent.Coding, "", false)
 }
 
 func (b *Bench) OpenCollection(profile, collectionID, resume string, options accounts.Options, gatewayID, previous string) (*Execution, error) {
 	if collectionID == "" {
 		return nil, errors.New("collection id required")
 	}
-	return b.open(profile, "", resume, options, gatewayID, "", previous, collectionID, "coding", "", false)
+	return b.open(profile, "", resume, options, gatewayID, "", previous, collectionID, agent.Coding, "", false)
+}
+
+// OpenReviewer starts a reviewer in the workspace it reviews (agent.Reviewer):
+// it is reached from its review, and ends once its findings are handed on.
+func (b *Bench) OpenReviewer(profile, collectionID string, options accounts.Options) (*Execution, error) {
+	if collectionID == "" {
+		return nil, errors.New("collection id required")
+	}
+	return b.open(profile, "", "", options, "", "", "", collectionID, agent.Reviewer, "", false)
 }
 
 // OpenEmptyWorkspace starts a coding session in a new Runner-owned directory.
 // Closing the session retains its files; no Git repository is initialized.
 func (b *Bench) OpenEmptyWorkspace(profile string, options accounts.Options, gatewayID string) (*Execution, error) {
-	return b.open(profile, "", "", options, gatewayID, "", "", "", "coding", "", true)
+	return b.open(profile, "", "", options, gatewayID, "", "", "", agent.Coding, "", true)
 }
 
 // OpenAssistant starts an artifact companion in its workspace, or a bounded
 // application assistant with read-only permissions.
 func (b *Bench) OpenAssistant(profile, purpose, contextText string, options accounts.Options, gatewayID string, workspace ...string) (*Execution, error) {
-	if purpose == "artifact" {
+	if purpose == agent.Artifact {
 		if len(workspace) == 0 || workspace[0] == "" || len(contextText) > 128<<10 {
 			return nil, errors.New("artifact companion requires a workspace and context up to 128 KiB")
 		}
@@ -684,7 +693,9 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 			return nil, err
 		}
 		parent = &record
-		if record.Purpose == "artifact" {
+		// A resume or a rotation continues the same kind of agent (a reviewer,
+		// a companion), whichever way it was asked for.
+		if record.Purpose != "" && agent.TypeOf(record.Purpose).Workspace {
 			purpose = record.Purpose
 		}
 		if _, err = b.History.Successor(b.ctx, previous); err == nil {
@@ -789,7 +800,7 @@ func (b *Bench) openWithID(id, profile, cwd, resume string, options accounts.Opt
 			options.Instructions = b.Config.Defaults.Instructions
 		}
 		contextText += "\n" + sectionText(briefing, "settings") + "\n" + sectionText(briefing, "provider") + "\n" + options.Instructions
-		workspaceAgent := purpose == "coding" || purpose == "artifact"
+		workspaceAgent := agent.TypeOf(purpose).Workspace
 		if options.BehaviorProfile == "" && workspaceAgent {
 			options.BehaviorProfile = b.Config.Defaults.BehaviorProfile
 		}

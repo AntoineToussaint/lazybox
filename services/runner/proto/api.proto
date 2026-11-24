@@ -1463,6 +1463,30 @@ message Session {
   string forked_from_session_id = 43;
   uint64 forked_from_cursor = 44;
   string effort = 45;
+  // What kind of agent this is, as the Runner defines it from its purpose
+  // (agent/types.go): where it is shown, what reaches the inbox, how it ends.
+  AgentType agent_type = 46;
+}
+// AgentType is one kind of agent: a coding agent, a reviewer, an artifact
+// companion, an Ask Lazybox assistant. Clients read these instead of
+// matching purposes.
+message AgentType {
+  // The purpose it is defined for ("coding", "reviewer", "artifact", "help", …).
+  string name = 1;
+  // How people call it: "Coding agent", "Reviewer".
+  string label = 2;
+  // Listed as a conversation of its own (sidebar, tabs, workspace lists).
+  bool listed = 3;
+  // Its questions, approvals and failures reach the inbox and notifications.
+  bool reaches_inbox = 4;
+  // Its job ends once its work is handed on (a reviewer's findings sent).
+  bool close_when_delivered = 5;
+  // Works in a workspace: edits files, takes interactive commands.
+  bool workspace = 6;
+  // Starts other agents, conversations and missions.
+  bool delegates = 7;
+  // How a client shows it: "chat", "reviewer", "companion" or "assistant".
+  string ui = 8;
 }
 // PermissionGrant is one "always allow" of a conversation.
 message PermissionGrant {
@@ -1827,6 +1851,8 @@ message StopAgent {
 // Changes a running session's permission mode: ask, read-only or yolo.
 message Permission {
   string mode = 1;
+  // Pending Claude ExitPlanMode approval authorizing a switch to the execute workflow.
+  string exit_plan_request_id = 2;
 }
 message Receipt {
   // Complete message returned after acquiring the edit hold.
@@ -3019,6 +3045,9 @@ message SetReviewDispositionRequest {
   string session_title = 5;
   // With "dismissed": why, for the record.
   string note = 6;
+  // With "sent": end and archive each reviewer whose review is over and
+  // whose findings are all sent or dismissed (AgentType.close_when_delivered).
+  bool close_reviewers = 7;
 }
 message SetReviewAutoResolveRequest { string collection_id = 1; bool enabled = 2; }
 message TurnCheckpointsRequest {

@@ -12,6 +12,39 @@ export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+// Characters a reader cannot see: C0 and C1 controls, DEL, zero-width and
+// direction marks. Shown raw they hide or reorder what a command runs.
+const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/u;
+const ESCAPES: Record<string, string> = { '\n': '\\n', '\t': '\\t', '\r': '\\r', '\u001b': '\\e', '\\': '\\\\', "'": "\\'" };
+
+/**
+ * An argument as the person reviews it before it runs: shellQuote, except
+ * that one holding a character they could not see is written in ANSI-C
+ * quoting (`$'…\e…'`), every such character as a visible escape. Pasted
+ * into bash or zsh it is the same argument.
+ */
+export function reviewArgument(value: string): string {
+  if (!INVISIBLE.test(value)) return shellQuote(value);
+  let out = '';
+  for (const char of value) {
+    if (ESCAPES[char]) out += ESCAPES[char];
+    else if (INVISIBLE.test(char)) {
+      const code = char.codePointAt(0)!;
+      out += code < 0x100 ? `\\x${code.toString(16).padStart(2, '0')}` : `\\u${code.toString(16).padStart(4, '0')}`;
+    } else out += char;
+  }
+  return `$'${out}'`;
+}
+
+/** Where a command runs, said from its workspace: `lazybox/scripts`, or `workspace root`; the full directory when the root is unknown. */
+export function workspaceFolder(root: string, cwd: string): string {
+  const trim = (path: string) => path.replace(/\/+$/, '');
+  const base = trim(root), dir = trim(cwd);
+  if (root && dir === base) return 'workspace root';
+  if (root && dir.startsWith(base + '/')) return dir.slice(base.length + 1);
+  return cwd;
+}
+
 /** `cd <folder>`, ready to paste. */
 export function cdCommand(folder: string): string { return `cd ${shellQuote(folder)}`; }
 

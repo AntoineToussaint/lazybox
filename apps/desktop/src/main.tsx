@@ -4,12 +4,18 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { fetch as nativeFetch } from '@tauri-apps/plugin-http';
-import { MissionWindow, AgentWindow, ArtifactExportContext, ArtifactWindow, OpenHtmlInBrowserContext, PREFERENCE_EVENT, WebWindow, WindowControls, WindowErrorBoundary, Workspace, configureContextMenus, configureExternalTerminal, configureSystemSounds, configureTitleBar, configureVoice, installLinkRouting, openInViewer, runMenuAction, useActionRevision, useNativeActionMenu, useRunnerLocator, type NativeMenuItem } from '@lazybox/surfaces';
+import { getAppearance, subscribeAppearance, MissionWindow, AgentWindow, ArtifactExportContext, ArtifactWindow, OpenHtmlInBrowserContext, PREFERENCE_EVENT, WebWindow, WindowControls, WindowErrorBoundary, Workspace, configureContextMenus, configureExternalTerminal, configureSystemSounds, configureTitleBar, configureVoice, installLinkRouting, openInViewer, runMenuAction, useActionRevision, useNativeActionMenu, useRunnerLocator, type NativeMenuItem } from '@lazybox/surfaces';
 import type { AddComputerStep, RunnerDirectoryHost, RunnerListing, SshHost } from '@lazybox/platform';
 import type { AppHost, AppInfo, ChatReturn, AttentionDestination, AttentionHost, NotificationPermission, AvailableUpdate, FeedbackDiagnostics, NativeWebViews, RecognitionEvent, RecognizerLanguage, RecognizerStatus, SpeechVoice, SurfaceHost, SurfaceTarget, TitleBarInset, ViewStateStore, UpdateError, UpdateErrorKind, UpdateProgress, VoiceHost, WebViewEvent, WorkspaceHost, ZoomHost } from '@lazybox/platform';
 import { FirstRun } from './FirstRun';
 
 type Bootstrap = { url: string; token: string; workingDirectory: string; target: SurfaceTarget; viewKey: string; viewScope: string; viewRoot: string; applicationName: string; fixedWorkspaceId: string; kind: 'workspace' | 'chat' | 'console' | 'mission' | 'artifact' | 'web'; notice: string; viewState: Record<string,string> };
+// The native window is visible before its page loads. Give the host the resolved theme color.
+const syncWindowBackground = () => invoke<void>('set_window_background', { color: getAppearance().theme.tokens.bg })
+  .catch(error => console.error('Could not sync the window background', error));
+subscribeAppearance(syncWindowBackground);
+void syncWindowBackground();
+
 const openHtmlInBrowser = (html: string) => invoke<void>('open_html_preview_in_browser', { html });
 const saveArtifactExport = (filename: string, content: string) => invoke<boolean>('save_artifact_export', { filename, content });
 const publishMenu = (items: NativeMenuItem[]) => invoke<void>('set_action_menu', { items });

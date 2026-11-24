@@ -81,12 +81,13 @@ export function findCommand(commands: readonly SlashCommand[], name: string): Sl
 export type RankedCommand = { command: SlashCommand; score: number; positions: number[] };
 /**
  * The commands a typed name matches, grouped (Lazybox · the agent · snippets)
- * and best first within each group. An exact name always wins, then a
+ * and best first within each group. Frequently used name prefixes win, then an exact name, a
  * prefix, then letters in order; aliases count almost as much as the name,
  * and the description or keywords much less (`/tokens` finds `/cost`).
  * `best` is the index of the strongest match overall: the one Enter takes.
  */
-export function rankCommands(query: string, commands: readonly SlashCommand[]): { items: RankedCommand[]; best: number } {
+type CommandUsage = Readonly<Record<string, { count: number }>>;
+export function rankCommands(query: string, commands: readonly SlashCommand[], usage: CommandUsage = {}): { items: RankedCommand[]; best: number } {
   const q = query.toLowerCase();
   const scored: RankedCommand[] = [];
   commands.forEach((command, order) => {
@@ -105,9 +106,11 @@ export function rankCommands(query: string, commands: readonly SlashCommand[]): 
     if (score > -Infinity) scored.push({ command, score, positions: main && score >= main.score ? main.positions : [] });
   });
   const groupIndex = (command: SlashCommand) => SLASH_GROUPS.indexOf(command.group);
-  const items = scored.sort((a, b) => groupIndex(a.command) - groupIndex(b.command) || b.score - a.score);
+  const frequency = (item: RankedCommand) => q && item.command.name.toLowerCase().startsWith(q) ? usage[item.command.key]?.count || 0 : 0;
+  const compare = (a: RankedCommand, b: RankedCommand) => frequency(b) - frequency(a) || b.score - a.score;
+  const items = scored.sort((a, b) => groupIndex(a.command) - groupIndex(b.command) || compare(a, b));
   let best = items.length ? 0 : -1;
-  if (q) items.forEach((item, i) => { if (!item.command.disabled && (best < 0 || items[best].command.disabled || item.score > items[best].score)) best = i; });
+  if (q) items.forEach((item, i) => { if (!item.command.disabled && (best < 0 || items[best].command.disabled || compare(item, items[best]) < 0)) best = i; });
   else best = items.findIndex(item => !item.command.disabled);
   return { items, best };
 }
@@ -155,13 +158,13 @@ export function orderedModelChoices(choices: readonly SlashChoice[]): SlashChoic
  * closed the menu (Esc), or nothing matches — a message that merely starts
  * with a slash is never held up by an empty menu.
  */
-export function slashMenu(text: string, commands: readonly SlashCommand[], dismissed = false): SlashMenuState | null {
+export function slashMenu(text: string, commands: readonly SlashCommand[], dismissed = false, usage: CommandUsage = {}): SlashMenuState | null {
   if (dismissed || text.includes('\n')) return null;
   const input = parseSlash(text);
   if (!input) return null;
   if (!input.completed) {
     if (input.name && !/^[\w:.-]+$/.test(input.name)) return null;
-    const { items, best } = rankCommands(input.name, commands);
+    const { items, best } = rankCommands(input.name, commands, usage);
     return items.length ? { kind: 'commands', query: input.name, items, best } : null;
   }
   const command = findCommand(commands, input.name);

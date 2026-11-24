@@ -1,6 +1,6 @@
 import { useKeyboardAction, useKeymap } from "./keyboard";
 import { useConversationIndex } from "./useConversationIndex";
-import { isWorkConversation } from "./attention";
+import { isListed } from "./attention";
 import { DeleteConversationDialog } from "./DeleteConversationDialog";
 import { repositoryLabel } from "./repository-model";
 import { WorkspaceRepositories } from "./WorkspaceRepositories";
@@ -300,7 +300,7 @@ function WorkspaceList({
     onError: (body) => showToast({ tone: "failed", title: "Workspaces not reordered", body }),
   });
   const choose = (collection: Collection) => {
-    const rows = index.sessions.filter((s) => s.collectionId === collection.id && isWorkConversation(s) && !isArchivedAway(s));
+    const rows = index.sessions.filter((s) => s.collectionId === collection.id && isListed(s) && !isArchivedAway(s));
     const sessionId =
       index.complete && rows.length === 1
         ? rows[0].id
@@ -387,7 +387,7 @@ function WorkspaceList({
         <span className="sr-only" role="status" aria-live="polite">{reorder.announcement}</span>
         {reorder.items.map((collection) => {
           const rows = index.sessions.filter(
-            (s) => s.collectionId === collection.id && isWorkConversation(s) && !isArchivedAway(s),
+            (s) => s.collectionId === collection.id && isListed(s) && !isArchivedAway(s),
           );
           const single =
             index.complete && rows.length === 1 ? rows[0] : undefined;
@@ -452,7 +452,7 @@ function WorkspaceList({
         </div>
       )}
       <ConversationList
-        sessions={index.sessions.filter(isWorkConversation)}
+        sessions={index.sessions.filter(isListed)}
         compact
         hideWhenEmpty
         heading="Without a workspace"

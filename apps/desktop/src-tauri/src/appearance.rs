@@ -9,6 +9,23 @@ use std::{
 };
 use tauri::{Emitter, EventTarget, Manager, State, WebviewWindow};
 
+/// Resolved by the page, including custom themes and system appearance.
+#[derive(Default)]
+pub struct ThemeBackground(pub Mutex<Option<tauri::window::Color>>);
+
+#[tauri::command]
+pub fn set_window_background(
+    color: String,
+    background: State<'_, ThemeBackground>,
+) -> Result<(), String> {
+    let hex = color.strip_prefix('#').unwrap_or("");
+    if !matches!(hex.len(), 6 | 8) || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Expected a theme background in hex".into());
+    }
+    *background.0.lock().map_err(|e| e.to_string())? = Some(color.parse()?);
+    Ok(())
+}
+
 /// The steps Zoom In / Zoom Out walk, like a browser's.
 pub const ZOOM_STEPS: [f64; 13] = [
     0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.2, 1.25, 1.33, 1.5, 1.75, 2.0,

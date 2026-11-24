@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cdCommand, folderFor, legacyTerminalCommand, parseTerminalChoice, resumeCommand, shellQuote, terminalFor, terminalTitle } from '../packages/surfaces/src/handoff-model.ts';
+import { cdCommand, folderFor, legacyTerminalCommand, parseTerminalChoice, resumeCommand, reviewArgument, shellQuote, terminalFor, terminalTitle, workspaceFolder } from '../packages/surfaces/src/handoff-model.ts';
 import { DEFAULT_SOUNDS, parseSoundSettings } from '../packages/surfaces/src/sounds.ts';
 
 test('shell quoting keeps plain paths readable and makes the rest safe', () => {
@@ -10,6 +10,23 @@ test('shell quoting keeps plain paths readable and makes the rest safe', () => {
   assert.equal(shellQuote('$(rm -rf ~)'), `'$(rm -rf ~)'`);
   assert.equal(shellQuote('a;b'), `'a;b'`);
   assert.equal(cdCommand('/w/My App'), `cd '/w/My App'`);
+});
+
+test('an interactive command is reviewed with every character visible, and its folder named from the workspace', () => {
+  assert.equal(reviewArgument('login'), 'login');
+  assert.equal(reviewArgument('team blue'), `'team blue'`);
+  assert.equal(reviewArgument(''), `''`);
+  // ESC, CR and a right-to-left override would hide or reorder what runs: each is an escape.
+  assert.equal(reviewArgument('safe\u001b[2Kgone'), `$'safe\\e[2Kgone'`);
+  assert.equal(reviewArgument('a\rb\nc\td'), `$'a\\rb\\nc\\td'`);
+  assert.equal(reviewArgument('txt.\u202Eexe'), `$'txt.\\u202eexe'`);
+  assert.equal(reviewArgument("it's\u200b"), `$'it\\'s\\u200b'`);
+  assert.equal(reviewArgument('C1\u0085'), `$'C1\\x85'`);
+  assert.equal(workspaceFolder('/w/tapir', '/w/tapir'), 'workspace root');
+  assert.equal(workspaceFolder('/w/tapir/', '/w/tapir/lazybox/scripts'), 'lazybox/scripts');
+  assert.equal(workspaceFolder('/w/tapir', '/w/tapirs/x'), '/w/tapirs/x', 'a sibling folder is not inside the workspace');
+  assert.equal(workspaceFolder('', '/w/tapir/lazybox'), '/w/tapir/lazybox');
+  assert.equal(workspaceFolder('', '/'), '/');
 });
 
 test('Continue in Claude Code / Codex: the provider\'s resume command, in the conversation\'s folder', () => {

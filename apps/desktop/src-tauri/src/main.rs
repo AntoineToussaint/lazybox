@@ -141,6 +141,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .manage(appearance::ThemeBackground::default())
         .manage(attention::Attention::default())
         .manage(runners::Runners::default())
         .manage(links::Links::default())
@@ -205,6 +206,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             appearance::ui_zoom,
             appearance::default_ui_zoom,
             appearance::set_ui_zoom,
+            appearance::set_window_background,
             appearance::share_preference,
             release::app_info,
             release::setup_state,
@@ -291,6 +293,10 @@ mod tests {
         (
             "share_preference",
             "an app-wide preference every window rereads",
+        ),
+        (
+            "set_window_background",
+            "supplies the theme color for new windows",
         ),
         ("notification_permission", "reads what macOS allows"),
         (

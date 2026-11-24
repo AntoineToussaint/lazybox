@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -283,6 +284,63 @@ func (b *Bench) ReviewFindingsSent(workspace string, ids []string, to string) {
 		}
 		return nil
 	})
+}
+
+// CloseDeliveredReviewers ends and archives the reviewers whose work the
+// findings `ids` handed on, when that work is over: the review is no longer
+// running or looping, and none of its findings is still open or proposed.
+// A reviewer with findings left, or one whose loop waits for the fix, stays.
+// It is archived, never deleted: its findings and review card point to it,
+// and its transcript is their evidence. It returns the sessions it ended.
+func (b *Bench) CloseDeliveredReviewers(ctx context.Context, workspace string, ids []string) []string {
+	if b.Reviews == nil || len(ids) == 0 {
+		return nil
+	}
+	rv, err := b.Reviews.Load(workspace)
+	if err != nil {
+		return nil
+	}
+	touched := map[string]bool{}
+	for _, c := range rv.Comments {
+		if c.ReviewID != "" && containsString(ids, c.ID) {
+			touched[c.ReviewID] = true
+		}
+	}
+	var closed []string
+	for _, run := range rv.Runs {
+		if !touched[run.ID] || run.ReviewerSession == "" || run.State == reviews.RunRunning || run.Active() {
+			continue
+		}
+		left := false
+		for _, c := range rv.Comments {
+			left = left || (c.ReviewID == run.ID && (c.Disposition == reviews.Open || c.Disposition == reviews.Proposed))
+		}
+		if left {
+			continue
+		}
+		e, err := b.Get(run.ReviewerSession)
+		if err == nil {
+			e, err = b.latest(e)
+		}
+		if err != nil {
+			continue
+		}
+		// A reviewer from before reviewers had a type of their own is a
+		// coding conversation: the run says it is this review's reviewer.
+		if t := agent.TypeOf(e.Purpose); !t.CloseWhenDelivered && t.Name != agent.Coding {
+			continue
+		}
+		if err := b.StopExecution(ctx, e.ID); err != nil {
+			log.Printf("review %s: end reviewer %s: %v", run.ID, e.ID, err)
+			continue
+		}
+		if err := b.History.Archive(ctx, e.ID, true); err != nil {
+			log.Printf("review %s: archive reviewer %s: %v", run.ID, e.ID, err)
+			continue
+		}
+		closed = append(closed, e.ID)
+	}
+	return closed
 }
 
 // turnDiff is how to read what one turn of a conversation changed.

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "policyFiles": ["Makefile", "scripts/release-gates.mjs"],
+  "policyFiles": ["Makefile", "scripts/release-gates.mjs", "scripts/unit-test-timeouts.mjs", "scripts/go-test-guard.mjs", ".config/nextest.toml"],
   "gates": [
     { "id": "core", "scope": "core", "command": "make", "args": ["check"], "timeoutMs": 1800000, "covers": ["test:client", "test:worker", "test:browser-service"] },
     { "id": "reboot", "scope": "core", "command": "make", "args": ["test-reboot"], "timeoutMs": 300000, "covers": [] },

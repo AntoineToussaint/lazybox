@@ -46,6 +46,10 @@ prints the command that installs it. Then it:
 | Node.js and npm | 24 or later, npm 11 or later (`package.json`) | `brew install node`, or [nodejs.org](https://nodejs.org) |
 | Rust | 1.90 or later (`rust-toolchain.toml` picks the stable compiler) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
 
+`make install-check` also reports `cargo-nextest`, which working on Lazybox
+needs for its Rust tests ([CONTRIBUTING.md](../CONTRIBUTING.md#set-up)) and
+installing it does not: a missing one does not fail the check.
+
 The agents themselves are not part of the build: Lazybox brings Claude Code,
 and Codex is installed and signed in as usual.
 

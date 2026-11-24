@@ -61,7 +61,7 @@ test('source snapshots exclude credentials, runtime state, and mutable build out
 
 import { mkdtemp, mkdir, writeFile, readFile, rm, rename, symlink, realpath, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { copySource, digestTree, promote, acquireLock, readValidatedRelease, buildCLI, watchCLI, runnerSourceFingerprint, runnerSourceFile } from './environments.mjs';
 
 test('snapshot inside the source excludes runtime credentials and survives subsequent source edits', async t => {
@@ -97,7 +97,12 @@ test('promotion validates source and app, pins only the next launch, and leaves 
   await mkdir(join(candidate, 'source/workers/claude-sdk/dist'), { recursive: true });
   await writeFile(join(candidate, 'source/workers/claude-sdk/dist/main.js'), '// validated worker');
   const sourceRoot = fileURLToPath(new URL('..', import.meta.url));
-  for (const path of ['Makefile', 'package.json', 'scripts/release-gates.json', 'scripts/release-gates.mjs']) await writeFile(join(candidate, 'source', path), await readFile(join(sourceRoot, path)));
+  // The catalog and every file its policy fingerprints, as a staged snapshot holds them.
+  const { policyFiles } = JSON.parse(await readFile(join(sourceRoot, 'scripts/release-gates.json'), 'utf8'));
+  for (const path of ['package.json', 'scripts/release-gates.json', ...policyFiles]) {
+    await mkdir(dirname(join(candidate, 'source', path)), { recursive: true });
+    await writeFile(join(candidate, 'source', path), await readFile(join(sourceRoot, path)));
+  }
   await mkdir(join(candidate, 'Lazybox.app'));
   await writeFile(join(candidate, 'source/main.ts'), 'validated');
   await writeFile(join(candidate, 'Lazybox.app/binary'), 'validated-app');

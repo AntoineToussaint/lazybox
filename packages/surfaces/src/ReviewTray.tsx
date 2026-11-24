@@ -12,6 +12,7 @@ import { openRelatedConversation } from './conversation-requests';
 import { endedByHand, loopActive, loopLine, loopModes, loopNeedsYou } from './review-model';
 import { authorLabel, dispositionLabel, freshnessLabel, groupByFile, isFinding, isPending, isProposed, linesLabel, location, matchesFilter, matchesQuery, reviewAuthors, reviewExcerpt, reviewMessage, runSummary, severities, severityLabel, trayFilters, type ReviewQuery, type TrayFilter } from './review-model';
 import type { WorkspaceReviewState } from './useWorkspaceReview';
+import { useCloseReviewersOnSend } from './review-close';
 import './review.css';
 import './review-agents.css';
 
@@ -132,15 +133,16 @@ function ReviewRuns({ runs, workspaceId, review, focus, onFocus }: { runs: reado
 }
 
 /** Every comment and finding on the workspace's changes, by file; agent
- * findings to triage; and the one action that matters: put the pending ones
- * in the author's message box as a single message, for the person to send. */
+ * findings to triage; and the one action that matters: send the selected comments
+ * to the author's conversation as one message. */
 export function ReviewTray({ id, workspaceId, review, conversation, focusReview = '', onJump, onSend, onClose }: {
   id?: string; workspaceId: string; review: WorkspaceReviewState; conversation?: Session; focusReview?: string;
-  onJump(comment: ReviewComment): void; onSend(text: string, to: Session, ids: string[]): void; onClose(): void;
+  onJump(comment: ReviewComment): void; onSend(sessionId: string): void; onClose(): void;
 }) {
   const runs = review.review?.runs || [];
   const reviewers = useMemo(() => new Set(runs.map(run => run.reviewerSessionId)), [runs]);
   const conversations = useConversations(workspaceId, conversation, reviewers);
+  const [closeReviewers, setCloseReviewers] = useCloseReviewersOnSend();
   const proposed = review.comments.filter(isProposed).length;
   const [query, setQuery] = useState<ReviewQuery>(() => ({ filter: proposed ? 'proposed' : 'pending', author: '', severity: '' }));
   const [focusRun, setFocusRun] = useState(focusReview);
@@ -173,7 +175,7 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
     if (!to || !chosen.length || busy) return;
     setBusy(true); setError('');
     try {
-      onSend(reviewMessage(chosen), to, chosen.map(c => c.id));
+      onSend(await review.send(chosen, to.id, closeReviewers && chosen.some(c => !!c.reviewId)));
     } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
   };
   const authorSession = to;
@@ -275,7 +277,8 @@ export function ReviewTray({ id, workspaceId, review, conversation, focusReview 
       <button className="primary review-send" disabled={!chosen.length || !to || busy} onClick={() => void send()}>
         <Icon name="send" size={14}/>{chosen.some(isFinding) ? `Fix ${plural(chosen.length, 'finding')} in ${to?.id === conversation?.id ? 'this conversation' : (to ? conversationName(to, 'conversation') : 'conversation')}` : chosen.length ? `Send ${plural(chosen.length, 'comment')} to the agent` : 'Send review to the agent'}
       </button>
-      <small className="review-muted">{!to ? 'No conversation in this workspace yet. Start one to send it comments.' : `Goes to the message box of “${conversationName(to, 'the conversation')}” as one message, findings exactly as filed. You review it and send it; nothing is sent for you.`}</small>
+      <small className="review-muted">{!to ? 'No conversation in this workspace yet. Start one to send it comments.' : `Sends the selected comments directly to “${conversationName(to, 'the conversation')}” as one message.`}</small>
+      {runs.length > 0 && <label className="review-auto check-row"><input type="checkbox" checked={closeReviewers} onChange={event => setCloseReviewers(event.target.checked)}/><span>Close the reviewer after sending</span></label>}
       <label className="review-auto check-row"><input type="checkbox" checked={review.autoResolve} onChange={event => { const enabled = event.target.checked; void review.setAutoResolve(enabled).catch(e => setError(errorText(e))); }}/><span>Resolve sent comments when a commit changes their lines</span></label>
     </footer>
   </aside>;

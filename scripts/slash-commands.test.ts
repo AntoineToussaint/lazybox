@@ -252,3 +252,19 @@ test('model rows stay unique when the provider repeats or shuffles effort levels
  assert.deepEqual(efforts.map(item=>item.value),['low','medium','high','xhigh','max']);
  assert.deepEqual(efforts.filter(item=>item.current).map(item=>item.value),['high']);
 });
+
+test('typing /rev highlights the most-used matching name across groups', () => {
+  const commands = [...all(ctx({reviewers:[{key:'codex',label:'Codex'}]})), ...snippetCommands([
+    {key:'rev', description:'Review the current diff', category:'Review', body:'Review it.'},
+  ], [])];
+  const best = (review: number, rev: number) => {
+    const menu = slashMenu('/rev', commands, false, {
+      'lazybox:review': {count: review}, 'snippet:rev': {count: rev}, 'lazybox:help': {count: 99},
+    });
+    assert.ok(menu?.kind === 'commands');
+    return menu.items[menu.best].command.key;
+  };
+  assert.equal(best(0, 0), 'snippet:rev');
+  assert.equal(best(4, 1), 'lazybox:review');
+  assert.equal(best(4, 4), 'snippet:rev');
+});

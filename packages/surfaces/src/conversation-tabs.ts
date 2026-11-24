@@ -5,7 +5,7 @@
  * status dot a conversation's tab shows. Pure, so the rules are tested alone.
  */
 import type { Session } from '@lazybox/protocol';
-import { activityAt, isWorkConversation, type AttentionState } from './attention';
+import { activityAt, isListed, type AttentionState } from './attention';
 import { isArchivedAway } from './agents-model';
 import type { OpenMode, ViewTarget } from './workspace-model';
 
@@ -28,7 +28,7 @@ export const openModeFor = (mode: OpenMode, tabs: boolean): OpenMode => tabs && 
  */
 export function workspaceConversations(sessions: readonly Session[], workspaceId: string, dismissed: ReadonlySet<string> = new Set()): ViewTarget[] {
   return sessions
-    .filter(session => session.collectionId === workspaceId && isWorkConversation(session) && !session.closed && !session.successorExecutionId && !isArchivedAway(session) && !dismissed.has(session.id))
+    .filter(session => session.collectionId === workspaceId && isListed(session) && !session.closed && !session.successorExecutionId && !isArchivedAway(session) && !dismissed.has(session.id))
     .sort((a, b) => activityAt(b) - activityAt(a))
     .map(session => ({ collectionId: workspaceId, sessionId: session.id, commandId: '' }));
 }

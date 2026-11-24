@@ -41,10 +41,10 @@ receiving them is your agent.
    comment of the workspace, by file, filtered *Pending*, *Sent*, *Done* or *All*.
    In a narrow Changes panel the tray and the file list share the left column:
    switch with the **Files** and **Review** tabs above it.
-3. **Send:** **Send N comments to the agent** puts **one message** in the chosen
-   conversation's message box — each comment with `repo/path:line`, the quoted
+3. **Send:** **Send N comments to the agent** sends **one message** to the chosen
+   conversation with each comment with `repo/path:line`, the quoted
    lines and whether they are still current. Untick any you want to keep back.
-   **Nothing is sent until you press Enter**; the comments are then marked *Sent*.
+   The comments are marked *Sent* after delivery.
    In the transcript, open the review comment thumbnail to read or copy the full message.
 4. **Close the loop:** Resolve, Won't fix, Edit, Delete or Reopen from each
    thread. Optionally, *Resolve sent comments when a commit changes their lines*.
@@ -85,11 +85,15 @@ can talk to it like any other.
   why and keeps the reason; **Ask Codex** opens the reviewer's conversation
   with a follow-up about that finding.
 - **Send** them with your own comments, as above: the author receives each
-  finding exactly as filed. Nothing is sent for you.
+  finding exactly as filed.
 - The author's conversation shows the review while it runs, then what it
   found, with **Open review**. When it ends with findings you have not sent,
-  **Send N findings to Claude** puts them in the author's message box, as
-  filed, for you to send.
+  **Send N findings to Claude** sends them directly to the author and preserves your draft.
+- **The reviewer closes when its work is handed on.** A reviewer stays out
+  of the sidebar; open it from its review card or the review tray, and its
+  questions reach the Inbox. Once its review is over and every finding is
+  sent or dismissed, sending ends and archives it. Untick **Close the reviewer after sending** in the review tray
+  to keep it.
 - **Clean ✓** means nothing at major or above is open (a minor or a nit may
   be, and it says so). The loop works on blockers, so it can end with majors
   open: the card then says *No blockers · 2 major open*.

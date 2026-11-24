@@ -29,6 +29,7 @@ import { existsSync, readFileSync, statfsSync, accessSync, constants, mkdirSync,
 import { homedir } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { NEXTEST_CONFIG, nextestVersion } from '../unit-test-timeouts.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -68,7 +69,9 @@ export function requirements(dir = root) {
   const cargo = readFileSync(join(dir, 'apps/desktop/src-tauri/Cargo.toml'), 'utf8');
   const rust = /^rust-version\s*=\s*"([^"]+)"/m.exec(cargo)?.[1];
   const macos = JSON.parse(readFileSync(join(dir, 'packaging/release.tauri.json'), 'utf8')).bundle?.macOS?.minimumSystemVersion;
-  const need = { go, node: atLeast(pkg.engines?.node), npm: atLeast(pkg.engines?.npm), rust, macos };
+  // Not needed to build: make check-desktop runs the Rust tests under it (CONTRIBUTING.md).
+  const nextest = nextestVersion(readFileSync(join(dir, NEXTEST_CONFIG), 'utf8'));
+  const need = { go, node: atLeast(pkg.engines?.node), npm: atLeast(pkg.engines?.npm), rust, macos, nextest };
   for (const [name, value] of Object.entries(need)) if (!value) throw new Error(`Could not read the ${name} version this checkout needs`);
   return need;
 }
@@ -77,11 +80,12 @@ export function requirements(dir = root) {
  * Each prerequisite with whether this host has it and, when not, the command
  * that gets it. `found` is what probe() saw; empty strings mean "not found".
  */
+const tool = (name, have, minimum, fix, why) => ({
+  name: `${name} ${minimum} or later`, why, have: have || 'not found',
+  ok: !!have && compareVersions(have, minimum) >= 0, fix: have ? fix.upgrade : fix.install,
+});
+
 export function evaluate(need, found, platform = 'darwin') {
-  const tool = (name, have, minimum, fix, why) => ({
-    name: `${name} ${minimum} or later`, why, have: have || 'not found',
-    ok: !!have && compareVersions(have, minimum) >= 0, fix: have ? fix.upgrade : fix.install,
-  });
   if (platform === 'linux') return [
     { name: 'Linux x64 or arm64', why: 'the Runner runtime', have: found.arch, ok: ['x64', 'arm64'].includes(found.arch) },
     tool('glibc', found.glibc, '2.28', { install: 'Use a glibc-based Linux distribution such as Ubuntu.', upgrade: 'Use a newer Linux distribution.' }, 'the bundled Node.js runtime'),
@@ -103,6 +107,28 @@ export function evaluate(need, found, platform = 'darwin') {
     }, 'the native app (Tauri)'),
     { name: `${BUILD_SPACE_GB} GB of free disk space`, why: 'dependencies and the native build', have: found.freeGB === undefined ? 'unknown' : `${found.freeGB.toFixed(1)} GB free`, ok: found.freeGB === undefined || found.freeGB >= BUILD_SPACE_GB, fix: 'Free up some space on this disk, then run make install again.' },
   ];
+}
+
+/**
+ * What working on Lazybox needs beyond the build (CONTRIBUTING.md), on a Mac:
+ * cargo-nextest, which `make check-desktop` runs the Rust tests under. `make
+ * install-check` reports it; `make install` does not need it.
+ */
+export function evaluateDevelopment(need, found, platform = 'darwin') {
+  if (platform !== 'darwin') return [];
+  const fix = `cargo install --locked cargo-nextest@${need.nextest}   (or brew install cargo-nextest)`;
+  return [tool('cargo-nextest', found.nextest, need.nextest, { install: fix, upgrade: fix }, 'make check-desktop: a 30 s deadline on every Rust test')];
+}
+
+/** Prints the development tools; true when they are all there. */
+export function reportDevelopment(checks, print = console.log) {
+  if (!checks.length) return true;
+  print('\nTo work on Lazybox (CONTRIBUTING.md), not to install it:');
+  for (const c of checks) {
+    print(`  ${c.ok ? '✓' : '✗'} ${c.name}${c.ok ? ` (${c.have})` : `: ${c.have}`}`);
+    if (!c.ok) print(`      ${c.fix}`);
+  }
+  return checks.every(c => c.ok);
 }
 
 function capture(command, args, options = {}) {
@@ -132,6 +158,7 @@ export function probe(dir = root) {
     npm: versionIn(capture('npm', ['--version'])),
     rust: versionIn(capture('rustc', ['--version'], { cwd: dir })),
     rustup: !!capture('rustup', ['--version']),
+    nextest: versionIn(capture('cargo', ['nextest', '--version'], { cwd: dir })),
     freeGB,
   };
 }
@@ -341,7 +368,12 @@ async function main() {
   const env = process.env;
   const flag = (value, fallback) => value === undefined || value === '' ? fallback : !['0', 'no', 'false'].includes(value.toLowerCase());
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('Source installation supports macOS and Linux');
-  if (command === 'check') process.exit(report(evaluate(requirements(), probe(), process.platform)) ? 0 : 1);
+  if (command === 'check') {
+    const need = requirements(), found = probe();
+    const ok = report(evaluate(need, found, process.platform));
+    reportDevelopment(evaluateDevelopment(need, found, process.platform));
+    process.exit(ok ? 0 : 1);
+  }
   else if (command === 'install') await install({ prefix: env.PREFIX, linkDir: env.LINK_DIR, open: flag(env.OPEN, true), smoke: flag(env.SMOKE, false) });
   else if (command === 'uninstall') await uninstall({ prefix: env.PREFIX, purge: flag(env.PURGE, false) });
   else throw new Error(`Unknown command ${command}: check, install or uninstall`);

@@ -124,8 +124,8 @@ func (b *Bench) Grant(ctx context.Context, r GrantRequest) (*work.State, string,
 	if e, err = b.latest(e); err != nil {
 		return nil, "", err
 	}
-	if e.Purpose != "" && e.Purpose != "coding" {
-		return nil, "", fmt.Errorf("%w: an Ask Lazybox conversation cannot run agents", work.ErrRefused)
+	if t := agent.TypeOf(e.Purpose); !t.Delegates {
+		return nil, "", fmt.Errorf("%w: a conversation of type %s cannot run agents", work.ErrRefused, t.Label)
 	}
 	c := r.Ceiling
 	own := work.EffectivePermission(e.Options.Permission)

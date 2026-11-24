@@ -45,7 +45,7 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
   onOpenFile?(reference: FileLink, how: OpenModifiers): void;
   onError(message: string): void;
   onHandoff?(message: HandoffMessage): void;
-  enableFullAccess?(): Promise<boolean>;
+  enableFullAccess?(exitPlanRequestId?: string): Promise<boolean>;
   onBranch?(message: TranscriptMessage, sideQuestion?: boolean): void;
   onOpenHandoff?: OpenHandoffConversation;
   /** The subscription limit card and switch dialog, after the requests. */
@@ -130,7 +130,8 @@ function EmptyConversation({ agentName }: { agentName: string }) {
 }
 
 /** Questions and approvals the agent waits on, answered in place. */
-function PendingRequests({ api, session, sessionID, agentName, onError, enableFullAccess }: { api: RunnerClient; enableFullAccess?(): Promise<boolean>; session?: Session; sessionID: string; agentName: string; onError(message: string): void }) {
+function PendingRequests({ api, session, sessionID, agentName, onError, enableFullAccess }: { api: RunnerClient; enableFullAccess?(exitPlanRequestId?: string): Promise<boolean>; session?: Session; sessionID: string; agentName: string; onError(message: string): void }) {
   const count = session?.pending.length || 0;
-  return <>{session?.pending.map((p, index) => <RequestCard enableFullAccess={enableFullAccess} key={p.requestId} request={p} api={api} session={sessionID} onError={onError} root={session.workingDirectory} agentName={agentName} position={{ index, count }}/>)}</>;
+  return <>{session?.pending.map((p, index) => <RequestCard enableFullAccess={session.workflow !== 'plan' ? enableFullAccess :
+    enableFullAccess && session.provider === 'claude' && p.type === 'approval' && p.text === 'ExitPlanMode' && (!p.agentId || p.agentId === 'root') ? () => enableFullAccess(p.requestId) : undefined} key={p.requestId} request={p} api={api} session={sessionID} onError={onError} root={session.workingDirectory} agentName={agentName} position={{ index, count }}/>)}</>;
 }

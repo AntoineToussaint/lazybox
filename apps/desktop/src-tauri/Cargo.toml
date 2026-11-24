@@ -9,24 +9,24 @@ publish = false
 [workspace]
 
 [build-dependencies]
-tauri-build = { version = "=2.7.4", features = [] }
+tauri-build = { version = "=2.7.6", features = [] }
 
 [dependencies]
 # `unstable` is Tauri's multiwebview: a Web panel is a child webview of the
 # window it is docked in (WORKSPACES.md, "The Web panel").
 tauri = { version = "=2.12.5", features = ["dynamic-acl", "unstable"] }
-tauri-plugin-http = "=2.8.3"
-tauri-plugin-opener = "=2.7.2"
-tauri-plugin-clipboard-manager = "=2.3.3"
+tauri-plugin-http = "=2.9.0"
+tauri-plugin-opener = "=2.7.3"
+tauri-plugin-clipboard-manager = "=2.5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 sha2 = "0.10"
 tempfile = "3"
-tauri-plugin-single-instance = "=2.4.0"
+tauri-plugin-single-instance = "=2.5.5"
 tauri-plugin-dialog = "=2.8.4"
-tauri-plugin-notification = "=2.8.0"
-tauri-plugin-updater = "=2.14.0"
+tauri-plugin-notification = "=2.8.1"
+tauri-plugin-updater = "=2.14.1"
 base64 = "0.22"
 # The notification center answers on its own threads: a oneshot and a timeout
 # await it without holding a blocking thread (src/attention.rs). Tauri's runtime.

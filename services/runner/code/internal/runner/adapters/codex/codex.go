@@ -820,8 +820,8 @@ func (s *session) read() {
 						return
 					}
 					if agent.IsInteractiveCommand(call.Tool, call.Arguments) {
-						if m.Redelivered {
-							_ = s.p.Reject(m.ID, toolOutcomeUnknown)
+						if m.Redelivered && !agent.ToolReplaySafe(call.Tool, call.Arguments) {
+							s.replyTool(m.ID, "", toolOutcomeUnknown, false)
 							return
 						}
 						// The Runner presents the command in its own handoff card.

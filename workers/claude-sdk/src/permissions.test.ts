@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
-import { alwaysChoices, commandPrefix, covers, decide, describeUpdates, offered, restoreGrant } from './permissions.js';
+import { runnerApprovesTerminalAction, alwaysChoices, commandPrefix, covers, decide, describeUpdates, offered, restoreGrant } from './permissions.js';
 
 // What CLI 2.1.325 suggested for `npm run lint --silent` in default mode.
 const npmRun: PermissionUpdate[] = [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'npm run *' }], behavior: 'allow', destination: 'localSettings' }];
@@ -118,4 +118,12 @@ test('Bash without suggestions, as SDK 0.3.325 sends for a command a saved rule 
   const exact = decide('Bash', input, choices, { decision: 'accept', always: 'command' }, () => 'g5');
   assert.deepEqual(exact.result, { behavior: 'allow', updatedInput: input, decisionClassification: 'user_permanent' });
   assert.ok(covers(exact.grant!, 'Bash', input) && !covers(exact.grant!, 'Bash', { command: 'npm run build && rm -rf /' }));
+});
+
+test('the Runner owns permission for terminal handoff and its approved input', () => {
+  for (const action of ['interactive', 'interactive_read', 'interactive_write']) {
+    assert.ok(runnerApprovesTerminalAction('mcp__lazybox__command', action));
+    assert.ok(!runnerApprovesTerminalAction('Bash', action));
+  }
+  assert.ok(!runnerApprovesTerminalAction('mcp__lazybox__command', 'start'));
 });

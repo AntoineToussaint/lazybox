@@ -10,7 +10,7 @@ import { NativeStatus } from './status.js';
 import { CommandCatalog } from './catalog.js';
 import { contextReporter } from './context.js';
 import { SettingsApprovals, settingsServer, settingsServerName, updateSettingsTool } from './settings.js';
-import { alwaysChoices, covers, decide, offered, restoreGrant, type Grant } from './permissions.js';
+import { runnerApprovesTerminalAction, alwaysChoices, covers, decide, offered, restoreGrant, type Grant } from './permissions.js';
 import { browserServer, browserServerName } from './browser.js';
 import { generateTitle } from './title.js';
 import { ModelSwitch } from './model.js';
@@ -66,8 +66,8 @@ const callRunner = (name: string, args: unknown) => new Promise<string>((resolve
 export function mcpServers(purpose: string, browser = false, call: typeof callRunner = callRunner): Record<string, McpServerConfig> {
   if (purpose === 'help') return { [settingsServerName]: settingsServer(call, settingsApprovals) };
   if (['planning', 'summary'].includes(purpose)) return {};
-  const commandTool = tool('command', 'Start/read/wait/cancel runner-owned commands with shared console output. Start returns an id; reuse it for read/wait/cancel, never restart a command to read output. interactive proposes argv for the person to review and run in a real terminal for prompts or sign-in. It waits for their decision and the exit status. The person handles all input. actions lists the workspace actions (dev servers and the like, with state and URL); start_action starts one by name (restart: true restarts it); read its output with its commandId.', {
-    action: z.enum(['start', 'read', 'wait', 'cancel', 'actions', 'start_action', 'interactive', 'verify']), cwd: z.string().optional().describe('interactive: optional absolute directory inside the conversation workspace.'), argv: z.array(z.string()).optional(), id: z.string().optional(), offset: z.number().int().nonnegative().optional(),
+  const commandTool = tool('command', 'Start/read/wait/cancel runner-owned commands with shared console output. Start returns an id; reuse it for read/wait/cancel, never restart a command to read output. interactive proposes argv for the person to review and run in a real terminal for prompts or sign-in. Set agentInput to true for ordinary prompts. After approval use interactive_read with the returned id and offset to see prompts and exit status, and interactive_write with id and input to type exact text (include a newline to submit). For credentials omit agentInput so the person types privately and the tool waits for exit. actions lists the workspace actions (dev servers and the like, with state and URL); start_action starts one by name (restart: true restarts it); read its output with its commandId.', {
+    action: z.enum(['start', 'read', 'wait', 'cancel', 'actions', 'start_action', 'interactive', 'interactive_read', 'interactive_write', 'verify']), input: z.string().optional(), agentInput: z.boolean().optional(), cwd: z.string().optional().describe('interactive: optional absolute directory inside the conversation workspace.'), argv: z.array(z.string()).optional(), id: z.string().optional(), offset: z.number().int().nonnegative().optional(),
     member: z.string().optional(), expected: z.string().optional(), regression: z.string().optional(),
     name: z.string().optional().describe('start_action: the action to start, as actions lists it; omit for the default action.'), restart: z.boolean().optional().describe('start_action: restart it if it is running.'),
   }, async args => ({ content: [{ type: 'text', text: await call('lazybox_command', args) }] }));
@@ -86,7 +86,7 @@ async function open(options: any) {
     mcpServers: mcpServers(options.purpose, options.browser === true),
     canUseTool: async (name, original, context): Promise<PermissionResult> => {
       if (name === 'mcp__lazybox__review_finding') return { behavior: 'allow', updatedInput: original };
-      if (name === 'mcp__lazybox__command' && original.action === 'interactive') {
+      if (runnerApprovesTerminalAction(name, original.action)) {
         // The Runner presents the command in its own handoff card.
         return { behavior: 'allow', updatedInput: original };
       }

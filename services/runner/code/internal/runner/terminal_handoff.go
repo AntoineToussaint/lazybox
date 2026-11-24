@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -15,18 +16,19 @@ import (
 )
 
 type terminalHandoff struct {
-	mu           sync.Mutex
-	decided      chan struct{}
-	ctx          context.Context
-	collectionID string
-	cwd          string
-	argv         []string
-	env          []string
-	terminal     *terminals.Terminal
-	rejected     bool
+	mu                sync.Mutex
+	decided           chan struct{}
+	ctx               context.Context
+	collectionID      string
+	cwd               string
+	argv              []string
+	env               []string
+	terminal          *terminals.Terminal
+	agentConversation string
+	rejected          bool
 }
 
-func (b *Bench) requestTerminalHandoff(ctx context.Context, e *Execution, argv []string, cwd string, env []string) (any, error) {
+func (b *Bench) requestTerminalHandoff(ctx context.Context, e *Execution, argv []string, cwd string, env []string, agentInput bool) (any, error) {
 	if e.CollectionID == "" || e.Options.Permission == "read-only" || e.Options.Workflow == "plan" || agent.IsAssistant(e.Purpose) {
 		return nil, errors.New("interactive commands require a writable workspace conversation")
 	}
@@ -51,10 +53,16 @@ func (b *Bench) requestTerminalHandoff(ctx context.Context, e *Execution, argv [
 		decided: make(chan struct{}), ctx: approval, collectionID: e.CollectionID,
 		cwd: dir, argv: argv, env: terminals.Environment(env, e.CollectionID),
 	}
+	if agentInput {
+		if e.ID == "" {
+			return nil, errors.New("agent input requires an execution")
+		}
+		h.agentConversation = conversationOf(e)
+	}
 	b.terminalHandoffs.Store(id, h)
 	defer b.terminalHandoffs.Delete(id)
 	record := func(status, text string, data json.RawMessage) error {
-		return b.Record(e, agent.Event{Type: "terminal_handoff", RequestID: id, Name: e.CollectionID, Status: status, Text: text, Data: data})
+		return b.Record(e, agent.Event{Type: "terminal_handoff", RequestID: id, Name: e.CollectionID, Status: status, TerminalAgentInput: agentInput, Text: text, Data: data})
 	}
 	if err := record("pending", dir, data); err != nil {
 		return nil, err
@@ -79,6 +87,14 @@ func (b *Bench) requestTerminalHandoff(ctx context.Context, e *Execution, argv [
 		return map[string]string{"status": status}, nil
 	}
 	_ = record("running", terminal.Status().ID, nil)
+	if terminal.Status().Spec.AgentConversation != "" {
+		go func() {
+			if result, err := terminal.Wait(b.ctx); err == nil {
+				_ = record("finished", result.ID, nil)
+			}
+		}()
+		return map[string]string{"id": terminal.Status().ID}, nil
+	}
 	wait, stop := context.WithCancel(ctx)
 	defer stop()
 	stopOnShutdown := context.AfterFunc(b.ctx, stop)
@@ -96,9 +112,8 @@ func (b *Bench) requestTerminalHandoff(ctx context.Context, e *Execution, argv [
 }
 
 // DecideTerminalHandoff is called by the owner after reviewing the proposed
-// argv. The approval starts exactly that command under a PTY, with no agent
-// input channel and without either the owner or the agent's Runner credential.
-func (b *Bench) DecideTerminalHandoff(id string, accept bool) (*terminals.Terminal, error) {
+// argv. The approval starts exactly that command under a PTY, without either the owner or the agent's Runner credential.
+func (b *Bench) DecideTerminalHandoff(id string, accept, allowAgentInput bool) (*terminals.Terminal, error) {
 	value, ok := b.terminalHandoffs.Load(id)
 	if !ok {
 		return nil, os.ErrNotExist
@@ -132,9 +147,13 @@ func (b *Bench) DecideTerminalHandoff(id string, accept bool) (*terminals.Termin
 	}
 	// Use a fixed exec wrapper to resolve the executable under the
 	// conversation's PATH and pass each argument literally.
+	var conversation string
+	if allowAgentInput {
+		conversation = h.agentConversation
+	}
 	t, err := b.Terminals.Start(terminals.Spec{
 		CollectionID: h.collectionID, Cwd: dir, Title: "Interactive command",
-		Place: terminals.InteractiveCommandPlace, Shell: "/bin/sh", Env: h.env, Cols: 100, Rows: 30,
+		AgentConversation: conversation, Place: terminals.InteractiveCommandPlace, Shell: "/bin/sh", Env: h.env, Cols: 100, Rows: 30,
 		Args: append([]string{"-c", `exec "$@"`, "lazybox"}, h.argv...),
 	}, "")
 	if err != nil {
@@ -143,4 +162,36 @@ func (b *Bench) DecideTerminalHandoff(id string, accept bool) (*terminals.Termin
 	h.terminal = t
 	close(h.decided)
 	return t, nil
+}
+
+func (b *Bench) interactiveTerminalIO(ctx context.Context, e *Execution, action, id, input string, offset uint64) (any, error) {
+	t, err := b.Terminals.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	spec := t.Status().Spec
+	if e.ID == "" || spec.AgentConversation != conversationOf(e) || spec.CollectionID != e.CollectionID || spec.Place != terminals.InteractiveCommandPlace || e.Options.Permission == "read-only" || e.Options.Workflow == "plan" || agent.IsAssistant(e.Purpose) {
+		return nil, errors.New("this terminal requires agent input approval for this writable conversation; check the existing terminal before starting another command")
+	}
+	if action == "interactive_write" {
+		if len(input) == 0 {
+			return nil, errors.New("terminal input is empty")
+		}
+		if err := t.Write([]byte(input)); err != nil {
+			return nil, err
+		}
+		return map[string]int{"written": len(input)}, nil
+	}
+	read, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	output, from, status, err := t.Next(read, offset)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
+	}
+	next := from + uint64(len(output))
+	return map[string]any{
+		"output": string(output), "offset": next, "truncated": from > offset,
+		"done": status.Done && next >= status.Offset, "exitCode": status.ExitCode,
+		"signal": status.Signal, "error": status.Error,
+	}, nil
 }

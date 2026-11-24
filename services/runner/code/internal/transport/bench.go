@@ -113,7 +113,7 @@ func wireAccount(value *agent.AccountObservation) *pb.AccountObservation {
 	return result
 }
 func wireEvent(e agent.Event) *pb.AgentEvent {
-	return &pb.AgentEvent{Type: e.Type, SessionReference: e.SessionID, TurnId: e.TurnID, RequestId: e.RequestID, OperationId: e.OperationID, Text: e.Text, Status: e.Status, ProviderDataJson: e.Data, AgentId: e.AgentID, ParentAgentId: e.ParentAgentID, Name: e.Name, AgentKind: e.AgentKind, NativeId: e.NativeID, Account: wireAccount(e.Account)}
+	return &pb.AgentEvent{Type: e.Type, SessionReference: e.SessionID, TurnId: e.TurnID, RequestId: e.RequestID, OperationId: e.OperationID, Text: e.Text, Status: e.Status, ProviderDataJson: e.Data, TerminalAgentInput: e.TerminalAgentInput, AgentId: e.AgentID, ParentAgentId: e.ParentAgentID, Name: e.Name, AgentKind: e.AgentKind, NativeId: e.NativeID, Account: wireAccount(e.Account)}
 }
 func wireSession(e *runner.Execution) *pb.Session {
 	s := e.Engine.Snapshot()

@@ -185,3 +185,8 @@ export function restoreGrant(value: unknown): Grant | undefined {
   if (g.all === true && !COMMAND_TOOLS.has(g.tool)) return { ...base, all: true };
   return undefined;
 }
+
+export function runnerApprovesTerminalAction(name: string, action: unknown): boolean {
+  return name === 'mcp__lazybox__command' &&
+    (action === 'interactive' || action === 'interactive_read' || action === 'interactive_write');
+}

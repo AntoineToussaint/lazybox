@@ -8628,23 +8628,24 @@ func (x *Capabilities) GetLiveModel() bool {
 }
 
 type AgentEvent struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	Type             string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
-	SessionReference string                 `protobuf:"bytes,2,opt,name=session_reference,json=sessionReference,proto3" json:"session_reference,omitempty"`
-	TurnId           string                 `protobuf:"bytes,3,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
-	RequestId        string                 `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	OperationId      string                 `protobuf:"bytes,5,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	Text             string                 `protobuf:"bytes,6,opt,name=text,proto3" json:"text,omitempty"`
-	Status           string                 `protobuf:"bytes,7,opt,name=status,proto3" json:"status,omitempty"`
-	ProviderDataJson []byte                 `protobuf:"bytes,8,opt,name=provider_data_json,json=providerDataJson,proto3" json:"provider_data_json,omitempty"`
-	AgentId          string                 `protobuf:"bytes,9,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
-	ParentAgentId    string                 `protobuf:"bytes,10,opt,name=parent_agent_id,json=parentAgentId,proto3" json:"parent_agent_id,omitempty"`
-	Name             string                 `protobuf:"bytes,11,opt,name=name,proto3" json:"name,omitempty"`
-	AgentKind        string                 `protobuf:"bytes,12,opt,name=agent_kind,json=agentKind,proto3" json:"agent_kind,omitempty"`
-	NativeId         string                 `protobuf:"bytes,13,opt,name=native_id,json=nativeId,proto3" json:"native_id,omitempty"`
-	Account          *AccountObservation    `protobuf:"bytes,14,opt,name=account,proto3" json:"account,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Type               string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
+	SessionReference   string                 `protobuf:"bytes,2,opt,name=session_reference,json=sessionReference,proto3" json:"session_reference,omitempty"`
+	TurnId             string                 `protobuf:"bytes,3,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	RequestId          string                 `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	OperationId        string                 `protobuf:"bytes,5,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	Text               string                 `protobuf:"bytes,6,opt,name=text,proto3" json:"text,omitempty"`
+	Status             string                 `protobuf:"bytes,7,opt,name=status,proto3" json:"status,omitempty"`
+	ProviderDataJson   []byte                 `protobuf:"bytes,8,opt,name=provider_data_json,json=providerDataJson,proto3" json:"provider_data_json,omitempty"`
+	AgentId            string                 `protobuf:"bytes,9,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	ParentAgentId      string                 `protobuf:"bytes,10,opt,name=parent_agent_id,json=parentAgentId,proto3" json:"parent_agent_id,omitempty"`
+	Name               string                 `protobuf:"bytes,11,opt,name=name,proto3" json:"name,omitempty"`
+	AgentKind          string                 `protobuf:"bytes,12,opt,name=agent_kind,json=agentKind,proto3" json:"agent_kind,omitempty"`
+	NativeId           string                 `protobuf:"bytes,13,opt,name=native_id,json=nativeId,proto3" json:"native_id,omitempty"`
+	Account            *AccountObservation    `protobuf:"bytes,14,opt,name=account,proto3" json:"account,omitempty"`
+	TerminalAgentInput bool                   `protobuf:"varint,15,opt,name=terminal_agent_input,json=terminalAgentInput,proto3" json:"terminal_agent_input,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *AgentEvent) Reset() {
@@ -8773,6 +8774,13 @@ func (x *AgentEvent) GetAccount() *AccountObservation {
 		return x.Account
 	}
 	return nil
+}
+
+func (x *AgentEvent) GetTerminalAgentInput() bool {
+	if x != nil {
+		return x.TerminalAgentInput
+	}
+	return false
 }
 
 type Session struct {
@@ -38604,11 +38612,12 @@ func (x *UndoDeletionRequest) GetId() string {
 
 // An owner decision on the exact command the Runner showed in the conversation.
 type DecideTerminalHandoffRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	HandoffId     string                 `protobuf:"bytes,1,opt,name=handoff_id,json=handoffId,proto3" json:"handoff_id,omitempty"`
-	Accept        bool                   `protobuf:"varint,2,opt,name=accept,proto3" json:"accept,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	HandoffId       string                 `protobuf:"bytes,1,opt,name=handoff_id,json=handoffId,proto3" json:"handoff_id,omitempty"`
+	Accept          bool                   `protobuf:"varint,2,opt,name=accept,proto3" json:"accept,omitempty"`
+	AllowAgentInput bool                   `protobuf:"varint,3,opt,name=allow_agent_input,json=allowAgentInput,proto3" json:"allow_agent_input,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *DecideTerminalHandoffRequest) Reset() {
@@ -38651,6 +38660,13 @@ func (x *DecideTerminalHandoffRequest) GetHandoffId() string {
 func (x *DecideTerminalHandoffRequest) GetAccept() bool {
 	if x != nil {
 		return x.Accept
+	}
+	return false
+}
+
+func (x *DecideTerminalHandoffRequest) GetAllowAgentInput() bool {
+	if x != nil {
+		return x.AllowAgentInput
 	}
 	return false
 }
@@ -39835,7 +39851,7 @@ const file_api_proto_rawDesc = "" +
 	"\n" +
 	"stop_agent\x18\v \x01(\bR\tstopAgent\x12\x1d\n" +
 	"\n" +
-	"live_model\x18\f \x01(\bR\tliveModel\"\xd5\x03\n" +
+	"live_model\x18\f \x01(\bR\tliveModel\"\x87\x04\n" +
 	"\n" +
 	"AgentEvent\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12+\n" +
@@ -39854,7 +39870,8 @@ const file_api_proto_rawDesc = "" +
 	"\n" +
 	"agent_kind\x18\f \x01(\tR\tagentKind\x12\x1b\n" +
 	"\tnative_id\x18\r \x01(\tR\bnativeId\x12>\n" +
-	"\aaccount\x18\x0e \x01(\v2$.lazybox.bench.v1.AccountObservationR\aaccount\"\xd7\x0e\n" +
+	"\aaccount\x18\x0e \x01(\v2$.lazybox.bench.v1.AccountObservationR\aaccount\x120\n" +
+	"\x14terminal_agent_input\x18\x0f \x01(\bR\x12terminalAgentInput\"\xd7\x0e\n" +
 	"\aSession\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -42490,11 +42507,12 @@ const file_api_proto_rawDesc = "" +
 	"\x1cListPendingDeletionsResponse\x12?\n" +
 	"\tdeletions\x18\x01 \x03(\v2!.lazybox.bench.v1.PendingDeletionR\tdeletions\"%\n" +
 	"\x13UndoDeletionRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\"U\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"\x81\x01\n" +
 	"\x1cDecideTerminalHandoffRequest\x12\x1d\n" +
 	"\n" +
 	"handoff_id\x18\x01 \x01(\tR\thandoffId\x12\x16\n" +
-	"\x06accept\x18\x02 \x01(\bR\x06accept\"\xb9\x01\n" +
+	"\x06accept\x18\x02 \x01(\bR\x06accept\x12*\n" +
+	"\x11allow_agent_input\x18\x03 \x01(\bR\x0fallowAgentInput\"\xb9\x01\n" +
 	"\x1cRunReviewVerificationRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +

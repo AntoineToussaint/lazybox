@@ -33,7 +33,7 @@ test('a screenshot reaches Claude as an image and a refusal as an error', async 
 test('the browser tools are allowed without a per-call prompt in every coding mode, never for the help assistant', () => {
   const allow = (o: Parameters<typeof nativeOptions>[0]) => ((nativeOptions(o, {}).settings as { permissions?: { allow?: string[] } } | undefined)?.permissions?.allow || []);
   for (const permission of [undefined, 'ask', 'read-only', 'yolo']) assert.ok(allow({ cwd: '/w', permission, browser: true }).includes(browserRule), String(permission));
-  assert.deepEqual(nativeOptions({ cwd: '/w', permission: 'ask', browser: true }, {}).settings, { permissions: { ask: ['Bash', 'mcp__lazybox__command'], allow: [browserRule] }, disableClaudeAiConnectors: true });
+  assert.deepEqual(nativeOptions({ cwd: '/w', permission: 'ask', browser: true }, {}).settings, { permissions: { ask: ['Bash', 'Monitor', 'PowerShell', 'mcp__lazybox__command'], allow: [browserRule] }, disableClaudeAiConnectors: true });
   assert.equal(allow({ cwd: '/w', permission: 'ask' }).includes(browserRule), false);
   assert.equal(allow({ cwd: '/w', purpose: 'help', browser: true }).includes(browserRule), false);
 });

@@ -46,6 +46,7 @@ leave out.
 
 ### Claude and your accounts
 
+- **A locked Keychain is not a sign-out** When the macOS Keychain refuses Claude's renewed sign-in, the conversation asks you to unlock the Keychain and send your message again. Your sign-in is still there, so the subscription is no longer marked as needing a sign-in, switched away from, or left out of reviews.
 - **Renaming a subscription keeps its conversations** Conversations on a renamed subscription resume again. They had stopped with "saved account configuration changed; reconcile before resuming".
 - **Continue in Codex when Claude hits its limit** The limit card offers available accounts and can open a fresh Codex conversation in the same workspace with a draft to review.
 - **An Anthropic API key for Claude** Settings → Agents & workspaces → Claude takes an Anthropic API key, the way Anthropic documents for apps built on its Agent SDK. Lazybox keeps it on your Mac and only ever shows its last four characters; the section also says what Claude agents sign in with now.
@@ -225,10 +226,15 @@ leave out.
 - **A refused message is not a dead end** When the agent refuses a message outright, the conversation shows the error and your next message continues it; only a message whose delivery is unknown asks you to check first.
 - **No more stuck "working" after a crash** A Runner that stopped just as a turn ended, or just after sending an ACP agent your message, no longer leaves the conversation working forever.
 
+- **A revoke command that works for every key** When lazybox remote rm cannot revoke this computer's key on the other one, the command it gives (`lazybox link owners revoke -- KEY`) works for a key that begins with a dash too.
 - **A Runner in Kubernetes** `lazybox remote add-kubernetes` reaches a Runner deployed in a cluster through `kubectl exec`, with the same owner handshake and pinned key as SSH; the desktop finds it like any remote Runner.
 
 ### Security
 
+- **Text after -- stays text** In every lazybox command, each word after `--` is an argument even when it looks like an option: `lazybox send review -- try -runner=x` sends that text and never switches the Runner, and `lazybox review verify … -- go test -run X` keeps the command's own options.
+- **Ask asks for every command** With Ask, Claude asks before each Monitor and PowerShell command too, not only Bash, so a saved rule or Claude's own read-only judgement cannot run one unasked, and neither offers "every request" as an always-allow.
+- **Ask never runs without its rules** If Claude did not apply the settings Ask relies on, the conversation stops and says what did not load instead of running commands unasked; in other modes Claude's warning shows in the conversation.
+- **Always allowed lists what still applies** An earlier "every Monitor request" that Claude no longer honours leaves the session menu instead of showing as allowed.
 - **No credential in the address bar** The browser build takes the Runner's credential out of the address bar and history as soon as it reads it.
 - **On this Mac only** The Runner answers only on loopback, to a credential in a file only you can read.
 - **Updates are signed** An update installs only when it matches the key built into your copy of Lazybox; anything else is refused before anything changes.

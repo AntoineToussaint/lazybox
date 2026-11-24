@@ -113,6 +113,39 @@ func TestContextLimitsAndNoOptInNeverRotate(t *testing.T) {
 	}
 }
 
+// A grant the provider dropped is not handed to the next subscription attempt.
+func TestADroppedGrantIsNotHandedToTheNextAttempt(t *testing.T) {
+	s, a, _ := fixture(t, []string{"a", "b"})
+	first := <-a.opened
+	first.Events <- agent.Event{Type: agent.GrantEvent, Data: json.RawMessage(`{"id":"g-wide","label":"every Monitor request","tool":"Monitor","all":true}`)}
+	first.Events <- agent.Event{Type: agent.GrantEvent, Data: json.RawMessage(`{"id":"g-exact","label":"x","tool":"Bash","exact":"make"}`)}
+	first.Events <- agent.Event{Type: agent.GrantDroppedEvent, Data: json.RawMessage(`{"id":"g-wide"}`)}
+	first.Events <- agent.Event{Type: "failure", Status: "exhausted", Account: &agent.AccountObservation{State: "exhausted", ResetAt: time.Now().Add(time.Hour).Unix()}}
+	receive(t, s, "profile_changed")
+	second := <-a.opened
+	if got := second.Open.Grants; len(got) != 1 || got[0].ID != "g-exact" {
+		t.Fatalf("the next attempt holds %+v", got)
+	}
+}
+
+// A Keychain that refused a renewed login leaves the stored login intact: the
+// Claude worker reports it as a provider error naming the cause, which neither
+// switches the subscription nor marks the account as needing a sign-in.
+func TestAKeychainRefusalNeitherRotatesNorMarksTheAccount(t *testing.T) {
+	s, a, state := fixture(t, []string{"a", "b"})
+	first := <-a.opened
+	first.Events <- agent.Event{Type: "failure", Status: "unknown", Text: "oauth_refresh_store_refused", Account: &agent.AccountObservation{State: "unknown", Reason: "oauth_refresh_store_refused"}}
+	if ev := receive(t, s, "failure"); ev.Text != "oauth_refresh_store_refused" {
+		t.Fatalf("the failure lost its cause: %+v", ev)
+	}
+	if first.closed.Load() || len(a.opened) != 0 {
+		t.Fatal("a Keychain refusal switched the subscription")
+	}
+	if got := state.Observation("a"); got.State == "auth_required" || !state.Eligible("a", time.Now()) {
+		t.Fatalf("a Keychain refusal marked the account: %+v", got)
+	}
+}
+
 // Without an account policy (no Switching, or one that is off now) a limit
 // stops the conversation on its account, whatever pool it started with: the
 // person switches. Turning the policy on applies at the next limit.

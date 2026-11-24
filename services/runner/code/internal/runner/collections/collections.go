@@ -69,6 +69,7 @@ type Member struct {
 var ErrBranchExists = errors.New("branch already exists; choose a new collection branch")
 
 type Collection struct {
+	ConversationOrder       []string          `json:"conversationOrder,omitempty"`
 	KeepArtifacts           bool              `json:"keepArtifacts,omitempty"`
 	HourlyWorkflowReview    bool              `json:"hourlyWorkflowReview,omitempty"`
 	Slug                    string            `json:"slug,omitempty"`
@@ -334,6 +335,7 @@ func (c Collection) Branch() string {
 }
 
 func clone(c Collection) Collection {
+	c.ConversationOrder = append([]string(nil), c.ConversationOrder...)
 	c.Members = append([]Member(nil), c.Members...)
 	c.OwnerExecutionIDs = append([]string(nil), c.OwnerExecutionIDs...)
 	if c.Origin != nil {

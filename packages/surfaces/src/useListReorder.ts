@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { holdWorkspaceHover } from './WorkspaceHover';
-import { dropAt, dropSlot, edgeScroll, inOrder, moveBy, movedWords, sameOrder, sameSlot } from './workspace-order';
+import { dropAt, dropSlot, edgeScroll, inOrder, movedWords, sameOrder, sameSlot } from './workspace-order';
 import './list-reorder.css';
 
 /** How far the pointer moves before a press becomes a drag (a click stays a click). */
@@ -12,6 +12,7 @@ type Options<T> = {
   /** The rows in the Runner's order. */
   items: readonly T[];
   name(item: T): string;
+  group?(item: T): unknown;
   /** Keeps the new order (ArrangeWorkspaces). */
   arrange?(ids: string[]): Promise<unknown>;
   onError?(message: string): void;
@@ -30,7 +31,7 @@ type Drag = { id: string; slot: number };
  * the press's default is prevented, a selection is cleared, and the page
  * cannot select while the row moves (`html.is-reordering`).
  */
-export function useListReorder<T extends { id: string }>({ items, name, arrange, onError, grip }: Options<T>) {
+export function useListReorder<T extends { id: string }>({ items, name, arrange, onError, grip, group }: Options<T>) {
   const [pending, setPending] = useState<string[]>();
   const [settled, setSettled] = useState(0);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -52,6 +53,15 @@ export function useListReorder<T extends { id: string }>({ items, name, arrange,
     return () => clearTimeout(timer);
   }, [settled]);
 
+  // Pinned conversations stay above unpinned ones while either group is reordered.
+  const allowedSlot = (id: string, slot: number) => {
+    if (!group) return slot;
+    const rows = live.current.shown;
+    const from = rows.findIndex(row => row.id === id);
+    if (from < 0) return slot;
+    const peers = rows.filter(row => group(row) === group(rows[from]));
+    return Math.max(rows.indexOf(peers[0]), Math.min(rows.indexOf(peers[peers.length - 1]) + 1, slot));
+  };
   const commit = (next: string[], id: string) => {
     const { arrange: keep, onError: fail, shown: rows, name: nameOf } = live.current;
     if (!keep) return;
@@ -61,7 +71,7 @@ export function useListReorder<T extends { id: string }>({ items, name, arrange,
     // In order: the last move is the one the Runner keeps.
     const done = queue.current.then(() => keep(next));
     queue.current = done.catch(() => {});
-    done.then(() => setSettled(Date.now()), error => { setPending(undefined); fail?.(`The workspaces could not be reordered: ${error instanceof Error ? error.message : String(error)}`); });
+    done.then(() => setSettled(Date.now()), error => { setPending(undefined); fail?.(`The rows could not be reordered: ${error instanceof Error ? error.message : String(error)}`); });
   };
   const focusGrip = (id: string) => {
     const previous = document.activeElement;
@@ -79,7 +89,7 @@ export function useListReorder<T extends { id: string }>({ items, name, arrange,
     const rows = () => [...(list.current?.querySelectorAll<HTMLElement>(':scope [data-reorder-id]') || [])].filter(row => row.closest('[data-reorder-list]') === list.current);
     const scroller = (() => { for (let node = list.current?.parentElement; node; node = node.parentElement) { const style = getComputedStyle(node); if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) return node; } return document.scrollingElement as HTMLElement | null; })();
     const place = () => {
-      const slot = dropSlot(rows().map(row => row.getBoundingClientRect()), lastY);
+      const slot = allowedSlot(id, dropSlot(rows().map(row => row.getBoundingClientRect()), lastY));
       if (active && active.slot !== slot) { active = { id, slot }; setDrag(active); }
     };
     const blockSelect = (event: Event) => event.preventDefault();
@@ -160,7 +170,8 @@ export function useListReorder<T extends { id: string }>({ items, name, arrange,
       if (!arrange || !event.altKey || !event.shiftKey || event.metaKey || event.ctrlKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
       if (!(event.target as HTMLElement).closest(grip)) return;
       event.preventDefault(); event.stopPropagation();
-      const next = moveBy(ids, id, event.key === 'ArrowUp' ? -1 : 1);
+      const slot = ids.indexOf(id) + (event.key === 'ArrowUp' ? -1 : 2);
+      const next = dropAt(ids, id, allowedSlot(id, slot));
       if (sameOrder(next, ids)) return;
       commit(next, id);
       focusGrip(id);

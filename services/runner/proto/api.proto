@@ -109,6 +109,8 @@ service RunnerService {
   // answers in, so every window and a paired phone list them alike, across
   // restarts. The owner's only. Answers the list in its new order.
   rpc ArrangeWorkspaces(ArrangeWorkspacesRequest) returns (ListCollectionsResponse);
+  // Keeps the sidebar conversation order on this workspace.
+  rpc ArrangeConversations(ArrangeConversationsRequest) returns (CollectionResponse);
   rpc ArchiveCollection(CollectionRequest) returns (CollectionResponse);
   rpc ReconcileCollection(ReconcileCollectionRequest) returns (CollectionResponse);
   // The owner's only. What a previous Runner left unconfirmed in a workspace
@@ -1632,6 +1634,7 @@ message Collection {
   // When it was created; 0 for a workspace older than the field.
   int64 created_at_unix_millis = 12;
   bool hourly_workflow_review = 13;
+  repeated string conversation_order = 14;
 }
 message CreateCollectionRequest {
   string request_key = 1;
@@ -4615,4 +4618,9 @@ message PlanContract {
   repeated string acceptance_criteria = 5;
   // The spec artifact's title when the plan pinned it.
   string title = 6;
+}
+
+message ArrangeConversationsRequest {
+  string collection_id = 1;
+  repeated string conversation_ids = 2;
 }

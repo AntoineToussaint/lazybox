@@ -440,6 +440,10 @@ within its own Runner. The move shows at once and goes back if the Runner
 refuses it. `useListReorder.ts` is the gesture, `workspace-order.ts` the pure
 half, `collections/arrangement.go` the Runner's.
 
+In an expanded workspace, drag a conversation row or focus it and press
+`⌥⇧↑` or `⌥⇧↓` to move it one place. Pinned conversations stay at the top.
+The Runner saves the order for that workspace across windows and restarts.
+
 **Peek.** Alt-click a peekable row, press Space on it (like Quick Look), or
 choose **Peek** in its context menu to see the item live over the current page
 without navigating: a conversation (its latest messages, status, a message box

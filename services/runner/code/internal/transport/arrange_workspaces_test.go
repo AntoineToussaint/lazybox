@@ -44,3 +44,33 @@ func TestArrangeWorkspacesIsTheOrderListCollectionsAnswersIn(t *testing.T) {
 		t.Fatal("an order past the capacity was taken", err)
 	}
 }
+
+func TestArrangeConversationsOnlyUpdatesItsWorkspace(t *testing.T) {
+	s, _ := collectionService(t)
+	ctx := context.Background()
+	var ids []string
+	for _, name := range []string{"First", "Second"} {
+		result, err := s.CreateCollection(ctx, &pb.CreateCollectionRequest{RequestKey: name, Spec: &pb.CollectionSpec{Name: name}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, result.Collection.Id)
+	}
+	_, err := s.ArrangeConversations(ctx, &pb.ArrangeConversationsRequest{CollectionId: ids[0], ConversationIds: []string{"second", "first"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.ListCollections(ctx, &pb.ListCollectionsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, workspace := range list.Collections {
+		want := ""
+		if workspace.Id == ids[0] {
+			want = "second first"
+		}
+		if order := strings.Join(workspace.ConversationOrder, " "); order != want {
+			t.Fatalf("%s order %q, want %q", workspace.Id, order, want)
+		}
+	}
+}

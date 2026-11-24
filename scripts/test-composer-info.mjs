@@ -40,7 +40,10 @@ try {
   await server.listen(); await mkdir('.cache', { recursive: true });
   browser = await webkit.launch();
   const base = `http://127.0.0.1:${server.httpServer.address().port}`;
-  const url = id => `${base}/?view=workspace&collection=${id === session.id ? 'alpha' : 'beta'}&session=${id}#token=${f.token}`;
+  // The first load brings the bearer in #token=; the app keeps it in the tab's session storage and takes it
+  // out of the address bar, so later loads go to the plain URL (with #token= the same URL is only a fragment
+  // change: no load at all).
+  const url = id => `${base}/?view=workspace&collection=${id === session.id ? 'alpha' : 'beta'}&session=${id}`;
   /** A colour token as the page computes it. */
   const token = (page, name) => page.evaluate(name => { const probe = document.createElement('span'); probe.style.color = `var(--${name})`; document.body.append(probe); const value = getComputedStyle(probe).color; probe.remove(); return value; }, name);
   /** What of the info shows: the agent, the model name, the meter, the percentage. */
@@ -57,7 +60,7 @@ try {
     const errors = await collectPageErrors(page);
     let reads = 0, usageAvailable = true;
     await page.route('**/GetTelemetry', route => { reads++; return route.fulfill({ json: usageAvailable ? telemetry() : { contexts: [], groups: [], recent: [] } }); });
-    await page.goto(url(session.id));
+    await page.goto(`${url(session.id)}#token=${f.token}`);
     const chat = page.locator('.panel-chat'), header = chat.locator('.chat-heading'), composer = chat.locator('form.composer'), info = composer.locator('.composer-info');
     const row = composer.locator('.row'), contextButton = info.getByRole('button', { name: /^Context .*show context and cost/ }), modelButton = info.locator('.composer-info-model');
 

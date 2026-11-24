@@ -327,12 +327,18 @@ fn page_details(view: &Webview, report: Reporter, page: Url) {
             let title: String = details.title.chars().take(300).collect();
             report.send(|id| Event::Title { id, title });
         }
-        let Some(icon) = icon_url(&page, &details.icon) else {
-            return;
-        };
         let report = report.clone();
-        let page_local = is_local(&page);
+        let page = page.clone();
         tauri::async_runtime::spawn(async move {
+            // A page reached by a LAN or tailnet name is on this network too.
+            let resolved = page.clone();
+            let page_local =
+                tauri::async_runtime::spawn_blocking(move || page_is_local(&resolved, resolve))
+                    .await
+                    .unwrap_or(false);
+            let Some(icon) = page_icon(&page, &details.icon, page_local) else {
+                return;
+            };
             if let Ok(icon) = fetch_icon(icon, page_local).await {
                 report.send(|id| Event::Icon { id, icon });
             }
@@ -391,6 +397,28 @@ fn is_local(url: &Url) -> bool {
     }
 }
 
+/// Whether a page is on this machine or a network it is on: by its address's
+/// text, or by what its name resolves to (`nas.lan` on the LAN, a tailnet's
+/// MagicDNS name), with the same test as an icon's address. Such a page's
+/// icons may come from its network, as a page at a local IP's may.
+fn page_is_local(page: &Url, resolve: impl FnOnce(&str) -> Vec<IpAddr>) -> bool {
+    if is_local(page) {
+        return true;
+    }
+    match page.host() {
+        Some(url::Host::Domain(name)) => resolve(name).into_iter().any(local_ip),
+        _ => false,
+    }
+}
+
+/// The addresses a name resolves to now; none when it does not resolve.
+fn resolve(name: &str) -> Vec<IpAddr> {
+    (name, 0)
+        .to_socket_addrs()
+        .map(|addrs| addrs.map(|addr| addr.ip()).collect())
+        .unwrap_or_default()
+}
+
 /// Resolves a name for an icon of a page on the web, and refuses it when any
 /// address it resolves to is local: the connection uses exactly the
 /// addresses checked, so a name that points at this machine (or is made to,
@@ -431,14 +459,19 @@ fn follows(page_local: bool, next: &Url, hops: usize) -> bool {
 }
 /// The icon a page names, else its /favicon.ico. A page on the web never
 /// gets the app to fetch from this machine or the local network.
-pub fn icon_url(page: &Url, named: &str) -> Option<Url> {
+#[cfg(test)]
+fn icon_url(page: &Url, named: &str) -> Option<Url> {
+    page_icon(page, named, is_local(page))
+}
+/// `icon_url` for a page already known to be local or not (`page_is_local`).
+fn page_icon(page: &Url, named: &str, page_local: bool) -> Option<Url> {
     let icon = if named.is_empty() {
         page.join("/favicon.ico").ok()?
     } else {
         page.join(named).ok()?
     };
     let icon = page_url(icon.as_str()).ok()?;
-    (!is_local(&icon) || is_local(page)).then_some(icon)
+    (!is_local(&icon) || page_local).then_some(icon)
 }
 /// What an icon's bytes are, by its declared type or its first bytes.
 pub fn icon_type(declared: &str, bytes: &[u8]) -> Option<&'static str> {
@@ -1048,6 +1081,41 @@ mod tests {
         ] {
             assert!(icon_url(&page, refused).is_none(), "{refused}");
         }
+    }
+
+    /// A page reached by a LAN or tailnet name is a local page: its own icon
+    /// (on its own network) is fetched, as for a page at a local IP. Deciding
+    /// from the text alone refused it.
+    #[test]
+    fn a_page_on_a_lan_or_tailnet_name_keeps_its_icon() {
+        let lookup = |name: &str| -> Vec<IpAddr> {
+            match name {
+                "nas.lan" => vec!["192.168.1.20".parse().unwrap()],
+                "studio.tail1234.ts.net" => vec!["100.101.102.103".parse().unwrap()],
+                "router.home" => vec!["fd00::1".parse().unwrap()],
+                "example.com" => vec!["93.184.216.34".parse().unwrap()],
+                _ => vec![],
+            }
+        };
+        for page in [
+            "http://nas.lan/",
+            "https://studio.tail1234.ts.net/app",
+            "http://router.home/",
+            "http://localhost:3000/",
+            "http://192.168.1.20/",
+        ] {
+            let page = Url::parse(page).unwrap();
+            assert!(page_is_local(&page, lookup), "{page}");
+            assert!(page_icon(&page, "", true).is_some(), "{page}");
+        }
+        for page in ["https://example.com/", "https://unknown.example/"] {
+            assert!(!page_is_local(&Url::parse(page).unwrap(), lookup), "{page}");
+        }
+        // Its icon may be on its network; a web page's still never is.
+        let nas = Url::parse("http://nas.lan/").unwrap();
+        assert!(page_icon(&nas, "http://192.168.1.20/icon.png", true).is_some());
+        let web = Url::parse("https://example.com/").unwrap();
+        assert!(page_icon(&web, "http://192.168.1.20/icon.png", false).is_none());
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::host::Host;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{self, Read, Seek, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread::JoinHandle,
@@ -390,35 +390,51 @@ const QUICK_FAILURE: Duration = Duration::from_secs(2);
 /// Starts `plan` and reports a failure within `watch`, with the first line
 /// the program wrote on stderr. A program still running after `watch` (a
 /// custom command, WezTerm) is left to run and reaped on its own thread: the
-/// returned handle. Its stderr goes to an unnamed temporary file, never a
-/// pipe, so it can write there for as long as it runs and never meets a pipe
-/// nobody reads (full) or one closed under it (SIGPIPE).
+/// returned handle. Its stderr is a pipe drained to its end by a thread of
+/// its own (`children::drain`), which keeps its first 4 KiB for the failure
+/// message and discards the rest: the terminal can write for as long as it
+/// runs, never meets a full pipe or a closed one (SIGPIPE), and nothing it
+/// writes accumulates anywhere.
 fn start(
     plan: &Launch,
     runner: Option<&Path>,
     watch: Duration,
 ) -> Result<Option<JoinHandle<io::Result<ExitStatus>>>, String> {
     let fail = |_| "Could not start the terminal".to_string();
-    let mut errors = tempfile::tempfile().map_err(fail)?;
     let mut command = Command::new(&plan.program);
     command
         .args(&plan.args)
         .current_dir(&plan.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(errors.try_clone().map_err(fail)?);
+        .stderr(Stdio::piped());
     if let Some(endpoint) = runner {
         command.env("LAZYBOX_RUNNER", endpoint);
     }
     let mut child = command.spawn().map_err(fail)?;
+    let errors = match child.stderr.take().map(crate::children::drain) {
+        Some(Ok(errors)) => errors,
+        _ => {
+            let _ = child.kill();
+            let _ = crate::children::reap(child);
+            return Err("Could not start the terminal".into());
+        }
+    };
     let deadline = Instant::now() + watch;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if !status.success() => {
-                let mut text = String::new();
-                if errors.rewind().is_ok() {
-                    let _ = (&mut errors).take(4096).read_to_string(&mut text);
+                // Its stderr ends with it, unless something it started still
+                // holds it: then the message goes without the detail.
+                let ended = Instant::now() + Duration::from_secs(1);
+                while !errors.is_finished() && Instant::now() < ended {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
+                let text = if errors.is_finished() {
+                    String::from_utf8_lossy(&errors.join().unwrap_or_default()).into_owned()
+                } else {
+                    String::new()
+                };
                 let detail = text.lines().next().unwrap_or("").trim().to_string();
                 return Err(if detail.is_empty() {
                     "The terminal did not open".to_string()

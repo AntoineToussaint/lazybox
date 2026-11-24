@@ -79,7 +79,7 @@ it did.
   as its text, and anything else (a PDF, an archive, longer text) as a file
   the agent opens itself. The sent message shows the same boxes; hover one
   to see how the agent got it.
-- **Interrupt** (in the live bar at the bottom) stops the running turn. An
+- **Interrupt** (in the live bar at the bottom) stops the running turn and asks the provider to stop its active sub-agents, including nested ones. Lazybox reports any child it could not stop. An
   interrupt is never treated as an error: send your next message and the agent
   carries on.
 - **Permission** can change mid-conversation from the session menu (⋯):
@@ -371,8 +371,8 @@ step it is on (*Reading platform/bin/devbox*), elapsed time, tool count and
 tokens; once it ends, its outcome and the result it handed back. Open a card to
 follow its own messages and tool calls in a panel docked beside the chat, or
 floating. **■ Stop** on a running sub-agent's card, its chip or its row in
-Background work (or `Delete` / `⌫` there) stops that one sub-agent (Claude);
-the main agent continues. It reads *Stopping…* until Claude reports the end,
+Background work (or `Delete` / `⌫` there) stops that one sub-agent (Claude or Codex);
+the main agent continues. It reads *Stopping…* until the provider reports the end,
 then *Stopped by you*. A skill Claude runs in a sub-agent of its own (a forked
 `/code-review`) has no stop of its own: interrupt the turn to end it. A
 sub-agent the turn waited on cannot outlive the turn: if its end was never

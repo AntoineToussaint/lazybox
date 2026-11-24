@@ -144,8 +144,8 @@ try {
   Object.assign(session, { recoveryRequired: true, closed: true, status: 'interrupted' });
   f.ownership.set('beta-session', { processes: [{ kind: 'command', sessionId: 'beta-session', commandId: 'c1', label: 'go test ./...', commandLine: 'go test ./...', pid: 0, state: 'unknown', detail: 'Lazybox recorded no process for it, so it cannot check.' }] });
   await nav.getByLabel('Actions for Beta release', { exact: true }).click();
-  await page.getByRole('button', { name: 'Delete conversation…', exact: true }).click();
-  const conversation = page.getByRole('dialog', { name: 'Delete conversation' });
+  await page.getByRole('button', { name: 'Delete conversation', exact: true }).click();
+  const conversation = page.getByRole('dialog', { name: 'Unconfirmed conversation processes' });
   const conversationPanel = conversation.getByRole('region', { name: 'Unconfirmed processes' });
   await expect(conversationPanel).toContainText('Deleting this conversation waits until that is settled.');
   await expect(conversationPanel).toContainText('Command go test ./...');
@@ -154,7 +154,7 @@ try {
   await expect(conversationPanel.getByRole('button', { name: 'They’re already stopped, continue' })).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(conversationPanel).toHaveCount(0);
-  await expect(conversation.getByRole('button', { name: 'Delete conversation' })).toBeEnabled();
+  await expect(page.getByText('Conversation moved to Recently deleted',{exact:true})).toBeVisible();
   assert.equal(session.recoveryRequired, false);
   await page.keyboard.press('Escape');
 

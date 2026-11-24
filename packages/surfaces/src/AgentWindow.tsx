@@ -11,7 +11,7 @@ import { useKeyboardNavigation, useKeyboardAction, useKeymap, useMenuSnippet, ty
 import { continueConversation } from './transcript-cache';
 import { useChatScroll } from './useChatScroll';
 import { sessionModelLabel, sessionAccountLabel, conversationProvider, conversationTitle, titleFromMessage, branchSummary } from './conversation-model';
-import { DeleteConversationDialog } from './DeleteConversationDialog';
+import { useDeleteConversation } from './useDeleteConversation';
 import { useFileOpener, type OpenModifiers } from './file-links';
 import type { FileLink } from './file-reference';
 import { useTranscript } from './useTranscript';
@@ -203,7 +203,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // A failed refresh of the session is current state, not an event: the next
   // successful refresh clears it (a Runner restart must not leave a stale alarm).
   const [refreshError, setRefreshError] = useState('');
-  const [deleting, setDeleting] = useState(false);
+  const deletion = useDeleteConversation();
   const [switchingSubscription, setSwitchingSubscription] = useState(false);
   const fileLinks = useFileOpener(session?.collectionId, viewState);
   // Stable, so the memoized messages do not re-render when the opener does.
@@ -745,18 +745,18 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
               detailButton={detailButton} review={!assistant && <ReviewChatButton review={chatReview} keys={keymap['review.start']}/>}
               onContextMenu={contextMenu('session', () => [...chatReview.menuItems, onOpenChat && { label: 'Open in its own window', icon: 'external', run: onOpenChat }, 'separator', ...withHandoff(sessionMenuItems({ session, allowStart,
                 onChangePermission: mode => void changePermission(mode), onRestartWithPermission: setRestartTo, onSwitchSubscription: () => setSwitchingSubscription(true), onGiveBrowser: () => void giveBrowser(),
-                onNewSession: newSession, onClose: () => void close(), onDelete: () => setDeleting(true), activity, models: slash.models, sessionID }), conversationHandoffItems(api, session, info))], { sessionId: sessionID })}
+                onNewSession: newSession, onClose: () => void close(), onDelete: () => session && void deletion.remove(session, newSession), activity, models: slash.models, sessionID }), conversationHandoffItems(api, session, info))], { sessionId: sessionID })}
               onPickModel={session && !session.closed ? slash.models.pick : undefined}
               onSwitchSubscription={session && !session.closed ? () => setSwitchingSubscription(true) : undefined}
               menu={<SessionMenu session={session} sessionID={sessionID} accountName={shownAccount} stream={stream} allowStart={allowStart}
                 onChangePermission={mode => void changePermission(mode)} onRestartWithPermission={setRestartTo}
                 onSwitchSubscription={() => setSwitchingSubscription(true)} onGiveBrowser={() => void giveBrowser()}
-                onNewSession={newSession} onClose={() => void close()} onDelete={() => setDeleting(true)} activity={activity} models={slash.models} extra={chatReview.menuItems}/>}/>
+                onNewSession={newSession} onClose={() => void close()} onDelete={() => session && void deletion.remove(session, newSession)} activity={activity} models={slash.models} extra={chatReview.menuItems}/>}/>
             : <SessionHeader agentName={agentName} session={session} sessionID={sessionID} title={title} status={status} modelLabel={modelLabel} inspection={inspection}
               accountName={shownAccount} lifecycle={<>{detailButton}{lifecycle}</>}/>}
           {drop.dragging && <div className="file-drop-hint" role="status">Drop files to attach</div>}
           {session?.closed && <ResumeBar session={session} canResumeOnSend={canResumeOnSend} onResume={resumeSession} onError={setError}/>}
-          {deleting && session && <DeleteConversationDialog session={session} onClose={() => setDeleting(false)} onDeleted={() => { setDeleting(false); newSession(); }}/>}
+          {deletion.ownership}
           {fileLinks.element}
           {slash.dialogs}
           {chatReview.dialog}

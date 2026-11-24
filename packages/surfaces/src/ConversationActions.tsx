@@ -10,7 +10,7 @@ import { conversationOpeners } from './conversation-requests';
 import { copyText, showMenuNotice, type MenuItem } from './ContextMenu';
 import { openPeek } from './Peek';
 import { conversationHandoffItems } from './handoff';
-import { DeleteConversationDialog } from './DeleteConversationDialog';
+import { useDeleteConversation } from './useDeleteConversation';
 import { ConfirmDialog } from './ConfirmDialog';
 import type { ViewTarget } from './workspace-model';
 
@@ -18,19 +18,19 @@ import type { ViewTarget } from './workspace-model';
  * A conversation row is the same object in every list (Workspaces, Agents,
  * the Inbox, History): one menu, in one order, from one place. Opening comes
  * first, then naming and marking, then the agent, and the two that take the
- * conversation away come last, apart, each behind a confirmation.
+ * conversation away come last, apart, with Undo for deletion.
  *
  *   Open · Open in new tab · Open beside · Open below · Open in new window ·
  *   Move to new page · Peek
  *   Close other tabs · Close tabs to the right (when its tab has neighbours)
  *   Rename · Pin · Mark as read
  *   Copy ID · Stop · Open in Terminal · Continue in Claude Code…
- *   Archive… · Delete…
+ *   Archive… · Delete
  */
 export function useConversationActions({ onOpen, onDeleted }: { onOpen?(target: ViewTarget): void; onDeleted?(session: Session): void } = {}) {
   const { api, info, refresh } = useRunner();
   const { seen, mark } = useSeen();
-  const [deleting, setDeleting] = useState<Session>();
+  const deletion = useDeleteConversation();
   const [archiving, setArchiving] = useState<Session>();
   // In a window showing several Runners, a conversation names its own: opening it shows that Runner's page.
   const { id: runner, multi } = useRunnerIdentity();
@@ -86,15 +86,15 @@ export function useConversationActions({ onOpen, onDeleted }: { onOpen?(target: 
       archived
         ? { label: 'Unarchive', icon: 'archive', run: () => void unarchive(session) }
         : { label: 'Archive…', icon: 'archive', run: () => setArchiving(session) },
-      { label: 'Delete…', icon: 'close', danger: true, run: () => setDeleting(session) },
+      { label: 'Delete', icon: 'close', danger: true, run: () => void deletion.remove(session, () => onDeleted?.(session)) },
     ];
   };
 
   const dialogs = <>
     {archiving && <ArchiveConversationDialog session={archiving} onClose={() => setArchiving(undefined)}/>}
-    {deleting && <DeleteConversationDialog session={deleting} onClose={() => setDeleting(undefined)} onDeleted={() => { const gone = deleting; setDeleting(undefined); onDeleted?.(gone); }}/>}
+    {deletion.ownership}
   </>;
-  return { items, dialogs, pin, markRead, stop, unread, remove: setDeleting, archive: setArchiving };
+  return { items, dialogs, pin, markRead, stop, unread, remove: (session: Session) => deletion.remove(session, () => onDeleted?.(session)), archive: setArchiving };
 }
 
 /** Archiving asks first: it is reversible, but the conversation leaves the lists. */

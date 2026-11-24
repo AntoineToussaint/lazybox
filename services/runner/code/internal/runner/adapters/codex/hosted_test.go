@@ -36,7 +36,8 @@ func fixtureAppServer() {
 				Input []struct {
 					Text string `json:"text"`
 				} `json:"input"`
-				ThreadID       string          `json:"threadId"`
+				ThreadID       string `json:"threadId"`
+				TurnID         string
 				LastTurnID     string          `json:"lastTurnId"`
 				Cwd            string          `json:"cwd"`
 				ExcludeTurns   bool            `json:"excludeTurns"`
@@ -70,7 +71,17 @@ func fixtureAppServer() {
 				continue
 			}
 			send(map[string]any{"id": m.ID, "result": map[string]any{"model": "fixture-model", "cwd": m.Params.Cwd, "thread": map[string]string{"id": "new-thread"}}})
+		case "turn/interrupt":
+			if m.Params.ThreadID != "test-child" || m.Params.TurnID != "child-turn" {
+				send(map[string]any{"id": m.ID, "error": map[string]any{"code": -32602, "message": "wrong interrupt target"}})
+			} else {
+				send(map[string]any{"id": m.ID, "result": map[string]any{}})
+			}
 		case "thread/turns/list":
+			if m.Params.ThreadID == "test-child" {
+				send(map[string]any{"id": m.ID, "result": map[string]any{"data": []map[string]string{{"id": "child-turn", "status": "inProgress"}}}})
+				continue
+			}
 			turn := "turn-1"
 			if os.Getenv("FIXTURE_FORK_WRONG_TURN") != "" {
 				turn = "later-turn"
@@ -897,5 +908,22 @@ func TestFullAccessStopsNativeCommandPromptsInRunningTurn(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+func TestStopChildUsesItsNativeTurn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := (Adapter{Binary: binary}).Open(ctx, agent.Open{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Apply(ctx, agent.Operation{ID: "stop", Kind: agent.StopAgent, NativeID: "test-child"}); err != nil {
+		t.Fatal(err)
 	}
 }

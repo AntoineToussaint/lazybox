@@ -434,7 +434,7 @@ func (s *session) Reference() string { s.mu.Lock(); defer s.mu.Unlock(); return 
 // currentModel is the model of the conversation's next turn.
 func (s *session) currentModel() string { s.mu.Lock(); defer s.mu.Unlock(); return s.model }
 func (s *session) Capabilities() agent.Capabilities {
-	return agent.Capabilities{Images: true, Files: true, Questions: s.workflow == "plan", Approvals: true, Steer: true, Resume: true, Subagents: true, LivePermission: true, LiveModel: true, ProfileIsolation: "environment; cross-account resume unverified"}
+	return agent.Capabilities{Images: true, Files: true, Questions: s.workflow == "plan", Approvals: true, Steer: true, Resume: true, Subagents: true, StopAgent: true, LivePermission: true, LiveModel: true, ProfileIsolation: "environment; cross-account resume unverified"}
 }
 func (s *session) emit(ev agent.Event) bool {
 	select {
@@ -474,6 +474,32 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 	ref, turn := s.ref, s.turn
 	s.mu.Unlock()
 	switch op.Kind {
+	case agent.StopAgent:
+		if op.NativeID == "" || op.NativeID == ref {
+			return r, errors.New("Codex child thread required")
+		}
+		result, err := s.p.Call(ctx, "thread/turns/list", map[string]any{
+			"threadId": op.NativeID, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded",
+		})
+		if err != nil {
+			return r, err
+		}
+		var page struct{ Data []struct{ ID, Status string } }
+		if err := json.Unmarshal(result, &page); err != nil {
+			return r, err
+		}
+		if len(page.Data) != 1 || page.Data[0].ID == "" {
+			return r, errors.New("Codex has not reported a turn for this child")
+		}
+		switch page.Data[0].Status {
+		case "completed", "failed", "interrupted":
+			return r, nil
+		case "inProgress":
+			_, err = s.p.Call(ctx, "turn/interrupt", map[string]string{"threadId": op.NativeID, "turnId": page.Data[0].ID})
+			return r, err
+		default:
+			return r, fmt.Errorf("unknown Codex child turn status %q", page.Data[0].Status)
+		}
 	case agent.Message, agent.Steer, agent.Interrupt:
 		method := "turn/start"
 		params := map[string]any{"threadId": ref}
@@ -786,6 +812,9 @@ func (s *session) read() {
 			}
 			root := s.Reference()
 			ev := agent.Event{SessionID: p.ThreadID, TurnID: p.TurnID, AgentID: actorID(p.ThreadID, root)}
+			if ev.AgentID != "root" {
+				ev.NativeID = p.ThreadID
+			}
 			if ev.AgentID != "root" {
 				ev.ParentAgentID = "root"
 				ev.NativeID = p.ThreadID

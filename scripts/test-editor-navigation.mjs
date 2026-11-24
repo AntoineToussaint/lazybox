@@ -36,33 +36,13 @@ try{
  await page.screenshot({path:'/tmp/lazybox-editor-verified.png'});
  await dialog.getByRole('button',{name:'Close file preview'}).click();await dialog.getByRole('button',{name:'Discard changes',exact:true}).click();await expect(dialog).toHaveCount(0);
  await page.getByLabel('Actions for Renamed',{exact:true}).click();await page.getByRole('button',{name:'Manage repositories…',exact:true}).click();await expect(page.getByRole('dialog',{name:'Repositories in Renamed'})).toBeVisible();await expect(page.getByRole('button',{name:'Add repositories to Renamed',exact:true})).toBeVisible();await page.keyboard.press('Escape');
- await page.getByLabel('Actions for Renamed',{exact:true}).click();await page.getByRole('button',{name:'Delete conversation…',exact:true}).first().click();
- const deletion=page.getByRole('dialog',{name:'Delete conversation',exact:true});await expect(deletion.getByRole('button',{name:'Delete conversation',exact:true})).toBeDisabled();
- // The confirmation reads as one: the name is a subtitle (one heading), the box and its words share a line,
- // and the danger button is plainly off until the box is ticked, then a full danger fill.
- {
-  await expect(deletion.getByRole('button',{name:'Cancel',exact:true})).toBeFocused();await expect(deletion.getByRole('heading')).toHaveCount(1);await expect(deletion.getByRole('heading')).toHaveText('Delete conversation?');
-  const token=name=>page.evaluate(name=>{const probe=document.createElement('span');probe.style.background=`var(--${name})`;document.body.append(probe);const value=getComputedStyle(probe).backgroundColor;probe.remove();return value;},name);
-  const label=deletion.locator('label').filter({hasText:'Stop its agent and running commands before deleting'}),box=label.getByRole('checkbox');
-  await expect(box).toHaveAccessibleName('Stop its agent and running commands before deleting');
-  const b=await box.boundingBox(),l=await label.boundingBox(),text=await label.locator('.confirm-check-text').boundingBox();
-  const line=await label.evaluate(node=>parseFloat(getComputedStyle(node).lineHeight));
-  assert.ok(text.height<line*1.5,`the label is one line (${text.height}px for ${line}px lines)`);
-  assert.ok(b.x+b.width<=text.x&&text.x-(b.x+b.width)<14,'the box sits just left of its words');
-  assert.ok(Math.abs((b.y+b.height/2)-(text.y+line/2))<1.5,'the box is centred on the first line of its words');
-  assert.ok(l.height<line*1.5+2,'box and words: one row');
-  const confirm=deletion.getByRole('button',{name:'Delete conversation',exact:true});
-  assert.equal(await confirm.evaluate(node=>getComputedStyle(node).opacity),'1','off is plain grey, not faded red');
-  assert.equal(await confirm.evaluate(node=>getComputedStyle(node).backgroundColor),await token('surface-strong'));
-  await page.mouse.move(0,0);
-  for(const scheme of ['light','dark']){await page.emulateMedia({colorScheme:scheme});await page.waitForTimeout(200);await deletion.screenshot({path:`.cache/confirm-delete-conversation-${scheme}.png`});}
-  await box.check();
-  await expect(confirm).toBeEnabled();
-  // Buttons ease their background (workspace.css): the fill settles within a frame or two.
-  await expect.poll(()=>confirm.evaluate(node=>getComputedStyle(node).backgroundColor),{message:'ticked: a full danger fill'}).toBe(await token('danger-solid'));
-  for(const scheme of ['light','dark']){await page.emulateMedia({colorScheme:scheme});await page.waitForTimeout(200);await deletion.screenshot({path:`.cache/confirm-delete-conversation-ready-${scheme}.png`});}
-  await page.emulateMedia({colorScheme:null});
- }await deletion.getByRole('button',{name:'Delete conversation',exact:true}).click();await expect(deletion).toHaveCount(0);await expect(page.locator('.workspace-agent-label').filter({hasText:'model-fixture'})).toHaveCount(0);
+ await page.getByLabel('Actions for Renamed',{exact:true}).click();await page.getByRole('button',{name:'Delete conversation',exact:true}).first().click();
+ await expect(page.locator('.workspace-agent[title*="model-fixture"]')).toHaveCount(0);
  assert.equal(fixture.mutations.filter(call=>call.method==='ScheduleDeletion').length,1);assert.equal(fixture.collections.length,2);
+ await page.reload();
+ const trash=page.getByRole('region',{name:'Recently deleted'});
+ await trash.locator('summary').click();
+ await trash.getByRole('button',{name:/Undo deletion of /}).click();
+ await expect(page.locator('.workspace-agent[title*="model-fixture"]')).toBeVisible();
  assert.deepEqual(errors,[]);console.log('PASS: metadata, rename without replay, cached navigation/draft, scoped repository management, tall Monaco editing, version conflict, unsaved guard, deletion. WebKit fixtures only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

@@ -208,16 +208,8 @@ async function tabsOn(){
  await expect(chatTabs).toHaveCount(6);
  // A conversation deleted leaves its tab.
  await row('Review of the main conversation').click({button:'right'});
- await page.getByRole('menuitem',{name:/^Delete…/}).click();
- const dialog=page.getByRole('dialog',{name:'Delete conversation'});
- const stop=dialog.getByRole('checkbox');
- await expect(dialog.getByRole('button',{name:/Delete conversation|Stop and delete/})).toBeVisible();
- // This fixture has an open session. Its required checkbox arrives after
- // the resource lookup; button visibility does not mean that lookup finished.
- await expect(stop).toBeVisible();
- await stop.check();
- await dialog.getByRole('button',{name:/Delete conversation|Stop and delete/}).click();
- await expect(dialog).toHaveCount(0);
+ await page.getByRole('menuitem',{name:/^Delete$/}).click();
+ await expect(page.getByText('Conversation moved to Recently deleted',{exact:true})).toBeVisible();
  await expect(tab('Review of the main conversation')).toHaveCount(0);
  await expect(chatTabs).toHaveCount(5);
  // Another workspace's conversation, ⌘-clicked in Agents: the window goes to that workspace; this one's page does not get it.

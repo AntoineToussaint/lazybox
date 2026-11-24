@@ -25,7 +25,7 @@ func TestEachBuiltinSectionTextIsPinnedToItsVersion(t *testing.T) {
 		version int
 		sum     string
 	}{
-		"workspace":     {9, "c9f3a2749e6d30e6"},
+		"workspace":     {10, "d2800f315e61b3bc"},
 		"run":           {6, "974f612d0e469ff3"},
 		"documents":     {6, "f57f81ccf9d13ef7"},
 		"conversations": {2, "9eef1f6b082a54f4"},

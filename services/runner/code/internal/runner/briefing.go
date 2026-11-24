@@ -60,6 +60,7 @@ var builtinBriefings = []builtinBriefing{
 		{version: 7, since: "Repeat the destination before every command", note: "For terminal buttons, repeat the destination in each paragraph: run in the home checkout of <repository>: `<command>`, or run in your home folder: `<command>`. Put prerequisites and ordering on separate lines. If confirmation is needed, offer one command at a time. For destructive commands, direct the person to Paste in terminal so they can review before pressing Return."},
 		{version: 8, since: "lazybox workspace rename", note: "When the person asks to rename this workspace, use `lazybox workspace rename \"DISPLAY NAME\"` to update its sidebar name."},
 		{version: 9, since: "ask once using a blocking question tool", note: "When progress requires the person's decision, ask once using a blocking question tool if available, then wait for their answer. If a goal hook continues the turn while the same decision is pending, leave the action pending and work only on independent steps. Silence is not authorization."},
+		{version: 10, since: "with agentInput enabled", note: "Use interactive with agentInput enabled for ordinary prompts. After approval, use interactive_read to see the prompt and interactive_write to answer. Keep sign-in handoffs private."},
 	}},
 	{id: "run", text: runBriefing, changes: []briefingChange{
 		{version: 1, since: "## Running commands in Lazybox", note: "Run tests, builds and other noisy commands as `lazybox run -- <command>`: the person sees the full output; you get a compact view that keeps the failures."},

@@ -23,6 +23,7 @@ const PERIODS = {
 const state = {
   period: 'week',
   usage: null,
+  pulls: null,
   conversations: new Map(), // conversationId → {sessionId, title, workspaceName}
   canShow: false,
   filter: { workspace: null, model: null },
@@ -171,9 +172,10 @@ function render() {
   const period = timed ? state.period : 'all';
   const win = timed ? windowOf(period, now, rows[0]?.at) : null;
   // Without a series (an older Lazybox), all time from the groups, and no chart.
-  const view = timed ? summarize(rows, win) : summarize(usage.groups.map(g => ({ ...g, at: 0, unpriced: 0 })), null);
+  const view = timed ? summarize(rows, win) : summarize(usage.groups.map(g => ({ ...g, at: 0 })), null);
   state.view = { ...view, win, period };
 
+  renderPullCosts(view, timed ? rows : usage.groups, win);
   renderPeriod(timed);
   renderHero(view, win, period, rows);
   renderFilters();
@@ -195,6 +197,42 @@ function render() {
       action: state.canShow && known?.sessionId ? () => show(known.sessionId) : null, actionLabel: 'Show',
     };
   }), view.total.usd, 8, 'No conversation spent anything in this period');
+}
+
+function renderPullCosts(view, rows, win) {
+  const list = $('by-pull');
+  const result = state.pulls;
+  if (!result || result.error || result.truncated || (result.truncated === undefined && result.pulls.length >= 100)) {
+    list.replaceChildren(el('li', 'none', result?.error || (result ? 'The tracked PR list is incomplete.' : 'Allow access to tracked pull requests to see estimates.')));
+    return;
+  }
+  const byWorkspace = new Map();
+  for (const pull of result.pulls) {
+    if (!byWorkspace.has(pull.workspaceId)) byWorkspace.set(pull.workspaceId, new Map());
+    const pulls = byWorkspace.get(pull.workspaceId);
+    if (!pulls.has(pull.key)) pulls.set(pull.key, { label: pull.repository + '#' + pull.number, conversations: new Set() });
+    if (pull.conversationId) pulls.get(pull.key).conversations.add(pull.conversationId);
+  }
+  const groups = [];
+  for (const workspace of view.workspaces) {
+    const pulls = [...(byWorkspace.get(workspace.key)?.values() || [])];
+    if (!pulls.length) continue;
+    if (pulls.length === 1) {
+      groups.push({ label: pulls[0].label, sub: workspace.name + ' · workspace estimate', detail: workspace });
+      continue;
+    }
+    const shared = blank();
+    for (const pull of pulls) pull.detail = blank();
+    for (const row of rows) {
+      if (row.workspaceId !== workspace.key || !passes(row) || (win && (row.at < win.start || row.at >= win.end))) continue;
+      const linked = pulls.filter(p => p.conversations.has(row.conversationId));
+      add(linked.length === 1 ? linked[0].detail : shared, row);
+    }
+    for (const pull of pulls) groups.push({ label: pull.label, sub: workspace.name + ' · linked conversation estimate', detail: pull.detail });
+    if (shared.records) groups.push({ label: 'Shared workspace usage', sub: workspace.name, detail: shared });
+  }
+  renderRank(list, 'pull', groups.map(g => ({ ...g, usd: g.detail.usd })).sort((a, b) => b.usd - a.usd),
+    view.total.usd, 8, 'No tracked pull requests in workspaces with usage this period');
 }
 
 function renderPeriod(timed) {
@@ -482,10 +520,12 @@ async function refresh() {
   try {
     const info = await lazybox.ready;
     state.canShow = info.grants.includes('show:conversations');
-    const [usage, sessions] = await Promise.all([
+    const [usage, sessions, pulls] = await Promise.all([
       lazybox.usage.read({ series: true }),
       lazybox.sessions.list({ limit: 500 }).catch(() => ({ conversations: [] })),
+      info.grants.includes('read:pulls') ? lazybox.pulls.list().catch(error => ({ error: error.message || 'Could not read tracked pull requests.' })) : null,
     ]);
+    state.pulls = pulls;
     state.conversations = new Map(sessions.conversations.map(c => [c.conversationId, { sessionId: c.sessionId, title: c.title, workspaceName: c.workspaceName }]));
     state.usage = usage;
     assignSlots(usage.series || usage.groups);

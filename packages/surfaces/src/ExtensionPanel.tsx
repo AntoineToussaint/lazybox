@@ -73,6 +73,10 @@ function ExtensionPanel({ viewState, collections, workspaceId, onShowPanel, onPa
   }, [extensionRequest]);
   const { value, error } = useExtensions();
   const extension = choice ? value?.extensions.find(e => e.id === choice.id) : undefined;
+  useEffect(() => {
+    // Keep the install sheet mounted until the person approves a bundled example.
+    if (choice && !extension && value?.examples.some(example => example.id === choice.id && !example.installed)) setChoice(undefined);
+  }, [choice, extension, value]);
   const panel = extension?.panels.find(p => p.id === choice?.panel) || extension?.panels[0];
   useEffect(() => {
     onPanelTitle?.(extension && panel ? { text: panel.title, tooltip: `${panel.title} · ${extension.name || extension.id} (extension)` } : undefined);
@@ -228,9 +232,10 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
       'pulls.list': async params => {
         const workspaceId = typeof params.workspaceId === 'string' ? stringParam(params, 'workspaceId') : undefined;
         const result = await client.listLinks(workspaceId ? { collectionId: workspaceId } : { all: true });
-        return { pulls: deliveredPulls(result.links).slice(0, 100).map(pull => ({
+        const delivered = deliveredPulls(result.links);
+        return { truncated: delivered.length > 100, pulls: delivered.slice(0, 100).map(pull => ({
           key: pull.key, title: pull.title, repository: pull.repository, number: pull.number, status: pull.status,
-          workspaceId: pull.link.collectionId, sessionId: pull.link.sessionId, url: pull.url, detail: pull.detail,
+          workspaceId: pull.link.collectionId, conversationId: pull.link.conversationId, sessionId: pull.link.sessionId, url: pull.url, detail: pull.detail,
           checkUrl: pull.link.item?.pullRequest?.failingChecks?.[0]?.url || '',
           checks: pull.link.item?.pullRequest?.checks || '',
         })), error: result.trackingError };

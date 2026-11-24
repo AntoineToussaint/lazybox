@@ -81,7 +81,7 @@ export function projectUsage(reports: readonly { workspaceId: string; report: Te
         workspaceId, workspaceName: name, conversationId: g.scope?.conversation || '',
         model: g.model, provider: g.scope?.provider || '',
         ...tokenCounts(g.tokens),
-        usd, records: Number(g.records || 0n),
+        usd, unpriced: Number(g.unpriced || 0n), records: Number(g.records || 0n),
       });
     }
     if (options.series) for (const b of report.series) {

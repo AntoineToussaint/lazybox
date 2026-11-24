@@ -59,7 +59,7 @@ declare namespace Lazybox {
     workspaceId: string; workspaceName: string; conversationId: string; model: string; provider: string;
     inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number;
     /** Dollars; null when unpriced. */
-    usd: number | null; records: number;
+    usd: number | null; records: number; unpriced: number;
   }
   /** Usage in one hour: `at` is the hour's start (UTC), Unix milliseconds. */
   interface UsageHour extends UsageGroup { at: number; unpriced: number }
@@ -96,7 +96,7 @@ declare namespace Lazybox {
     /** read:releases — deployments for workspace repositories. */
     releases: { list(): Promise<{ items: { id: string; repository: string; environment: string; reason: string; url: string }[]; truncated: boolean }> };
     /** read:pulls — metadata for tracked pull requests. */
-    pulls: { list(workspaceId?: string): Promise<{ pulls: { key: string; title: string; repository: string; number: number; status: string; detail: string; workspaceId: string; sessionId: string; url: string; checkUrl: string; checks: string }[]; error: string }> };
+    pulls: { list(workspaceId?: string): Promise<{ truncated: boolean; pulls: { conversationId: string; key: string; title: string; repository: string; number: number; status: string; detail: string; workspaceId: string; sessionId: string; url: string; checkUrl: string; checks: string }[]; error: string }> };
     artifacts: {
       /** read:artifacts — titles and IDs, without contents. */
       list(workspaceId: string): Promise<{ artifacts: { id: string; title: string; kind: string }[] }>;

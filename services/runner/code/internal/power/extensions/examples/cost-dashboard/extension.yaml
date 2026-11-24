@@ -1,14 +1,14 @@
 # yaml-language-server: $schema=../extension.schema.json
 #
 # An example Lazybox extension (EXTENSIONS.md): what your agents cost, over
-# time and by model, workspace and conversation. It reads token use and the
+# time and by model, workspace, conversation and tracked pull request. It reads PR metadata, token use and the
 # conversation list (titles only, never messages), and can bring a
 # conversation forward in the window. It cannot send anything, change
 # anything or reach the network.
 lazybox: 1
 name: Cost dashboard
-version: 1.1.0
-description: What your agents cost, over time and by model, workspace and conversation.
+version: 1.2.0
+description: Estimated spend by pull request, workspace, conversation and model.
 author: Lazybox
 panels:
   - id: costs
@@ -19,4 +19,5 @@ panels:
 grants:
   - read:usage
   - read:sessions
+  - read:pulls
   - show:conversations

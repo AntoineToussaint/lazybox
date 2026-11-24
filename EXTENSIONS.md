@@ -95,12 +95,14 @@ Runner acts on them itself.
   approval.
 - **Off, and removal.** The switch in Settings turns one off (its panels show
   *Off*); *Remove* deletes its folder and its approval after a confirmation.
-- **Examples.** *Cost dashboard* (`read:usage`, `read:sessions`,
+- **Examples.** *Cost dashboard* (`read:usage`, `read:sessions`, `read:pulls`,
   `show:conversations`) and *Agent
   board* (`read:attention`, `show:conversations`, `do:attention.next`,
   `do:inbox.open`) are bundled; *Add* copies one into the folder, then the sheet
   asks. `lazybox extension new my-panel [--example agent-board]` writes a
   starter (with `lazybox.d.ts` for the editor).
+
+Use `/pr-cost` to open the Cost dashboard. For one tracked PR it shows the workspace estimate for the selected period. For several PRs, each estimate includes usage from conversations linked only to that PR. Conversations with multiple links or no link count once under shared workspace usage. The dashboard can be refreshed throughout PR creation and review.
 
 ## Bundled workflow plugins
 

@@ -27,6 +27,7 @@ type Commands = {
   canOpenWorkspaceWindow: boolean;
   showSession(target: ViewTarget): void;
   selectWorkspace(target: ViewTarget): void;
+  openCostDashboard(): void;
   showPanel(kind: string): void;
   showRun(target: ViewTarget): void;
   openSettings(tab: string): void;
@@ -51,6 +52,7 @@ export function useWorkspaceCommands(commands: Commands): CommandNavigator {
     'settings.open': commands.main && { run: tab => c().openSettings(typeof tab === 'string' ? tab : 'subscriptions') },
     'conversation.new': { run: () => c().newConversation(), enabled: () => c().canStartConversation },
     'changes.show': { run: () => c().showPanel('changes'), enabled: () => !!c().workspaceId },
+    'cost-dashboard.open': { run: () => c().openCostDashboard(), enabled: () => !!c().registry.extension && !c().missionOpen },
     'missions.open': { run: () => c().showPanel('missions'), enabled: () => c().canShowMissions },
     'missions.page': { run: () => showMissionsPage(), enabled: () => c().canShowMissions },
     'pulls.open': { run: () => c().showPanel('pulls'), enabled: () => !c().missionOpen && !!c().registry.pulls },

@@ -132,14 +132,27 @@ type Manager struct {
 	opts     Options
 	backend  sessionhost.Backend
 	items    map[string]*Terminal
+	// keys maps a request key to the running terminal it started; starts
+	// maps one to the start still in flight for it.
 	keys     map[string]string
+	starts   map[string]*keyedStart
 	closed   bool
 	pending  int
 	starting sync.WaitGroup
 }
 
+// keyedStart is a start in flight for a request key: a repeated request
+// waits for it and gets its outcome instead of starting a second shell.
+type keyedStart struct {
+	done chan struct{}
+	t    *Terminal
+	err  error
+}
+
 type Terminal struct {
 	m *Manager
+	// key is the request key that started it, if any.
+	key string
 	// hostID is the session host running the shell, fixed at start.
 	hostID   string
 	mu       sync.Mutex
@@ -257,7 +270,7 @@ func Open(dir, hostRoot string, opts Options) (*Manager, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	m := &Manager{dir: dir, hostRoot: hostRoot, opts: opts, backend: sessionhost.Use(opts.Backend), items: map[string]*Terminal{}, keys: map[string]string{}}
+	m := &Manager{dir: dir, hostRoot: hostRoot, opts: opts, backend: sessionhost.Use(opts.Backend), items: map[string]*Terminal{}, keys: map[string]string{}, starts: map[string]*keyedStart{}}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -356,8 +369,10 @@ func ValidSize(cols, rows uint16) bool {
 }
 
 // Start runs a login shell or an explicit command in a new terminal host. A repeated
-// non-empty requestKey returns the terminal it already started.
-func (m *Manager) Start(spec Spec, requestKey string) (*Terminal, error) {
+// non-empty requestKey returns the terminal it already started while that
+// shell runs, or waits for the start in flight and returns its outcome. Once
+// the shell has exited (or the terminal was discarded), the key is free again.
+func (m *Manager) Start(spec Spec, requestKey string) (t *Terminal, err error) {
 	if !filepath.IsAbs(spec.Shell) || !filepath.IsAbs(spec.Cwd) || spec.CollectionID == "" {
 		return nil, errors.New("terminal requires an absolute shell, an absolute directory and a workspace")
 	}
@@ -376,6 +391,11 @@ func (m *Manager) Start(spec Spec, requestKey string) (*Terminal, error) {
 		}
 		return t, nil
 	}
+	if s := m.starts[requestKey]; s != nil && requestKey != "" {
+		m.mu.Unlock()
+		<-s.done
+		return s.t, s.err
+	}
 	// Starts still in flight count, so concurrent opens cannot pass the limit.
 	live := m.pending
 	for _, t := range m.items {
@@ -389,10 +409,20 @@ func (m *Manager) Start(spec Spec, requestKey string) (*Terminal, error) {
 	}
 	m.pending++
 	m.starting.Add(1)
+	var keyed *keyedStart
+	if requestKey != "" {
+		keyed = &keyedStart{done: make(chan struct{})}
+		m.starts[requestKey] = keyed
+	}
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
 		m.pending--
+		if keyed != nil {
+			delete(m.starts, requestKey)
+			keyed.t, keyed.err = t, err
+			close(keyed.done)
+		}
 		m.mu.Unlock()
 		m.starting.Done()
 	}()
@@ -438,7 +468,8 @@ func (m *Manager) Start(spec Spec, requestKey string) (*Terminal, error) {
 	if err != nil {
 		return fail(fmt.Errorf("shell failed to start: %w", err))
 	}
-	t := m.newTerminal(r)
+	t = m.newTerminal(r)
+	t.key = requestKey
 	m.mu.Lock()
 	m.items[r.ID] = t
 	if requestKey != "" {
@@ -650,6 +681,13 @@ func (t *Terminal) finish(exit *int, signal string, cause error, forget bool) {
 		if forget {
 			_ = os.Remove(t.m.recordPath(t.status.ID))
 		}
+		// The request that started it is answered: a new one with the same
+		// key starts a new shell.
+		t.m.mu.Lock()
+		if t.key != "" && t.m.keys[t.key] == t.status.ID {
+			delete(t.m.keys, t.key)
+		}
+		t.m.mu.Unlock()
 		close(t.finished)
 	})
 }

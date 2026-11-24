@@ -53,7 +53,7 @@ func (s *Service) OpenTerminal(ctx context.Context, r *pb.OpenTerminalRequest) (
 }
 
 func (s *Service) DecideTerminalHandoff(_ context.Context, r *pb.DecideTerminalHandoffRequest) (*pb.TerminalStatus, error) {
-	t, err := s.Bench.DecideTerminalHandoff(r.HandoffId, r.Accept)
+	t, err := s.Bench.DecideTerminalHandoff(r.HandoffId, r.Accept, r.AllowAgentInput)
 	if err != nil {
 		return nil, rpcError(err)
 	}

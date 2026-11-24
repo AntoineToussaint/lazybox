@@ -378,20 +378,21 @@ func Prompt(op Operation) string {
 }
 
 type Event struct {
-	Type          string              `json:"type"`
-	SessionID     string              `json:"sessionId,omitempty"`
-	TurnID        string              `json:"turnId,omitempty"`
-	RequestID     string              `json:"requestId,omitempty"`
-	OperationID   string              `json:"operationId,omitempty"`
-	Text          string              `json:"text,omitempty"`
-	Status        string              `json:"status,omitempty"`
-	Data          json.RawMessage     `json:"data,omitempty"`
-	AgentID       string              `json:"agentId,omitempty"`
-	ParentAgentID string              `json:"parentAgentId,omitempty"`
-	Name          string              `json:"name,omitempty"`
-	AgentKind     string              `json:"agentKind,omitempty"`
-	NativeID      string              `json:"nativeId,omitempty"`
-	Account       *AccountObservation `json:"account,omitempty"`
+	TerminalAgentInput bool                `json:"terminalAgentInput,omitempty"`
+	Type               string              `json:"type"`
+	SessionID          string              `json:"sessionId,omitempty"`
+	TurnID             string              `json:"turnId,omitempty"`
+	RequestID          string              `json:"requestId,omitempty"`
+	OperationID        string              `json:"operationId,omitempty"`
+	Text               string              `json:"text,omitempty"`
+	Status             string              `json:"status,omitempty"`
+	Data               json.RawMessage     `json:"data,omitempty"`
+	AgentID            string              `json:"agentId,omitempty"`
+	ParentAgentID      string              `json:"parentAgentId,omitempty"`
+	Name               string              `json:"name,omitempty"`
+	AgentKind          string              `json:"agentKind,omitempty"`
+	NativeID           string              `json:"nativeId,omitempty"`
+	Account            *AccountObservation `json:"account,omitempty"`
 	// Cursor is the session host transport position of the native line this
 	// event came from. Recorded in the journal so a re-attaching Runner knows
 	// exactly which lines it already holds.

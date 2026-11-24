@@ -1393,6 +1393,7 @@ message AgentEvent {
   string agent_kind = 12;
   string native_id = 13;
   AccountObservation account = 14;
+  bool terminal_agent_input = 15;
 }
 message Session {
   string id = 1;
@@ -4562,6 +4563,7 @@ message UndoDeletionRequest { string id = 1; }
 message DecideTerminalHandoffRequest {
   string handoff_id = 1;
   bool accept = 2;
+  bool allow_agent_input = 3;
 }
 
 message RunReviewVerificationRequest {

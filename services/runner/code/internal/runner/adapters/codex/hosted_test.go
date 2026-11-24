@@ -351,7 +351,14 @@ func TestRedeliveredUnansweredApprovalStaysPending(t *testing.T) {
 // Waiting for a command has no effect and the command outlived the Runner, so
 // a wait in flight at the restart runs again without an approval.
 func TestRedeliveredWaitRunsAgainWithoutApproval(t *testing.T) {
-	t.Setenv("FIXTURE_TOOL_ACTION", "wait")
+	testRedeliveredTerminalTool(t, "wait", true)
+}
+func TestRedeliveredInteractiveWriteIsNeverRepeated(t *testing.T) {
+	testRedeliveredTerminalTool(t, "interactive_write", false)
+}
+func testRedeliveredTerminalTool(t *testing.T, action string, replay bool) {
+	t.Helper()
+	t.Setenv("FIXTURE_TOOL_ACTION", action)
 	root := fixtureRoot(t)
 	self, _ := os.Executable()
 	runs := make(chan string, 4)
@@ -385,7 +392,19 @@ func TestRedeliveredWaitRunsAgainWithoutApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer again.Close()
-	if reply := receive(t, again, "message_delta"); reply.Text != `success=true {"done":true,"exitCode":0}` {
+	reply := receive(t, again, "message_delta")
+	if !replay {
+		if !strings.HasPrefix(reply.Text, "success=false") || !strings.Contains(reply.Text, "outcome is unknown") {
+			t.Fatal(reply.Text)
+		}
+		select {
+		case <-runs:
+			t.Fatal("interactive input repeated")
+		default:
+		}
+		return
+	}
+	if reply.Text != `success=true {"done":true,"exitCode":0}` {
 		t.Fatalf("redelivered wait: %q", reply.Text)
 	}
 	if args := <-runs; !strings.Contains(args, "wait") {

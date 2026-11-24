@@ -35,7 +35,7 @@ export type TranscriptMessage = { id: string; type: string; text: string; turnId
   delegationRequested?: boolean;
   terminalHandoff?: TerminalHandoff };
 
-export type TerminalHandoff = { id: string; workspaceId: string; cwd: string; argv: string[]; status: string; terminalId?: string };
+export type TerminalHandoff = { id: string; workspaceId: string; cwd: string; argv: string[]; agentInput?: boolean; status: string; terminalId?: string };
 /** One line about an agent tree, as the Runner recorded it (runner/orchestrator.go). */
 export type LineageNote = { kind: string; conversation: string; session: string; mission: string; direction: string; plan: string };
 /** An agent review of this conversation's work (the Runner's review_started /
@@ -257,9 +257,12 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
       if (event.status === 'pending') {
         let argv: unknown;
         try { argv = JSON.parse(new TextDecoder().decode(event.providerDataJson)); } catch { continue; }
+        const legacyShared = !!argv && typeof argv === 'object' && 'agentInput' in argv && argv.agentInput === true;
+        const agentInput = event.terminalAgentInput || legacyShared;
+        if (legacyShared && argv && typeof argv === 'object' && 'argv' in argv) argv = argv.argv;
         if (!Array.isArray(argv) || argv.some(value => typeof value !== 'string')) continue;
         add({ id: record.cursor.toString(), type: event.type, text: '', turnId: event.turnId,
-          terminalHandoff: { id: event.requestId, workspaceId: event.name, cwd: event.text, argv, status: 'pending' } });
+          terminalHandoff: { id: event.requestId, workspaceId: event.name, cwd: event.text, argv, agentInput, status: 'pending' } });
         next.appendToLast = false;
       } else {
         const current = messages ?? state.messages;

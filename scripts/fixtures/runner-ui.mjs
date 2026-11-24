@@ -1242,6 +1242,20 @@ actions:
         if(session&&body.deliverQueued){
           const {operationId,how}=body.deliverQueued,queue=session.queuedMessages||[],index=queue.findIndex(m=>m.operationId===operationId);
           if(index<0)return error('failed_precondition','that message is no longer queued');
+          const message=queue[index], editor=body.deliverQueued.editId;
+          if(how==='edit'){
+            if(message.editing && message.editor!==editor)return error('failed_precondition','message is being edited');
+            message.editor=editor;message.editing=true;
+            return json({operationId,delivery:how,queuedText:message.text});
+          }
+          if(how==='save_edit'||how==='cancel_edit'){
+            if(!message.editing||message.editor!==editor)return error('failed_precondition','edit no longer active');
+            if(how==='save_edit')message.text=body.deliverQueued.text;
+            message.editing=false;delete message.editor;
+            eventStreams.get(session.id)?.push({type:'queued_message_edit',operationId,status:how,text:message.text});
+            return json({operationId,delivery:how,queuedText:message.text});
+          }
+          if(message.editing && how!=='delete')return error('failed_precondition','message is paused for editing');
           if(how==='delete'){
             queue.splice(index,1);session.queued=queue.length;
             eventStreams.get(session.id)?.push({type:'receipt',operationId,status:'canceled_before_delivery'});

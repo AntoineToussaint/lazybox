@@ -9391,7 +9391,9 @@ type QueuedMessage struct {
 	Text               string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
 	QueuedAtUnixMillis int64  `protobuf:"varint,3,opt,name=queued_at_unix_millis,json=queuedAtUnixMillis,proto3" json:"queued_at_unix_millis,omitempty"`
 	// Set on a message Lazybox wrote rather than the person.
-	Origin        *MessageOrigin `protobuf:"bytes,4,opt,name=origin,proto3" json:"origin,omitempty"`
+	Origin *MessageOrigin `protobuf:"bytes,4,opt,name=origin,proto3" json:"origin,omitempty"`
+	// Automatic and manual delivery are paused while a person edits this message.
+	Editing       bool `protobuf:"varint,5,opt,name=editing,proto3" json:"editing,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -9452,6 +9454,13 @@ func (x *QueuedMessage) GetOrigin() *MessageOrigin {
 		return x.Origin
 	}
 	return nil
+}
+
+func (x *QueuedMessage) GetEditing() bool {
+	if x != nil {
+		return x.Editing
+	}
+	return false
 }
 
 // MessageOrigin marks a message Lazybox wrote, not the person: the answer to a
@@ -12499,9 +12508,12 @@ func (x *RevokeGrant) GetGrantId() string {
 // turn. how "steer": the message goes into the running turn without
 // interrupting it (Capabilities.steer). how "delete": remove it before delivery.
 type DeliverQueued struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	OperationId   string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	How           string                 `protobuf:"bytes,2,opt,name=how,proto3" json:"how,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	OperationId string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	How         string                 `protobuf:"bytes,2,opt,name=how,proto3" json:"how,omitempty"`
+	// For edit, save_edit, or cancel_edit. Only the editing client can release the hold.
+	EditId        string `protobuf:"bytes,3,opt,name=edit_id,json=editId,proto3" json:"edit_id,omitempty"`
+	Text          string `protobuf:"bytes,4,opt,name=text,proto3" json:"text,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -12546,6 +12558,20 @@ func (x *DeliverQueued) GetOperationId() string {
 func (x *DeliverQueued) GetHow() string {
 	if x != nil {
 		return x.How
+	}
+	return ""
+}
+
+func (x *DeliverQueued) GetEditId() string {
+	if x != nil {
+		return x.EditId
+	}
+	return ""
+}
+
+func (x *DeliverQueued) GetText() string {
+	if x != nil {
+		return x.Text
 	}
 	return ""
 }
@@ -12696,11 +12722,13 @@ func (x *Permission) GetMode() string {
 }
 
 type Receipt struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	OperationId   string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
-	Delivery      string                 `protobuf:"bytes,2,opt,name=delivery,proto3" json:"delivery,omitempty"`
-	ProviderId    string                 `protobuf:"bytes,3,opt,name=provider_id,json=providerId,proto3" json:"provider_id,omitempty"`
-	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Complete message returned after acquiring the edit hold.
+	QueuedText    string `protobuf:"bytes,5,opt,name=queued_text,json=queuedText,proto3" json:"queued_text,omitempty"`
+	OperationId   string `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	Delivery      string `protobuf:"bytes,2,opt,name=delivery,proto3" json:"delivery,omitempty"`
+	ProviderId    string `protobuf:"bytes,3,opt,name=provider_id,json=providerId,proto3" json:"provider_id,omitempty"`
+	Error         string `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -12733,6 +12761,13 @@ func (x *Receipt) ProtoReflect() protoreflect.Message {
 // Deprecated: Use Receipt.ProtoReflect.Descriptor instead.
 func (*Receipt) Descriptor() ([]byte, []int) {
 	return file_api_proto_rawDescGZIP(), []int{165}
+}
+
+func (x *Receipt) GetQueuedText() string {
+	if x != nil {
+		return x.QueuedText
+	}
+	return ""
 }
 
 func (x *Receipt) GetOperationId() string {
@@ -39940,12 +39975,13 @@ const file_api_proto_rawDesc = "" +
 	"\x04role\x18\x06 \x01(\tR\x04role\x12\x19\n" +
 	"\bgrant_id\x18\a \x01(\tR\agrantId\x12#\n" +
 	"\rlive_children\x18\b \x01(\rR\fliveChildren\x12!\n" +
-	"\fmax_children\x18\t \x01(\rR\vmaxChildren\"\xb2\x01\n" +
+	"\fmax_children\x18\t \x01(\rR\vmaxChildren\"\xcc\x01\n" +
 	"\rQueuedMessage\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\x121\n" +
 	"\x15queued_at_unix_millis\x18\x03 \x01(\x03R\x12queuedAtUnixMillis\x127\n" +
-	"\x06origin\x18\x04 \x01(\v2\x1f.lazybox.bench.v1.MessageOriginR\x06origin\"\xbb\x01\n" +
+	"\x06origin\x18\x04 \x01(\v2\x1f.lazybox.bench.v1.MessageOriginR\x06origin\x12\x18\n" +
+	"\aediting\x18\x05 \x01(\bR\aediting\"\xbb\x01\n" +
 	"\rMessageOrigin\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x18\n" +
 	"\asummary\x18\x02 \x01(\tR\asummary\x12\x16\n" +
@@ -40171,10 +40207,12 @@ const file_api_proto_rawDesc = "" +
 	"\x13ListProviderCatalog\x12\x18\n" +
 	"\asection\x18\x01 \x01(\tR\asection\"(\n" +
 	"\vRevokeGrant\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"D\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"q\n" +
 	"\rDeliverQueued\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x10\n" +
-	"\x03how\x18\x02 \x01(\tR\x03how\";\n" +
+	"\x03how\x18\x02 \x01(\tR\x03how\x12\x17\n" +
+	"\aedit_id\x18\x03 \x01(\tR\x06editId\x12\x12\n" +
+	"\x04text\x18\x04 \x01(\tR\x04text\";\n" +
 	"\vModelChange\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12\x16\n" +
 	"\x06effort\x18\x02 \x01(\tR\x06effort\"&\n" +
@@ -40182,8 +40220,10 @@ const file_api_proto_rawDesc = "" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\" \n" +
 	"\n" +
 	"Permission\x12\x12\n" +
-	"\x04mode\x18\x01 \x01(\tR\x04mode\"\x7f\n" +
-	"\aReceipt\x12!\n" +
+	"\x04mode\x18\x01 \x01(\tR\x04mode\"\xa0\x01\n" +
+	"\aReceipt\x12\x1f\n" +
+	"\vqueued_text\x18\x05 \x01(\tR\n" +
+	"queuedText\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x1a\n" +
 	"\bdelivery\x18\x02 \x01(\tR\bdelivery\x12\x1f\n" +
 	"\vprovider_id\x18\x03 \x01(\tR\n" +

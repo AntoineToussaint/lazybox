@@ -292,7 +292,7 @@ function PhoneConversation({ sessionId, commandId, device, collections, go }: { 
       {transcript.error && <p className="remote-error" role="alert">Conversation could not be loaded. {transcript.error} <button onClick={transcript.retry}>Retry</button></p>}
       {error && !session && <p className="remote-error" role="alert">{error}</p>}
       {transcript.loading && !transcript.messages.length && <ConversationLoading replay={transcript.replay}/>}
-      <MessageList key={sessionId} messages={transcript.messages} visible={visible} agentName={agentName} onShowEarlier={() => setVisible(value => value + 60)} loadingEarlier={transcript.partial}/>
+      <MessageList conversationId={`remote:${device.id}:${session?.conversationId || sessionId}`} key={sessionId} messages={transcript.messages} visible={visible} agentName={agentName} onShowEarlier={() => setVisible(value => value + 60)} loadingEarlier={transcript.partial}/>
       {session?.fault && <p className="remote-error" role="alert">{session.fault}</p>}
       {session?.pending.map(request => request.type === 'repository_request'
         ? <p key={request.requestId} className="remote-hint">{requestSummary(request)}? The agent waits for this repository. Add it or decline on your computer.</p>

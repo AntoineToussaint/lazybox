@@ -59,6 +59,14 @@ async function scenario(browser, scheme, full) {
   await page.goto(url);
   await expect(page.locator('.page-layout .panel-chat').getByRole('textbox', { name: 'Message', exact: true })).toBeEnabled();
 
+  if (full) {
+    f.runnerSettings.notices = ['disk-pressure-critical'];
+    await page.evaluate(() => window.dispatchEvent(new Event('lazybox-settings-saved')));
+    await expect(page.getByRole('status', { name: 'Disk space is critically low on this Runner' })).toBeVisible();
+    f.runnerSettings.notices = [];
+    await page.evaluate(() => window.dispatchEvent(new Event('lazybox-settings-saved')));
+    await expect(page.getByRole('status', { name: 'Disk space is critically low on this Runner' })).toHaveCount(0);
+  }
   // ---- An empty Extensions panel: the examples, one click to add.
   await page.locator('summary[aria-label="Panels"]').click();
   await page.getByRole('button', { name: 'New Extensions panel', exact: true }).click();
@@ -177,7 +185,7 @@ async function scenario(browser, scheme, full) {
     assert.equal(results.fetchApproved, 'allowed:true');
     assert.equal(results.sessions.startsWith('allowed:'), true, results.sessions);
     // sendBeacon only queues (it may answer true); the leak server below says whether anything left.
-    assert.equal(page.url(), url, 'the window was navigated');
+    assert.equal(page.url(), url.split('#')[0], 'the window was navigated'); // The app consumes the sign-in fragment on load.
     await expect(page.locator('.extension-notice').filter({ hasText: 'forged' })).toHaveCount(0);
     // Nothing the screenshots or the page injected is reported as the extension leaving.
     await expect(page.locator('.extension-notice').filter({ hasText: 'tried to leave' })).toHaveCount(0);

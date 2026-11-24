@@ -141,3 +141,30 @@ func TestExtensionContentServesOnlyItsOwnFiles(t *testing.T) {
 		t.Fatalf("revoked session: %d", resp.StatusCode)
 	}
 }
+
+func TestDiskReportRequiresLiveScanGrant(t *testing.T) {
+	e, board, _ := openBoard(t, "")
+	const resource = "_lazybox/disk-report.html"
+	if resp, _ := get(t, board.Base+resource); resp.StatusCode != http.StatusNotFound {
+		t.Fatal(resp.Status)
+	}
+	if _, err := e.InstallExample("disk-cleanup"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Approve("disk-cleanup", []string{GrantDiskScan}, nil); err != nil {
+		t.Fatal(err)
+	}
+	session, err := e.Open("disk-cleanup", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := get(t, session.Base+resource); resp.StatusCode != http.StatusOK || !strings.Contains(body, "Waiting") {
+		t.Fatalf("%s %s", resp.Status, body)
+	}
+	if _, err := e.SetEnabled("disk-cleanup", false); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := get(t, session.Base+resource); resp.StatusCode != http.StatusGone {
+		t.Fatal(resp.Status)
+	}
+}

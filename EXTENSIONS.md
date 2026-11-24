@@ -57,6 +57,7 @@ person read.
 | `read:artifacts` | workspace artifact titles and kinds | `ListArtifacts` without document content |
 | `show:github` | open a GitHub item or deployment in the browser | Client navigation |
 | `show:runtime` | open an Actions or Preview panel | Client navigation for the current workspace |
+| `scan:disk` | enables a daily background scan, including with every panel closed, and reveals candidate paths and sizes | runs the first `dev-cleaner` on the Runner PATH with `--dry-run --sizes --json` and serves the report to approved sessions |
 | `draft:artifact` | open a draft for the person to review and save | Client-side confirmation |
 | `read:missions` | missions and their tasks | `ListMissions` |
 | `read:usage` | tokens and cost by workspace, conversation and model, and hour by hour | `GetTelemetry` (with `series` for the hours) |
@@ -66,7 +67,7 @@ person read.
 
 `WaitUiRequest` is admitted to an extension that may post window requests, for
 its own requests only. **No grant reads a conversation's messages, a command's
-output, a file or a terminal, changes a setting, starts or stops work,
+output, a file or a terminal, changes a setting, starts arbitrary commands,
 approves anything or sees a credential** — there is no grant to ask for.
 
 `switch:claude` and `switch:codex` are not bridge grants: they admit no RPC to
@@ -385,3 +386,14 @@ Tauri's origin checks, not run); Chromium (the suite runs WebKit; the
 prototype of the frame and policy design was run in both); a real Runner
 driven from a browser (the Go tests cover the Runner, the browser test its
 fake); the frozen-window recovery (unit-level only).
+
+## Disk Cleanup
+
+Install Disk Cleanup from Settings → Extensions and approve `scan:disk`.
+The Runner needs the installed `dev-cleaner` executable on its PATH.
+While any enabled extension holds this grant, the Runner runs
+`dev-cleaner --dry-run --sizes --json` when due, at most once per 24 hours. Startup gives agents five minutes to restore before a scan. It uses the cleaner's configured roots. Closing the panel
+leaves scans running. Turning off the last approved extension cancels scanning.
+Open Disk Cleanup and choose **Review latest disk scan** for free space and
+candidate paths ordered by size. The last attempt and latest report are saved in private Runner state. A tight or critical result shows a notice in the main workspace window until a healthy scan or disablement.
+To select and remove items, use dev-cleaner's interactive review on that machine.

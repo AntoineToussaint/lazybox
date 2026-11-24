@@ -15,7 +15,7 @@ import './claude-auth.css';
  */
 export function AccountNotices({ onOpenSettings }: { onOpenSettings(tab: 'extensions' | 'agents'): void }) {
   const { api } = useRunner();
-  const { settings, setSettings } = useRunnerSettings();
+  const { settings, setSettings } = useRunnerSettings(true, 60_000);
   const [busy, setBusy] = useState(''), [error, setError] = useState('');
   const ids = shownNotices(settings?.notices);
   if (!settings || !ids.length) return null;
@@ -34,7 +34,7 @@ export function AccountNotices({ onOpenSettings }: { onOpenSettings(tab: 'extens
         <p>{notice.body}{notice.link && <> <a href={notice.link.href} target="_blank" rel="noreferrer">{notice.link.label}</a></>}</p>
         <div className="account-notice-actions">
           <button type="button" className="primary" onClick={() => onOpenSettings(notice.tab)}>{notice.action}</button>
-          <button type="button" disabled={busy === id} onClick={() => void dismiss(id)}>{busy === id ? 'Saving…' : 'Got it'}</button>
+          {!id.startsWith('disk-pressure-') && <button type="button" disabled={busy === id} onClick={() => void dismiss(id)}>{busy === id ? 'Saving…' : 'Got it'}</button>}
         </div>
         {error && <p className="settings-error" role="alert">{error}</p>}
       </div>

@@ -122,7 +122,8 @@ test('the bridge client, its types and the Runner agree on every method and gran
   assert.match(sdk, new RegExp(`var PROTOCOL = ${BRIDGE_PROTOCOL};`));
   const goGrants = [...goSource.matchAll(/Grant\w+\s+= "([a-z:]+)"/g)].map(m => m[1]).filter(g => g !== 'do:');
   const bridgeGrants = [...new Set(Object.values(bridgeMethods).filter(g => g && g !== 'do:'))];
-  assert.deepEqual([...goGrants].sort(), [...bridgeGrants].sort(), 'each Runner grant has its bridge method');
+  // The Runner schedules scan:disk and serves its report on the content origin.
+  assert.deepEqual(goGrants.sort(), [...bridgeGrants, 'scan:disk'].sort(), 'each fixed grant has a bridge method or the disk report');
   for (const grant of [...bridgeGrants, 'do:']) assert.ok(types.includes(grant), `lazybox.d.ts documents ${grant}`);
   for (const grant of goGrants) assert.notEqual(describeGrant(grant).icon, 'alert', `the sheet describes ${grant}`);
   assert.equal(describeGrant('do:inbox.open').title, 'Run “Open the inbox”');

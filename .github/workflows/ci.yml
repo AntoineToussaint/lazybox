@@ -312,7 +312,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # Pinned to a tagged release so a silent upstream change cannot flip CI.
-      - uses: crate-ci/typos@v1.50.3
+      - uses: crate-ci/typos@v1.52.2
 
   # Keep the same check name for both profiles. Only the two macOS jobs
   # are expected to skip in the fast profile.

@@ -209,7 +209,8 @@ try{
  await page.keyboard.press('Enter');
  await expect.poll(()=>applies().slice(sentBefore).at(-1)?.body.message?.text).toBe('/compact');
  await expect(message).toHaveValue('half a draft');
- await go(`${base}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
+ // A reload: the same URL with #token= would only change the fragment (the app took the bearer out of the address bar).
+ await page.reload();
  await expect(message).toHaveValue('half a draft','the saved draft survived');
 
  // The ⋯ menu has the same models; the header's model name opens the picker.

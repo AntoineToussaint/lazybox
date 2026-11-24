@@ -5,7 +5,7 @@
 // Inbox's rows whose "Send the failures" reaches the conversation with its
 // chip, and the phone's Inbox. Nothing runs an agent or talks to GitHub.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {chromium, devices, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

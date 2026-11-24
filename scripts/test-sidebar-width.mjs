@@ -1,7 +1,7 @@
 // The Workspaces sidebar has one fixed width: switching workspace or resizing
 // the window never moves it, and dragging its edge changes it everywhere.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

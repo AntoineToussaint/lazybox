@@ -9,7 +9,7 @@
 // Runner cannot be reached, no "create a workspace" for a Runner that has not
 // answered yet, and no stale or empty bearer left behind by a restart.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

@@ -13,7 +13,7 @@
 // Screenshots: .cache/multi-runner-*.png, dark and light. WebKit, the desktop
 // app's engine. Fixture only: no agent runs.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

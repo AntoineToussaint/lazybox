@@ -15,7 +15,7 @@
 // PERF_TURNS, PERF_BROWSER=chromium|webkit, PERF_BUILD=1 (production bundle),
 // PERF_RUNS and PERF_STRICT tune a manual measurement; the gate uses the defaults.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer,build,preview} from 'vite';
+import {build,preview} from 'vite';import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

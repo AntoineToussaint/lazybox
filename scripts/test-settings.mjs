@@ -1,6 +1,6 @@
 // Explicitly fake account authority: no provider login, credentials or inference.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

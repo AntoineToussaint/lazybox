@@ -1,4 +1,4 @@
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

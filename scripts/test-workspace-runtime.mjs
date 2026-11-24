@@ -5,7 +5,7 @@
 // address bar, history, reload and open in browser; repository scripts are
 // reviewed (changed entries marked) and approved by hash before setup runs;
 // Settings → Workspaces saves your own overrides. Chromium; TEST_WEBKIT=1 runs WebKit.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

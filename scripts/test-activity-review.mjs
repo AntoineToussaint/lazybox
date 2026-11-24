@@ -1,5 +1,5 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {readFile,mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';import {NativeStatus} from '../workers/claude-sdk/src/status.ts';
+import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {readFile,mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';import {NativeStatus} from '../workers/claude-sdk/src/status.ts';
 import { collectPageErrors } from './fixtures/page-errors.mjs';
 const f=await startRunnerFixture();Object.assign(f.sessions[0],{busy:true,status:'running',provider:'claude',agents:[{id:'root',status:'running'}]});
 f.library[0].gitIdentity='github:codefly-dev/module-datasource';f.library[1].gitIdentity='github:codefly-dev/module-saas-starter';const channel=f.openEvents('alpha-session');

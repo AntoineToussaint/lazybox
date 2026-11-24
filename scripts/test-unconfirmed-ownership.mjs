@@ -9,7 +9,7 @@
 // stopped it clears without asking. All of it by keyboard alone.
 // Screenshot: .cache/unconfirmed-ownership.png. Chromium.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

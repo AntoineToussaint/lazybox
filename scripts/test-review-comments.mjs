@@ -4,7 +4,7 @@ import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // comment whose lines moved or changed, send the review directly to the chosen
 // conversation, and find the same comments in a
 // second window.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

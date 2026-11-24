@@ -9,7 +9,7 @@ import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // output), a dock tab dragged, a floating group's edge and title bar, the
 // editor's split, a sub-agent panel's edge and header, and a dialog's header.
 // Escape in the middle of a divider's drag puts it back and ends the drag.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

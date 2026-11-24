@@ -7,7 +7,7 @@
 // densely (one title, the kind once, a wide column, the outline as a toggle
 // below 900 px, no horizontal scroll at 360 px). Fixture only;
 // WebKit by default (the desktop engine).
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

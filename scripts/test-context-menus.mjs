@@ -7,7 +7,7 @@ import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // screen at the edges, text fields keep the native menu and Monaco its own.
 // A right-click on a link never opens it: not a slow one, not at a window
 // edge, not Ctrl+click on a Mac; press, drag onto an item and release does.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

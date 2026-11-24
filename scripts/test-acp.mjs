@@ -8,7 +8,7 @@
 // tool lines, the plan, the command it ran, its reply, and the approval card
 // with the agent's own "Always allow". No credentials, no inference.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';
+import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {acpJournal} from './fixtures/acp-ui-fake.mjs';
 import { collectPageErrors } from './fixtures/page-errors.mjs';

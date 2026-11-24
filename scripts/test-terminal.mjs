@@ -3,7 +3,7 @@
 // re-attach after a reload without starting another shell. WebKit by default
 // (the desktop app's engine); TEST_CHROMIUM=1 runs Chromium.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit, chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

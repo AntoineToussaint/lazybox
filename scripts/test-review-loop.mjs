@@ -7,7 +7,7 @@ import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // two fixes stops the loop and asks you, in the tray and in the author's
 // conversation. Then your controls: pause, resume, mode, take over; and the
 // loop's settings. The fixture plays both agents.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

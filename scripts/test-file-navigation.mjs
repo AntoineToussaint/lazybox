@@ -1,7 +1,7 @@
 // Files panel, Editor panel (tabs, splits, persistence), Go to file, and how
 // file links an agent writes resolve. WebKit against the fake Runner fixture.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

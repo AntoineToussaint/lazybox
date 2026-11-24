@@ -13,7 +13,7 @@
 // content origin and its policies are real (policy.json), the Runner's parser
 // and credential checks are the Go tests'.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import { createServer as createHttp } from 'node:http';
 import react from '@vitejs/plugin-react';
 import { webkit, expect } from './fixtures/playwright.mjs';
@@ -187,7 +187,8 @@ async function scenario(browser, scheme, full) {
     assert.equal(results.fetchApproved, 'allowed:true');
     assert.equal(results.sessions.startsWith('allowed:'), true, results.sessions);
     // sendBeacon only queues (it may answer true); the leak server below says whether anything left.
-    assert.equal(page.url(), url.split('#')[0], 'the window was navigated'); // The app consumes the sign-in fragment on load.
+    // The app takes the bearer out of the address bar once it reads it, so the window shows `shown`.
+    assert.equal(page.url(), shown, 'the window was navigated');
     await expect(page.locator('.extension-notice').filter({ hasText: 'forged' })).toHaveCount(0);
     // Nothing the screenshots or the page injected is reported as the extension leaving.
     await expect(page.locator('.extension-notice').filter({ hasText: 'tried to leave' })).toHaveCount(0);

@@ -3,7 +3,7 @@
 // preview, the full-size lightbox, sent-message thumbnails read from the
 // Runner only when they scroll into view, and every object URL revoked.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

@@ -6,7 +6,7 @@
 // said quietly. The review opens as a background tab beside the chat — the
 // person stays in their composer — titled "Review · Codex", with a badge that
 // ends as its findings count; the review card brings that tab to the front.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

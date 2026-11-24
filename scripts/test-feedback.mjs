@@ -5,7 +5,7 @@
 // only when ticked (never its messages). Nothing is uploaded: Save to file,
 // Copy, or a pre-filled GitHub issue the person posts. Screenshots:
 // .cache/feedback-*.png, dark and light.
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

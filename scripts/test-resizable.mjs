@@ -7,7 +7,7 @@ import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // the content beside it readable, and is remembered across a reload and a
 // workspace switch. A narrow panel keeps the divider on the edge, a phone has
 // none. WebKit, the desktop engine.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

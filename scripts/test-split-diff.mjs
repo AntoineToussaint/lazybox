@@ -5,7 +5,7 @@ import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // from the file, n/p between hunks and Shift+N/P between files, review
 // comments on both sides of the split view (the same threads in unified), and
 // Viewed files that stay viewed across a reload until their diff changes.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

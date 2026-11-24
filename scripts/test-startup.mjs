@@ -1,7 +1,7 @@
 // Isolated UI regression: every RPC is intercepted; no Runner, credentials,
 // provider process, or existing desktop session is used.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

@@ -7,7 +7,7 @@ import { activeSubagent, mergedStatus } from './subagent-model';
 import { useSubagentView, useSubagentIndex, usePresentation } from './subagent-view';
 import { describeToolBrief } from './tool-lines';
 import './telemetry.css';
-import { contextLevel, dollars, percentLabel, unpricedHelp, unpricedLine, usageBreakdown, type UsageBreakdown } from './usage-model';
+import { contextLevel, dollars, percentLabel, reportFor, unpricedHelp, unpricedLine, usageBreakdown, usageSubject, type UsageBreakdown } from './usage-model';
 
 const number=(n?:bigint)=>n===undefined?'—':n.toLocaleString();
 const short=(n?:bigint)=>n===undefined?'—':new Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:1}).format(n);
@@ -147,12 +147,17 @@ export function openUsage(executionId:string,part:'context'|'cost'):boolean{retu
  */
 export function TelemetryPanel({workspaceId,executionId,conversationId,messages,compact=false}:{messages?:readonly TranscriptMessage[];workspaceId?:string;executionId?:string;conversationId?:string;compact?:boolean}){
  const {api,info,error:connectionError}=useRunner();
- const [report,setReport]=useState<TelemetryReport>(),[error,setError]=useState(''),[open,setOpen]=useState(false),[asked,setAsked]=useState(false);
+ const [read,setRead]=useState<{subject:string;report:TelemetryReport}>(),[error,setError]=useState(''),[open,setOpen]=useState(false),[asked,setAsked]=useState(false);
  const id=useId(),popover=useRef<HTMLDivElement>(null);
+ // A report is kept with the workspace and execution it was read for, and shown (and published to the
+ // message box) only for them, from the very render in which they change. The execution's conversation
+ // becoming known only widens the read, so the figures shown stay until it answers (an open popover
+ // keeps its content and what is unfolded in it).
+ const subject=usageSubject(workspaceId,executionId),report=reportFor(read,subject);
  useEffect(()=>{
-  setReport(undefined);setError('');if(!workspaceId&&!executionId&&!conversationId)return;
+  setError('');if(!workspaceId&&!executionId&&!conversationId)return;
   const controller=new AbortController();let reading=false;
-  const update=async()=>{if(reading)return;reading=true;try{const r=await api.getTelemetry(conversationId?{conversation:conversationId}:executionId?{execution:executionId}:{workspace:workspaceId},{signal:controller.signal,timeoutMs:5000});if(!controller.signal.aborted){setReport(r);setError('');}}catch(e){if(!controller.signal.aborted)setError(String(e));}finally{reading=false;}};
+  const update=async()=>{if(reading)return;reading=true;try{const r=await api.getTelemetry(conversationId?{conversation:conversationId}:executionId?{execution:executionId}:{workspace:workspaceId},{signal:controller.signal,timeoutMs:5000});if(!controller.signal.aborted){setRead({subject,report:r});setError('');}}catch(e){if(!controller.signal.aborted)setError(String(e));}finally{reading=false;}};
   void update();const timer=setInterval(()=>void update(),3000);return()=>{controller.abort();clearInterval(timer);};
  },[api,workspaceId,executionId,conversationId]);
  // Another workspace or conversation closes the popover. Not conversationId: it is the execution's

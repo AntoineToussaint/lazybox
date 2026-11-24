@@ -9,7 +9,7 @@
 // against the policy the app ships. Fixture only; WebKit by default (the
 // desktop engine), TEST_CHROMIUM=1 for Chromium.
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

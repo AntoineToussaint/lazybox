@@ -1,7 +1,7 @@
 // Fixture only: per-turn code checkpoints in the conversation. A quiet marker
 // after each finished turn, its changes on the Changes page, a revert that
 // says exactly what it will change before it does, and an undo.
-import {createServer} from 'vite';
+import {createServer} from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';

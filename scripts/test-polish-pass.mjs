@@ -5,7 +5,7 @@ import {openWorkspaceChanges} from './fixtures/workspace-changes.mjs';
 // page opened from the header (Changes) closes again; the header fits a window
 // snapped to half a screen. WebKit, the desktop engine.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

@@ -113,3 +113,19 @@ export function contextLevel(percent: number): ContextLevel {
 export function percentLabel(n?: number): string {
   return n === undefined ? '—' : `${n > 0 && n < 0.1 ? '<0.1' : n.toFixed(1).replace(/\.0$/, '')}%`;
 }
+
+/**
+ * What a usage read is about: a workspace, or an execution. The execution's
+ * conversation becoming known only widens the read; it is not another subject.
+ */
+export const usageSubject = (workspaceId?: string, executionId?: string) => `${workspaceId || ''}\0${executionId || ''}`;
+
+/**
+ * The report to show for `subject`: the one read for it, or none. A report kept
+ * from another workspace or execution is never shown or published, not even in
+ * the render in which the subject changes; one read for the same execution
+ * stays while a read widened to its conversation is out.
+ */
+export function reportFor<T>(read: { subject: string; report: T } | undefined, subject: string): T | undefined {
+  return read?.subject === subject ? read.report : undefined;
+}

@@ -12,7 +12,7 @@
 // screenshots at 1440 and 390, dark and light:
 // .cache/artifact-reader-<view>-<width>-<scheme>.png. Fixture only; Chromium
 // (print to PDF is Chromium's).
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

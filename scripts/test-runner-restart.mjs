@@ -2,7 +2,7 @@
 // Codefly, credentials or agents. The fixture answers RestartRunner, is down for
 // a moment, then serves as a new process (another instance ID).
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

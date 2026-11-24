@@ -5,7 +5,7 @@
 // A subscription at its limit says when it is back ("Back at … (in …)"); one
 // whose reported reset has passed says it is checking, refreshes itself once,
 // and shows what the provider reports now. The sections move with the arrow keys.
-import { createServer } from 'vite';
+import { createServer, testViteCache } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +28,7 @@ fixture.profiles.push(
   limited('claude-past', 'Limit already over', now - 120),
   { id: 'claude-unknown', provider: 'claude', label: 'Limit without a time', managed: true, isolation: 'environment', availability: { state: 'exhausted', observedAtUnixMillis: String(Date.now()) } },
 );
-const server = await createServer({ configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
+const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
 const refreshes = id => fixture.calls.filter(c => c.method === 'RefreshSubscription' && c.body.profileId === id).length;
 let browser, page;
 try {

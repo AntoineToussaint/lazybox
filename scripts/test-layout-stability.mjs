@@ -6,7 +6,7 @@
 // Chromium, and Chromium's own layout-shift entries must add up to nothing.
 // LAYOUT_STABILITY_REPORT=1 prints every moving box instead of failing on the first.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

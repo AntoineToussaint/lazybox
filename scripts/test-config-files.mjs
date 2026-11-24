@@ -11,7 +11,7 @@
 // and delete with Undo write the files. Screenshots dark and light:
 // .cache/config-files-*.png. WebKit, the browser build, the fake Runner.
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { createServer } from 'vite';
+import { createServer } from './fixtures/vite-cache.mjs';
 import react from '@vitejs/plugin-react';
 import { webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';

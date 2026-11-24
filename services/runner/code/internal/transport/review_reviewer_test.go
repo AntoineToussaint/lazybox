@@ -89,6 +89,9 @@ func TestStartReviewUsesTheConfiguredReviewer(t *testing.T) {
 		t.Fatalf("the focus is in the brief:\n%s", brief.Text)
 	}
 
+	if _, err = f.client.CancelReview(f.owner, &pb.CancelReviewRequest{CollectionId: f.mine.Id, ReviewId: started.Run.Id}); err != nil {
+		t.Fatal(err)
+	}
 	saveReviewer(t, f, "same", "", "")
 	same, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID})
 	if err != nil {
@@ -99,6 +102,9 @@ func TestStartReviewUsesTheConfiguredReviewer(t *testing.T) {
 	}
 	briefOf(t, f.claude.Session.Applied)
 
+	if _, err = f.client.CancelReview(f.owner, &pb.CancelReviewRequest{CollectionId: f.mine.Id, ReviewId: same.Run.Id}); err != nil {
+		t.Fatal(err)
+	}
 	saveReviewer(t, f, "fixed", "codex-default", "gpt-5.2-codex")
 	fixed, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID})
 	if err != nil {
@@ -108,10 +114,16 @@ func TestStartReviewUsesTheConfiguredReviewer(t *testing.T) {
 		t.Fatalf("the fixed reviewer on its model: %+v (opened with %+v)", fixed.Run, f.codex.Session.Open)
 	}
 	briefOf(t, f.codex.Session.Applied)
+	if _, err = f.client.CancelReview(f.owner, &pb.CancelReviewRequest{CollectionId: f.mine.Id, ReviewId: fixed.Run.Id}); err != nil {
+		t.Fatal(err)
+	}
 	// A reviewer named for one run (the chevron, `/review claude`) outranks the setting.
 	named, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Provider: "claude"})
 	if err != nil || named.Run.ReviewerProvider != "claude" {
 		t.Fatalf("a named reviewer: %+v %v", named.GetRun(), err)
+	}
+	if _, err = f.client.CancelReview(f.owner, &pb.CancelReviewRequest{CollectionId: f.mine.Id, ReviewId: named.Run.Id}); err != nil {
+		t.Fatal(err)
 	}
 	if _, err = f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Focus: strings.Repeat("x", 33<<10)}); err == nil {
 		t.Fatal("a focus over 32 KiB was accepted")
@@ -144,6 +156,9 @@ func TestStartReviewFallsBackWhenTheOtherAgentIsNotAvailable(t *testing.T) {
 		t.Fatalf("fallback: %+v", started.Run)
 	}
 	briefOf(t, f.claude.Session.Applied)
+	if _, err = f.client.CancelReview(f.owner, &pb.CancelReviewRequest{CollectionId: f.mine.Id, ReviewId: started.Run.Id}); err != nil {
+		t.Fatal(err)
+	}
 	// Asked for by name, an agent that is not available is refused, not replaced.
 	if _, err = f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Provider: "codex"}); err == nil || !strings.Contains(err.Error(), "Codex is not available") {
 		t.Fatalf("a named reviewer that is not available: %v", err)

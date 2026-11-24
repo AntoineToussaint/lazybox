@@ -37,7 +37,7 @@ export function useChatReview({ session, sessionID, onError }: { session?: Sessi
   useEffect(() => { if (launcher.error) { latest.current(`Could not start the review: ${launcher.error}`); launcher.setError(''); } }, [launcher.error]);
   const shown = !!workspaceId && coding && !isReviewer && launcher.choices.length > 0;
   // This conversation's review under way, newest first: the button follows it.
-  const running = runs?.find(run => run.sourceSessionId === sessionID && run.state === 'running');
+  const running = launcher.activeFor({scope: 'changes'});
   const start = (choice?: ReviewerChoice, focus = '') => {
     if (launcher.unavailable) { showMenuNotice(launcher.unavailable); return; }
     const reviewer = choice || launcher.choices[0];
@@ -47,13 +47,14 @@ export function useChatReview({ session, sessionID, onError }: { session?: Sessi
   };
   // The review this conversation can cancel: the one it is the reviewer of, or its own newest one under way.
   const underWay = asReviewer ? (reviewInProgress(asReviewer) ? asReviewer : undefined) : runs?.find(run => run.sourceSessionId === sessionID && reviewInProgress(run));
+  const visible = coding && !isReviewer ? runs?.filter(run => reviewInProgress(run) && (run.sourceSessionId === sessionID || run.scope !== 'turn')) : undefined;
   const cancelling = useCancelReview(workspaceId);
   /** The ⋯ menu's items: Review (the button folds into it in a slim panel), and Cancel review while one is under way. */
   const menuItems: MenuItem[] = [
-    ...(shown ? [{ label: `Review with ${launcher.choices[0].label}`, icon: 'review', disabled: !!launcher.busy && 'A review is starting', run: () => start() }] : []),
+    ...(shown ? [{ label: `Review with ${launcher.choices[0].label}`, icon: 'review', disabled: running ? 'Review already in progress' : !!launcher.busy && 'A review is starting', run: () => start() }] : []),
     ...(underWay ? [{ label: 'Cancel review', icon: 'stop', run: () => cancelling.request(underWay) }] : []),
   ];
-  return { launcher, shown, running, start, menuItems, workspaceId, asReviewer, underWay, dialog: cancelling.dialog };
+  return { visible, launcher, shown, running, start, menuItems, workspaceId, asReviewer, underWay, dialog: cancelling.dialog };
 }
 export type ChatReview = ReturnType<typeof useChatReview>;
 
@@ -69,7 +70,7 @@ export function ReviewChatButton({ review, keys }: { review: ChatReview; keys: s
   const [first] = launcher.choices;
   const busy = !!launcher.busy;
   const items: MenuItem[] = [
-    ...launcher.choices.map(choice => ({ label: `Review with ${choice.label}`, icon: 'review', note: choice.isDefault ? 'Default' : undefined, disabled: busy && 'A review is starting', run: () => start(choice) })),
+    ...launcher.choices.map(choice => ({ label: `Review with ${choice.label}`, icon: 'review', note: choice.isDefault ? 'Default' : undefined, disabled: running ? 'Review already in progress' : busy && 'A review is starting', run: () => start(choice) })),
     'separator',
     { label: 'Open the review tray', icon: 'eye', run: () => { requestReviewTray(workspaceId); if (!runAction('changes.show')) showMenuNotice('Open the Changes panel to see the review tray'); } },
   ];

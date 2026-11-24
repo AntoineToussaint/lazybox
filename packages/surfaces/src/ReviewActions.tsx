@@ -33,7 +33,7 @@ export function ReviewActions({ workspaceId, sessionId }: { workspaceId: string;
     'review.start': !launcher.unavailable && !launcher.busy && launcher.choices.length > 0 && {
       run: template => {
         const reviewer = launcher.choices[0];
-        showMenuNotice(`Starting ${reviewer.label}’s review…`);
+        if (!launcher.activeFor({scope: 'changes'})) showMenuNotice(`Starting ${reviewer.label}’s review…`);
         void launcher.start({ scope: 'changes' }, reviewer, '', typeof template === 'string' ? template : '');
       },
     },

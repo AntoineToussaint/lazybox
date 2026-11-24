@@ -19,6 +19,8 @@ import './review-agents.css';
 
 /** "Review … with Codex", then "… with Claude", as menu items: a turn's ⋯ menu, the file list's context menu. */
 export function reviewMenuItems(launcher: ReviewLauncher, scope: ReviewScope, what: string): MenuItem[] {
+  const active = launcher.activeFor(scope);
+  if (active) return [{label: 'View review in progress', icon: 'review', run: () => showReview({collectionId: active.collectionId, reviewId: active.id})}];
   if (launcher.unavailable || !launcher.choices.length) return [];
   // The default reviewer, then each other agent; a specific subscription is
   // the Changes page's ▾ menu's, not every menu's.
@@ -33,6 +35,8 @@ export function reviewMenuItems(launcher: ReviewLauncher, scope: ReviewScope, wh
  * lists every reviewer that is signed in.
  */
 export function ReviewWithButton({ launcher, scope, label = 'Review with', className = '' }: { launcher: ReviewLauncher; scope: ReviewScope; label?: string; className?: string }) {
+  const active = launcher.activeFor(scope);
+  if (active) return <button type="button" onClick={() => showReview({collectionId: active.collectionId, reviewId: active.id})}>View review in progress</button>;
   const [first, ...rest] = launcher.choices;
   if (!first) return null;
   const busy = !!launcher.busy;

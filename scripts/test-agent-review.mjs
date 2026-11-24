@@ -59,6 +59,7 @@ try{
  const reviewWith=changes.getByRole('group',{name:'Review with another agent'});
  await expect(reviewWith.getByRole('button',{name:'Review with Codex'})).toBeVisible();
  await page.screenshot({path:'.cache/agent-review-start.png'});
+ fixture.runnerSettings.review = {...fixture.runnerSettings.review,loop:'off'};
  await reviewWith.getByRole('button',{name:'Review with Codex'}).click();
  await expect.poll(()=>starts().length).toBe(1);
  // The default reviewer is left to the Runner, which applies the setting (the other agent).
@@ -160,6 +161,9 @@ try{
  await menu.getByRole('menuitem',{name:'Review the changes with Codex'}).click();
  await expect.poll(()=>starts().length).toBe(2);
  assert.equal(starts()[1].sourceSessionId,author.id,'the reviewer conversation is never itself reviewed');
+ fixture.finishReview(fixture.reviewOf('alpha').runs.at(-1).id);
+ fixture.runnerSettings.review.loop='ask';
+ await page.waitForResponse(response=>response.url().endsWith('/ListReviewComments') && response.ok());
 
  // 8. ⌘K: "Review changes with Claude".
  await page.keyboard.press(`${mod}+k`);
@@ -217,6 +221,7 @@ try{
  assert.equal(fixture.reviewOf('alpha').comments.filter(c=>c.reviewId===turnRun.id && c.disposition==='sent').length,2,'archiving preserves both findings');
  await authorBox.fill('');
 
+ for(const active of fixture.reviewOf('alpha').runs.filter(r=>r.scope==='changes' && r.state==='running'))fixture.finishReview(active.id);
  // 9b. The message box: `/review claude` (and `/review` alone is the default reviewer).
  // A fresh load of the author's conversation. This tab already signed in, and the app took #token= out
  // of the address bar: the plain URL loads the page (the same URL with #token= would only change the fragment).
@@ -268,6 +273,7 @@ try{
  await page.screenshot({path:'.cache/agent-review-settings.png'});
 
  assert.deepEqual(errors,[]);
+ for(const active of fixture.reviewOf('alpha').runs.filter(r=>r.scope==='changes' && r.state==='running'))fixture.finishReview(active.id);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${author.id}`);
  await page.getByRole('navigation',{name:'Pages'}).getByRole('button',{name:'Work',exact:true}).click();
  await page.getByRole('button',{name:'Snippets',exact:true}).click();

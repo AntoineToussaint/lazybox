@@ -301,7 +301,7 @@ export function useSlashCommands(o: Options) {
           requestReviewTray(workspaceId); if (!runAction('changes.show')) notice('Open the Changes panel to see the review tray'); break;
         }
         if (reviewLauncher.busy) { notice('A review is starting'); break; }
-        notice(`Starting ${request.reviewer.label}’s review${request.focus ? ', with your focus' : ''}…`);
+        if (!reviewLauncher.activeFor({scope: 'changes'})) notice(`Starting ${request.reviewer.label}’s review${request.focus ? ', with your focus' : ''}…`);
         void reviewLauncher.start({ scope: 'changes' }, request.reviewer, request.focus);
         break;
       }

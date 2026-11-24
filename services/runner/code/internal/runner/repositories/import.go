@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,11 +81,16 @@ func New(root string, library Library, git Cloner) (*Importer, error) {
 	return &Importer{root: root, library: library, git: git}, nil
 }
 
-var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+func checkoutName(repo github.Repository) string {
+	if strings.EqualFold(repo.Name, ".github") {
+		return "github-" + strconv.FormatInt(repo.ID, 10)
+	}
+	return repo.Name
+}
 
 func Validate(repo github.Repository) error {
 	parts := strings.Split(repo.FullName, "/")
-	if repo.ID <= 0 || len(parts) != 2 || !namePattern.MatchString(parts[0]) || !namePattern.MatchString(parts[1]) || repo.Name != parts[1] || repo.Disabled {
+	if repo.ID <= 0 || len(parts) != 2 || gitidentity.GitHubName(repo.CloneURL) != strings.ToLower(repo.FullName) || repo.Name != parts[1] || repo.Disabled {
 		return errors.New("GitHub returned an unsupported repository identity")
 	}
 	if repo.CloneURL != "https://github.com/"+repo.FullName+".git" || repo.HTMLURL != "https://github.com/"+repo.FullName {
@@ -116,7 +120,7 @@ func (i *Importer) ImportWithProgress(ctx context.Context, repo github.Repositor
 		}
 	}
 	destination := filepath.Join(i.root, id)
-	record := collections.Repository{ID: id, Name: repo.Name, Path: filepath.Join(destination, "source.git"), SourceURL: repo.HTMLURL, GitHubID: repo.ID}
+	record := collections.Repository{ID: id, Name: checkoutName(repo), Path: filepath.Join(destination, "source.git"), SourceURL: repo.HTMLURL, GitHubID: repo.ID}
 	// A completed clone with its own marker can be enrolled after a crash between
 	// rename and registration. Unknown paths are never adopted or overwritten.
 	if info, err := os.Lstat(destination); err == nil {
@@ -177,7 +181,7 @@ func (i *Importer) Replace(ctx context.Context, repo github.Repository, token st
 		id = base + "-" + strconv.Itoa(n)
 	}
 	destination := filepath.Join(i.root, id)
-	record := collections.Repository{ID: id, Name: repo.Name, Path: filepath.Join(destination, "source.git"), SourceURL: repo.HTMLURL, GitHubID: repo.ID}
+	record := collections.Repository{ID: id, Name: checkoutName(repo), Path: filepath.Join(destination, "source.git"), SourceURL: repo.HTMLURL, GitHubID: repo.ID}
 	if err := i.clone(ctx, repo, token, progress, destination, record); err != nil {
 		return collections.Repository{}, nil, err
 	}

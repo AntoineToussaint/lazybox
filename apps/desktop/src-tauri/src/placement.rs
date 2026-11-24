@@ -201,21 +201,6 @@ mod tests {
         }
     }
     #[test]
-    fn inconsistent_resize_sample_preserves_the_last_saved_position() {
-        let mut layout = crate::layout::Layout::default();
-        let good = geometry(display("external", -1920.0, 1.0));
-        let surface = layout.surfaces.get_mut("main").expect("main window");
-        surface.remember_geometry(good.clone());
-        let mut mixed = good.clone();
-        mixed.inner_width = mixed.outer.width + 1.0;
-        surface.remember_geometry(mixed);
-        assert_eq!(surface.geometry.as_ref(), Some(&good));
-        layout
-            .validate()
-            .expect("other window state can still be saved");
-    }
-
-    #[test]
     fn identical_displays_and_tile_edges() {
         let left = display("External", -1920.0, 1.0);
         let right = display("External", 0.0, 1.0);

@@ -36,7 +36,7 @@ func GitHubName(remote string) string {
 	}
 	name := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), "/"), ".git")
 	parts := strings.Split(name, "/")
-	if len(parts) != 2 || !githubComponent.MatchString(parts[0]) || !githubComponent.MatchString(parts[1]) {
+	if len(parts) != 2 || !githubComponent.MatchString(parts[0]) || (!githubComponent.MatchString(parts[1]) && !strings.EqualFold(parts[1], ".github")) {
 		return ""
 	}
 	return strings.ToLower(name)

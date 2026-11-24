@@ -27,13 +27,12 @@ func TestMatchFindsTheRepositoryAnAgentNames(t *testing.T) {
 		query string
 		want  []string
 	}{
-		// owner/repo, in every spelling an agent might copy; another owner's
-		// repository of the same name is a weaker alternative.
-		{"acme/module-directory", []string{"acme/module-directory", "other/module-directory"}},
-		{"github:acme/module-directory", []string{"acme/module-directory", "other/module-directory"}},
-		{"https://github.com/acme/module-directory.git", []string{"acme/module-directory", "other/module-directory"}},
-		{"git@github.com:acme/module-directory.git", []string{"acme/module-directory", "other/module-directory"}},
-		{"https://github.com/acme/module-directory/tree/main/pkg", []string{"acme/module-directory", "other/module-directory"}},
+		// Qualified names identify a single repository.
+		{"acme/module-directory", []string{"acme/module-directory"}},
+		{"github:acme/module-directory", []string{"acme/module-directory"}},
+		{"https://github.com/acme/module-directory.git", []string{"acme/module-directory"}},
+		{"git@github.com:acme/module-directory.git", []string{"acme/module-directory"}},
+		{"https://github.com/acme/module-directory/tree/main/pkg", []string{"acme/module-directory"}},
 		// A bare name finds every owner's, the closest first.
 		{"module-directory", []string{"acme/module-directory", "other/module-directory"}},
 		// Separators, case and a small typo do not matter.
@@ -94,6 +93,25 @@ func TestNormalizeName(t *testing.T) {
 	} {
 		if got := NormalizeName(in); got != want {
 			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRepositoryIDsNeverMatchSimilarNames(t *testing.T) {
+	entries := []Entry{{Name: "codefly-dev/.github", GitHubID: 1}, {Name: "acme/.github", GitHubID: 2}, {Name: "acme/platform-environment", GitHubID: 42}}
+	for _, q := range []string{"42", "github-42", "github:42"} {
+		if got := Match(entries, q, 3); len(got) != 1 || got[0].GitHubID != 42 {
+			t.Errorf("%s: %+v", q, got)
+		}
+	}
+	// A repository named with digits is still found by its name, but a GitHub ID never by a similar name.
+	numbered := append(entries, Entry{Name: "games/2048", GitHubID: 7})
+	if got := Match(numbered, "2048", 3); len(got) != 1 || got[0].Name != "games/2048" {
+		t.Errorf("2048: %+v", got)
+	}
+	for _, q := range []string{"github-404", "missing/.github"} {
+		if got := Match(entries, q, 3); len(got) != 0 {
+			t.Errorf("%s: %+v", q, got)
 		}
 	}
 }

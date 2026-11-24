@@ -29,3 +29,5 @@
 .confirm-error{margin:14px 0 0;padding:8px 10px;border-radius:6px;background:var(--danger-bg);color:var(--danger-strong);font-size:calc(12px * var(--text-scale));overflow-wrap:anywhere}
 
 .confirm-dialog footer{margin-top:22px}
+/* Ticks every box above: a secondary footer button, apart from Cancel and the confirm button. */
+.confirm-dialog footer .confirm-check-all{margin-right:auto}

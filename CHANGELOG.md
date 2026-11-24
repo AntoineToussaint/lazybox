@@ -118,6 +118,7 @@ leave out.
 
 ### Chat and Send now
 
+- **Edit sits with a queued message's actions** A queued message's Edit is in its row of buttons, right before Send now, instead of alone on a line below it; Tab reaches the buttons in the order you see them, and in a narrow chat or on a phone the row wraps under the message. Editing a message you just sent with Send now no longer says, 20 seconds later, that the current step has not stopped.
 - **Restart in a separate workspace.** Press Esc twice in an empty Claude or Codex composer, or click Restart from here on a previous prompt. Review the prompt and restore the captured files from each repository into separate worktrees. The original conversation can keep working. Ignored files are excluded. Older Claude turns can lack the message identifier needed for restart.
 - **No approval by a stray key** A question or approval that appears takes the focus itself, not its Allow button, so a Space or Enter meant for the conversation answers nothing. A request Claude marks default to no cannot be allowed with one key: only N works, and its allow rows show no key. Back from Deny's reason returns to Deny.
 - **Sent means sent** When your message reached the agent but marking the review comments it carried as sent failed, Lazybox says just that and clears the message box, instead of offering to send it again.

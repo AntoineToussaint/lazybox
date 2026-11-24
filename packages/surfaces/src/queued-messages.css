@@ -9,14 +9,15 @@
 .queued-messages .queued-toggle:hover{background:var(--surface-selected);color:var(--text)}
 .queued-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;max-height:30vh;overflow-y:auto}
 .queued-message{display:flex;flex-direction:column;gap:6px;min-width:0}
-.queued-row{display:flex;align-items:center;gap:8px;min-width:0}
-.queued-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);quotes:"“" "”"}
+/* The text keeps at least 12em beside the actions: a narrow chat panel, at any window width, wraps the actions under it, and they wrap among themselves. */
+.queued-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;min-width:0}
+.queued-text{flex:1 1 12em;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);quotes:"“" "”"}
 /* A message Lazybox wrote waits as what it is, not as a quote of its words. */
 .queued-event{display:flex;align-items:center;gap:6px;color:var(--text-secondary)}
 .queued-event>svg{flex:none;color:var(--text-muted)}
 .queued-event>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .queued-event>small{flex:none;padding:0 6px;border:1px solid var(--line);border-radius:999px;color:var(--text-muted);font-size:calc(10.5px * var(--text-scale))}
-.queued-actions{flex:none;display:inline-flex;align-items:center;gap:4px}
+.queued-actions{flex:none;display:inline-flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:4px;margin-left:auto;max-width:100%}
 .queued-messages .queued-actions button{border-color:var(--line-strong,var(--line));background:var(--surface);color:var(--text-soft,var(--text))}
 .queued-messages .queued-actions button:hover{background:var(--surface-selected)}
 .queued-working{color:var(--accent);font-size:calc(11px * var(--text-scale))}
@@ -24,9 +25,7 @@
 .queued-error{margin:0;color:var(--danger);font-size:calc(11px * var(--text-scale))}
 @media (max-width:720px){
   .queued-messages{margin:0 10px 6px;padding:6px 6px 6px 10px}
-  .queued-row{flex-wrap:wrap}
   .queued-text{flex:1 1 100%}
-  .queued-actions{margin-left:auto;max-width:100%;flex-wrap:wrap}
 }
 
 .queued-edit { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }

@@ -151,6 +151,9 @@ try{
  await page.setViewportSize({width:390,height:844});
  {const chatTab=page.locator('.mobile-panel-switcher').getByRole('button',{name:/Agent chat/});if(await chatTab.count())await chatTab.first().click();}
  await expect(strip.getByRole('listitem').first().getByRole('button',{name:'Send now'})).toBeVisible();
+ // Edit stays in the action row beside Send now on a phone, on screen.
+ await expect(strip.getByRole('listitem').first().locator('.queued-actions').getByRole('button',{name:'Edit',exact:true})).toBeVisible();
+ assert.deepEqual(await strip.getByRole('listitem').first().locator('.queued-actions button').evaluateAll(buttons=>buttons.map(button=>button.textContent.trim())),['Edit','Send now','Delete']);
  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),'no horizontal page scroll');
  await page.screenshot({path:'.cache/queued-phone.png'});
  await page.setViewportSize({width:1400,height:900});
@@ -253,9 +256,38 @@ try{
    ['Shift queue first', 'Shift queue second', 'Shift queue third']);
  assert.equal(deliveries().length,delivered,'the custom send shortcut queues without interrupting');
  const editingRow=strip.getByRole('listitem',{name:/Shift queue first/});
+ // Edit is one of the message's actions, in their row, right before Send now; Tab follows the same order.
+ const actionNames=row=>row.locator('.queued-actions button').evaluateAll(buttons=>buttons.map(button=>button.textContent.trim()));
+ assert.deepEqual(await actionNames(editingRow),['Steer','Request delegation','Edit','Send now','Delete']);
+ await editingRow.getByRole('button',{name:'Request delegation'}).focus();
+ for (const name of ['Edit','Send now','Delete']) {
+   await page.keyboard.press('Tab');
+   await expect(editingRow.getByRole('button',{name,exact:true})).toBeFocused();
+ }
+ // A wide chat: the text and all its actions on one line.
+ {
+   const middle=async locator=>{const at=await locator.boundingBox();return at.y+at.height/2;};
+   const line=await middle(editingRow.getByRole('button',{name:'Send now'}));
+   for (const at of [editingRow.locator('.queued-text'),editingRow.getByRole('button',{name:'Edit',exact:true}),editingRow.getByRole('button',{name:'Steer'})]) assert.ok(Math.abs(await middle(at)-line)<2,'one line in a wide chat');
+ }
+ // A narrow chat panel, at any window width: the actions wrap under the text and stay inside the strip.
+ await strip.evaluate(element=>{element.style.width='300px';});
+ {
+   const box=await strip.boundingBox(),row=editingRow.locator('.queued-row');
+   for (const button of await editingRow.locator('.queued-actions button').all()) {
+     const at=await button.boundingBox();
+     assert.ok(at.x>=box.x&&at.x+at.width<=box.x+box.width+1,`${await button.textContent()} stays inside a narrow strip`);
+   }
+   assert.ok(await row.evaluate(element=>element.scrollWidth<=element.clientWidth+1),'a narrow queued row does not overflow');
+   const text=await editingRow.locator('.queued-text').boundingBox(),edit=await editingRow.getByRole('button',{name:'Edit',exact:true}).boundingBox();
+   assert.ok(edit.y>=text.y+text.height-1,'in a narrow strip the actions wrap under the text');
+ }
+ await page.screenshot({path:'.cache/queued-narrow-panel.png'});
+ await strip.evaluate(element=>{element.style.width='';});
  await editingRow.getByRole('button',{name:'Edit',exact:true}).click();
  const editor=editingRow.getByRole('textbox');
  await expect(editor).toHaveValue('Shift queue first');
+ await expect(editingRow.locator('.queued-actions')).toBeHidden();
  await editor.fill('Updated queued message');
  const other=await context.newPage();
  await other.goto(page.url());
@@ -275,8 +307,41 @@ try{
  await revised.getByRole('button',{name:'Cancel edit'}).click();
  await expect(revised.getByRole('textbox')).toHaveCount(0);
  assert.equal(codex.queuedMessages[0].text,'Updated queued message');
+ // ── Send now, then Edit before the agent stops: editing supersedes the Send now at
+ // work. The message stays queued, held, and Send now's timeout never says the step
+ // would not stop. The agent is slow to stop (the fixture keeps the message queued, as
+ // the Runner does until the turn ends), and a window on Playwright's clock runs out
+ // that timeout (DELIVERY_TIMEOUT_MS, 20 s) at once.
+ codex.sendNowWaits=true;
+ {
+   const held=await context.newPage();held.setDefaultTimeout(15000);
+   const heldErrors=[];await collectPageErrors(held,heldErrors);
+   await held.goto(`${page.url().split('#')[0]}#token=${f.token}`);
+   const heldStrip=held.locator('.embedded-chat:visible').first().getByRole('region',{name:'Queued messages'});
+   const heldRow=heldStrip.getByRole('listitem',{name:/Updated queued message/});
+   await expect(heldRow.getByRole('button',{name:'Send now'})).toBeVisible();
+   // The clock goes in once the window shows the queue, before Send now starts its timeout.
+   await held.clock.install();
+   await heldRow.getByRole('button',{name:'Send now'}).click();
+   await expect(heldRow.locator('.queued-working')).toHaveText('Waiting for the current turn to end…');
+   assert.equal(codex.queuedMessages[0].text,'Updated queued message','Send now leaves it queued until the turn ends');
+   await heldRow.getByRole('button',{name:'Edit',exact:true}).click();
+   await expect(heldRow.getByRole('textbox')).toHaveValue('Updated queued message');
+   assert.equal(codex.queuedMessages[0].editing,true,'Edit holds it');
+   await expect(heldRow.locator('.queued-working')).toHaveCount(0);
+   await held.clock.fastForward('00:25');
+   await expect(heldRow.getByRole('textbox')).toBeVisible();
+   await expect(heldStrip.getByRole('alert')).toHaveCount(0);
+   await expect(heldStrip.getByText(/has not stopped yet/)).toHaveCount(0);
+   await heldRow.getByRole('button',{name:'Cancel edit'}).click();
+   await expect(heldRow.getByRole('textbox')).toHaveCount(0);
+   assert.deepEqual(heldErrors,[]);
+   await held.close();
+ }
+ codex.sendNowWaits=false;
+ assert.equal(codex.queuedMessages[0].editing,false);
  await revised.getByRole('button',{name:'Steer'}).click();
  await expect(youSaid(chat,'Updated queued message')).toBeVisible();
  assert.deepEqual(errors,[]);
- console.log('PASS queued messages: a message sent during a busy turn shows as queued with what the agent is busy with, from the stream at once even while the session poll lags, and its ticking time is not announced; once delivered it is never also in a stale poll\'s strip; it is in the strip only, never also a bubble in the running turn; Send now delivers it in one click (interrupt, then next), said once after the stop, also after a reload, and its tooltip names the step it stops; Steer for Codex delivers into the running turn; Claude says it cannot be steered; several collapse and hide; phone width. Fixture only.');
+ console.log('PASS queued messages: a message sent during a busy turn shows as queued with what the agent is busy with, from the stream at once even while the session poll lags, and its ticking time is not announced; once delivered it is never also in a stale poll\'s strip; it is in the strip only, never also a bubble in the running turn; Send now delivers it in one click (interrupt, then next), said once after the stop, also after a reload, and its tooltip names the step it stops; Steer for Codex delivers into the running turn; Claude says it cannot be steered; several collapse and hide; Edit sits in the action row before Send now, in Tab order, pauses and edits, and supersedes a Send now still at work (no retry message when its time runs out); the row wraps in a narrow panel and on a phone. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

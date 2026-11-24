@@ -24,7 +24,7 @@ it did.
   next in one click (its tooltip names the step it stops), and, for
   Claude and Codex, **Steer**, which hands it to the running turn without
   stopping it: the agent reads it after the step it is on, as when you type
-  into its own terminal mid-turn. **Send to sub-agent** asks the running agent to
+  into its own terminal mid-turn. **Request delegation** asks the running agent to
   delegate that queued message and continue its current task. It appears for
   your messages when the agent supports both steering and sub-agents. An agent that cannot take a message
   mid-turn (an ACP agent, or a Claude agent an older Lazybox started) has no
@@ -32,9 +32,12 @@ it did.
   now the conversation shows one quiet line, *Stopped to send your message*,
   and your message goes as soon as the step stops, the other queued messages
   in order after it.
-  **Edit** pauses delivery before the editor opens. The message keeps its place
+  **Edit**, in the message's row of buttons right before Send now, pauses
+  delivery before the editor opens below the message. The message keeps its place
   and attachments, even if the current turn ends. **Save** releases the
-  revised message. **Cancel edit** releases the original. If you reload the
+  revised message. **Cancel edit** releases the original. Edit also works
+  while a Send now waits for the step to stop: the edit takes over, and the
+  message waits until you save or cancel. If you reload the
   tab while editing, choose **Resume edit** to continue.
 
   A queued message is in one place at a time: above the message box while it

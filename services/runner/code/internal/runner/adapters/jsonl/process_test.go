@@ -167,3 +167,22 @@ func TestEscapedProtocolDescriptorDoesNotPreventReapingOrClaimCleanExit(t *testi
 		t.Fatal("helper was not reaped")
 	}
 }
+
+// A local agent treats a line that is not a message as a hosted one does: a
+// diagnostic, and the conversation goes on.
+func TestLocalLineThatIsNotAMessageIsADiagnostic(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	p, err := Start(ctx, "/bin/sh", []string{"-c", `printf '%s\n' 'debug output' 42 '{"method":"ready"}'; exit 3`}, nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	m, err := p.Receive(ctx)
+	if err != nil || m.Method != "ready" {
+		t.Fatalf("the message after lines that are not messages: %+v %v", m, err)
+	}
+	if _, err = p.Receive(ctx); err == nil || !strings.Contains(err.Error(), "not a message") || !strings.Contains(err.Error(), "debug output") {
+		t.Fatalf("the exit does not carry the diagnostic: %v", err)
+	}
+}

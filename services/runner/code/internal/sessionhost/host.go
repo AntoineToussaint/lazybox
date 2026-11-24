@@ -757,12 +757,21 @@ func (h *host) spawn(spec *Spec) error {
 }
 
 // readLines records an agent's JSONL output, one entry per line.
+//
+// Only JSON is sequenced: a line is sent to the Runner as raw JSON in a frame,
+// so one that is not (a stray print, a debug line) could never be sent, and
+// would block every later line and every re-attachment behind it. Such a line
+// joins the stderr tail instead, which the exit report carries.
 func (h *host) readLines(out *os.File) {
 	defer out.Close()
 	s := bufio.NewScanner(out)
 	s.Buffer(make([]byte, 4096), 16<<20)
 	for s.Scan() {
 		h.console.line("<", s.Bytes())
+		if !json.Valid(s.Bytes()) {
+			h.notJSON(s.Bytes())
+			continue
+		}
 		h.record(s.Bytes())
 	}
 	if err := s.Err(); err != nil && !errors.Is(err, os.ErrClosed) {
@@ -775,6 +784,18 @@ func (h *host) readLines(out *os.File) {
 			_ = guard.Stop()
 		}
 	}
+}
+
+// notJSONLimit bounds how much of one non-JSON line the stderr tail keeps.
+const notJSONLimit = 512
+
+// notJSON keeps a line that is not JSON as a diagnostic: the stderr tail is
+// bounded and redacted, and nothing waits on it.
+func (h *host) notJSON(line []byte) {
+	if len(line) > notJSONLimit {
+		line = append(line[:notJSONLimit:notJSONLimit], "…"...)
+	}
+	_, _ = h.stderr.Write(append([]byte("\nsession host: agent wrote a line that is not JSON: "), line...))
 }
 
 // readChunks records a command's output stream, one entry per read.

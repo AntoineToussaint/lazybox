@@ -39,6 +39,12 @@ func fixtureAgent() {
 		case m.Method == "finish":
 			write(map[string]any{"method": "last"})
 			os.Exit(0)
+		case m.Method == "raw":
+			// Writes its parameter verbatim, as a line of its own.
+			var line string
+			_ = json.Unmarshal(m.Params, &line)
+			fmt.Fprintf(out, "%s\n", line)
+			out.Flush()
 		case m.Method == "ask":
 			write(map[string]any{"id": "q-" + strings.Trim(string(m.Params), `"`), "method": "question"})
 		case m.Method != "" && len(m.ID) > 0:
@@ -306,4 +312,117 @@ func TestReattachedRunnerUsesFreshRequestIDs(t *testing.T) {
 	if again := callID(next); again == first {
 		t.Fatalf("the re-attached Runner reused request ID %s", first)
 	}
+}
+
+// JSON that is not a message (`42`) is a diagnostic: it is acknowledged and
+// the agent goes on being supervised. Before, the Runner stopped reading and
+// detached, so the conversation lost its agent, and Close then reported
+// success while the agent kept running with no one to stop it.
+func TestJSONThatIsNotAMessageKeepsTheAgentSupervised(t *testing.T) {
+	root := hostRoot(t)
+	p, pid := startHosted(t, context.Background(), root)
+	for _, line := range []string{"42", `"text"`, "null", "[1]", "not json"} {
+		if err := p.Notify("raw", line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.Notify("note", "after"); err != nil {
+		t.Fatal(err)
+	}
+	m, err := p.Receive(timeout(t))
+	if err != nil || m.Method != "event" || string(m.Params) != `"after"` {
+		t.Fatalf("the message after lines that are not messages: %+v %v", m, err)
+	}
+	p.Commit(m.Seq)
+	// Everything up to the event is acknowledged: a re-attaching Runner gets
+	// none of it again.
+	id := p.HostID()
+	if err = p.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	next, err := Attach(timeout(t), root, id, m.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = next.Notify("raw", "7"); err != nil {
+		t.Fatal(err)
+	}
+	if err = next.Notify("note", "again"); err != nil {
+		t.Fatal(err)
+	}
+	if m, err = next.Receive(timeout(t)); err != nil || string(m.Params) != `"again"` {
+		t.Fatalf("after re-attaching: %+v %v", m, err)
+	}
+	if err = next.Close(); err != nil {
+		t.Fatal(err)
+	}
+	awaitStopped(t, pid)
+}
+
+// A line that is not a message, last of what the agent wrote, is acknowledged
+// on its own once everything before it is recorded.
+func TestALastLineThatIsNotAMessageIsAcknowledged(t *testing.T) {
+	root := hostRoot(t)
+	p, _ := startHosted(t, context.Background(), root)
+	defer p.Close()
+	if err := p.Notify("note", "first"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := p.Receive(timeout(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Notify("raw", "42"); err != nil {
+		t.Fatal(err)
+	}
+	var early, skipped uint64
+	for end := time.Now().Add(5 * time.Second); skipped == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("the line that is not a message was never read")
+		}
+		p.commitMu.Lock()
+		early, skipped = p.commit, p.skipped
+		p.commitMu.Unlock()
+	}
+	// The event before it is not recorded yet: the skipped line waits for it.
+	if early != 0 {
+		t.Fatalf("acknowledged %d before the event before it was recorded", early)
+	}
+	p.Commit(first.Seq)
+	p.commitMu.Lock()
+	acked := p.commit
+	p.commitMu.Unlock()
+	if acked != first.Seq+1 {
+		t.Fatalf("acknowledged %d, want the skipped line %d", acked, first.Seq+1)
+	}
+}
+
+// Closing an agent stops it whatever it last wrote. After a line that is not
+// a message, Close used to report success and leave the agent running.
+func TestCloseAfterALineThatIsNotAMessageStopsTheAgent(t *testing.T) {
+	root := hostRoot(t)
+	p, pid := startHosted(t, context.Background(), root)
+	if err := p.Notify("raw", "42"); err != nil {
+		t.Fatal(err)
+	}
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		p.commitMu.Lock()
+		skipped := p.skipped
+		p.commitMu.Unlock()
+		select {
+		case <-p.done:
+			skipped = 1 // The old behaviour: reading stopped at the line.
+		default:
+		}
+		if skipped != 0 {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("the line was never read")
+		}
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	awaitStopped(t, pid)
 }

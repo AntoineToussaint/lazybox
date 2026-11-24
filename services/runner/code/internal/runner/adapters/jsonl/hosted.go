@@ -1,6 +1,7 @@
 package jsonl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -162,11 +163,16 @@ func (p *Process) readHosted() {
 			}
 			return
 		}
-		var msg Message
-		if err = json.Unmarshal(m.Line, &msg); err != nil {
-			p.stop(fmt.Errorf("invalid adapter JSON: %w", err))
-			_ = p.host.Detach()
-			return
+		msg, err := decodeMessage(m.Line)
+		if err != nil {
+			// JSON that is not a message (`42`, a string, an array): nothing
+			// to deliver. Stopping here would leave the line at the head of
+			// the host's log, failing every later attach on it. It is kept
+			// as a diagnostic and acknowledged in order (skip), and the
+			// agent goes on being supervised.
+			_, _ = fmt.Fprintf(p.stderr, "\nignored agent output that is not a message (%v): %s", err, clip(m.Line))
+			p.skip(m.Seq)
+			continue
 		}
 		msg.Seq, msg.Redelivered = m.Seq, m.Redelivered
 		if msg.Method == "" && len(msg.ID) > 0 {
@@ -196,6 +202,42 @@ func (p *Process) readHosted() {
 			return
 		}
 	}
+}
+
+// decodeMessage reads one line as a message: a JSON object of the shape
+// Message describes. `null` decodes into an empty struct without error, so
+// the object is required explicitly.
+func decodeMessage(line json.RawMessage) (Message, error) {
+	var msg Message
+	trimmed := bytes.TrimLeft(line, " \t\r\n")
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return msg, errors.New("not a JSON object")
+	}
+	err := json.Unmarshal(line, &msg)
+	return msg, err
+}
+
+// clip bounds a line quoted in a diagnostic.
+func clip(line []byte) string {
+	const limit = 256
+	if len(line) > limit {
+		return string(line[:limit]) + "…"
+	}
+	return string(line)
+}
+
+// skip acknowledges a line that yields nothing to record. Acknowledgements are
+// cumulative, so it is acknowledged at once only when every line delivered
+// before it is recorded; otherwise Commit acknowledges it with them.
+func (p *Process) skip(seq uint64) {
+	p.commitMu.Lock()
+	p.skipped = max(p.skipped, seq)
+	ack := p.commit >= p.delivered && seq > p.commit
+	if ack {
+		p.commit = seq
+		_ = p.host.Ack(seq)
+	}
+	p.commitMu.Unlock()
 }
 
 func signalSuffix(signal string) string {
@@ -233,6 +275,10 @@ func (p *Process) Commit(seq uint64) {
 	if seq <= p.commit {
 		p.commitMu.Unlock()
 		return
+	}
+	if seq >= p.delivered && p.skipped > seq {
+		// Everything delivered is recorded: lines skipped since go too.
+		seq = p.skipped
 	}
 	p.commit = seq
 	_ = p.host.Ack(seq)

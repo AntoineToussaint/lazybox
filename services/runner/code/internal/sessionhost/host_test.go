@@ -58,6 +58,10 @@ func fakeAgent() {
 		switch {
 		case m.Method == "echo":
 			emit(out, "echoed", m.Params)
+		case m.Method == "raw":
+			var line string
+			_ = json.Unmarshal(m.Params, &line)
+			fmt.Fprintf(out, "%s\n", line)
 		case m.Method == "ask":
 			fmt.Fprintf(out, `{"id":%s,"method":"question"}`+"\n", m.Params)
 		case m.Method == "flood":
@@ -1072,4 +1076,41 @@ func TestResolveConfirmedBeforeReattachAndRejectsStaleOwner(t *testing.T) {
 	if name, _ := method(t, next(t, third)); name != "echoed" {
 		t.Fatalf("resolved request replayed: %s", name)
 	}
+}
+
+// A line that is not JSON (a stray print) cannot be sent in a frame. It must
+// not block the lines after it, nor every later attach: it becomes a
+// diagnostic in the exit report instead.
+func TestALineThatIsNotJSONDoesNotBlockTheConnection(t *testing.T) {
+	dir := root(t)
+	c, _ := started(t, dir)
+	_ = c.Ack(1)
+	_ = c.Send(json.RawMessage(`{"method":"raw","params":"debug: not json"}`))
+	_ = c.Send(json.RawMessage(`{"method":"echo","params":"after"}`))
+	m := next(t, c)
+	if name, params := method(t, m); name != "echoed" || string(params) != `"after"` {
+		t.Fatalf("the line after a non-JSON one: %s", m.Line)
+	}
+	_ = c.Detach()
+	again, err := Attach(deadline(t), dir, c.ID(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, _ := method(t, next(t, again)); name != "echoed" {
+		t.Fatal("re-attachment did not replay the unacknowledged line")
+	}
+	_ = again.Terminate()
+	for {
+		_, exit, err := again.Next(deadline(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exit != nil {
+			if !strings.Contains(exit.Stderr, "not JSON: debug: not json") {
+				t.Fatalf("the non-JSON line is not in the diagnostics: %q", exit.Stderr)
+			}
+			break
+		}
+	}
+	_ = again.Release()
 }

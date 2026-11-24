@@ -102,8 +102,8 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
 
 type EditAction = 'edit' | 'save_edit' | 'cancel_edit';
 
-function QueueEditor({ message, sessionId, edit }: { message: QueuedEntry; sessionId: string; edit: QueuedDelivery['edit'] }) {
-  const key = `lazybox:queue-edit:${sessionId}:${message.operationId}`;
+function QueueEditor({ message, conversationId, edit }: { message: QueuedEntry; conversationId: string; edit: QueuedDelivery['edit'] }) {
+  const key = `lazybox:queue-edit:${conversationId}:${message.operationId}`;
   const [draft, setDraft] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -227,7 +227,7 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
               </>}
             </span>
           </div>
-          {!origin && <QueueEditor key={session.id + message.operationId} message={message} sessionId={session.id} edit={delivery.edit}/>}
+          {!origin && <QueueEditor key={session.id + message.operationId} message={message} conversationId={session.conversationId || session.id} edit={delivery.edit}/>}
           {error?.id === message.operationId && <p className="queued-error" role="alert">{error.text}</p>}
         </li>;
       })}

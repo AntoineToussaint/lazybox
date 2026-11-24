@@ -427,6 +427,10 @@ func (e *Engine) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, 
 	// the operation's kind from its data: an interrupt explains a tool call
 	// that then fails as one the person stopped.
 	record := map[string]any{"type": "operation_accepted", "operationId": op.ID, "kind": op.Kind, "text": op.Text, "imageCount": len(op.Images), "requestId": op.RequestID, "data": map[string]any{"files": op.Files, "kind": op.Kind}}
+	// A held message carried into a new execution waits even before its first turn.
+	if op.QueueEditID != "" {
+		record["status"] = "queued_for_edit"
+	}
 	// A response's decision and answers are journaled so a request redelivered
 	// after a restart can be answered as the user did.
 	if op.Decision != "" {

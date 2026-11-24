@@ -212,19 +212,9 @@ func AdoptStopped(ctx context.Context, adapter agent.Adapter, open agent.Open, s
 		return nil, errors.New("adoption requires session hosting")
 	}
 	queued := map[string]bool{}
-	var queue []agent.Operation
-	for _, op := range record.Queue {
-		if scan.receipts[op.ID].Delivery == "canceled_before_delivery" {
-			continue
-		}
-		if edit, ok := scan.edits[op.ID]; ok {
-			op.QueueEditID = edit.editor
-			if edit.text != nil {
-				op.Text = *edit.text
-			}
-		}
+	queue := scan.restoreQueue(record.Queue)
+	for _, op := range queue {
 		queued[op.ID] = true
-		queue = append(queue, op)
 	}
 	// A queued message has not reached the agent yet; it joins the transcript
 	// when it is delivered. (One accepted but not queued, without a receipt,
@@ -333,6 +323,36 @@ func (e *Engine) Start() {
 			go e.dispatch()
 		}
 	})
+}
+
+// RestoreQueued applies journaled changes before carrying an interrupted queue
+// into a successor execution. The attachment can lag the journal after a crash.
+func RestoreQueued(ctx context.Context, spool *journal.Journal, saved []agent.Operation) ([]agent.Operation, error) {
+	if len(saved) == 0 {
+		return nil, nil
+	}
+	scan, err := scanJournal(ctx, spool)
+	if err != nil {
+		return nil, err
+	}
+	return scan.restoreQueue(saved), nil
+}
+
+func (scan *journalScan) restoreQueue(saved []agent.Operation) []agent.Operation {
+	var queue []agent.Operation
+	for _, op := range saved {
+		if scan.receipts[op.ID].Delivery == "canceled_before_delivery" {
+			continue
+		}
+		if edit, ok := scan.edits[op.ID]; ok {
+			op.QueueEditID = edit.editor
+			if edit.text != nil {
+				op.Text = *edit.text
+			}
+		}
+		queue = append(queue, op)
+	}
+	return queue
 }
 
 type queuedEdit struct {

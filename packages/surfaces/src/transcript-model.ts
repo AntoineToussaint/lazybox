@@ -155,9 +155,9 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
    * strip shows it, and the conversation does once it is delivered. One sent
    * while idle is the next turn's start, shown at once.
    */
-  const accept = (message: TranscriptMessage) => {
+  const accept = (message: TranscriptMessage, held = false) => {
     const id = message.operationId;
-    if (id && (next.turnRunning || Object.keys(queued()).length)) (pending ??= { ...state.pending })[id] = message;
+    if (id && (held || next.turnRunning || Object.keys(queued()).length)) (pending ??= { ...state.pending })[id] = message;
     else place(message);
   };
   for (const record of fresh) {
@@ -406,7 +406,7 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
       } else add({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, ...when });
       next.appendToLast = true;
     } else if (event.type === 'operation_accepted' && (event.text || files?.length)) {
-      accept({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, files, ...when, promptModel: next.lastObservedModel, promptContext: next.reportedContext, ...(event.operationId ? { operationId: event.operationId } : {}), ...(ranCommand(event.text, next.catalog) ? { command: true } : {}) });
+      accept({ id: record.cursor.toString(), type: event.type, text: event.text, turnId: event.turnId, files, ...when, promptModel: next.lastObservedModel, promptContext: next.reportedContext, ...(event.operationId ? { operationId: event.operationId } : {}), ...(ranCommand(event.text, next.catalog) ? { command: true } : {}) }, event.status === 'queued_for_edit');
     } else if (event.type === 'failure' && (event.text || files?.length)) {
       const sentence = failureSentence(event.status, event.text);
       add({ id: record.cursor.toString(), type: event.type, text: sentence, turnId: event.turnId, files, ...(event.text.trim() && sentence !== event.text.trim() ? { detail: event.text.trim() } : {}) });

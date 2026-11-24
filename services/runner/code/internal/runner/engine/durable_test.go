@@ -425,6 +425,10 @@ func TestQueuedEditHoldSurvivesAdoptionWithStaleAttachment(t *testing.T) {
 	if _, err := e.EditQueued("queued", "edit", "editor", ""); err != nil {
 		t.Fatal(err)
 	}
+	carried, err := RestoreQueued(ctx, e.journal, stale.Queue)
+	if err != nil || len(carried) != 1 || carried[0].QueueEditID != "editor" {
+		t.Fatalf("carried queue lost the hold: %+v, %v", carried, err)
+	}
 	if err := e.Detach(); err != nil {
 		t.Fatal(err)
 	}

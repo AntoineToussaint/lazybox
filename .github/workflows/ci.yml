@@ -133,7 +133,6 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - name: Install verification isolation
-        if: needs.plan.outputs.profile == 'full'
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap apparmor-profiles
@@ -143,12 +142,10 @@ jobs:
           sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
           bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev -- true
       - name: Install tmux
-        if: needs.plan.outputs.profile == 'full'
         run: command -v tmux || { sudo apt-get update && sudo apt-get install -y tmux; }
       # A user manager for this account, as a Linux host running the Runner
       # as a service has (lingering), so systemd-run --user --scope works.
       - name: Start a systemd user manager
-        if: needs.plan.outputs.profile == 'full'
         run: |
           sudo loginctl enable-linger "$USER"
           uid="$(id -u)"

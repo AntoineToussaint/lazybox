@@ -71,6 +71,30 @@ func TestActivityBoundForgetsFinishedForLaterSubagents(t *testing.T) {
 	}
 }
 
+// A sub-agent the Runner only lost track of (Unknown) may still be reported
+// by an adopted host: every sub-agent that truly ended makes room before it.
+func TestActivityBoundForgetsALostSubagentLast(t *testing.T) {
+	e, _ := bench(t, true)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.observe(agent.Event{Type: "turn_started"})
+	// The lost one is the oldest: the plain oldest-first rule would forget it first.
+	e.observe(agent.Event{Type: "agent_status", AgentID: "claude-tool:lost", NativeID: "lost", Status: "running"})
+	e.observe(agent.Event{Type: "agent_status", AgentID: "claude-tool:lost", Status: "unknown"})
+	for i := 0; i < 254; i++ {
+		id := fmt.Sprintf("claude-tool:call-%d", i)
+		e.observe(agent.Event{Type: "agent_status", AgentID: id, NativeID: fmt.Sprintf("t%d", i), Status: "running"})
+		e.observe(agent.Event{Type: "agent_status", AgentID: id, Status: "done"})
+	}
+	e.observe(agent.Event{Type: "agent_status", AgentID: "claude-tool:new", NativeID: "new", Status: "running"})
+	if a, ok := e.state.Agents["claude-tool:lost"]; !ok || a.NativeID != "lost" {
+		t.Fatalf("a lost sub-agent made room before finished ones: %+v ok=%v", a, ok)
+	}
+	if _, ok := e.state.Agents["claude-tool:new"]; !ok {
+		t.Fatal("the new sub-agent found no room")
+	}
+}
+
 func TestActivityBoundAndLostStreamRemainUnknown(t *testing.T) {
 	e, _ := bench(t, true)
 	e.mu.Lock()

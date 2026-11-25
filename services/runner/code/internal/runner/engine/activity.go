@@ -155,21 +155,27 @@ const activityLimit = 256
 // the main agent. A bound that kept the first sub-agents for good would leave
 // every later one, in a conversation used all day, unknown to the Runner:
 // impossible to stop and absent from the session's status.
+//
+// A sub-agent the Runner only lost track of (Unknown, after its process
+// exited) may still be reported again by an adopted host, so it leaves only
+// when no sub-agent has truly ended.
 func (e *Engine) forgetFinished() bool {
-	oldest := ""
-	for id, a := range e.state.Agents {
-		if id == "root" || liveStatus(a.Status) {
-			continue
+	for _, lost := range []bool{false, true} {
+		oldest := ""
+		for id, a := range e.state.Agents {
+			if id == "root" || liveStatus(a.Status) || (a.Status == agent.Unknown) != lost {
+				continue
+			}
+			if oldest == "" || a.UpdatedAt.Before(e.state.Agents[oldest].UpdatedAt) || (a.UpdatedAt.Equal(e.state.Agents[oldest].UpdatedAt) && id < oldest) {
+				oldest = id
+			}
 		}
-		if oldest == "" || a.UpdatedAt.Before(e.state.Agents[oldest].UpdatedAt) || (a.UpdatedAt.Equal(e.state.Agents[oldest].UpdatedAt) && id < oldest) {
-			oldest = id
+		if oldest != "" {
+			delete(e.state.Agents, oldest)
+			return true
 		}
 	}
-	if oldest == "" {
-		return false
-	}
-	delete(e.state.Agents, oldest)
-	return true
+	return false
 }
 
 func liveStatus(s agent.Status) bool {

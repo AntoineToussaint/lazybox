@@ -28,7 +28,7 @@ yours. The command palette's *Switch between light and dark* flips it in one go.
 | Motion | Appearance | *System*, or *Reduce* to turn off animations and smooth scrolling. |
 | Zoom | `⌘=` `⌘−` `⌘0` (View menu) | The desktop app, every window, 50–200 %, kept across launches. In a browser, use its own zoom. |
 | Chat text | Chat | Size, line spacing, paragraph spacing, and a line-width cap for wide windows, with a live sample. |
-| How much of the agent's work the chat shows | Chat | Smart, Quiet or Verbose — see [Activity detail](activity-detail.md). |
+| How much of the agent's work the chat shows | Chat | Quiet or Verbose — see [Activity detail](activity-detail.md). |
 | Diffs side by side or unified | `s` in Changes | Remembered for every window. |
 | Word wrap in the editor | `⌥Z` | Prose wraps by default, code does not. |
 | What a link click does | Web & links | Open in your browser (default) or in a Web panel; the search engine. |

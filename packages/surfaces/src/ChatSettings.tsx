@@ -39,7 +39,7 @@ export function ChatSettings({ store }: { store?: ViewStateStore }) {
     <SettingsGroup id="chat-activity-detail" title="Activity detail" description={<>How much of an agent’s tool calls a conversation shows. Change one conversation from its ⋯ menu, the command palette, or <kbd>]</kbd> <kbd>]</kbd> <kbd>v</kbd>. Every call stays in the Activity dialog.</>}>
       <div role="radiogroup" aria-label="Activity detail">
         {ACTIVITY_DETAILS.map(choice => <label key={choice} className="settings-row chat-settings-choice">
-          <span className="settings-row-text"><span className="settings-row-label">{ACTIVITY_LABELS[choice].label}{choice === 'smart' ? ' · recommended' : ''}</span><small>{ACTIVITY_LABELS[choice].detail}</small></span>
+          <span className="settings-row-text"><span className="settings-row-label">{ACTIVITY_LABELS[choice].label}{choice === 'quiet' ? ' · recommended' : ''}</span><small>{ACTIVITY_LABELS[choice].detail}</small></span>
           <span className="settings-row-control"><input type="radio" name="activity-detail" value={choice} checked={detail === choice} onChange={() => setDetail(choice)}/></span>
         </label>)}
       </div>

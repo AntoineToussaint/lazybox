@@ -1,0 +1,9 @@
+lazybox: 1
+name: Compound Engineering
+version: 1.0.0
+description: Review archived work and propose scoped changes to AGENTS.md and reference documentation.
+author: Lazybox
+category: Code & documentation
+keywords: [retrospective, agent instructions, documentation]
+caption: Example documentation proposal in workspace Artifacts.
+grants: [review:archives]

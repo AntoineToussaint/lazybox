@@ -610,34 +610,6 @@ shot('subagents', async ({ f, open }) => {
   return page;
 });
 
-shot('activity-detail', async ({ f, open }) => {
-  realistic(f);
-  const session = f.sessions[0];
-  Object.assign(session, { title: 'Why can’t the owner read the runtime?', busy: true, status: 'running', agents: [{ id: 'root', status: 'running' }] });
-  const root = session.workingDirectory;
-  const j = journal(f, 'alpha-session', Date.now() - 45_000, { turnId: 't1' });
-  const tool = (id, fields, seconds = 0) => j.push({ type: 'tool_activity', turnId: 't1', providerDataJson: b64({ type: 'tool_call', id, ...fields }) }, seconds);
-  j.prompt('Why can’t the owner read their own runtime?');
-  j.say('I’ll trace how the runtime resolves access.');
-  ['runtime_access.go', 'policy.go', 'owner.go', 'session.go', 'grants.go', 'store.go', 'handler.go', 'errors.go'].forEach((file, i) => {
-    j.push({ type: 'activity', status: 'thinking' }, 2);
-    tool(`sh-${i}`, { name: 'Bash', status: 'running', input: { command: `sed -n '1,200p' internal/runtime/${file}`, ...(i === 0 ? { description: 'Read the access check' } : {}) } }, 1.4);
-    tool(`sh-${i}`, { status: 'completed', output: `package runtime\n// ${file}\n` }, 0.1);
-  });
-  for (const [i, file] of ['internal/runtime/policy_test.go', 'README.md'].entries()) { tool(`read-${i}`, { name: 'Read', status: 'running', input: { file_path: `${root}/${file}` } }, 1); tool(`read-${i}`, { status: 'completed', output: 'a\nb\n' }, 0.1); }
-  tool('fail', { name: 'Bash', status: 'running', input: { command: 'npm test', description: 'Run the unit tests' } }, 1);
-  tool('fail', { status: 'failed', output: [{ type: 'text', text: 'Exit code 1\nFAIL src/access.test.ts › owner can read' }] }, 3);
-  tool('edit', { name: 'Edit', status: 'running', input: { file_path: `${root}/internal/runtime/runtime_access.go`, old_string: 'return false', new_string: 'return owner == caller' } }, 1);
-  tool('edit', { status: 'completed', output: 'ok' }, 0.1);
-  j.say('Found it: the owner check compared the wrong ids. Running the tests now.');
-  tool('diff', { name: 'Bash', status: 'running', input: { command: 'git diff --stat' } }, 1); tool('diff', { status: 'completed', output: ' 1 file changed' }, 0.1);
-  tool('gotest', { name: 'Bash', status: 'running', input: { command: 'go test ./internal/runtime/... -count 1', description: 'Run the runtime tests' } }, 1);
-  const page = await open(WORKSPACE);
-  const first = page.locator('.messages').first().locator('.tool-lines').first();
-  await expect(first).toContainText('Explored the codebase');
-  return page;
-});
-
 // The artifact reader: a design doc an agent wrote and revised, read like a document.
 shot('artifacts', async ({ f, open, clock }) => {
   realistic(f);

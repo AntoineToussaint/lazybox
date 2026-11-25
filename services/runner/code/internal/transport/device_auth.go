@@ -66,7 +66,9 @@ var deviceRPCs = map[string]deviceRule{
 		// Changing a running agent's permission mode (to yolo, say) or its
 		// model is a setting, not a response.
 		switch r.Operation.(type) {
-		case *pb.ApplyRequest_Message, *pb.ApplyRequest_Steer, *pb.ApplyRequest_Interrupt, *pb.ApplyRequest_Answer, *pb.ApplyRequest_Approval, *pb.ApplyRequest_DeliverQueued:
+		case *pb.ApplyRequest_Answer:
+			return !r.GetAnswer().GetRememberForClone()
+		case *pb.ApplyRequest_Message, *pb.ApplyRequest_Steer, *pb.ApplyRequest_Interrupt, *pb.ApplyRequest_Approval, *pb.ApplyRequest_DeliverQueued:
 			return true
 		}
 		return false

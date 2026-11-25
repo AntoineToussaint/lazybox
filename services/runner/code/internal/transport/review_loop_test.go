@@ -51,6 +51,14 @@ func runUntil(t *testing.T, f *reviewFixture, check func(*pb.ReviewRun) bool) *p
 // asks the author a question and gets the reply.
 func TestReviewLoopTwoRoundsEndsClean(t *testing.T) {
 	f := newReviewFixture(t)
+	settings, err := f.client.GetRunnerSettings(f.owner, &pb.InfoRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Review.Loop = "ask"
+	if _, err = f.client.SaveRunnerSettings(f.owner, settings); err != nil {
+		t.Fatal(err)
+	}
 	ctx := timeout(t)
 	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Scope: "turn", Turn: 1, Provider: "codex"})
 	if err != nil {
@@ -204,4 +212,27 @@ func TestReviewLoopAutoSendsFindingsAndEscalatesAtTheLimit(t *testing.T) {
 	if _, err = f.client.UpdateReviewRun(bearer(context.Background(), f.agentToken), &pb.UpdateReviewRunRequest{CollectionId: f.mine.Id, ReviewId: run.Id, Action: "stop"}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("an agent controlled the loop: %v", err)
 	}
+}
+
+func TestDefaultReviewDeliversMinorFindingWithoutAnotherRound(t *testing.T) {
+	f := newReviewFixture(t)
+	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Scope: "turn", Turn: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.Run.Loop != "auto" {
+		t.Fatal(started.Run.Loop)
+	}
+	applied(t, f.codex, "What to review")
+	reviewer := bearer(timeout(t), agentToken(t, f.codex.Session.Open.Env))
+	filed, err := f.client.AddReviewFinding(reviewer, &pb.AddReviewFindingRequest{SessionId: started.Session.Id, File: "api/handler.go", StartLine: 4, Severity: "minor", Title: "Clarify the error", Body: "Include the input name."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	op := applied(t, f.claude, "Please address this review comment")
+	if !strings.Contains(op.Text, filed.Finding.Id) || !strings.Contains(op.Text, "Include the input name.") {
+		t.Fatal(op.Text)
+	}
+	runUntil(t, f, func(r *pb.ReviewRun) bool { return r.Round == 1 && r.Phase == "done" && r.StopReason == "clean" })
 }

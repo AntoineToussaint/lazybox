@@ -91,3 +91,10 @@ test('an API key from the Runner reaches Claude Code untouched', () => {
     for (const name of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK']) assert.equal(name in passed, false, `${name} appeared`);
   }
 });
+
+test('reviewers keep native read-only enforcement and never enter the plan approval workflow', () => {
+  const reviewer = nativeOptions({ cwd: '/fixture', purpose: 'reviewer', permission: 'read-only', browser: true }, {});
+  assert.equal(reviewer.permissionMode, 'plan');
+  assert.equal(reviewer.strictMcpConfig, true);
+  assert.deepEqual(reviewer.tools, ['Read', 'Glob', 'Grep', 'Bash', 'AskUserQuestion']);
+});

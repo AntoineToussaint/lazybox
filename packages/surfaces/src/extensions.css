@@ -115,3 +115,16 @@ button.extension-chip{cursor:pointer}
 .extension-commands code{font-family:var(--font-mono);font-size:calc(12px * var(--text-scale));color:var(--text)}
 .extension-commands small{color:var(--text-muted);font-size:calc(12px * var(--text-scale))}
 @container settings-group (max-width:560px){.extension-card{grid-template-columns:auto minmax(0,1fr)}.extension-card-actions{grid-column:2}.extension-commands{grid-template-columns:minmax(0,1fr)}}
+
+.extension-search { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.extension-search input[type=search] { flex: 1 1 12rem; min-width: 0; }
+.extension-search label { display: inline-flex; align-items: center; gap: 4px; }
+.extension-listing small { color: var(--text-subtle); }
+.extension-listing summary { cursor: zoom-in; width: fit-content; }
+.extension-listing summary img { width: 112px; max-width: 100%; border-radius: 4px; }
+.extension-listing details[open] summary { cursor: zoom-out; }
+.extension-listing figure { margin: 4px 0; }
+.extension-listing figure img { max-width: 100%; height: auto; }
+.clone-interview, .clone-interview label { display: grid; gap: 6px; }
+.clone-interview { gap: 12px; }
+.clone-interview label:has(input) { display: block; }

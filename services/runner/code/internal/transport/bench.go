@@ -533,9 +533,26 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 	default:
 		return nil, grpcError(codes.InvalidArgument, errors.New("typed operation required"))
 	}
+	var remember, approved agent.Event
+	if answer := r.GetAnswer(); answer != nil && answer.RememberForClone {
+		remember = e.Engine.Snapshot().Pending[op.RequestID]
+	}
+	if op.Kind == agent.Approve && op.Decision == "accept" {
+		approved = e.Engine.Snapshot().Pending[op.RequestID]
+	}
 	receipt, err := e.Engine.Apply(ctx, op)
 	if err != nil {
 		return nil, rpcError(err)
+	}
+	if approved.Type != "" && receipt.Error == "" && receipt.Delivery != "failed" {
+		if err = s.Bench.PlanApproved(ctx, e, approved); err != nil {
+			return nil, rpcError(fmt.Errorf("plan approved; could not leave plan mode: %w", err))
+		}
+	}
+	if remember.Type == "question" && receipt.Error == "" {
+		if err = s.Bench.RememberCloneAnswer(e.CollectionID, remember, op.Answers); err != nil {
+			return nil, rpcError(fmt.Errorf("answer sent; could not remember preference: %w", err))
+		}
 	}
 	if prompt != nil && receipt.Error == "" {
 		s.Bench.RecordPrompt(e, p.OperationId, prompt.Text, promptSource(prompt.Source))
@@ -1251,6 +1268,11 @@ func (s *Service) ArchiveConversation(ctx context.Context, r *pb.ArchiveConversa
 	}
 	if err = s.Bench.History.Archive(ctx, r.SessionId, r.Archived); err != nil {
 		return nil, rpcError(err)
+	}
+	if r.Archived {
+		if record, err := s.Bench.History.Get(ctx, e.ID); err == nil {
+			s.Bench.Archived(ctx, e.CollectionID, e.ID, fmt.Sprint(record.ArchivedAt))
+		}
 	}
 	return s.sessionResponse(ctx, e)
 }

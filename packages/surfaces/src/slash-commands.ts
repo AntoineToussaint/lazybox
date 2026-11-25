@@ -22,7 +22,7 @@ export type SlashCommand = {
   name: string;
   group: SlashGroup;
   description: string;
-  /** What follows the name, as the provider or Lazybox writes it: `<name>`, `quiet|smart|verbose`. */
+  /** What follows the name, as the provider or Lazybox writes it: `<name>`, `quiet|verbose`. */
   argumentHint?: string;
   icon: string;
   aliases?: string[];
@@ -246,7 +246,6 @@ export function shownModelChoices<T extends { current?: boolean }>(choices: read
 }
 export const DETAIL_CHOICES: SlashChoice[] = [
   { value: 'quiet', label: 'Quiet', detail: 'Only what the agent says, its decisions and edits' },
-  { value: 'smart', label: 'Smart', detail: 'Runs of tool calls fold into one line' },
   { value: 'verbose', label: 'Verbose', detail: 'Every tool call on its own line' },
 ];
 
@@ -338,7 +337,7 @@ export function lazyboxCommands(ctx: SlashContext): SlashCommand[] {
     { key: 'lazybox:orchestrate', name: 'orchestrate', group: 'lazybox', icon: 'subagent', description: `Let ${agentName} start and drive agents for a mission`, aliases: ['orchestrator'], disabled: unless(notLive, !ctx.coding && 'Assistants cannot run agents', !ctx.workspace && 'Only in a workspace'), keywords: 'spawn agents team grant mission' },
     { key: 'lazybox:run', name: 'run', group: 'lazybox', icon: 'play', description: `Open the last command block ${agentName} wrote in the terminal, ready to run`, disabled: unless(!ctx.coding && 'Assistants have no commands to run', !ctx.shellBlock && 'No command block to run yet'), keywords: 'shell bash script execute' },
     { key: 'lazybox:stop', name: 'stop', group: 'lazybox', icon: 'stop', description: `Interrupt ${agentName}`, aliases: ['interrupt'], disabled: unless(notLive, !ctx.busy && `${agentName} is not working`), keywords: 'cancel abort halt' },
-    { key: 'lazybox:detail', name: 'detail', group: 'lazybox', icon: 'activity', argumentHint: 'quiet|smart|verbose', description: 'How much tool activity this conversation shows', choices: DETAIL_CHOICES.map(choice => ({ ...choice, current: choice.value === ctx.detail })), keywords: 'activity tools noise' },
+    { key: 'lazybox:detail', name: 'detail', group: 'lazybox', icon: 'activity', argumentHint: 'quiet|verbose', description: 'How much tool activity this conversation shows', choices: DETAIL_CHOICES.map(choice => ({ ...choice, current: choice.value === ctx.detail })), keywords: 'activity tools noise' },
     { key: 'lazybox:rename', name: 'rename', group: 'lazybox', icon: 'pencil', argumentHint: '<title>', needsArgument: true, description: 'Rename this conversation', aliases: ['title'], disabled: unless(!ctx.live && !ctx.resumable && 'The conversation is still connecting') },
     { key: 'lazybox:help', name: 'help', group: 'lazybox', icon: 'keyboard', description: 'Keyboard shortcuts', aliases: ['shortcuts', 'keys'] },
   ];

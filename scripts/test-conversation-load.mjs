@@ -114,6 +114,21 @@ try{
  const shown=order(await pane.innerText());
  assert.deepEqual(shown,Array.from({length:turns},(_,i)=>i),'every turn once, oldest first');
  await expect(chat.getByRole('button',{name:/Show earlier messages/})).toHaveCount(0);
+ // Exercise the composer with every earlier turn mounted. Measure the input
+ // task through its next frame, excluding Playwright's keyboard round trip.
+ const draft=chat.getByRole('textbox',{name:'Message',exact:true});
+ await draft.focus();
+ const samples=[];
+ for(const key of 'long conversation'){
+  await draft.evaluate(node=>{window.__typingFrame=new Promise(resolve=>node.addEventListener('input',()=>{
+   const start=performance.now();
+   requestAnimationFrame(()=>resolve(performance.now()-start));
+  },{once:true,capture:true}));});
+  await page.keyboard.type(key);
+  samples.push(await page.evaluate(()=>window.__typingFrame));
+ }
+ await expect(draft).toHaveValue('long conversation');
+ console.log('Fully mounted composer input to next frame (ms)',{median:median(samples),max:Math.max(...samples)});
  await drainPageErrors(errors);assert.deepEqual(errors,[]);
  await page.close();
 

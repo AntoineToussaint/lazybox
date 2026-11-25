@@ -462,6 +462,9 @@ func (e *Engine) apply(ctx context.Context, op agent.Operation, interruptChildre
 	if op.Kind == agent.Answer || op.Kind == agent.Approve {
 		record["data"] = map[string]any{"files": op.Files, "response": map[string]any{"kind": op.Kind, "decision": op.Decision, "always": op.Always, "reason": op.Reason, "answers": op.Answers}}
 	}
+	if op.Kind == agent.Answer && op.Origin != nil {
+		record["data"].(map[string]any)["response"].(map[string]any)["from"] = op.Origin.From
+	}
 	if ok, retry := e.recordLocked(record); !ok {
 		e.mu.Unlock()
 		if retry {

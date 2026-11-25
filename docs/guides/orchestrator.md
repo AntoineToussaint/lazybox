@@ -24,8 +24,9 @@ request appears in the chat as a card, like an approval:
 
 | Choice | Key | What it does |
 | --- | --- | --- |
-| **Start** | `1` `Y` | Starts it as asked and opens it as a tab beside this one. |
-| **Start in a new workspace** | `W` | Starts it with its own branches, created from this workspace's, so it doesn't edit the same files as the agents already running here. |
+| **Start in this workspace** or **Start in a new workspace** | `1` `Y` | Starts it where the agent asked, which the button names, and opens it. |
+| **Start in a new workspace** | `W` | When the agent asked for this workspace: starts it with its own branches, created from this workspace's, so it doesn't edit the same files as the agents already running here. |
+| **Start in this workspace** | `H` | When the agent asked for a new workspace: starts it here instead, without creating one. |
 | **Edit…** | `E` | Change the title, brief, agent, model or workspace first. `⌘↵` starts it; `Esc` goes back. |
 | **Deny…** | `N` | Tells the agent why. It won't start the conversation another way. |
 
@@ -64,7 +65,7 @@ this workspace, it can run:
 lazybox conversation new --title TODO --brief "Maintain the Workspace TODO artifact." --no-wait
 ```
 
-Choose **Start** on the request card to open the conversation. This is the
+Choose **Start in this workspace** on the request card to open the conversation. This is the
 agent command for creating a conversation. `lazybox do conversation.new`
 opens the owner's New conversation dialog.
 

@@ -162,7 +162,7 @@ the menu highlights the one you use most. For example, typing `/rev` can select
   `/cost` and `/context` (the usage popover), `/review [codex|claude] [focus…]`
   (another agent reviews the workspace's changes; `/review tray` opens the tray),
   `/artifact` (track the agent's last message), `/mission`, `/run` (the last
-  command block), `/stop`, `/detail quiet|smart|verbose`, `/rename <title>` and
+  command block), `/stop`, `/detail quiet|verbose`, `/rename <title>` and
   `/help`. A command that takes a choice lists it (models, modes) with the
   current one marked. The unfiltered `/model` list puts the current model first
   and the provider default next when available, then sorts the rest by name and version number. Each model appears once. Use `/effort` to choose a supported reasoning level for the current model, or type both in one command, such as `/model luna high`. An unavailable suggestion says why and lets Tab move

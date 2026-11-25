@@ -927,3 +927,19 @@ func TestStopChildUsesItsNativeTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReviewerContinuesAfterNativeApprovalRequest(t *testing.T) {
+	t.Setenv("FIXTURE_NATIVE_APPROVAL", "1")
+	self, _ := os.Executable()
+	s, err := (Adapter{Binary: self}).Open(context.Background(), agent.Open{Cwd: t.TempDir(), Purpose: agent.Reviewer, Permission: "read-only", Host: &agent.Hosting{Root: fixtureRoot(t)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Apply(context.Background(), agent.Operation{ID: "inspect", Kind: agent.Message, Text: "review"}); err != nil {
+		t.Fatal(err)
+	}
+	if reply := receive(t, s, "message_delta"); reply.Text != "decision=decline" {
+		t.Fatalf("review response: %+v", reply)
+	}
+}

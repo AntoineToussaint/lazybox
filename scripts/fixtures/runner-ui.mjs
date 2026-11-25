@@ -705,6 +705,11 @@ actions:
       case 'ListGitHubItems': return json({ items: [{ id: '501', number: '12', kind: 'issue', title: 'Fix startup', state: 'open', author: 'fixture-user', htmlUrl: 'https://github.com/fixture-team/api/issues/12' }, { id: '502', number: '13', kind: 'pull_request', title: 'Improve startup', state: 'open', author: 'fixture-user', htmlUrl: 'https://github.com/fixture-team/api/pull/13' }], hasMore: false });
       case 'ListSnippets': return json({snippets:[{key:'review',category:'Review',description:'Review this change',body:'Review the current change carefully.',origin:'built-in'},{key:'test',category:'Testing',description:'Run tests',body:'Run the relevant tests.',origin:'global'},{key:'review-pr-ci',category:'Review',description:'Review, prepare PR and follow CI',body:'Start the default reviewer and return to the author for PR and CI.',origin:'workflow'}]});
       case 'GetTelemetry': return json(telemetry(body));
+      case 'ArchiveCollection': {
+        const workspace=collections.find(c=>c.id===body.collectionId);
+        if (!workspace) return error('not_found','workspace missing');
+        workspace.state='archived'; mutations.push({method,body}); return json({collection:workspace});
+      }
       case 'RenameCollection': { const workspace=collections.find(c=>c.id===body.collectionId);if(!workspace)return error('not_found','workspace missing');workspace.name=body.name;mutations.push({method,body});return json({collection:workspace}); }
       case 'RestartRunner': {
         mutations.push({ method, body });

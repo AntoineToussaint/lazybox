@@ -10,7 +10,7 @@ import { NativeStatus } from './status.js';
 import { CommandCatalog } from './catalog.js';
 import { contextReporter } from './context.js';
 import { SettingsApprovals, settingsServer, settingsServerName, updateSettingsTool } from './settings.js';
-import { runnerApprovesTerminalAction, alwaysChoices, covers, decide, offered, restoreGrants, type Grant } from './permissions.js';
+import { reviewToolDecision, runnerApprovesTerminalAction, alwaysChoices, covers, decide, offered, restoreGrants, type Grant } from './permissions.js';
 import { browserServer, browserServerName } from './browser.js';
 import { generateTitle } from './title.js';
 import { ModelSwitch } from './model.js';
@@ -80,7 +80,7 @@ export function mcpServers(purpose: string, browser = false, call: typeof callRu
     file: z.string().describe('Workspace-relative repository/path'), startLine: z.number().int().positive(), endLine: z.number().int().positive().optional(),
     severity: z.enum(['blocker', 'major', 'minor', 'nit']), title: z.string(), body: z.string(), key: z.string().optional(),
   }, async args => ({ content: [{ type: 'text', text: await call('lazybox_review_finding', args) }] }));
-  return { lazybox: createSdkMcpServer({ name: 'lazybox', version: '0.1.0', tools: [commandTool, reviewFinding] }), ...(browser ? { [browserServerName]: browserServer(call) } : {}) };
+  return { lazybox: createSdkMcpServer({ name: 'lazybox', version: '0.1.0', tools: [commandTool, reviewFinding] }), ...(browser && purpose !== 'reviewer' ? { [browserServerName]: browserServer(call) } : {}) };
 }
 
 async function open(options: any) {
@@ -101,6 +101,11 @@ async function open(options: any) {
     mcpServers: mcpServers(options.purpose, options.browser === true),
     canUseTool: async (name, original, context): Promise<PermissionResult> => {
       if (name === 'mcp__lazybox__review_finding') return { behavior: 'allow', updatedInput: original };
+      if (options.purpose === 'reviewer' && name !== 'AskUserQuestion') {
+        const decision = reviewToolDecision(name, original.action);
+        if (decision === 'allow') return { behavior: 'allow', updatedInput: original };
+        if (decision === 'deny') return { behavior: 'deny', message: 'Review is read-only. Use the available file inspection tools and report any missing evidence.' };
+      }
       if (runnerApprovesTerminalAction(name, original.action)) {
         // The Runner presents the command in its own handoff card.
         return { behavior: 'allow', updatedInput: original };

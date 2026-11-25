@@ -1,0 +1,9 @@
+lazybox: 1
+name: Clone Me
+version: 1.0.0
+description: Learn your coding preferences from recent conversations and an interview, then answer routine agent questions.
+author: Lazybox
+category: Agents & conversations
+keywords: [coding style, preferences, answer questions]
+caption: Coding-style interview with a suggested preference.
+grants: [answer:preferences]

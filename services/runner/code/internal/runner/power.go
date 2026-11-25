@@ -220,6 +220,7 @@ func (b *Bench) ObserveHookEvents() {
 	o.mu.Unlock()
 	for _, ev := range events {
 		b.power.Hooks.Dispatch(ev)
+		b.answerFromClone(ev)
 	}
 }
 

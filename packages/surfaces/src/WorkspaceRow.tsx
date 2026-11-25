@@ -1,3 +1,4 @@
+import { ConfirmDialog } from './ConfirmDialog';
 import { peekProps } from './peek-model';
 import { ActionMenu } from './ActionMenu';
 import { ActionMenuItems } from './ActionMenuItems';
@@ -80,6 +81,7 @@ export function WorkspaceRow({
   onSaved(): void;
 }) {
   const { api, info } = useRunner();
+  const [archiving,setArchiving] = useState(false);
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -124,6 +126,7 @@ export function WorkspaceRow({
     workspaceTerminalItem(api, workspace.id),
     "separator",
     conversation && { label: "Delete conversation", danger: true, run: onDeleteConversation },
+    workspace.state === "ready" && { label: "Archive workspace…", icon: "history", run: () => setArchiving(true) },
     { label: "Delete workspace…", danger: true, run: onDelete },
   ];
   return (
@@ -203,7 +206,7 @@ export function WorkspaceRow({
         >
           <Icon name="folder" size={16} />
           <span className="workspace-label">
-            <strong>{workspace.name}</strong>
+            <strong>{workspace.name}{workspace.state === "archived" && <small> · Archived</small>}</strong>
             <RepositorySummary names={repositoryNames} />
             <GitLine git={git} fallback={branchSummary(workspace)} empty={!workspace.members.length} />
             {fold && !fold.folded ? null : featured && line ? (
@@ -269,6 +272,12 @@ export function WorkspaceRow({
           <Icon name="plus" size={15} />
         </button>
       )}
+      {archiving && <ConfirmDialog title="Archive workspace?" subject={workspace.name} confirm="Archive workspace" working="Archiving…" tone="primary"
+        onClose={() => setArchiving(false)} onConfirm={async () => {
+          await api.archiveCollection({collectionId: workspace.id});
+          setArchiving(false);
+          onSaved();
+        }}>Archiving keeps the worktrees and artifacts and closes this workspace to new conversations. Active sessions must finish first.</ConfirmDialog>}
       {settling && (
         <OwnershipDialog target={{ collectionId: workspace.id }} title="Settle what a previous Lazybox left here" subject={workspace.name}
           what="New conversations and deleting this workspace wait" onClose={() => setSettling(undefined)}

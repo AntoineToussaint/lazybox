@@ -76,6 +76,17 @@ async function scenario(browser, scheme, full) {
     await expect(panel.getByRole('heading', { name: 'Examples' })).toBeVisible();
     await expect(panel.getByText('Agent board', { exact: true })).toBeVisible();
     await expect(panel.getByText('Mischief', { exact: true })).toBeVisible(); // waiting for approval
+    const search = panel.getByRole('searchbox', {name:'Search extensions'});
+    const category = panel.getByRole('combobox', {name:'Extension category'});
+    await search.fill('coding style');
+    await expect(panel.getByText('Clone Me',{exact:true})).toBeVisible();
+    await category.selectOption('Code & documentation');
+    await expect(panel.getByText('No matching extensions.',{exact:false})).toBeVisible();
+    await panel.getByRole('button',{name:'Clear filters'}).click();
+    const preview = panel.locator('details').filter({has:page.getByLabel('Preview Agent board')});
+    await preview.locator('summary').click();
+    await expect(preview.locator('figure img')).toBeVisible();
+    await preview.locator('summary').click();
     await shot('home');
     await panel.locator('li', { hasText: 'Agent board' }).getByRole('button', { name: 'Add' }).click();
   } else {
@@ -206,6 +217,19 @@ async function scenario(browser, scheme, full) {
     const card = page.getByRole('listitem', { name: 'Mischief' });
     await expect(card).toContainText('On');
     await expect(page.getByRole('listitem', { name: 'Agent board' })).toContainText('See what needs you');
+    const clone = page.getByRole('list',{name:'Example extensions'}).locator('li').filter({has:page.getByText('Clone Me',{exact:true})});
+    await clone.getByRole('button',{name:'Add',exact:true}).click();
+    await page.getByRole('dialog',{name:'Allow Clone Me?'}).getByRole('button',{name:'Allow and turn on'}).click();
+    await page.getByRole('button',{name:'Teach Clone Me'}).click();
+    const interview = page.getByRole('dialog',{name:'Teach Clone Me'});
+    await interview.getByRole('button',{name:'I prefer explicit errors.'}).click();
+    await expect(interview.getByLabel('How do you like code structured?')).toHaveValue('I prefer explicit errors.');
+    await interview.getByRole('button',{name:'Learn from recent conversations'}).click();
+    await interview.getByLabel('How should agents test error paths?').fill('Use table-driven tests.');
+    await interview.getByRole('checkbox',{name:/Forget in Workspace A: Naming convention/}).check();
+    await interview.getByRole('button',{name:'Save preferences'}).click();
+    await expect(interview).toHaveCount(0);
+    assert.deepEqual(f.mutations.findLast(m=>m.method==='SaveCloneProfile').body.forgetAnswerIds,['w/naming']);
     await shot('settings');
     await card.getByRole('switch').click();
     await expect(card.getByRole('switch')).not.toBeChecked();

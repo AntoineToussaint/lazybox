@@ -618,15 +618,15 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const [rewindSession, setRewindSession] = useState('');
   const escapePress = useRef<{ source: string; at: number } | undefined>(undefined);
   const canBranch = allowStart && !assistant && (session?.provider === 'codex' || session?.provider === 'claude');
-  const pendingRestartKey = (id: string, sideQuestion = false) => JSON.stringify(['restart', viewState?.key, sessionID, id, sideQuestion]);
-  const selectBranch = (entry: TranscriptMessage, sideQuestion = false) => {
+  const pendingRestartKey = useCallback((id: string, sideQuestion = false) => JSON.stringify(['restart', viewState?.key, sessionID, id, sideQuestion]), [viewState?.key, sessionID]);
+  const selectBranch = useCallback((entry: TranscriptMessage, sideQuestion = false) => {
     setRewindSession('');
     setBranchSelection({ message: entry, source: sessionID, sideQuestion });
     const pending = sessionStorage.getItem(pendingRestartKey(entry.id, sideQuestion));
     const saved = pending ? JSON.parse(pending) : undefined;
     setRetryDraft(saved?.text ?? (sideQuestion ? '' : entry.text));
     setBranchFromCheckpoint(saved?.checkpoint ?? (!!session?.collectionId && !!onOpenHandoff));
-  };
+  }, [sessionID, pendingRestartKey, session?.collectionId, onOpenHandoff]);
   const openBranch = async () => {
     if (!branchMessage || !branchSelection) return;
     const retry = branchMessage.type === 'operation_accepted';

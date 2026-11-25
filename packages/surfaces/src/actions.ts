@@ -155,9 +155,8 @@ const tail = [
   { id: 'snippets.open', title: 'Open snippets', group: 'Conversation', icon: 'snippets', keys: '] ] s', scope: 'global', keywords: 'prompt template' },
   { id: 'composer.focus', title: 'Focus the message box', group: 'Conversation', icon: 'chat', keys: '', scope: 'global', safe: true, keywords: 'type write composer prompt' },
   // Activity detail of the conversation in front (activity-detail.ts).
-  { id: 'activity.cycle', title: 'Cycle activity detail', group: 'Conversation', icon: 'activity', keys: '] ] v', scope: 'global', safe: true, keywords: 'quiet smart verbose tool calls commands steps noise collapse expand detail' },
+  { id: 'activity.cycle', title: 'Cycle activity detail', group: 'Conversation', icon: 'activity', keys: '] ] v', scope: 'global', safe: true, keywords: 'quiet verbose tool calls commands steps noise collapse expand detail' },
   { id: 'activity.quiet', title: 'Activity detail: Quiet', group: 'Conversation', icon: 'collapse', keys: '', scope: 'global', safe: true, keywords: 'tool calls commands steps hide less noise minimal' },
-  { id: 'activity.smart', title: 'Activity detail: Smart', group: 'Conversation', icon: 'sparkle', keys: '', scope: 'global', safe: true, keywords: 'tool calls commands steps summary group collapse' },
   { id: 'activity.verbose', title: 'Activity detail: Verbose', group: 'Conversation', icon: 'expand', keys: '', scope: 'global', safe: true, keywords: 'tool calls commands steps every line all full show' },
   { id: 'activity.default', title: 'Activity detail: Use the default', group: 'Conversation', icon: 'refresh', keys: '', scope: 'global', safe: true, keywords: 'tool calls commands reset settings' },
   // The agent's latest shell code block (code-runs.tsx).

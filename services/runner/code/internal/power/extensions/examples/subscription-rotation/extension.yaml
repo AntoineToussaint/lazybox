@@ -13,6 +13,9 @@
 # keep working past a usage limit (CLAUDE_COMPLIANCE.md). Read them before
 # approving switch:claude: https://code.claude.com/docs/en/legal-and-compliance
 lazybox: 1
+category: Monitoring & costs
+caption: Access requested by Subscription rotation.
+keywords: [accounts, quota]
 name: Subscription rotation
 version: 1.0.0
 description: When a conversation reaches its subscription's limit, continue it on another of your signed-in accounts of the same provider.

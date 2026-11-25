@@ -112,6 +112,45 @@ func TestAgentWithoutLivePermissionRestartsInTheNewModeAndContinues(t *testing.T
 	}
 }
 
+// A plain Allow of the plan leaves plan mode too: before, only Full access
+// did, and the conversation stayed "plan" with Full access hidden for good.
+func TestPlanApprovedLeavesPlanMode(t *testing.T) {
+	b, err := New(Config{State: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	b.Adapters["claude"] = &agenttest.Adapter{LivePermission: true}
+	e, err := b.OpenEmptyWorkspace("claude-default", accounts.Options{Workflow: "plan"}, "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, other := range []agent.Event{
+		{Type: "approval", Text: "Edit"},
+		{Type: "approval", Text: "ExitPlanMode", AgentID: "sub-1"},
+		{Type: "question", Text: "ExitPlanMode"},
+	} {
+		if err := b.PlanApproved(context.Background(), e, other); err != nil || e.Options.Workflow != "plan" {
+			t.Fatalf("%+v must not leave plan mode: %v %q", other, err, e.Options.Workflow)
+		}
+	}
+	if err := b.PlanApproved(context.Background(), e, agent.Event{Type: "approval", Text: "ExitPlanMode"}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := b.History.Get(context.Background(), e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, options := range []accounts.Options{saved.Options, e.Options, e.Saved.Options} {
+		if options.Workflow != "execute" || options.Permission == "yolo" {
+			t.Fatalf("a plain Allow must leave plan mode and keep the permission: %+v", options)
+		}
+	}
+	if _, err := b.SetPermission(context.Background(), e, "later", "yolo", ""); err != nil {
+		t.Fatalf("Full access must be possible after the plan is approved: %v", err)
+	}
+}
+
 func TestFullAccessLeavesPlanForPendingClaudePlanExit(t *testing.T) {
 	b, err := New(Config{State: t.TempDir()})
 	if err != nil {

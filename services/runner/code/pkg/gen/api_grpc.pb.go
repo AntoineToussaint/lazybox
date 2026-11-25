@@ -231,6 +231,8 @@ const (
 	RunnerService_CompleteUiRequest_FullMethodName            = "/lazybox.bench.v1.RunnerService/CompleteUiRequest"
 	RunnerService_GetConfigFiles_FullMethodName               = "/lazybox.bench.v1.RunnerService/GetConfigFiles"
 	RunnerService_UpdateConfigFile_FullMethodName             = "/lazybox.bench.v1.RunnerService/UpdateConfigFile"
+	RunnerService_GetCloneProfile_FullMethodName              = "/lazybox.bench.v1.RunnerService/GetCloneProfile"
+	RunnerService_SaveCloneProfile_FullMethodName             = "/lazybox.bench.v1.RunnerService/SaveCloneProfile"
 	RunnerService_ListExtensions_FullMethodName               = "/lazybox.bench.v1.RunnerService/ListExtensions"
 	RunnerService_ApproveExtension_FullMethodName             = "/lazybox.bench.v1.RunnerService/ApproveExtension"
 	RunnerService_SetExtensionEnabled_FullMethodName          = "/lazybox.bench.v1.RunnerService/SetExtensionEnabled"
@@ -738,6 +740,8 @@ type RunnerServiceClient interface {
 	// Owner only. Sandboxed panel extensions (EXTENSIONS.md): the folders in the
 	// config folder's extensions/, each with what its manifest asks for, what
 	// the person approved, and its state. Reloaded every second.
+	GetCloneProfile(ctx context.Context, in *GetCloneProfileRequest, opts ...grpc.CallOption) (*CloneProfile, error)
+	SaveCloneProfile(ctx context.Context, in *SaveCloneProfileRequest, opts ...grpc.CallOption) (*CloneProfile, error)
 	ListExtensions(ctx context.Context, in *ListExtensionsRequest, opts ...grpc.CallOption) (*Extensions, error)
 	// Owner only. Approves exactly the grants and hosts the person was shown and
 	// turns the extension on; refused when its manifest asks for anything else
@@ -2977,6 +2981,26 @@ func (c *runnerServiceClient) UpdateConfigFile(ctx context.Context, in *UpdateCo
 	return out, nil
 }
 
+func (c *runnerServiceClient) GetCloneProfile(ctx context.Context, in *GetCloneProfileRequest, opts ...grpc.CallOption) (*CloneProfile, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloneProfile)
+	err := c.cc.Invoke(ctx, RunnerService_GetCloneProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) SaveCloneProfile(ctx context.Context, in *SaveCloneProfileRequest, opts ...grpc.CallOption) (*CloneProfile, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloneProfile)
+	err := c.cc.Invoke(ctx, RunnerService_SaveCloneProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *runnerServiceClient) ListExtensions(ctx context.Context, in *ListExtensionsRequest, opts ...grpc.CallOption) (*Extensions, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Extensions)
@@ -3707,6 +3731,8 @@ type RunnerServiceServer interface {
 	// Owner only. Sandboxed panel extensions (EXTENSIONS.md): the folders in the
 	// config folder's extensions/, each with what its manifest asks for, what
 	// the person approved, and its state. Reloaded every second.
+	GetCloneProfile(context.Context, *GetCloneProfileRequest) (*CloneProfile, error)
+	SaveCloneProfile(context.Context, *SaveCloneProfileRequest) (*CloneProfile, error)
 	ListExtensions(context.Context, *ListExtensionsRequest) (*Extensions, error)
 	// Owner only. Approves exactly the grants and hosts the person was shown and
 	// turns the extension on; refused when its manifest asks for anything else
@@ -4423,6 +4449,12 @@ func (UnimplementedRunnerServiceServer) GetConfigFiles(context.Context, *GetConf
 }
 func (UnimplementedRunnerServiceServer) UpdateConfigFile(context.Context, *UpdateConfigFileRequest) (*ConfigFiles, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateConfigFile not implemented")
+}
+func (UnimplementedRunnerServiceServer) GetCloneProfile(context.Context, *GetCloneProfileRequest) (*CloneProfile, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetCloneProfile not implemented")
+}
+func (UnimplementedRunnerServiceServer) SaveCloneProfile(context.Context, *SaveCloneProfileRequest) (*CloneProfile, error) {
+	return nil, status.Error(codes.Unimplemented, "method SaveCloneProfile not implemented")
 }
 func (UnimplementedRunnerServiceServer) ListExtensions(context.Context, *ListExtensionsRequest) (*Extensions, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListExtensions not implemented")
@@ -8280,6 +8312,42 @@ func _RunnerService_UpdateConfigFile_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_GetCloneProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetCloneProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).GetCloneProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_GetCloneProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).GetCloneProfile(ctx, req.(*GetCloneProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_SaveCloneProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SaveCloneProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).SaveCloneProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_SaveCloneProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).SaveCloneProfile(ctx, req.(*SaveCloneProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RunnerService_ListExtensions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListExtensionsRequest)
 	if err := dec(in); err != nil {
@@ -9535,6 +9603,14 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateConfigFile",
 			Handler:    _RunnerService_UpdateConfigFile_Handler,
+		},
+		{
+			MethodName: "GetCloneProfile",
+			Handler:    _RunnerService_GetCloneProfile_Handler,
+		},
+		{
+			MethodName: "SaveCloneProfile",
+			Handler:    _RunnerService_SaveCloneProfile_Handler,
 		},
 		{
 			MethodName: "ListExtensions",

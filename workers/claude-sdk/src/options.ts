@@ -28,7 +28,7 @@ export function nativeOptions(o: ExecutionOptions, env: NodeJS.ProcessEnv): Opti
   const options = baseOptions(o, env);
   // The browser asks the person per site, download and sign-in itself; a
   // prompt per click on top would teach them to click through.
-  if (o.browser && o.purpose !== 'help') {
+  if (o.browser && o.purpose !== 'help' && o.purpose !== 'reviewer') {
     const permissions = options.settings && typeof options.settings === 'object' ? (options.settings as { permissions?: Record<string, string[]> }).permissions || {} : {};
     options.settings = { ...(typeof options.settings === 'object' ? options.settings : {}), permissions: { ...permissions, allow: [...(permissions.allow || []), browserRule] } };
   }
@@ -36,12 +36,16 @@ export function nativeOptions(o: ExecutionOptions, env: NodeJS.ProcessEnv): Opti
 }
 
 function baseOptions(o: ExecutionOptions, env: NodeJS.ProcessEnv): Options {
-  const connectors = o.claudeAiConnectors === true;
+  const connectors = o.claudeAiConnectors === true && o.purpose !== 'reviewer';
   const off: Settings = connectors ? {} : connectorsOff.setting;
   const permission: Partial<Options> =
     // The help assistant's only tools are Lazybox's settings: reading them is
     // allowed, and every update asks, whatever the Runner permission says.
-    o.purpose === 'help' ? { permissionMode: 'default', settings: { permissions: helpPermissions, ...off } }
+    o.purpose === 'reviewer' ? {
+      permissionMode: 'plan', strictMcpConfig: true,
+      tools: ['Read', 'Glob', 'Grep', 'Bash', 'AskUserQuestion'],
+      settings: { ...connectorsOff.setting, permissions: { ask: ['mcp__lazybox__command'] } },
+    } : o.purpose === 'help' ? { permissionMode: 'default', settings: { permissions: helpPermissions, ...off } }
       : o.permission === 'read-only' || o.workflow === 'plan' ? { permissionMode: 'plan' }
       : o.permission === 'yolo' ? { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true }
       // Every tool that runs a command asks (Bash, Monitor, PowerShell, the

@@ -38,7 +38,7 @@ try{
  await expect(card.locator('[data-fact=workspace]')).toContainText('This one');
  await expect(card.locator('[data-fact=workspace]')).toContainText('Shared with 2 running conversations');
  await expect(card.locator('[data-fact=agent]')).toContainText('Claude · Opus 5.5');
- await expect(card.locator('.decision-row')).toHaveText([/Start/,/Start in a new workspace/,/Edit…/,/Deny…/]);
+ await expect(card.locator('.decision-row')).toHaveText([/^1Start in this workspace/,/^2Start in a new workspace/,/Edit…/,/Deny…/]);
  await expect(card.getByRole('button',{name:'Let this conversation start agents (orchestrator grant)…'})).toBeVisible();
  await expect(card).toBeFocused();
  await expect(page.locator('.chat-status [role=status]').first()).toHaveText('Waiting to start a conversation');
@@ -130,8 +130,11 @@ try{
  await expect(card.locator('[data-fact=brief]')).toContainText('Module review spec');
  await expect(card.locator('[data-fact=brief]')).toContainText('version 3');
  await expect(card.locator('[data-fact=workspace]')).toContainText('A new workspace');
- await expect(card.locator('.decision-row')).toHaveText([/Start/,/Edit…/,/Deny…/]);
- await card.getByRole('button',{name:'Start',exact:true}).focus();
+ // Asked for a new workspace: Start says so, and this workspace is one key (h) away.
+ await expect(card.locator('.decision-row')).toHaveText([/^1Start in a new workspace/,/^2Start in this workspace/,/Edit…/,/Deny…/]);
+ await card.getByRole('button',{name:'Start in a new workspace',exact:true}).focus();
+ await page.keyboard.press('ArrowDown');
+ await expect(card.getByRole('button',{name:'Start in this workspace',exact:true})).toBeFocused();
  await page.keyboard.press('ArrowDown');
  await expect(card.getByRole('button',{name:'Edit…'})).toBeFocused();
  await page.keyboard.press('ArrowDown');
@@ -140,7 +143,13 @@ try{
  await expect(page.locator('.panel-artifacts, [data-panel-kind=artifacts]').first()).toBeVisible();
  session.pending=[];
  await expect(card).toHaveCount(0);
+ session.pending=[ask('start-here','Implement it here',{workspace:'new'})];
+ await expect(card.getByRole('heading')).toContainText('Implement it here');
+ await page.locator('.messages').first().click({position:{x:5,y:5}});
+ await page.keyboard.press('h');
+ await expect.poll(()=>mutations('AnswerConversationStart').at(-1)).toEqual({requestId:'start-here',decision:'start',workspace:'same'});
+ assert.equal(fixture.repositoryRequests.get('start-here').workspace,'same');
 
  await drainPageErrors(errors);assert.deepEqual(errors,[]);
- console.log('Agent starts a conversation: card, inbox, start opens a tab, edit the title, new workspace, deny with a reason, artifact brief, keyboard only, narrow.');
+ console.log('Agent starts a conversation: card, inbox, start opens a tab, edit the title, new workspace, this workspace when asked for a new one, deny with a reason, artifact brief, keyboard only, narrow.');
 }finally{await browser?.close();await server.close();await fixture.close?.();}

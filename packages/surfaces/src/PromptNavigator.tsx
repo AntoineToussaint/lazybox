@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from './Icons';
 import { useDismiss } from './dismiss';
@@ -11,7 +11,7 @@ const firstLine = (text: string) => text.trim().split('\n', 1)[0].slice(0, 120);
  * Jump between your prompts without scrolling: a rail of markers on the
  * conversation's edge, a searchable list, and Alt+↑ / Alt+↓.
  */
-export function PromptNavigator({ messages, paneRef, onReveal }: { messages: TranscriptMessage[]; paneRef: RefObject<HTMLDivElement | null>; onReveal(id: string): void }) {
+export const PromptNavigator = memo(function PromptNavigator({ messages, paneRef, onReveal }: { messages: TranscriptMessage[]; paneRef: RefObject<HTMLDivElement | null>; onReveal(id: string): void }) {
  const prompts = useMemo(() => messages.map((message, index) => ({ message, index })).filter(({ message }) => message.type === 'operation_accepted' && !message.origin && message.text.trim()), [messages]);
  const [open, setOpen] = useState(false), [query, setQuery] = useState(''), [active, setActive] = useState(0);
  const search = useRef<HTMLInputElement>(null), panel = useRef<HTMLDivElement>(null), toggle = useRef<HTMLButtonElement>(null);
@@ -108,4 +108,4 @@ export function PromptNavigator({ messages, paneRef, onReveal }: { messages: Tra
   </div>;
    return slot ? createPortal(jump, slot) : jump; })()}
  </>;
-}
+});

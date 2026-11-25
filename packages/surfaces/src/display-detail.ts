@@ -5,7 +5,7 @@ import { PREFERENCE_EVENT, readPreference, writePreference } from './view-state'
 
 export const DISPLAY_PRESETS = [
   { id: 'focused', label: 'Focused', description: 'Keep the current work and anything that needs you in view.', activity: 'quiet', workspaceDetails: false, timestamps: false },
-  { id: 'standard', label: 'Standard', description: 'See workspace and agent status with grouped tool activity.', activity: 'smart', workspaceDetails: true, timestamps: false },
+  { id: 'standard', label: 'Standard', description: 'See workspace and agent status with grouped tool activity.', activity: 'quiet', workspaceDetails: true, timestamps: false },
   { id: 'power', label: 'Power user', description: 'Show each tool call, workspace details, and reply times.', activity: 'verbose', workspaceDetails: true, timestamps: true },
 ] as const satisfies readonly { id: string; label: string; description: string; activity: ActivityDetail; workspaceDetails: boolean; timestamps: boolean }[];
 

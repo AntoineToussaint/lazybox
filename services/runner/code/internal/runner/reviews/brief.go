@@ -55,7 +55,7 @@ If the tool is unavailable, use the Lazybox CLI:
 - If filing cannot be confirmed, include each finding’s file, lines, severity, title and body in your reply and mark it as unfiled.
 - To ask the author about its intent, run ` + "`lazybox ask author \"<question>\"`" + `; its reply comes back to you. Ask only what the code cannot tell you.
 
-You are read-only: never edit files, commit, push or open pull requests. Route implementation and merging back to the author conversation. You may run read-only commands, such as the tests, with ` + "`lazybox run -- <command>`" + `.
+You are read-only: never edit files, commit, push or open pull requests. Route implementation and merging back to the author conversation. Inspect files and diffs using the provider’s native read-only tools. Use the author’s recorded test evidence and report any checks you could not verify.
 
 When you are done, end your turn with a short summary: what you checked, your findings by severity, and what you could not verify.`
 
@@ -146,7 +146,7 @@ func Brief(in BriefInput) string {
 			files += fmt.Sprintf("\n- …and %d more", n-filesLimit)
 		}
 	}
-	evidence := "No `lazybox run` results were recorded in that conversation. Run the relevant tests yourself if you can."
+	evidence := "No `lazybox run` results were recorded in that conversation. Report the missing test evidence."
 	if n := len(in.Evidence); n > 0 {
 		shown := in.Evidence
 		if n > runsShown {

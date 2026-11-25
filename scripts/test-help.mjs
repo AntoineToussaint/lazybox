@@ -73,7 +73,7 @@ try {
   await box.focus();
   const yaml = 'name: Review wide\nlayout:\n  panels: [chat, changes]';
   const proposal = fixture.openEvents('assistant-' + fixture.sessions.length);
-  proposal.push({type: 'message_delta', text: ['```lazybox-layout', yaml, '```'].join('\n')});
+  proposal.push({type: 'message_delta', text: ['```lazybox-layout', yaml, '```', '', '```lazybox-snippet', '- key: my-help-check', '  body: Inspect the workspace.', '```'].join('\n')});
   proposal.push({type: 'turn_ended'});
   await box.fill('How do I add a second subscription?');
   await page.keyboard.press('Enter');
@@ -92,6 +92,14 @@ try {
   await expect(box).toHaveCount(0);
   await expect(panel.locator('.agent-window')).toBeVisible();
   await expect(header).toContainText('using Claude (Claude CLI sign-in)');
+  let savedProposal;
+  await page.route('**/SaveSnippet', route => {
+    savedProposal = route.request().postDataJSON().yaml;
+    return route.fulfill({json: {key: 'my-help-check'}});
+  });
+  await panel.getByRole('button', {name: 'Save snippet', exact: true}).click();
+  await expect(panel.getByRole('button', {name: 'Saved /my-help-check'})).toBeDisabled();
+  assert.match(savedProposal, /body: Inspect the workspace/);
   await panel.getByRole('button', {name: 'Review layout'}).click();
   const importer = page.getByRole('dialog', {name: 'Import a layout'});
   await expect(importer.getByRole('textbox', {name: 'Layout YAML'})).toHaveValue(yaml);

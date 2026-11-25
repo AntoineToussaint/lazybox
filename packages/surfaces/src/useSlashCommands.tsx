@@ -96,11 +96,20 @@ export function useSlashCommands(o: Options) {
   useEffect(() => {
     if (!o.enabled) return;
     const controller = new AbortController();
-    void api.listSnippets({}, { signal: controller.signal }).then(list => {
-      if (!controller.signal.aborted) setSnippetRows(list.snippets);
-    }).catch(() => {});
-    return () => controller.abort();
-  }, [api, o.enabled, sessionID]);
+    let request = 0;
+    const load = () => {
+      const current = ++request;
+      void api.listSnippets({}, { signal: controller.signal }).then(list => {
+        if (!controller.signal.aborted && current === request) setSnippetRows(list.snippets);
+      }).catch(() => {});
+    };
+    load();
+    window.addEventListener('lazybox-snippets-changed', load);
+    return () => {
+      controller.abort();
+      window.removeEventListener('lazybox-snippets-changed', load);
+    };
+  }, [api, o.enabled, sessionID, o.message.startsWith('/')]);
   const [nextSnippets, setNextSnippets] = useState<string[]>([]);
   const typingCommand = o.message.startsWith('/');
   useEffect(() => {

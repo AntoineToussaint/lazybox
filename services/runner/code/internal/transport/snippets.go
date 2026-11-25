@@ -4,10 +4,26 @@ import (
 	"context"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/snippets"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
+	"path/filepath"
 )
 
+func (s *Service) snippetCatalog() snippets.Command {
+	cfg := s.Bench.Config
+	return snippets.Command{Binary: cfg.SnippetCommand, Directory: cfg.SnippetDirectory, Packs: cfg.SnippetPacks, SavedPack: filepath.Join(cfg.State, "saved-snippets.yaml")}
+}
+
+func (s *Service) SaveSnippet(ctx context.Context, req *pb.SaveSnippetRequest) (*pb.Snippet, error) {
+	s.savingSnippet.Lock()
+	defer s.savingSnippet.Unlock()
+	entry, err := s.snippetCatalog().Save(ctx, req.Yaml)
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	return &pb.Snippet{Key: entry.Key, Category: entry.Category, Description: entry.Description, Body: entry.Body, Origin: entry.Origin}, nil
+}
+
 func (s *Service) ListSnippets(ctx context.Context, _ *pb.InfoRequest) (*pb.SnippetCatalog, error) {
-	entries, err := (snippets.Command{Binary: s.Bench.Config.SnippetCommand, Directory: s.Bench.Config.SnippetDirectory, Packs: s.Bench.Config.SnippetPacks}).List(ctx)
+	entries, err := s.snippetCatalog().List(ctx)
 	if err != nil {
 		return nil, rpcError(err)
 	}

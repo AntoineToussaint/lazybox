@@ -724,6 +724,9 @@ const (
 	// RunnerServiceDecideTerminalHandoffProcedure is the fully-qualified name of the RunnerService's
 	// DecideTerminalHandoff RPC.
 	RunnerServiceDecideTerminalHandoffProcedure = "/lazybox.bench.v1.RunnerService/DecideTerminalHandoff"
+	// RunnerServiceSaveSnippetProcedure is the fully-qualified name of the RunnerService's SaveSnippet
+	// RPC.
+	RunnerServiceSaveSnippetProcedure = "/lazybox.bench.v1.RunnerService/SaveSnippet"
 )
 
 // RunnerServiceClient is a client for the lazybox.bench.v1.RunnerService service.
@@ -1274,6 +1277,7 @@ type RunnerServiceClient interface {
 	InstallBrowser(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.CommandStatus], error)
 	DeleteTheme(context.Context, *connect.Request[gen.DeleteThemeRequest]) (*connect.Response[gen.ThemeFolder], error)
 	DecideTerminalHandoff(context.Context, *connect.Request[gen.DecideTerminalHandoffRequest]) (*connect.Response[gen.TerminalStatus], error)
+	SaveSnippet(context.Context, *connect.Request[gen.SaveSnippetRequest]) (*connect.Response[gen.Snippet], error)
 }
 
 // NewRunnerServiceClient constructs a client for the lazybox.bench.v1.RunnerService service. By
@@ -2685,6 +2689,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("DecideTerminalHandoff")),
 			connect.WithClientOptions(opts...),
 		),
+		saveSnippet: connect.NewClient[gen.SaveSnippetRequest, gen.Snippet](
+			httpClient,
+			baseURL+RunnerServiceSaveSnippetProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("SaveSnippet")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -2923,6 +2933,7 @@ type runnerServiceClient struct {
 	installBrowser               *connect.Client[gen.InfoRequest, gen.CommandStatus]
 	deleteTheme                  *connect.Client[gen.DeleteThemeRequest, gen.ThemeFolder]
 	decideTerminalHandoff        *connect.Client[gen.DecideTerminalHandoffRequest, gen.TerminalStatus]
+	saveSnippet                  *connect.Client[gen.SaveSnippetRequest, gen.Snippet]
 }
 
 // ListSnippets calls lazybox.bench.v1.RunnerService.ListSnippets.
@@ -4090,6 +4101,11 @@ func (c *runnerServiceClient) DecideTerminalHandoff(ctx context.Context, req *co
 	return c.decideTerminalHandoff.CallUnary(ctx, req)
 }
 
+// SaveSnippet calls lazybox.bench.v1.RunnerService.SaveSnippet.
+func (c *runnerServiceClient) SaveSnippet(ctx context.Context, req *connect.Request[gen.SaveSnippetRequest]) (*connect.Response[gen.Snippet], error) {
+	return c.saveSnippet.CallUnary(ctx, req)
+}
+
 // RunnerServiceHandler is an implementation of the lazybox.bench.v1.RunnerService service.
 type RunnerServiceHandler interface {
 	ListSnippets(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.SnippetCatalog], error)
@@ -4638,6 +4654,7 @@ type RunnerServiceHandler interface {
 	InstallBrowser(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.CommandStatus], error)
 	DeleteTheme(context.Context, *connect.Request[gen.DeleteThemeRequest]) (*connect.Response[gen.ThemeFolder], error)
 	DecideTerminalHandoff(context.Context, *connect.Request[gen.DecideTerminalHandoffRequest]) (*connect.Response[gen.TerminalStatus], error)
+	SaveSnippet(context.Context, *connect.Request[gen.SaveSnippetRequest]) (*connect.Response[gen.Snippet], error)
 }
 
 // NewRunnerServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -6045,6 +6062,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(runnerServiceMethods.ByName("DecideTerminalHandoff")),
 		connect.WithHandlerOptions(opts...),
 	)
+	runnerServiceSaveSnippetHandler := connect.NewUnaryHandler(
+		RunnerServiceSaveSnippetProcedure,
+		svc.SaveSnippet,
+		connect.WithSchema(runnerServiceMethods.ByName("SaveSnippet")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/lazybox.bench.v1.RunnerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case RunnerServiceListSnippetsProcedure:
@@ -6513,6 +6536,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceDeleteThemeHandler.ServeHTTP(w, r)
 		case RunnerServiceDecideTerminalHandoffProcedure:
 			runnerServiceDecideTerminalHandoffHandler.ServeHTTP(w, r)
+		case RunnerServiceSaveSnippetProcedure:
+			runnerServiceSaveSnippetHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -7452,4 +7477,8 @@ func (UnimplementedRunnerServiceHandler) DeleteTheme(context.Context, *connect.R
 
 func (UnimplementedRunnerServiceHandler) DecideTerminalHandoff(context.Context, *connect.Request[gen.DecideTerminalHandoffRequest]) (*connect.Response[gen.TerminalStatus], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.DecideTerminalHandoff is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) SaveSnippet(context.Context, *connect.Request[gen.SaveSnippetRequest]) (*connect.Response[gen.Snippet], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.SaveSnippet is not implemented"))
 }

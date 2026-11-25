@@ -28,6 +28,7 @@ type Catalog interface {
 type Command struct {
 	Binary, Directory string
 	Packs             []string
+	SavedPack         string
 }
 type boundedOutput struct{ data []byte }
 
@@ -39,6 +40,10 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 func (c Command) List(ctx context.Context) ([]Entry, error) {
+	return c.list(ctx, nil)
+}
+
+func (c Command) list(ctx context.Context, savedBudget *int) ([]Entry, error) {
 	if c.Binary == "" {
 		return nil, errors.New("snippet catalog adapter is not configured on this Runner")
 	}
@@ -72,10 +77,30 @@ func (c Command) List(ctx context.Context) ([]Entry, error) {
 		}
 		seen[entry.Key] = true
 	}
+	if savedBudget != nil {
+		*savedBudget = remaining
+	}
+	if c.SavedPack != "" {
+		saved, _, err := readPack(c.SavedPack, remaining)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		for _, row := range saved {
+			if seen[row.Key] {
+				continue
+			} // Configured entries take precedence.
+			row.Origin = "saved"
+			entries = append(entries, row)
+			seen[row.Key] = true
+		}
+	}
 	// This workflow is implemented by the V2 Runner. Leave a same-named
 	// user snippet available as ordinary text.
 	if !seen["review-pr-ci"] {
 		entries = append(entries, Entry{Key: "review-pr-ci", Category: "Review", Origin: "workflow", Description: "Review with the default reviewer, fix findings, open or update the PR, and repair failing CI.", Body: "Start an independent code review with my default reviewer. Return the completed report to this conversation. Apply fixes here, create or update the pull request, and monitor and repair its CI until checks pass or a blocker needs my decision. Leave the PR open."})
+	}
+	if !seen["wrap-up"] {
+		entries = append(entries, Entry{Key: "wrap-up", Category: "Workflow", Origin: "built-in", Description: "Verify all work landed on main", Body: wrapUp})
 	}
 	return entries, nil
 }
@@ -112,3 +137,9 @@ func readPack(path string, budget int) ([]Entry, int, error) {
 	}
 	return entries, len(data), nil
 }
+
+const wrapUp = `Verify whether all work for this task has landed on remote main across every repository touched. Fetch the latest remote main and inspect related PRs, branches, and worktrees. Account for squash merges and rebases by comparing the changes themselves.
+
+Check for open or draft PRs, unmerged commits, staged and unstaged edits, task-related untracked files, and unfinished features or follow-ups. Identify remaining task branches or worktrees and whether they contain unique work.
+
+Report all work landed, work remains, or verification is blocked. Name the repository and PR, branch or file for each outstanding item and explain what remains. Verification only. Leave merges, pushes and cleanup to me.`

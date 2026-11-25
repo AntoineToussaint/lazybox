@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"connectrpc.com/vanguard/vanguardgrpc"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent/agenttest"
@@ -737,5 +738,16 @@ func TestCompletionScriptsCoverEveryVerbAndParse(t *testing.T) {
 	}
 	if _, err := completionScript("powershell"); exitCode(err) != exitUsage {
 		t.Fatal("unknown shell accepted")
+	}
+}
+
+func TestRunnerConnectionFailurePreservesCause(t *testing.T) {
+	c := &client{target: target{URL: "http://localhost:1234", EndpointPath: "agent-endpoint.json"}}
+	for _, cause := range []string{"dial tcp: operation not permitted", "dial tcp: connection refused"} {
+		err := c.explain(connect.NewError(connect.CodeUnavailable, errors.New(cause)))
+		var failure exitError
+		if !errors.As(err, &failure) || failure.code != exitUnavailable || !strings.Contains(err.Error(), cause) {
+			t.Fatalf("explain(%q) = %v", cause, err)
+		}
 	}
 }

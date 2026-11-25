@@ -2,15 +2,20 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Runner Radar</title>
 <link rel="stylesheet" href="_lazybox/lazybox.css">
+<link rel="stylesheet" href="radar.css">
 <script src="_lazybox/lazybox.js"></script>
 <script src="_lazybox/workflow.js" defer></script>
 <script src="app.js" defer></script>
 </head>
 <body class="workflow">
 <header><h1>Runner Radar</h1><p id="scope">Runner</p></header>
+<label class="state-filter">Show <select id="state">
+  <option value="all">All blocked</option><option value="needs-input">Needs input</option><option value="failed">Failed</option>
+</select></label>
 <p id="notice" role="status">Loading…</p>
-<ul id="rows"></ul>
+<ul id="rows" aria-label="Blocked conversations"></ul>
 </body>
 </html>

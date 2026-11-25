@@ -29,9 +29,9 @@ test('Install Claude Code runs Anthropic’s own installer, the one its setup pa
 test('the notices this client shows are the Runner’s, each with where to change it back', () => {
   assert.deepEqual(shownNotices(['automatic-switching-moved', 'something-newer', 'claude-sign-in-kept']), ['automatic-switching-moved', 'claude-sign-in-kept']);
   assert.deepEqual(shownNotices(undefined), []);
-  assert.equal(accountNotices['automatic-switching-moved'].tab, 'extensions');
+  assert.equal(accountNotices['automatic-switching-moved'].target, 'extensions');
   assert.match(accountNotices['automatic-switching-moved'].body, /Settings → Extensions/);
-  assert.equal(accountNotices['claude-sign-in-kept'].tab, 'agents');
+  assert.equal(accountNotices['claude-sign-in-kept'].target, 'agents');
   // The ids are the Runner's own (account_policy.go).
   const runner = ['runner/account_policy.go', 'power/disk_scan.go'].map(path => readFileSync(new URL('../services/runner/code/internal/' + path, import.meta.url), 'utf8')).join('\n');
   for (const id of Object.keys(accountNotices)) assert.ok(runner.includes(`"${id}"`), id);
@@ -44,10 +44,10 @@ test('the switch grants read as what they do, and say which providers they move'
   assert.match(CLAUDE_TERMS_URL, /^https:\/\/code\.claude\.com\/docs\/en\/legal-and-compliance$/);
 });
 
-test('disk pressure notices are visible from the workspace and lead to Extensions', () => {
+test('disk pressure notices are visible from the workspace and lead to Disk Cleanup', () => {
   for (const level of ['tight', 'critical']) {
     const id = 'disk-pressure-' + level;
     assert.deepEqual(shownNotices([id]), [id]);
-    assert.equal(accountNotices[id].tab, 'extensions');
+    assert.equal(accountNotices[id].target, 'disk-cleanup');
   }
 });

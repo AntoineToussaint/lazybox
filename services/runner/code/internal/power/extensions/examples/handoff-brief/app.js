@@ -11,20 +11,41 @@ function githubLink(pull) {
   } catch { return ''; }
 }
 
+let workspaceId = '';
+const excluded = new Set();
+
+function sourceRow(key, title, detail) {
+  const toggle = workflow.button('Include', () => {
+    if (excluded.has(key)) excluded.delete(key);
+    else excluded.add(key);
+    updateSelection();
+  });
+  function updateSelection() {
+    toggle.textContent = excluded.has(key) ? 'Include' : 'Included';
+    toggle.setAttribute('aria-pressed', String(!excluded.has(key)));
+    toggle.setAttribute('aria-label', 'Include ' + title);
+  }
+  updateSelection();
+  return workflow.row(key, title, detail, toggle);
+}
+
 workflow.poll(10000, async () => {
   const workspace = await workflow.workspace();
-  draft.disabled = true;
-  if (selected?.workspace.id !== workspace?.id) {
+  if (workspaceId !== (workspace?.id || '')) {
+    workspaceId = workspace?.id || '';
+    selected = undefined;
+    draft.disabled = true;
+    excluded.clear();
     decisions.value = '';
     next.value = '';
+    if (workspace) workflow.list([], 'Loading workspace sources…');
   }
-  selected = undefined;
   if (!workspace) return;
   const [{ pulls }, { artifacts }] = await Promise.all([lazybox.pulls.list(workspace.id), lazybox.artifacts.list(workspace.id)]);
   selected = { workspace, pulls, artifacts };
   workflow.list([
-    ...pulls.map(pull => workflow.row(pull.key, pull.title, `${pull.repository} #${pull.number} · ${pull.detail}`)),
-    ...artifacts.map(artifact => workflow.row(artifact.id, artifact.title, `Artifact · ${artifact.kind}`)),
+    ...pulls.map(pull => sourceRow('pull:' + pull.key, pull.title, [pull.repository + ' #' + pull.number, pull.detail].filter(Boolean).join(' · '))),
+    ...artifacts.map(artifact => sourceRow('artifact:' + artifact.id, artifact.title, 'Artifact · ' + artifact.kind)),
   ], 'No tracked pull requests or artifacts in this workspace.');
   draft.disabled = false;
 });
@@ -32,19 +53,22 @@ workflow.poll(10000, async () => {
 draft.addEventListener('click', async () => {
   if (!selected) return;
   const { workspace, pulls, artifacts } = selected;
-  const content = [
-    `# Handoff · ${label(workspace.name)}`,
-    '## Pull requests',
-    ...pulls.slice(0, 20).map(pull => {
-      const title = label(`${pull.repository} #${pull.number} · ${pull.title}`);
-      const url = githubLink(pull);
-      return url ? `- [${title}](<${url}>)` : `- ${title}`;
-    }),
-    '## Artifacts',
-    ...artifacts.slice(0, 20).map(artifact => `- ${label(artifact.title)} · ${artifact.id}`),
-    '## Open decisions', decisions.value.trim(),
-    '## Next step', next.value.trim(),
-  ].join('\n\n');
+  const sections = [];
+  if (next.value.trim()) sections.push('## Next step', next.value.trim());
+  if (decisions.value.trim()) sections.push('## Open decisions', decisions.value.trim());
+  const pullLines = pulls.filter(pull => !excluded.has('pull:' + pull.key)).map(pull => {
+    const title = label(pull.repository + ' #' + pull.number + ' · ' + pull.title);
+    const url = githubLink(pull);
+    const detail = pull.detail ? ' — ' + label(pull.detail) : '';
+    return '- ' + (url ? '[' + title + '](<' + url + '>)' : title) + detail;
+  });
+  const artifactLines = artifacts.filter(artifact => !excluded.has('artifact:' + artifact.id))
+    .map(artifact => '- ' + label(artifact.title) + ' · ' + label(artifact.id));
+  if (pullLines.length) sections.push('## Pull requests', pullLines.join('\n'));
+  if (artifactLines.length) sections.push('## Artifacts', artifactLines.join('\n'));
+  if (!sections.length) { workflow.say('Include a source or write a next step or decision.'); return; }
+  const content = ['# Handoff · ' + label(workspace.name), ...sections].join('\n\n');
+  if (content.length > 12000) { workflow.say('This draft is too long. Include fewer sources or shorten your notes.'); return; }
   try { await lazybox.artifacts.draft(workspace.id, content); }
   catch (error) { workflow.say(error.message); }
 });

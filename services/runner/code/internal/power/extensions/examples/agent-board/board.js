@@ -50,16 +50,27 @@ function card(item) {
   return button;
 }
 
+const search = document.getElementById('search');
+const attention = document.getElementById('attention');
+const empty = document.getElementById('no-matches');
+let latest;
+
 function render(result) {
+  latest = result;
+  const query = search.value.trim().toLowerCase();
+  const matching = result.items.filter(item => (!attention.checked || ['needs-input', 'failed', 'review'].includes(item.state))
+    && [item.title, item.workspaceName, item.reason, item.line].some(value => (value || '').toLowerCase().includes(query)));
+  empty.hidden = matching.length > 0;
+  empty.textContent = query ? 'No conversations match your search.' : attention.checked ? 'No conversations need attention.' : 'No conversations on this Runner.';
+
   const focused = document.activeElement && document.activeElement.closest('.card') ? document.activeElement.dataset.session : '';
-  board.replaceChildren(...columns.map(column => {
-    const items = result.items.filter(item => item.state === column.state);
-    const section = el('section', 'column ' + column.state + (items.length ? '' : ' is-empty'));
+  board.replaceChildren(...columns.filter(column => matching.some(item => item.state === column.state)).map(column => {
+    const items = matching.filter(item => item.state === column.state);
+    const section = el('section', 'column ' + column.state);
     section.setAttribute('aria-label', column.title);
     const heading = el('h2');
     heading.append(el('i', 'dot'), el('span', '', column.title), el('span', 'count', String(items.length)));
     const list = el('ul', 'cards');
-    if (!items.length) list.append(el('li', 'empty', 'Nothing here'));
     for (const item of items) { const li = el('li'); li.append(card(item)); list.append(li); }
     section.append(heading, list);
     return section;
@@ -73,6 +84,9 @@ function render(result) {
   summary.textContent = parts.join(' · ') || 'Nothing needs you';
   summary.title = summary.textContent;
 }
+
+search.addEventListener('input', () => { if (latest) render(latest); });
+attention.addEventListener('change', () => { if (latest) render(latest); });
 
 // Arrow keys move between cards: up and down in a column, left and right across.
 board.addEventListener('keydown', event => {

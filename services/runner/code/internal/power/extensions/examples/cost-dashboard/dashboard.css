@@ -102,7 +102,9 @@ button { font: inherit; }
 .chart .hit { fill: transparent; }
 .chart .col.on .hit { fill: var(--surface-hover); }
 .chart text.nothing { fill: var(--text-muted); font-size: var(--t-label); }
-.chart-hint { margin-top: 6px; color: var(--text-faint); font-size: var(--t-caption); }
+.chart-footer { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 6px; margin-top: 8px; border-top: 1px solid var(--line-subtle); padding-top: 8px; }
+.chart-footer button, #clear-peak { font-size: var(--t-label); }
+.chart-hint { color: var(--text-faint); font-size: var(--t-caption); }
 
 .tooltip {
   position: absolute; top: 0; left: 0; z-index: 2; pointer-events: none; min-width: 150px; max-width: 240px;

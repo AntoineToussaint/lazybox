@@ -1095,6 +1095,13 @@ actions:
           checks:[{name:'test',status:'completed',conclusion:'failure',url:`https://github.com/${s.githubRepository}/actions/runs/41/job/1`,summary:'2 tests failed'},{name:'lint',status:'in_progress',conclusion:'',url:''},{name:'build',status:'completed',conclusion:'success',url:`https://github.com/${s.githubRepository}/actions/runs/40`}]};
         return json(pullRequest(s));
       }
+      case 'ListMailbox': return json({ items: [
+        { id: 'review', repository: 'acme/api', title: 'Review the retry policy', reason: 'review_requested', url: 'https://github.com/acme/api/pull/42', updatedAt: '2026-10-19T10:14:00Z' },
+        { id: 'discussion', repository: 'acme/web', title: 'Update the deployment notes', reason: 'comment', url: 'https://github.com/acme/web/issues/17', updatedAt: '2026-10-19T09:20:00Z' },
+      ] });
+      case 'ListReleaseWatch': return json({ items: [
+        { id: 'deploy', environment: 'Production', repository: 'acme/api', reason: 'deployment_approval', url: 'https://github.com/acme/api/actions/runs/123' },
+      ] });
       case 'ListLinks': {
         // Like the Runner (runner/items.go): the store's links, never GitHub on the request path.
         tracked.requests.push(body);

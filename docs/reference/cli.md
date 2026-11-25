@@ -131,7 +131,7 @@ For the installed app ([Install](../install.md)):
 | 3 | Not found: conversation, workspace, request, action, hook |
 | 4 | Not allowed: a scoped credential (agent, terminal, hook) or a refused token |
 | 5 | Timed out: `wait`, or a window that did not answer |
-| 6 | Unavailable: no Runner answers, none is registered, or no Lazybox window is open for `open` / `shot` / `actions run` / `do` |
+| 6 | Unavailable: the Runner connection failed (the CLI prints the transport error), none is registered, or no Lazybox window is open for `open` / `shot` / `actions run` / `do` |
 
 ## Shell completion
 

@@ -10,29 +10,37 @@ credential, or reach any site you did not allow.
 
 Clone Me and Compound Engineering are background workflows run by the Runner.
 In Settings → Extensions, search by name or keyword, filter by category, and
-expand a thumbnail to see the plugin before adding it. After approval, choose
-**Teach Clone Me** to build your profile. Compound Engineering publishes its
-documentation proposals in workspace Artifacts. Use **Archive workspace…** in the workspace menu or **Archive conversation** to trigger a review.
+choose **Preview** to see an extension before installing it. After approval, choose
+**Teach Clone Me** to assign interview answers to code style, verification, or decisions that need your input. Compound Engineering checks applicable repository instructions and publishes proposed edits with citations to the archived conversation in workspace Artifacts. Use **Archive workspace…** in the workspace menu or **Archive conversation** to trigger a review.
 
 ## Try one
 
 1. **Panels → New Extensions panel** (or ⌘K, *Show Extensions*).
-2. Under **Examples**, **Add** the *Agent board* or the *Cost dashboard*.
+2. Under **Available to install**, choose **Install** for the *Agent board* or the *Cost dashboard*.
 3. Read the sheet: what it can see, what it can do, where it can connect.
    **Allow and turn on** — or **Not now**.
 
-The *Agent board* shows every conversation as a card in a column of what it
-needs from you (needs you, failed, ready for review, working, done). Click a
-card to show its conversation; **Next** and **Inbox** run those actions of the
-app. The *Cost dashboard* shows what your agents spent today, in the last 7 or
-30 days or so far: the total against the period before, tokens and the cache
-hit rate, spend per day stacked by model, and where it went by model,
-workspace and conversation. Click a model or a workspace to narrow the
-dashboard to it, a conversation to show it.
+| Panel | What you can do |
+| --- | --- |
+| Agent board | Search conversations or select **Needs attention only**. Open a card to answer the agent. |
+| Cost dashboard | Filter spend by period, workspace, or model. **Inspect peak spend** ranks conversations in the most expensive interval. |
+| Mailbox | Use **Needs you** to find review requests, assignments and mentions. Open the item on GitHub. |
+| Release Watch | Find deployments awaiting approval, failed deployments, and failing checks. Open the deployment or failing check. |
+| Runner Radar | Filter blocked conversations by failure or pending input, see how long they have waited, and open one. |
+| Preview Desk | Find a running preview, inspect service logs, or open the repository setup that needs approval. |
+| Workspace Bootstrap | Find failed setup, missing files or pending approvals and open the relevant setup or logs. |
+| Handoff Brief | Pick the pull requests and artifacts to include, write the next step, then review the draft before publishing. |
+| Reminders | Schedule a follow-up at a local time, tomorrow morning or next Monday morning. Cancel it from the scheduled list. |
 
 The panel's bar switches between your extensions (*All extensions…* lists
 them, and what waits for your approval), shows what the one in front may do
 (the shield) and reloads it.
+
+Opening a specific extension from Settings or a workspace alert shows its docked panel maximized. Choose **Restore layout** to see your other panels again.
+
+A low-disk-space alert has an **Open Disk Cleanup** button. The bundled panel opens the saved report with free space and cleanup candidates, largest measured items first. Earlier installed copies have a **Review latest disk scan** link. Opening the report leaves files in place. **Dismiss** hides the current warning in this window, including after reload. A change in pressure can show a new warning.
+
+Mailbox, Release Watch, Preview Desk, Runner Radar, Workspace Bootstrap and Handoff Brief support filtering their current list and refreshing it on demand. Row actions open the corresponding conversation, preview, log or GitHub item where available.
 
 ## What an extension may do
 
@@ -66,12 +74,14 @@ folder and what you allowed).
 
 ## Account policies
 
+**Manage rotation accounts** opens Subscriptions, where you can include or exclude individual accounts from automatic switching.
+
 An account policy says what Lazybox does when a conversation reaches its
 subscription's limit. It is a few lines of the manifest that the Runner reads
 itself; no code of the extension runs, and no panel is needed:
 
 ```yaml
-# extensions/subscription-rotation/extension.yaml (bundled; Settings → Extensions → Examples)
+# extensions/subscription-rotation/extension.yaml (bundled; Settings → Extensions → Available to install)
 lazybox: 1
 name: Subscription rotation
 grants: [switch:codex, switch:claude]    # the providers it may switch

@@ -106,7 +106,7 @@ lists them).
 | 3 | not found (conversation, workspace, request, action, hook) |
 | 4 | not allowed: a scoped credential (agent, terminal, hook) or a refused token |
 | 5 | timed out (`wait`, a window that did not answer) |
-| 6 | unavailable: no Runner answers, none is registered, or no Lazybox window is open for `open`/`shot`/`actions run`/`do` |
+| 6 | unavailable: the Runner connection failed (the CLI prints the transport error), none is registered, or no Lazybox window is open for `open`/`shot`/`actions run`/`do` |
 
 ### An installed release
 

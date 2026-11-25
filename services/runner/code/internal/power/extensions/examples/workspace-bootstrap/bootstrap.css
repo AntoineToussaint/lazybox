@@ -1,0 +1,7 @@
+.bootstrap-filter { display: flex; align-items: center; gap: 6px; width: fit-content; margin: 0 0 12px; cursor: pointer; }
+.bootstrap-filter input { accent-color: var(--accent); }
+.bootstrap-filter span, .bootstrap-state { padding: 1px 6px; border-radius: 5px; background: var(--surface-selected); color: var(--text-secondary); font-size: calc(11px * var(--text-scale)); font-weight: 500; }
+.bootstrap-state { display: inline-block; }
+.bootstrap-state[data-tone=warn] { color: var(--warn); background: var(--warn-bg); }
+.bootstrap-state[data-tone=danger] { color: var(--danger); background: var(--danger-bg); }
+.bootstrap-state[data-tone=ok] { color: var(--ok); background: var(--ok-bg); }

@@ -2,16 +2,24 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mailbox</title>
 <link rel="stylesheet" href="_lazybox/lazybox.css">
+<link rel="stylesheet" href="mailbox.css">
 <script src="_lazybox/lazybox.js"></script>
 <script src="_lazybox/workflow.js" defer></script>
 <script src="app.js" defer></script>
 </head>
 <body class="workflow">
 <header><h1>Mailbox</h1><p id="scope">Runner</p></header>
+<div class="mailbox-toolbar">
+  <div class="mailbox-views" role="group" aria-label="Notification view">
+    <button type="button" id="all" aria-pressed="true">All unread <span></span></button>
+    <button type="button" id="direct" aria-pressed="false">Needs you <span></span></button>
+  </div>
+  <button type="button" id="inbox">Open Inbox</button>
+</div>
 <p id="notice" role="status">Loading…</p>
-<ul id="rows"></ul>
-<button type="button" id="inbox">Open Inbox</button>
+<ul id="rows" aria-label="Unread notifications"></ul>
 </body>
 </html>

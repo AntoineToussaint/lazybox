@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -155,6 +157,15 @@ func TestCompoundEngineeringReviewsAnArchiveOnce(t *testing.T) {
 			ctx := context.Background()
 			ws := createTestCollection(t, s)
 			approveWorkflow(t, s, "compound-engineering", power.GrantCompound)
+			for dir, rule := range map[string]string{"checks": "Run the narrow verifier first.", "unrelated": "Unrelated directory rule."} {
+				folder := filepath.Join(ws.Root, "api", dir)
+				if err := os.MkdirAll(folder, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(folder, "AGENTS.md"), []byte(rule), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			a := archiveAdapter{make(chan *agenttest.Session, 4)}
 			s.Bench.Adapters["claude"] = a
 			opened, err := s.OpenSession(ctx, &pb.OpenSessionRequest{ProfileId: "claude-default", CollectionId: ws.Id})
@@ -163,7 +174,7 @@ func TestCompoundEngineeringReviewsAnArchiveOnce(t *testing.T) {
 			}
 			source := <-a.opened
 			e, _ := s.Bench.Get(opened.Session.Id)
-			if _, err = e.Engine.Apply(ctx, agent.Operation{ID: "lesson", Kind: agent.Message, Text: "Always verify changes with the repository gate."}); err != nil {
+			if _, err = e.Engine.Apply(ctx, agent.Operation{ID: "lesson", Kind: agent.Message, Text: "Always verify changes to api/checks/verify.go with the repository gate."}); err != nil {
 				t.Fatal(err)
 			}
 			<-source.Applied
@@ -190,6 +201,9 @@ func TestCompoundEngineeringReviewsAnArchiveOnce(t *testing.T) {
 			}
 			if reviewer.Open.Permission != "read-only" || !strings.Contains(reviewer.Open.Context, "repository gate") {
 				t.Fatalf("unexpected reviewer context: %s", reviewer.Open.Context)
+			}
+			if scope == "conversation" && (!strings.Contains(reviewer.Open.Context, "Current api/checks/AGENTS.md") || !strings.Contains(reviewer.Open.Context, "Run the narrow verifier first.") || strings.Contains(reviewer.Open.Context, "Unrelated directory rule.")) {
+				t.Fatalf("archive review missing scoped evidence: %s", reviewer.Open.Context)
 			}
 			<-reviewer.Applied
 			reviewer.Events <- agent.Event{Type: "message_delta", Text: "Add a verification instruction to AGENTS.md."}

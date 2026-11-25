@@ -3,8 +3,8 @@ category: Code & documentation
 caption: Handoff Brief panel with fixture workspace data.
 keywords: [summarize, handover]
 name: Handoff Brief
-version: 1.0.0
-description: Draft a shareable workspace handoff with pull requests and artifacts.
+version: 1.1.0
+description: Choose pull requests and artifacts, record open decisions, and draft the next step for your teammate.
 author: Lazybox
 panels:
   - id: main

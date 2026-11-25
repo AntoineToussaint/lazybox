@@ -1,6 +1,7 @@
 // Capture bundled listings with the same WebKit app and fake Runner as the extension UI suite.
 import {createServer, testViteCache} from './fixtures/vite-cache.mjs';
 import {webkit, expect} from './fixtures/playwright.mjs';
+import {report} from './fixtures/cost-dashboard.mjs';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import react from '@vitejs/plugin-react';
 import {readdir, readFile} from 'node:fs/promises';
@@ -9,6 +10,9 @@ import {fileURLToPath} from 'node:url';
 
 const root = new URL('../services/runner/code/internal/power/extensions/examples/', import.meta.url);
 const fixture = await startRunnerFixture();
+fixture.telemetry = body => report(body.workspace);
+fixture.artifacts.agentPut({collectionId:'alpha',sessionId:'alpha-session',kind:'notes',title:'Deployment checklist',content:'Verify the release candidate before promoting it.'});
+Object.assign(fixture.sessions.find(item => item.id === 'beta-session'), {title:'Review the migration plan',status:'waiting_input',pending:[{type:'question',requestId:'migration',text:'Which schema should we deploy?'}]});
 const server = await createServer({...testViteCache(import.meta.url), configFile:false, root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 const browser = await webkit.launch();
 try {
@@ -18,11 +22,13 @@ try {
   await page.locator('summary[aria-label="Panels"]').click();
   await page.getByRole('button',{name:'New Extensions panel',exact:true}).click();
   for (const id of await readdir(root)) {
+    if (process.argv.length > 2 && !process.argv.slice(2).includes(id)) continue;
+    if (id === 'disk-cleanup') await fixture.extensions.showSampleDiskReport();
     const manifest = parseManifest(await readFile(new URL(id+'/extension.yaml',root),'utf8'));
     const picker = page.getByRole('combobox',{name:'Extension panel'});
     if (await picker.count()) await picker.selectOption({label:'All extensions…'});
     const row = page.locator('.extension-home li').filter({has:page.getByText(manifest.name,{exact:true})});
-    await row.getByRole('button',{name:'Add',exact:true}).click();
+    await row.getByRole('button',{name:'Install',exact:true}).click();
     const sheet = page.getByRole('dialog',{name:'Allow '+manifest.name+'?'});
     let target = sheet;
     if (id === 'compound-engineering') {
@@ -49,6 +55,13 @@ try {
       const inner = page.frameLocator('iframe.extension-frame').frameLocator('iframe');
       await expect(inner.locator('body')).toBeVisible();
       await expect(inner.locator('body')).not.toContainText('Loading…');
+      if (id === 'reminders') {
+        await inner.getByLabel('What should you check?').fill('Check the staging deployment');
+        await inner.getByRole('button',{name:'Set reminder'}).click();
+        await expect(inner.getByRole('listitem').first()).toBeVisible();
+      }
+      if (id === 'cost-dashboard') await expect(inner.locator('#total')).toHaveText(/\$[1-9]/);
+      if (id === 'disk-cleanup') await expect(inner.getByRole('heading', { name: /^Cleanup candidates/ })).toBeVisible();
     }
     const box = await target.boundingBox();
     const clip = {x:box.x,y:box.y,width:Math.min(box.width,560),height:Math.min(box.height,360)};

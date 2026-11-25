@@ -343,7 +343,7 @@ export function SettingsPage({ initialAddSubscription = false, onOpenExtensionPa
     finally { usageInFlight.current.delete(profile.id); if (!signal.aborted) setRefreshing(new Set(usageInFlight.current)); }
   };
   // Per-account opt-out of automatic switching; every saved subscription is in by default.
-  const { settings: runnerSettings, setSettings: setRunnerSettings } = useRunnerSettings();
+  const { settings: runnerSettings, setSettings: setRunnerSettings } = useRunnerSettings(tab === 'subscriptions');
   // An account imported from a token earlier: Settings → Subscriptions → Remove.
   const [removing, setRemoving] = useState<Profile>();
   const [statusFilter, setStatusFilter] = useState("All statuses");
@@ -462,7 +462,7 @@ export function SettingsPage({ initialAddSubscription = false, onOpenExtensionPa
     {panel('keyboard', <KeyboardSettings store={viewState}/>)}
     {panel('power', <PowerSettings viewState={viewState}/>)}
     {panel('runners', <RunnersSettings/>)}
-    {panel('extensions', <ExtensionsSettings onOpenPanel={onOpenExtensionPanel}/>)}
+    {panel('extensions', <ExtensionsSettings onOpenPanel={onOpenExtensionPanel} onManageAccounts={() => { setStatusFilter('All statuses'); select('subscriptions', true); }}/>)}
     {panel('runner', <RunnerSection onShowProcesses={onShowProcesses}/>)}
     {panel('process', <OrchestrationProcessSettings/>)}
     {panel('about', <AboutSettings app={app}/>)}

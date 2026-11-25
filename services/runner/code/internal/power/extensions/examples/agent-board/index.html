@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agent board</title>
 <link rel="stylesheet" href="_lazybox/lazybox.css">
 <link rel="stylesheet" href="board.css">
@@ -12,9 +13,14 @@
 <header class="bar">
   <h1 class="summary" id="summary" aria-live="polite">Loading…</h1>
   <span class="spacer"></span>
-  <button id="next" type="button" title="Show the next conversation that needs you (attention.next)">Next</button>
+  <button id="next" type="button" title="Show the next conversation that needs you (attention.next)">Next conversation</button>
   <button id="inbox" type="button" title="Open the inbox">Inbox</button>
 </header>
+<div class="filters" role="search" aria-label="Conversation filters">
+  <input id="search" type="search" placeholder="Find a conversation or workspace…" aria-label="Find a conversation or workspace">
+  <label><input id="attention" type="checkbox"> Needs attention only</label>
+</div>
+<p id="no-matches" role="status" hidden></p>
 <p class="notice" id="notice" role="status" hidden></p>
 <main id="board" class="board" aria-label="Conversations by what they need"></main>
 </body>

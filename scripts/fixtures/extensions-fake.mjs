@@ -44,6 +44,7 @@ async function listing(folder, manifest) {
 }
 
 export async function createExtensionsFake({ mutations }) {
+  let diskReport = 'Waiting for the first scan.';
   const dir = await mkdtemp(join(tmpdir(), 'lazybox-extensions-'));
   const approvals = new Map(), sessions = new Map(), creds = new Map();
   let profile = {rememberedAnswers:[{id:'w/naming',workspace:'Workspace A',question:'Naming convention?',answer:'camelCase'}],style:'',testing:'',askWhen:'',revision:'0',suggestions:['I prefer explicit errors.']};
@@ -94,7 +95,7 @@ export async function createExtensionsFake({ mutations }) {
       const name = file.slice('_lazybox/'.length);
       if (name === 'disk-report.html' && s.grants.includes('scan:disk')) {
         res.writeHead(200, { ...headers, 'Content-Type': types['.html'], 'Content-Security-Policy': extensionPolicy });
-        res.end('Waiting for the first scan.');
+        res.end(diskReport);
         return;
       }
       if (!runtimeFiles.includes(name)) { res.writeHead(404, headers); res.end(); return; }
@@ -112,6 +113,7 @@ export async function createExtensionsFake({ mutations }) {
 
   const fake = {
     dir, origin, approvals, sessions, creds,
+    async showSampleDiskReport() { diskReport = await readFile(join(power, '../testdata/disk-report.html'), 'utf8'); },
     /** RPCs extension credentials made, and those refused. */
     calls: [], denied: [],
     /** Writes an extension folder (a test's own, such as a malicious one). */

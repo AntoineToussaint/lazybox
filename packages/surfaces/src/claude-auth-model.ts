@@ -32,18 +32,18 @@ export function claudeSignInLine(auth: Pick<ClaudeAuth, 'apiKeySet' | 'apiKeyHin
  * migration keeps an existing setup working, so each says what stayed on and
  * where to review it.
  */
-export const accountNotices: Record<string, { title: string; body: string; action: string; tab: 'extensions' | 'agents'; link?: { href: string; label: string } }> = {
-  'disk-pressure-tight': { title: 'Running low on disk space on this Runner', body: 'Review the latest scan in Disk Cleanup.', action: 'Open Extensions', tab: 'extensions' },
-  'disk-pressure-critical': { title: 'Disk space is critically low on this Runner', body: 'Review the latest scan in Disk Cleanup.', action: 'Open Extensions', tab: 'extensions' },
+export const accountNotices: Record<string, { title: string; body: string; action: string; target: 'extensions' | 'agents' | 'disk-cleanup'; link?: { href: string; label: string } }> = {
+  'disk-pressure-tight': { title: 'Running low on disk space on this Runner', body: 'Review the latest scan in Disk Cleanup.', action: 'Open Disk Cleanup', target: 'disk-cleanup' },
+  'disk-pressure-critical': { title: 'Disk space is critically low on this Runner', body: 'Review the latest scan in Disk Cleanup.', action: 'Open Disk Cleanup', target: 'disk-cleanup' },
   'automatic-switching-moved': {
     title: 'Automatic switching is now an extension',
     body: 'Your conversations still switch subscription at a limit, as before: Lazybox turned on the Subscription rotation extension for you, with your settings. Review or turn it off in Settings → Extensions.',
-    action: 'Open Extensions', tab: 'extensions',
+    action: 'Open Extensions', target: 'extensions',
   },
   'claude-sign-in-kept': {
     title: 'Lazybox now follows Anthropic’s terms for Claude sign-in',
     body: 'Your saved Claude accounts keep working; review in Settings → Agents → Claude.',
-    action: 'Review Claude settings', tab: 'agents',
+    action: 'Review Claude settings', target: 'agents',
     link: { href: 'https://code.claude.com/docs/en/legal-and-compliance', label: 'Anthropic’s terms' },
   },
 };

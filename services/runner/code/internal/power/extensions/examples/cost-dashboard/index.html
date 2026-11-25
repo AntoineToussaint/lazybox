@@ -72,7 +72,10 @@
         <svg id="chart-svg" aria-hidden="true"></svg>
         <div class="tooltip" id="tooltip" role="presentation" hidden></div>
       </div>
-      <p class="chart-hint" id="chart-hint"></p>
+      <div class="chart-footer">
+        <p class="chart-hint" id="chart-hint"></p>
+        <button type="button" id="inspect-peak" hidden>Inspect peak spend</button>
+      </div>
     </section>
 
     <section class="card breakdown models" aria-labelledby="models-title">
@@ -88,7 +91,10 @@
       <ol class="rank" id="by-pull"></ol>
     </section>
     <section class="card breakdown conversations" aria-labelledby="conversations-title">
-      <h2 id="conversations-title">By conversation</h2>
+      <div class="card-head">
+        <h2 id="conversations-title" tabindex="-1">By conversation</h2>
+        <button type="button" id="clear-peak" hidden>Show full period</button>
+      </div>
       <ol class="rank" id="by-conversation"></ol>
     </section>
   </main>

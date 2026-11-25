@@ -433,7 +433,15 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const openExtensionPanel = (choice?: ExtensionPanelChoice) => {
     const panelId = showModule('extension');
     if (panelId) {
-      const request = { choice, onOpened: () => setExtensionRequest(current => current?.request === request ? undefined : current) };
+      const request = { choice, onOpened: () => {
+        if (choice) {
+          const handle = dock.current;
+          handle?.reveal(panelId);
+          const group = handle?.groupOf(panelId);
+          if (group?.location === 'grid' && !group.maximized) handle?.toggleMaximize(panelId);
+        }
+        setExtensionRequest(current => current?.request === request ? undefined : current);
+      } };
       setExtensionRequest({ panelId, request });
     }
   };
@@ -1117,7 +1125,10 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       </div>)}
     {!fixedWorkspaceId && <div className="account-notices">
       <ReminderNotices/>
-      <AccountNotices onOpenSettings={tab => { setSettingsTab(tab); setSettings(true); }}/>
+      <AccountNotices onNavigate={target => {
+        if (target === 'disk-cleanup') openExtensionPanel({ id: 'disk-cleanup', panel: 'main' });
+        else { setSettingsTab(target); setSettings(true); }
+      }}/>
     </div>}
     {surface === 'missions'
       ? <MissionsPanel openMission={host?.openMission} collections={collections} viewState={viewState} onReturn={() => setSettings(false)}

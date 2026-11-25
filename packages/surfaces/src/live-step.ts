@@ -51,19 +51,50 @@ export const isManagedCommandTool = (name: string) => MANAGED.has(name);
  */
 export function stepDetail(step: RootStep): { code?: string; where?: string; full?: string; words?: string } {
   const input = step.input && typeof step.input === 'object' && !Array.isArray(step.input) ? step.input as Record<string, any> : {};
-  let script = '';
-  if (SHELL.has(step.name)) script = Array.isArray(step.input) ? step.input.join(' ') : typeof step.input === 'string' ? step.input : Array.isArray(input.command) ? input.command.join(' ') : typeof input.command === 'string' ? input.command : '';
-  else if (MANAGED.has(step.name) && input.action === 'start' && Array.isArray(input.argv)) script = input.argv.join(' ');
-  if (!script) return MANAGED.has(step.name) ? { words: input.action === 'wait' ? 'Waiting for its command' : 'Reading command output' } : step.name === 'Task' || step.name === 'Agent' ? {} : { words: actionLabel(step.name, step.input) };
-  return { ...commandParts(script), full: script };
+  let script: string | string[] = '';
+  if (SHELL.has(step.name)) {
+    const command = Array.isArray(step.input) || typeof step.input === 'string' ? step.input : input.command ?? input.cmd;
+    if (typeof command === 'string' || Array.isArray(command)) script = command;
+  } else if (MANAGED.has(step.name) && input.action === 'start' && Array.isArray(input.argv)) {
+    script = input.argv;
+  }
+  if (!script.length) return MANAGED.has(step.name) ? { words: input.action === 'wait' ? 'Waiting for its command' : 'Reading command output' } : step.name === 'Task' || step.name === 'Agent' ? {} : { words: actionLabel(step.name, step.input) };
+  return { ...commandParts(script), full: typeof script === 'string' ? script : script.join(' ') };
 }
 
-/** "cd services/front-door && pnpm run check" → the command, and where it runs. */
-export function commandParts(script: string): { code: string; where?: string } {
+function shellBody(script: string): string {
+  // Providers display shell -c argv as a quoted string. Only unwrap a single
+  // script argument; trailing commands outside the quotes belong to the caller.
+  const shell = /^(?:\S*\/)?(?:zsh|bash|sh|dash)\s+-(?:lc|c)\s+/.exec(script.trim());
+  if (!shell) return script;
+  const body = script.trim().slice(shell[0].length);
+  if (/^'(?:[^']|'\\'')*'$/.test(body)) return body.slice(1, -1).replaceAll("'\\''", "'");
+  if (/^"(?:[^"\\]|\\.)*"$/.test(body)) return body.slice(1, -1).replace(/\\(["\\$`])/g, '$1');
+  return script;
+}
+
+function runPayload(script: string): string {
+  const cli = /^(?:"[^"]+"|'[^']+'|\S+)\s+run\s+/.exec(script);
+  if (!cli || plainLazybox(cli[0]).trim() !== 'lazybox run') return script;
+  let rest = script.slice(cli[0].length);
+  while (rest.startsWith('-')) {
+    if (/^--\s/.test(rest)) return rest.slice(2).trimStart() || script;
+    const flag = /^--?(?:raw|background|wait)(?:=\S+)?\s+|^--?(?:title|check|needs|to|collection|output-dir|session)(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)\s+/.exec(rest);
+    if (!flag) return script;
+    rest = rest.slice(flag[0].length);
+  }
+  return rest || script;
+}
+
+export function commandParts(command: string | readonly string[]): { code: string; where?: string } {
+  const script = typeof command === 'string' ? shellBody(command)
+    : command.length === 3 && /(?:^|\/)(?:zsh|bash|sh|dash)$/.test(command[0]) && ['-lc', '-c'].includes(command[1])
+      ? command[2] : command.join(' ');
   const lines = script.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('#'));
   let first = lines[0] || script.trim(), where: string | undefined;
   const cd = /^cd\s+("[^"]+"|'[^']+'|\S+)\s*(?:&&|;)\s*(.+)$/.exec(first);
   if (cd) { where = cd[1].replace(/^["']|["']$/g, ''); first = cd[2]; }
+  first = runPayload(first);
   const code = first.length > 120 ? first.slice(0, 119) + '…' : first;
   return { code: lines.length > 1 ? code + ' …' : code, where };
 }
@@ -85,8 +116,6 @@ export function runningCommand(commands: readonly CommandStatus[], sessionId: st
 
 /** How long a foreground command may stay quiet before the bar offers to move it to the background. */
 export const QUIET_MS = 20_000;
-/** How long a shell step may run before the bar warns it may never end. */
-export const LONG_STEP_MS = 60_000;
 
 /**
  * Whether the bar offers Move to background for a `lazybox run` in the
@@ -102,11 +131,11 @@ export function offersBackground(command: Pick<CommandStatus, 'canBackground' | 
 /**
  * Whether a shell step the agent runs itself (not through `lazybox run`,
  * however it calls lazybox)
- * may never end: it looks like a server or a watcher, or it has run long.
+ * looks like a server or a watcher. Elapsed time alone tells us nothing about that.
  */
-export function mayNeverEnd(script: string | undefined, runningForMs: number): boolean {
+export function mayNeverEnd(script: string | undefined): boolean {
   if (!script || /\blazybox\s+run\b/.test(plainLazybox(script))) return false;
-  return serverLike(script).server || runningForMs >= LONG_STEP_MS;
+  return serverLike(shellBody(script)).server;
 }
 
 /** Terminal output as lines a person can read: no colour codes, carriage-return redraws resolved. */

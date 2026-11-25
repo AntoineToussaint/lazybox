@@ -283,13 +283,15 @@ export function exitFault(fault = ''): boolean {
 }
 
 /** Why a conversation needs attention, for a fault that is not a subscription limit. */
-export function faultSentence(fault: string): string {
+export function faultSentence(fault: string, backgroundRunning = false): string {
   if (!fault) return '';
   if (fault === 'provider delivery failed; reconcile before continuing') return 'A message could not be delivered to the agent. Check the conversation before sending again.';
   if (fault.startsWith('provider stream ended')) return 'The connection to the agent ended unexpectedly.';
   if (exitFault(fault)) return 'The agent process stopped unexpectedly. Resume continues the conversation in a new one.';
   if (fault.startsWith('event capture failed')) return 'Lazybox could not record this conversation. Its agent keeps running: Resume reconnects to it.';
-  if (fault === 'unknown') return 'The provider ended the turn without a recognized reason. Send a message to continue the conversation.';
+  if (fault === 'unknown') return backgroundRunning
+    ? 'The agent stopped responding. Background work is still running. You can check its progress below or ask the agent to continue.'
+    : 'The agent stopped responding. You can continue from where it left off.';
   if (fault === 'provider_failure' || fault === 'provider_error' || fault === 'sdk_error') return 'The agent stopped after an error from the provider.';
   if (looksLikeCode(fault)) return codeSentences[fault] || `The agent stopped (${fault.replaceAll('_', ' ')}).`;
   return fault;

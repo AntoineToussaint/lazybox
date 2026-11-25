@@ -58,6 +58,15 @@ try{
  await otherComposer.fill('anything');const refused=applies();await otherComposer.press('Enter');
  await expect(page.getByRole('alert').filter({hasText:'Resume it or start a new conversation to continue.'})).toBeVisible();
  assert.equal(applies(),refused,'a refused conversation sends nothing');
+ Object.assign(other,{fault:'unknown'});
+ await page.reload();
+ const recover=page.getByRole('button',{name:'Continue from here'});
+ await expect(otherComposer).toHaveValue('anything');
+ await expect(recover).toHaveCount(0);
+ await otherComposer.fill('');
+ await recover.click();
+ await expect.poll(applies).toBe(refused+1);
+ assert.match(fixture.mutations.filter(m=>m.method==='Apply').at(-1).body.message.text,/Check the existing commands and their results first/);
  assert.deepEqual(errors,[]);
  console.log('PASS: screenshot bytes survive a reload; a provider error does not block the next message; a refused conversation says why.');
 }finally{await browser?.close();await server.close();await fixture.close();}

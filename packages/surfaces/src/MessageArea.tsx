@@ -10,6 +10,7 @@ import { ConversationLoading, MessageList } from './MessageList';
 import { MessageScopeProvider } from './MessageArtifactActions';
 import { useFileLinkTracking } from './FileArtifactActions';
 import { revealMessage, useRevealRequests, type RevealMessageRequest } from './artifact-events';
+import { useBackgroundRunning } from './SubagentTray';
 import { PromptNavigator } from './PromptNavigator';
 import { RequestCard } from './session-parts';
 import { ToolLineContext } from './ToolLine';
@@ -28,7 +29,7 @@ type Transcript = ReturnType<typeof useTranscript>;
  * the agent's pending requests (and a subscription limit) in the scrolling pane, and a way back to the
  * latest message once the reader scrolled away from it.
  */
-export function MessageArea({ api, session, sessionID, transcript, scroll, spoken, agentName, limited, nameFor, onOpenFile, onError, onHandoff, onOpenHandoff, onBranch, subscription, enableFullAccess, detail = 'smart', alwaysShowTime }: {
+export function MessageArea({ api, session, sessionID, transcript, scroll, spoken, agentName, limited, onContinueTurn, nameFor, onOpenFile, onError, onHandoff, onOpenHandoff, onBranch, subscription, enableFullAccess, detail = 'smart', alwaysShowTime }: {
   api: RunnerClient;
   alwaysShowTime?: boolean;
   session?: Session;
@@ -40,6 +41,7 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
   agentName: string;
   /** At a subscription limit: the limit card stands in for the fault. */
   limited: boolean;
+  onContinueTurn?: () => void;
   /** A subscription's name by profile ID, for switch lines. */
   nameFor(id: string): string;
   onOpenFile?(reference: FileLink, how: OpenModifiers): void;
@@ -92,7 +94,7 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
           {transcript.loading && !conversation.length && <ConversationLoading replay={transcript.replay}/>}
           {!transcript.loading && !transcript.error && !spoken && <EmptyConversation agentName={agentName}/>}
           <MessageScopeProvider scope={artifactScope}><ToolLineContext.Provider value={toolScope}><ConversationSourceContext.Provider value={onOpenHandoff && handoffWorkspace ? openSource : undefined}><MessageList conversationId={session?.conversationId || sessionID} key={session?.conversationId || sessionID} messages={spoken ? conversation : []} visible={scroll.visibleMessages} agentName={agentName} onOpenFile={onOpenFile} onShowEarlier={scroll.showEarlier} nameFor={nameFor} checkpoints={checkpoints} sessionId={sessionID} onReveal={scroll.revealMessage} onHandoff={onHandoff} onBranch={onBranch} detail={detail} alwaysShowTime={alwaysShowTime} loadingEarlier={transcript.partial}/></ConversationSourceContext.Provider></ToolLineContext.Provider></MessageScopeProvider>
-          {session?.fault && !limited && <FaultBanner api={api} session={session} sessionID={sessionID} onError={onError}/>}
+          {session?.fault && !limited && <FaultBanner onContinueTurn={onContinueTurn} api={api} session={session} sessionID={sessionID} onError={onError}/>}
           <PendingRequests enableFullAccess={enableFullAccess} api={api} session={session} sessionID={sessionID} agentName={agentName} onError={onError}/>
           {subscription}
         </div>
@@ -110,7 +112,8 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
  * never starts a second one. An agent whose process exited offers it too:
  * its conversation goes on in a new process.
  */
-function FaultBanner({ api, session, sessionID, onError }: { api: RunnerClient; session: Session; sessionID: string; onError(message: string): void }) {
+function FaultBanner({ api, session, sessionID, onError, onContinueTurn }: { onContinueTurn?: () => void; api: RunnerClient; session: Session; sessionID: string; onError(message: string): void }) {
+  const running = useBackgroundRunning();
   const [resuming, setResuming] = useState(false);
   const resume = async () => {
     if (resuming) return;
@@ -120,7 +123,8 @@ function FaultBanner({ api, session, sessionID, onError }: { api: RunnerClient; 
     finally { setResuming(false); }
   };
   return <div className="error" role="alert">
-    {faultSentence(session.fault)}
+    {faultSentence(session.fault, running > 0)}
+    {session.fault === 'unknown' && onContinueTurn && <button type="button" onClick={onContinueTurn}>Continue from here</button>}
     {(transportFault(session.fault) || exitFault(session.fault)) && !session.closed && <button disabled={resuming} onClick={() => void resume()}>{resuming ? 'Resuming…' : 'Resume'}</button>}
   </div>;
 }

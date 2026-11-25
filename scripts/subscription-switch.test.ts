@@ -69,7 +69,8 @@ test('a limit is one plain sentence, never a provider token', () => {
   assert.match(failureSentence('auth_required', 'gateway_session_expired'), /Sign in again/);
   assert.equal(failureSentence('provider_error', 'The model refused the request.'), 'The model refused the request.', 'provider prose is kept');
   assert.equal(faultSentence('provider delivery failed; reconcile before continuing'), 'A message could not be delivered to the agent. Check the conversation before sending again.');
-  assert.match(faultSentence('unknown'), /Send a message to continue/);
+  assert.match(faultSentence('unknown', true), /Background work is still running/);
+  assert.doesNotMatch(faultSentence('unknown'), /still running/);
   // A message the provider refused is a turn's failure: the next one continues (agent.DeliveryRejectedFault).
   assert.match(faultSentence('delivery_rejected'), /Send a message to continue/);
   assert.doesNotMatch(faultSentence('provider_failure'), /provider_failure/);

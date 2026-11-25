@@ -798,7 +798,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {session?.forkedFromSessionId && <button type="button" className="text-button" onClick={() => void openLinkedConversation(session.forkedFromSessionId, session.forkedFromCursor)}>
             Open previous conversation
           </button>}
-          <CodeRunContext.Provider value={codeRuns}><MessageArea onBranch={canBranch ? selectBranch : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
+          <CodeRunContext.Provider value={codeRuns}><MessageArea
+            onContinueTurn={canCompose && continuesAfterError && !session?.busy && !sending && !uncertainSend && !message && !files.length && !missingFiles.length
+              ? () => void send(undefined, 'Continue from where the turn stopped. Check the existing commands and their results first, then finish the remaining work. Avoid repeating operations that already ran.')
+              : undefined}
+            onBranch={canBranch ? selectBranch : undefined} onOpenHandoff={onOpenHandoff} onHandoff={session?.collectionId && onOpenHandoff && !assistant ? setHandoffMessage : undefined} api={api} session={session} sessionID={sessionID} transcript={transcript} scroll={scroll} spoken={spoken} agentName={agentName} limited={limited} nameFor={nameFor}
             enableFullAccess={session?.capabilities?.livePermission && !session.closed && session.permission !== 'yolo' && !assistant ? requestId => changePermission('yolo', requestId) : undefined}
             onOpenFile={session?.collectionId ? openFile : undefined} onError={setError} detail={activity.detail} alwaysShowTime={display.timestamps}
             subscription={session && <SubscriptionControls session={session} profiles={profileList || []} viewState={viewState} dialogOpen={switchingSubscription} onCloseDialog={() => { setSwitchingSubscription(false); requestAnimationFrame(() => { const active = document.activeElement; if (!active || active === document.body) composer.current?.focus({ preventScroll: true }); }); }} onSession={next => { transcript.reader.session = next; setSession(next); }} onError={setError} onOpenContinuation={id => void openLinkedConversation(id, 0n)} onContinueInCodex={continueInCodex}/>}/></CodeRunContext.Provider>

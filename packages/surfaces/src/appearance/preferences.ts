@@ -4,7 +4,7 @@
  * what they left alone. Pure: no DOM, no storage.
  */
 import { parseColor } from './color';
-import { BUILTIN_BY_ID, validTokenValue, type ThemeDefinition } from './themes';
+import { BUILTIN_BY_ID, currentThemeId, validTokenValue, type ThemeDefinition } from './themes';
 import type { Scheme } from './tokens';
 
 export type Mode = 'system' | 'light' | 'dark';
@@ -92,8 +92,8 @@ export function parsePreferences(text: string | null | undefined): AppearancePre
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_PREFERENCES };
   const out: AppearancePreferences = { ...DEFAULT_PREFERENCES, typography: cleanTypography(raw.typography) };
   if (raw.mode === 'system' || raw.mode === 'light' || raw.mode === 'dark') out.mode = raw.mode;
-  if (typeof raw.darkTheme === 'string' && raw.darkTheme.length < 200) out.darkTheme = raw.darkTheme;
-  if (typeof raw.lightTheme === 'string' && raw.lightTheme.length < 200) out.lightTheme = raw.lightTheme;
+  if (typeof raw.darkTheme === 'string' && raw.darkTheme.length < 200) out.darkTheme = currentThemeId(raw.darkTheme);
+  if (typeof raw.lightTheme === 'string' && raw.lightTheme.length < 200) out.lightTheme = currentThemeId(raw.lightTheme);
   if (typeof raw.accent === 'string' && parseColor(raw.accent)) out.accent = raw.accent;
   if (raw.tokens && typeof raw.tokens === 'object') {
     const tokens = Object.fromEntries(Object.entries(raw.tokens as Record<string, unknown>).filter(([k, v]) => typeof v === 'string' && validTokenValue(k, v))) as Record<string, string>;

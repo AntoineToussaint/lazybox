@@ -138,4 +138,6 @@ settings.yaml written from Settings, applied from an editor save, its mistakes
 by line, a change just before a reload kept), against the fake Runner. The
 Runner's parser of the section is `internal/power` (`TestSettingsAppearance*`).
 
+Saved selections and custom themes based on retired color presets use Dracula for dark or GitHub Light for light.
+
 The editor presets map published workbench, syntax and terminal colors onto Lazybox tokens using the palettes bundled by Shiki. Palette sources are [Dracula](https://github.com/dracula/visual-studio-code), [One Dark Pro](https://github.com/Binaryify/OneDark-Pro), [Tokyo Night](https://github.com/enkia/tokyo-night-vscode-theme), [Catppuccin](https://github.com/catppuccin/vscode) and [GitHub](https://github.com/primer/github-vscode-theme).

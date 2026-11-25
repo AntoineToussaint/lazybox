@@ -179,6 +179,13 @@ func TestSettingsParse(t *testing.T) {
 	}
 }
 
+func TestRetiredThemeSettings(t *testing.T) {
+	s, issues, err := ParseSettings([]byte("appearance:\n  dark-theme: aubergine\n  light-theme: paper\n"))
+	if err != nil || len(issues) != 0 || s.Appearance["darkTheme"] != "dracula" || s.Appearance["lightTheme"] != "github-light-default" {
+		t.Fatalf("appearance=%v issues=%v err=%v", s.Appearance, issues, err)
+	}
+}
+
 func TestSettingsAppearanceParse(t *testing.T) {
 	s, issues, err := ParseSettings([]byte(`appearance:
   mode: dark

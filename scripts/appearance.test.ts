@@ -34,6 +34,15 @@ test('contrast follows WCAG 2 and ensureContrast moves only as far as needed', (
   assert.equal(mix('#000000', '#ffffff', 0), '#000000');
 });
 
+test('retired palettes leave the picker and old selections resolve to editor presets', () => {
+  assert.equal(BUILTIN_THEMES.length, 12);
+  assert.ok(!BUILTIN_BY_ID.has('aubergine'));
+  const prefs = parsePreferences(JSON.stringify({ darkTheme: 'aubergine', lightTheme: 'paper' }));
+  assert.equal(prefs.darkTheme, 'dracula');
+  assert.equal(prefs.lightTheme, 'github-light-default');
+  assert.equal(parseThemeDocument('custom.toml', { name: 'Custom', appearance: 'dark', extends: 'pine' }).theme?.extends, 'dracula');
+});
+
 test('every built-in theme resolves every token to a valid value', () => {
   for (const theme of BUILTIN_THEMES) {
     const { tokens } = resolveTheme(theme);

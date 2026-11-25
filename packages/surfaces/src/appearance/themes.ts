@@ -68,6 +68,26 @@ function palette(id: string, name: string, scheme: Scheme, bg: string, surface: 
   return { id, name, scheme, tokens: { bg, surface, text, accent } };
 }
 
+// Read old settings and theme files without offering retired presets for new selections.
+const retiredThemes = new Map<string, string>([
+  ['midnight-blue', 'dracula'],
+  ['pine', 'dracula'],
+  ['ember', 'dracula'],
+  ['aubergine', 'dracula'],
+  ['graphite', 'dracula'],
+  ['deep-ocean', 'dracula'],
+  ['rosewood', 'dracula'],
+  ['ink', 'dracula'],
+  ['paper', 'github-light-default'],
+  ['glacier', 'github-light-default'],
+  ['sage', 'github-light-default'],
+  ['rose-quartz', 'github-light-default'],
+  ['lavender-mist', 'github-light-default'],
+  ['sand', 'github-light-default'],
+  ['sea-glass', 'github-light-default'],
+]);
+export const currentThemeId = (id: string): string => retiredThemes.get(id) ?? id;
+
 export const BUILTIN_THEMES: ThemeDefinition[] = [
   { id: 'dark', name: 'Dark', scheme: 'dark', tokens: darkTokens },
   { id: 'light', name: 'Light', scheme: 'light', tokens: lightTokens },
@@ -86,21 +106,6 @@ export const BUILTIN_THEMES: ThemeDefinition[] = [
     },
   },
   ...editorThemes,
-  palette('midnight-blue', 'Midnight blue', 'dark', '#0e1524', '#18253a', '#e4edf9', '#85b9ff'),
-  palette('pine', 'Pine', 'dark', '#0f1916', '#182823', '#e2efe8', '#7cd9b2'),
-  palette('ember', 'Ember', 'dark', '#1c1311', '#2c1f1c', '#f7e9e1', '#f5ad84'),
-  palette('aubergine', 'Aubergine', 'dark', '#1b1422', '#2a2033', '#f4e8f9', '#eab0fa'),
-  palette('graphite', 'Graphite', 'dark', '#141515', '#222424', '#ededed', '#b7cece'),
-  palette('deep-ocean', 'Deep ocean', 'dark', '#091b21', '#102a32', '#dcf1f6', '#66d9e0'),
-  palette('rosewood', 'Rosewood', 'dark', '#1c1116', '#2f2027', '#f7e8ef', '#f0a7c3'),
-  palette('ink', 'Ink', 'dark', '#090d17', '#131725', '#e4e9fa', '#aaaafa'),
-  palette('paper', 'Paper', 'light', '#ede8e0', '#fffcf5', '#312a24', '#925025'),
-  palette('glacier', 'Glacier', 'light', '#e2ecf7', '#f7fbff', '#20344a', '#235fa4'),
-  palette('sage', 'Sage', 'light', '#e4ece2', '#f8fcf4', '#263826', '#3d6a43'),
-  palette('rose-quartz', 'Rose quartz', 'light', '#f4e6e9', '#fff8fa', '#442c36', '#a13c65'),
-  palette('lavender-mist', 'Lavender mist', 'light', '#ebe5f5', '#fcf9ff', '#332844', '#6948a7'),
-  palette('sand', 'Sand', 'light', '#f0e4cf', '#fffaf0', '#423421', '#8a5419'),
-  palette('sea-glass', 'Sea glass', 'light', '#dfefee', '#f4fcfa', '#233b39', '#1b706a'),
   palette('light-high-contrast', 'Light high contrast', 'light', '#e7e7e7', '#ffffff', '#101010', '#243488'),
 ];
 export const BUILTIN_BY_ID = new Map(BUILTIN_THEMES.map(theme => [theme.id, theme]));
@@ -115,7 +120,7 @@ export type ThemeOverrides = { accent?: string; tokens?: Record<string, string> 
  * accent recolours the whole accent family, not just one token.
  */
 export function resolveTheme(theme: ThemeDefinition, overrides: ThemeOverrides = {}, minContrast = 0): ResolvedTheme {
-  const parent = theme.extends ? BUILTIN_BY_ID.get(theme.extends) : undefined;
+  const parent = theme.extends ? BUILTIN_BY_ID.get(currentThemeId(theme.extends)) : undefined;
   const explicit: Record<string, string> = { ...(parent && parent.scheme === theme.scheme ? parent.tokens : {}), ...theme.tokens };
   if (overrides.accent && parseColor(overrides.accent)) {
     // A new accent replaces every accent value the theme spelled out, so the family derives from it.

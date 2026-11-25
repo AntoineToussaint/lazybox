@@ -290,11 +290,13 @@ try{
  await expect(editingRow.locator('.queued-actions')).toBeHidden();
  await editor.fill('Updated queued message');
  const other=await context.newPage();
+ await collectPageErrors(other, errors);
  await other.goto(page.url());
  const otherRow=other.getByRole('listitem',{name:/Shift queue first/}).first();
  await otherRow.getByRole('button',{name:'Resume edit'}).click();
  await expect(otherRow.getByRole('alert')).toContainText('another window');
  await expect(otherRow.getByRole('textbox')).toHaveCount(0);
+ await drainPageErrors(errors);
  await other.close();
  await page.reload();
  await editingRow.getByRole('button',{name:'Resume edit'}).click();

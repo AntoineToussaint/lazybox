@@ -146,6 +146,7 @@ try {
       await expect(page.locator('.workspace-header .runner-indicator')).toHaveText('Connected');
       // The popout's blank document is painted before Dockview installs any panel styles.
       const blank = await context.newPage();
+      await collectPageErrors(blank, errors);
       const openerBackground = await page.evaluate(() => {
         const sample = document.createElement('span');
         sample.style.color = getComputedStyle(document.documentElement).getPropertyValue('--bg');
@@ -153,6 +154,7 @@ try {
       });
       await blank.goto(origin + '/popout.html');
       await expect(blank.locator('body')).toHaveCSS('background-color', openerBackground);
+      await drainPageErrors(errors);
       await blank.close();
       await checkHeader(page, { kind: 'workspace', scheme, selector: '.workspace-header', inset: 89, height: 48 });
       // The page tabs, the pills and the menus are pressed, not dragged: a real click on Settings opens it.

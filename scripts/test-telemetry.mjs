@@ -111,6 +111,7 @@ try{
  await codex.keyboard.press('Meta+2');
  await expect(codex.getByRole('combobox',{name:'Workspace',exact:true})).toHaveValue('beta');
  await expect(codexPanel).toBeHidden();
+ await drainPageErrors(errors);
  await codex.close();
 
  // A window that moves to another conversation reads that one's usage, never the one it left,
@@ -138,6 +139,7 @@ try{
  await expect(forkPanel).toBeHidden();
  await expect(chip).toContainText('50%');
  releaseAlpha();
+ await drainPageErrors(errors);
  await forkWindow.close();
  await drainPageErrors(errors);assert.deepEqual(errors,[]);assert.equal(fixture.mutations.length,0);console.log('PASS: normalized context, deferred counts, partial pricing, disconnect/retry recovery. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

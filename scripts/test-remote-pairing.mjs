@@ -106,10 +106,12 @@ try {
   // The same code a second time pairs nothing.
   const otherContext = await browser.newContext({ ...iPhone, ...(process.env.TEST_CHROMIUM ? { isMobile: false } : {}) });
   const other = await otherContext.newPage();
+  await collectPageErrors(other, phoneErrors);
   await other.goto(link);
   await other.getByRole('button', { name: 'Pair this phone' }).click();
   await expect(other.getByRole('alert')).toHaveText('this pairing code was already used; show a new one on your computer');
   assert.equal(f.remote.devices.size, 1);
+  await drainPageErrors(phoneErrors);
   await otherContext.close();
 
   // The list shows the phone, what it may do, and that it is active.

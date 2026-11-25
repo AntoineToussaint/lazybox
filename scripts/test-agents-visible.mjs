@@ -247,7 +247,7 @@ try {
   // The phone sees the desktop's pin.
   const offer = await fetch(`${f.url}/lazybox.bench.v1.RunnerService/BeginDevicePairing`, {method: 'POST', headers: {authorization: `Bearer ${f.token}`, 'content-type': 'application/json'}, body: JSON.stringify({grants: ['respond']})}).then(r => r.json());
   const phoneContext = await browser.newContext({...devices['iPhone 13']});
-  const phone = await phoneContext.newPage(); await watch(phone);
+  const phone = await phoneContext.newPage(); await collectPageErrors(phone, errors);
   await phone.goto(offer.url);
   await phone.getByRole('textbox', {name: 'Name this phone'}).fill('iPhone');
   await phone.getByRole('button', {name: 'Pair this phone'}).click();

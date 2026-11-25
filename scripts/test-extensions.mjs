@@ -248,6 +248,7 @@ try {
   await scenario(browser, 'dark', true);
   await scenario(browser, 'light', false);
   const page = await browser.newPage();
+  const errors = []; await collectPageErrors(page, errors);
   await page.goto(url);
   await page.locator('summary[aria-label="Panels"]').click();
   await page.getByRole('button', { name: 'New Extensions panel', exact: true }).click();
@@ -285,6 +286,7 @@ try {
   await expect.poll(() => page.evaluate(id => Object.keys(localStorage).some(key => key.endsWith(':' + id)), revoked)).toBe(false);
   await expect(page.locator('.page-layout')).toBeVisible();
   await expect(due).toHaveCount(0);
+  await drainPageErrors(errors);assert.deepEqual(errors, [], 'no page errors in the reminders panel');
   await page.close();
   console.log('extensions: ok');
 } finally {

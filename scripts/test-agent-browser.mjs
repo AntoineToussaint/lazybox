@@ -29,6 +29,7 @@ let browser;
 try {
   await server.listen(); browser = await chromium.launch({ headless: true });
   // Frames: little pages rendered to JPEG, as the Runner's screencast sends them.
+  // page-errors-opt-out: paints the fake sites' screenshots from set content; runs no Lazybox code.
   const painter = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const paint = async (title, body, color = '#2b6cb0') => {
     await painter.setContent(`<!doctype html><body style="margin:0;font:18px system-ui;background:#fff"><header style="background:${color};color:#fff;padding:18px 28px;display:flex;justify-content:space-between"><b>${title}</b><span style="border:2px solid #fff;padding:4px 14px;border-radius:6px">Sign in</span></header><main style="padding:28px">${body}</main></body>`);

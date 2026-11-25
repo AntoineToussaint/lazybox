@@ -26,10 +26,12 @@ try {
   const errors = [];
   await collectPageErrors(page, errors);
   const denied = await context.newPage();
+  await collectPageErrors(denied, errors);
   await denied.goto(url.replace(endpoint.token, 'invalid-token'));
   await expect(denied.getByRole('alert')).toContainText('unauthenticated');
   await expect(denied.getByRole('button', { name: 'Start Claude ↗' })).toBeDisabled();
   await expect(denied.getByRole('button', { name: 'Retry connection' })).toBeVisible();
+  await drainPageErrors(errors);
   await denied.close();
   await page.goto(url);
   await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveText(/^Claude/);

@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const E = '\x1b';
 const addresses = n => Array.from({ length: n }, (_, i) => i % 3 === 2 ? `[2a01:cb0d:5c4:${i}::1]:57771` : `192.168.${i}.21:57771`).join(' ');
@@ -215,6 +215,7 @@ try {
   for (const scheme of ['dark', 'light']) {
     const shot = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: scheme });
     const shotPage = await shot.newPage();
+    await collectPageErrors(shotPage, errors);
     await shotPage.goto(`${base}/?view=workspace&collection=beta&session=${fixture.sessions[1].id}#token=${fixture.token}`);
     await shotPage.getByRole('tab', { name: 'Command output', exact: true }).click();
     await expect(shotPage.locator('.command-panel select')).toHaveValue(quiet.id);
@@ -226,11 +227,13 @@ try {
     await shotPage.getByRole('button', { name: 'Maximize Command output' }).click();
     await shown.locator('.log-row').filter({ hasText: 'GET /healthz' }).getByRole('button', { name: '×3' }).hover();
     await shotPage.screenshot({ path: `.cache/console-log-${scheme}.png` });
+    await drainPageErrors(errors);
     await shot.close();
   }
   {
     const light = await browser.newContext({ viewport: { width: 1440, height: 960 }, colorScheme: 'light' });
     const lightPage = await light.newPage();
+    await collectPageErrors(lightPage, errors);
 
     // The classic console ("Open output in a window": in the browser build, the conversation window with its commands open) reads the same way.
     await lightPage.goto(`${base}/?session=${fixture.sessions[1].id}&command=${quiet.id}#token=${fixture.token}`);
@@ -239,6 +242,7 @@ try {
     await expect(classic.getByRole('group', { name: 'Sources' })).toBeVisible();
     await expect(classic.locator('.log-level[data-level=error]')).toHaveText('ERROR');
     await lightPage.screenshot({ path: '.cache/console-log-window.png' });
+    await drainPageErrors(errors);
     await light.close();
   }
 

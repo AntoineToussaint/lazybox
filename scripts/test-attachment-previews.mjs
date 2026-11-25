@@ -405,6 +405,7 @@ try {
   const beta = fixture.openEvents('beta-session');
   const oldPath = `/fixture/attachments/beta-session/${'1'.repeat(64)}/early.png`, newPath = `/fixture/attachments/beta-session/${'2'.repeat(64)}/late.png`;
   {
+    // page-errors-opt-out: draws test images on an empty page; runs no Lazybox code.
     const scratch = await browser.newPage();
     await scratch.route('http://localhost/**', route => route.fulfill({ contentType: 'text/html', body: '' })); await scratch.goto('http://localhost/');
     fixture.attachments.set(oldPath, { name: 'early.png', mediaType: 'image/png', data: Buffer.from(await pngBytes(scratch, 300, 600)) });

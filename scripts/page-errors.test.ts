@@ -65,6 +65,29 @@ export function collectsPageErrors(text: string): boolean {
 }
 
 /**
+ * The lines of `text` that open a page (`x = await y.newPage(`) no collector
+ * covers: neither collectPageErrors(x, …) before `x` names another page, nor a
+ * context collector on the context it came from, nor a marked opt-out on the
+ * line or the one above (a page that runs no Lazybox code). A script that opts
+ * out as a whole (it does not use the fixture) says so once, at the top.
+ */
+export function uncollectedPages(text: string): number[] {
+  if (!/fixtures\/page-errors\.mjs['"]/.test(text)) return [];
+  const lines = text.split('\n');
+  const allowed = new RegExp(`${optOut}:[ \\t]*\\S`);
+  const opened = [...text.matchAll(/([\w$]+)\s*=\s*(?:await\s+)?([\w$]+)\.newPage\(/g)];
+  return opened.flatMap((m, k) => {
+    const at = m.index!, line = text.slice(0, at).split('\n').length, page = m[1], from = m[2];
+    if (allowed.test(lines[line - 1]) || allowed.test(lines[line - 2] ?? '')) return [];
+    // Until the same name opens another page.
+    const next = opened.slice(k + 1).find(o => o[1] === page)?.index ?? text.length;
+    if (new RegExp(`collectPageErrors\\(\\s*${page.replace(/\$/g, '\\$')}\\s*[,)]`).test(text.slice(at, next))) return [];
+    if (from !== 'browser' && new RegExp(`collectContextPageErrors\\(\\s*${from.replace(/\$/g, '\\$')}\\s*[,)]`).test(text)) return [];
+    return [line];
+  });
+}
+
+/**
  * The lines of `text` that install an init script on a page or context no
  * collector covers yet: one that throws would go unheard. The collector must
  * be on the same variable, installed since that variable was last assigned:
@@ -134,6 +157,17 @@ test('the init-order check finds an init script installed before its collector',
   assert.deepEqual(initScriptsBeforeCollector(`let context = await browser.newContext();\nawait collectContextPageErrors(context, errors);\ncontext = await browser.newContext();\nawait context.addInitScript(stub);`), [4], 'a collector on the context the name held before does not count');
 });
 
+test('the page check finds a page opened without a collector', () => {
+  const head = "import { collectPageErrors } from './fixtures/page-errors.mjs';\n";
+  assert.deepEqual(uncollectedPages(head + 'const page = await browser.newPage();\nawait collectPageErrors(page, errors);'), []);
+  assert.deepEqual(uncollectedPages(head + 'const other = await context.newPage();\nawait other.goto(url);'), [2]);
+  assert.deepEqual(uncollectedPages(head + 'await collectContextPageErrors(context, errors);\nconst other = await context.newPage();'), []);
+  assert.deepEqual(uncollectedPages(head + `// ${optOut}: draws a picture\nconst scratch = await browser.newPage();`), []);
+  // A collector on a later page of the same name does not cover the first.
+  assert.deepEqual(uncollectedPages(head + 'let page = await browser.newPage();\npage = await browser.newPage();\nawait collectPageErrors(page, errors);'), [2]);
+  assert.deepEqual(uncollectedPages('const page = await browser.newPage();'), [], 'a script without the fixture is the whole-file check\'s');
+});
+
 test('the drain check finds an assertion on collected errors that was not drained first', () => {
   const collect = 'const errors = await collectPageErrors(page);\n';
   assert.deepEqual(undrainedAssertions(`${collect}await page.click('a');\nassert.deepEqual(errors, []);`), [3]);
@@ -196,6 +230,8 @@ test('every script of a UI gate, and every test-*.mjs, that opens a page collect
   const unsettled = [...files].sort().filter(file => file !== 'scripts/test-page-errors.mjs')
     .flatMap(file => undrainedAssertions(readFileSync(join(v2, file), 'utf8')).map(line => `${file}:${line}`));
   assert.deepEqual(unsettled, [], `await drainPageErrors(errors) before asserting on them, or mark "${undrained}: <why>"`);
+  const uncovered = [...files].sort().flatMap(file => uncollectedPages(readFileSync(join(v2, file), 'utf8')).map(line => `${file}:${line}`));
+  assert.deepEqual(uncovered, [], `collect every page's errors (collectPageErrors(page, errors) before it navigates), or mark "${optOut}: <why>" on a page that runs no Lazybox code`);
   const early = [...files].sort().flatMap(file => initScriptsBeforeCollector(readFileSync(join(v2, file), 'utf8')).map(line => `${file}:${line}`));
   assert.deepEqual(early, [], `install the collector (collectContextPageErrors for a context) before the init script, or mark "${initOrder}: <why>"`);
 });

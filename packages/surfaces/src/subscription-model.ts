@@ -113,7 +113,12 @@ export function limitHeadline(name: string, state: LimitState, resetAt: bigint |
   }
 }
 
-export type SubscriptionChoice = { id: string; provider: string; name: string; ready: boolean; detail: string; resetAt: number; current: boolean };
+/**
+ * `refreshable`: the provider can be asked for its usage (a private sign-in;
+ * a CLI sign-in is a read-only reference). `clear`: how "Mark available" is
+ * offered (clearOffer).
+ */
+export type SubscriptionChoice = { id: string; provider: string; name: string; ready: boolean; detail: string; resetAt: number; current: boolean; refreshable: boolean; clear: ClearOffer };
 
 /** A zero reset means a known limit with no recovery time. */
 function limitResets(profile: SubscriptionLike): number[] {
@@ -154,6 +159,23 @@ export function subscriptionDetail(profile: SubscriptionLike, now: number): stri
   return used >= 0 ? `${prefix} · ${Math.min(99, Math.round(used))}% used` : prefix;
 }
 
+/** Whether Lazybox can ask the provider for this subscription's usage (RefreshSubscription). */
+export const usageRefreshable = (profile: Partial<Pick<Profile, 'managed' | 'isolation'>>) => !!profile.managed && profile.isolation === 'environment';
+
+/**
+ * How a person can clear a recorded limit (ClearSubscriptionLimit): 'direct'
+ * once its reset has passed and only the report is stale, 'confirm' while the
+ * report still says it is limited, '' with no limit to clear. Sign-in and
+ * billing problems are not limits. Mirrors accounts.State.Clear.
+ */
+export type ClearOffer = '' | 'direct' | 'confirm';
+export function clearOffer(profile: SubscriptionLike, now: number): ClearOffer {
+  const state = profile.availability?.state;
+  if (state !== 'exhausted' && state !== 'throttled' && state !== 'available') return '';
+  if (!limitResets(profile).length) return '';
+  return readiness(profile, now) === 2 ? 'confirm' : 'direct';
+}
+
 /** Sort by reported capacity, possible capacity, then unavailable. */
 export function standing(profile: SubscriptionLike, now = Date.now()): 0 | 1 | 2 {
   return readiness(profile, now);
@@ -175,7 +197,7 @@ export function orderSubscriptions<T extends SubscriptionLike>(profiles: readonl
  */
 export function subscriptionChoices(profiles: readonly Profile[], provider: string, currentId: string, now = Date.now()): SubscriptionChoice[] {
   return orderSubscriptions(profiles.filter(p => p.provider === provider), { currentId, now })
-    .map(p => ({ id: p.id, provider: p.provider, name: subscriptionName(p, p.id), ready: subscriptionReady(p, now), detail: subscriptionDetail(p, now), resetAt: seconds(p.availability?.resetAt), current: p.id === currentId }));
+    .map(p => ({ id: p.id, provider: p.provider, name: subscriptionName(p, p.id), ready: subscriptionReady(p, now), detail: subscriptionDetail(p, now), resetAt: seconds(p.availability?.resetAt), current: p.id === currentId, refreshable: usageRefreshable(p), clear: clearOffer(p, now) }));
 }
 
 /** The subscription "Switch to …" offers: the best other one that is ready. */

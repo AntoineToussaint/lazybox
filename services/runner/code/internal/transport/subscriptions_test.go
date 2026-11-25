@@ -203,6 +203,42 @@ func TestRenameSubscriptionIsOwnerOnly(t *testing.T) {
 	}
 }
 
+// Mark available: the owner clears a recorded limit, on any subscription
+// (a CLI sign-in too); an account with no limit, or an unknown one, says so.
+func TestClearSubscriptionLimitIsTheOwnersWordAndOwnerOnly(t *testing.T) {
+	method := pb.RunnerService_ClearSubscriptionLimit_FullMethodName
+	_, agentAllowed := agentRPCs[method]
+	_, terminalAllowed := terminalRPCs[method]
+	_, deviceAllowed := deviceRPCs[method]
+	if agentAllowed || terminalAllowed || deviceAllowed {
+		t.Fatalf("%s allows a scoped credential", method)
+	}
+	service, _ := collectionService(t)
+	ctx := context.Background()
+	reset := time.Now().Add(time.Hour).Unix()
+	if err := service.Bench.Accounts.Observe("claude-default", agent.AccountObservation{State: "exhausted", ResetAt: reset}); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := service.ClearSubscriptionLimit(ctx, &pb.ClearSubscriptionLimitRequest{ProfileId: "claude-default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Availability.GetState() != "available" || profile.Availability.GetResetAt() != 0 || !service.Bench.Accounts.Eligible("claude-default", time.Now()) {
+		t.Fatalf("limit kept: %+v", profile.Availability)
+	}
+	if _, err = service.ClearSubscriptionLimit(ctx, &pb.ClearSubscriptionLimitRequest{ProfileId: "claude-default"}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("clearing again got %v, want FailedPrecondition", err)
+	}
+	if _, err = service.ClearSubscriptionLimit(ctx, &pb.ClearSubscriptionLimitRequest{ProfileId: "missing"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("unknown subscription got %v, want NotFound", err)
+	}
+	f := newAuthorityFixture(t)
+	_, _, token := f.open(t)
+	if _, err = f.client.ClearSubscriptionLimit(bearer(timeout(t), token), &pb.ClearSubscriptionLimitRequest{ProfileId: "claude-default"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("agent credential got %v, want PermissionDenied", err)
+	}
+}
+
 // Lazybox does not store Claude.ai credentials (CLAUDE_COMPLIANCE.md): a
 // subscription token sent from Settings is refused, wiped from the request,
 // and nothing is registered.

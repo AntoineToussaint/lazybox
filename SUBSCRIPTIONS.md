@@ -134,7 +134,18 @@ Opening **Settings → Subscriptions** refreshes usage for each managed
 subscription with a private sign-in. The page shows the last report while
 the provider is contacted, and an individual card can still be refreshed.
 The conversation’s limit card also has **Refresh** to check the current
-provider’s managed subscriptions and update the available choices.
+provider’s managed subscriptions and update the available choices; the
+**Switch subscription…** dialog has the same check as a refresh icon in its
+header.
+
+**Mark available** (`ClearSubscriptionLimit`) is the owner's override of a
+recorded limit, offered on limited rows of **Switch subscription…**: at once
+when the reset has passed and only the report is stale, after a confirmation
+while the report still says limited. The Runner records the account as
+available, drops its windows at 100% and keeps the rest; the next provider
+report replaces that either way. It works on a CLI sign-in too, since it asks
+the provider nothing. Sign-in and billing problems are not limits: the Runner
+refuses them (`FAILED_PRECONDITION`), as it does an account with no limit.
 
 Use **Settings → Subscriptions → Add subscription** in the main workspace,
 or enroll a Codex account on the Runner host using `lazybox account-login` as

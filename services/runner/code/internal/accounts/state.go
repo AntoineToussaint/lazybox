@@ -80,6 +80,44 @@ func (s *State) Observe(id string, observation agent.AccountObservation) error {
 		observation.Plan = old.Plan
 	}
 	next[id] = observation
+	return s.save(next)
+}
+
+// ErrNotLimited is a Clear on an account with no limit on record.
+var ErrNotLimited = errors.New("no limit is recorded for this subscription")
+
+// Clear forgets a recorded usage limit: the owner says the account can take
+// work again (its reset passed, or the provider reset it early). The account
+// reads available until a provider reports otherwise; windows at 100% are
+// dropped, since their numbers are what the owner overrode. Sign-in and
+// billing problems are not limits and stay.
+func (s *State) Clear(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, ok := s.observations[id]
+	full := false
+	for _, window := range old.Windows {
+		full = full || window.UsedPercent >= 100
+	}
+	if !ok || (old.State != "exhausted" && old.State != "throttled" && !(old.State == "available" && full)) {
+		return ErrNotLimited
+	}
+	cleared := agent.AccountObservation{State: "available", Email: old.Email, Plan: old.Plan, ObservedAt: time.Now().UnixMilli()}
+	for _, window := range old.Windows {
+		if window.UsedPercent < 100 {
+			cleared.Windows = append(cleared.Windows, window)
+		}
+	}
+	next := make(map[string]agent.AccountObservation, len(s.observations))
+	for key, value := range s.observations {
+		next[key] = value
+	}
+	next[id] = cleared
+	return s.save(next)
+}
+
+// save writes the observations durably, then adopts them; s.mu is held.
+func (s *State) save(next map[string]agent.AccountObservation) error {
 	data, err := json.Marshal(next)
 	if err != nil {
 		return err

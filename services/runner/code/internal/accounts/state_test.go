@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"errors"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"path/filepath"
 	"testing"
@@ -85,5 +86,50 @@ func TestRotationCapacityChecksAllWindows(t *testing.T) {
 	}
 	if state.Eligible("a", now.Add(time.Hour)) {
 		t.Fatal("a full window without a reset still blocks rotation")
+	}
+}
+
+func TestClearForgetsALimitButNotSignInOrBilling(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "availability.json")
+	state, err := OpenState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reset := time.Now().Add(time.Hour).Unix()
+	for id, observation := range map[string]agent.AccountObservation{
+		"limited": {State: "exhausted", ResetAt: reset, Plan: "max", Email: "kept@example.invalid", Windows: []agent.UsageWindow{{Name: "five_hour", UsedPercent: 100, ResetAt: reset}, {Name: "weekly", UsedPercent: 40}}},
+		"full":    {State: "available", Windows: []agent.UsageWindow{{Name: "weekly", UsedPercent: 100}}},
+		"signin":  {State: "auth_required"},
+		"fine":    {State: "available"},
+	} {
+		if err = state.Observe(id, observation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"limited", "full"} {
+		if err = state.Clear(id); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+	}
+	for _, id := range []string{"signin", "fine", "missing"} {
+		if err = state.Clear(id); !errors.Is(err, ErrNotLimited) {
+			t.Fatalf("%s: got %v, want ErrNotLimited", id, err)
+		}
+	}
+	// Durable: a Runner restart keeps the cleared limit cleared.
+	state, err = OpenState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	cleared := state.Observation("limited")
+	if cleared.State != "available" || cleared.ResetAt != 0 || cleared.Plan != "max" || cleared.Email != "kept@example.invalid" || len(cleared.Windows) != 1 || cleared.Windows[0].Name != "weekly" || cleared.ObservedAt == 0 {
+		t.Fatalf("%+v", cleared)
+	}
+	if state.RotationCapacity("limited", now) != CapacityReported || state.RotationCapacity("full", now) != CapacityReported {
+		t.Fatal("a cleared limit still blocks rotation")
+	}
+	if state.Observation("signin").State != "auth_required" {
+		t.Fatal("a sign-in problem was cleared")
 	}
 }

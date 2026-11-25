@@ -2,7 +2,7 @@ import { create } from '@bufbuild/protobuf';
 import { JournalEventSchema, ProfileSchema, SessionSchema, type Profile, type Session } from '@lazybox/protocol';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { backAt, backWhen, bestChoice, comeback, exitFault, failureSentence, faultSentence, limitHeadline, limitStatus, resetTime, sessionLimit, signInDefault, subscriptionChoices, subscriptionName, switchedLine, switchesItself, switchLabel, switchNote, transportFault, turnFault, untilText } from '../packages/surfaces/src/subscription-model.ts';
+import { backAt, backWhen, bestChoice, clearOffer, comeback, exitFault, failureSentence, faultSentence, limitHeadline, limitStatus, resetTime, sessionLimit, signInDefault, subscriptionChoices, subscriptionName, switchedLine, switchesItself, switchLabel, switchNote, transportFault, turnFault, untilText } from '../packages/surfaces/src/subscription-model.ts';
 import { foldTranscript, emptyTranscript } from '../packages/surfaces/src/transcript-model.ts';
 import { liveStatus } from '../packages/surfaces/src/live-status.ts';
 import { continuationPrompt } from '../packages/surfaces/src/continuation-prompt.ts';
@@ -120,6 +120,25 @@ test('the best other subscription is the ready one; a picker lists the current o
   assert.equal(bestChoice(onlyLimited), undefined, 'nothing ready: no automatic best');
   // A reset that passed makes a subscription ready again.
   assert.equal(subscriptionChoices(profiles.slice(1, 3), 'claude', 'work-2', at(16) * 1000).find(c => c.id === 'work-3')?.ready, true);
+});
+
+test('a recorded limit can be marked available: at once once its reset passed, after a word before it; a sign-in cannot', () => {
+  const offer = (availability: Record<string, unknown>, now = noon) => clearOffer(profile('p', 'P', availability), now);
+  // "Reset elapsed · usage unconfirmed": only the report is stale.
+  assert.equal(offer({ state: 'exhausted', resetAt: BigInt(at(11)) }), 'direct');
+  assert.equal(offer({ state: 'available', windows: [{ name: 'seven_day', usedPercent: 100, resetAt: BigInt(at(11)) }] }), 'direct');
+  // Still limited by its report, or with no reset at all: the person confirms.
+  assert.equal(offer({ state: 'exhausted', resetAt: BigInt(at(18)) }), 'confirm');
+  assert.equal(offer({ state: 'throttled', resetAt: BigInt(at(12, 5)) }), 'confirm');
+  assert.equal(offer({ state: 'exhausted' }), 'confirm');
+  assert.equal(offer({ state: 'available', windows: [{ name: 'seven_day', usedPercent: 100 }] }), 'confirm');
+  // Nothing to clear: available, unknown, or a problem a limit reset cannot fix (mirrors accounts.State.Clear).
+  for (const availability of [{ state: 'available', windows: [{ name: 'five_hour', usedPercent: 37 }] }, { state: 'unknown' }, { state: 'auth_required', resetAt: BigInt(at(11)) }, { state: 'billing_error' }]) assert.equal(offer(availability), '', JSON.stringify(availability, (_, v) => typeof v === 'bigint' ? Number(v) : v));
+  const choices = subscriptionChoices(profiles, 'claude', 'work-2', at(16) * 1000);
+  assert.deepEqual(Object.fromEntries(choices.map(c => [c.id, c.clear])), { 'work-2': 'confirm', 'work-1': '', 'work-3': 'direct', 'claude-default': '' });
+  assert.equal(choices.find(c => c.id === 'work-3')?.detail, 'Reset elapsed · usage unconfirmed');
+  // Only a private sign-in can be asked for its usage; a CLI sign-in is a reference.
+  assert.deepEqual(Object.fromEntries(choices.map(c => [c.id, c.refreshable])), { 'work-2': true, 'work-1': true, 'work-3': true, 'claude-default': false });
 });
 
 // Switching by itself is an extension's account policy (EXTENSIONS.md): by

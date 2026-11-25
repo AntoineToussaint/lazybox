@@ -96,6 +96,14 @@ Messages you send while a conversation waits are kept and delivered once it can
 continue. You can also switch at any time from the session menu (⋯) →
 **Switch subscription…**.
 
+In **Switch subscription…**, the refresh icon beside the close button asks the
+provider for the usage of every subscription you signed in to in Lazybox, so a
+row that reads *Reset elapsed · usage unconfirmed* turns into what the provider
+reports now. A limited row also has **Mark available**: Lazybox stops treating
+it as limited and offers it again until the provider reports a limit. It acts at
+once on a row whose reset has passed; before the reset it asks you first. A
+sign-in or billing problem has no **Mark available**: signing in again fixes it.
+
 ### Switching by itself: the Subscription rotation extension
 
 Lazybox does not move a conversation to another account by itself. If you want

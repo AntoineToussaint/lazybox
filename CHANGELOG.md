@@ -206,6 +206,7 @@ leave out.
 
 ### Runner reliability
 
+- **No red flashes while the Runner is busy** A conversation's refresh that is slow or cancelled while reconnecting no longer flashes a red error; only refreshes that keep failing for 15 seconds say so, in words. The Runner's own "context deadline exceeded" and "context canceled" are never shown raw.
 - **Gentler reconnecting** While the Runner is away, live conversations and command output try again after about a second, then less often, up to every 30 seconds, so windows do not all knock at once; once it answers, the next drop starts again at a second.
 - **Dev opens past the white screen** The desktop launcher allows React’s startup script under Dev’s content security policy.
 - **Resume Codex after restarting Dev** A Runner launched from an agent shell ignores that agent's sign-in overrides when it selects its own accounts.

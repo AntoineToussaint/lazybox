@@ -249,8 +249,11 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   const id=reveal.current,pane=paneRef.current;if(!id||!pane)return false;
   const node=contentRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`);if(!node)return false;
   reveal.current=undefined;
-  const target=node.querySelector('[data-terminal-decision]') ?? node;
-  place(pane,pane.scrollTop+target.getBoundingClientRect().top-pane.getBoundingClientRect().top-12);measure(pane);capture(pane);reader.view.scrollTop=pane.scrollTop;
+  const decision=node.querySelector('[data-terminal-decision]');
+  const header=node.getBoundingClientRect().top-12;
+  // Keep the command in view. For a taller card, move just far enough to reach its controls.
+  const top=decision?Math.max(header,decision.getBoundingClientRect().bottom-pane.clientHeight+12):header;
+  place(pane,pane.scrollTop+top-pane.getBoundingClientRect().top);measure(pane);capture(pane);reader.view.scrollTop=pane.scrollTop;
   node.classList.remove('message-flash');void node.offsetWidth;node.classList.add('message-flash');
   return true;
  };

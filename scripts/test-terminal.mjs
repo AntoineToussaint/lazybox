@@ -254,6 +254,7 @@ try {
  const earlierReview=page.getByRole('button',{name:'Review terminal request 2',exact:true});
  await expect(earlierReview).toBeVisible({timeout:15000});
  await earlierReview.click();
+ await expect(declined.locator('pre')).toBeInViewport();
  await expect(declined.getByRole('button',{name:'Decline',exact:true})).toBeInViewport();
  const directory=declined.getByText('Working directory · api/scripts');
  await expect(declined.getByText(reviewed.text,{exact:true})).toBeHidden();

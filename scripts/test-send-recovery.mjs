@@ -35,6 +35,7 @@ try{
  await expect(page.getByRole('list',{name:'Attached files'}).getByRole('button',{name:/^Open CleanShot/})).toBeVisible();
  await expect(notice).toHaveCount(0);
  const before=applies();
+ await expect(page.getByRole('button',{name:'Send message',exact:true})).toBeEnabled();
  await composer.press('Enter');
  await expect.poll(applies).toBe(before+1);
  const sent=fixture.mutations.filter(m=>m.method==='Apply').at(-1).body;
@@ -59,6 +60,8 @@ try{
  await expect(page.getByRole('alert').filter({hasText:'Resume it or start a new conversation to continue.'})).toBeVisible();
  assert.equal(applies(),refused,'a refused conversation sends nothing');
  Object.assign(other,{fault:'unknown'});
+ const events=fixture.openEvents(other.id);
+ events.push({type:'failure',status:'unknown',text:'Turn failed',turnId:'first'});
  await page.reload();
  const recover=page.getByRole('button',{name:'Continue from here'});
  await expect(otherComposer).toHaveValue('anything');
@@ -67,6 +70,12 @@ try{
  await recover.click();
  await expect.poll(applies).toBe(refused+1);
  assert.match(fixture.mutations.filter(m=>m.method==='Apply').at(-1).body.message.text,/Check the existing commands and their results first/);
+ // The Apply receipt can arrive before GetSession clears the old fault.
+ await expect(page.getByText('Continuation sent.', {exact:true})).toBeVisible();
+ await expect(recover).toHaveCount(0);
+ events.push({type:'failure',status:'unknown',text:'Another turn failed',turnId:'next'});
+ await expect(recover).toBeVisible();
+ assert.equal(applies(),refused+1,'a new fault offers recovery without sending automatically');
  assert.deepEqual(errors,[]);
  console.log('PASS: screenshot bytes survive a reload; a provider error does not block the next message; a refused conversation says why.');
 }finally{await browser?.close();await server.close();await fixture.close();}

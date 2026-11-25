@@ -17,7 +17,7 @@ WORKSPACE_MANIFESTS := $(wildcard apps/*/package.json packages/*/package.json wo
 # test (AGENTS.md; scripts/unit-test-timeouts.mjs fails the gate catalog
 # otherwise). go test's -timeout bounds a whole package binary, so Go unit
 # tests run through the guard, which stops a test that runs over and names it.
-GO_TEST := node $(abspath scripts/go-test-guard.mjs)
+GO_TEST := node '$(abspath scripts/go-test-guard.mjs)'
 # cargo test has no per-test deadline; nextest ends a test at 30 s. The crates
 # are separate Cargo workspaces, so the one config is passed, not looked up.
 NEXTEST := cargo nextest run --config-file $(abspath .config/nextest.toml) --locked
@@ -66,7 +66,7 @@ build-web: deps
 
 test: build-worker
 	# The remote and terminal tests build their binaries once per package, in TestMain, only when they run.
-	cd $(GO_ROOT) && LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) LAZYBOX_V2_BROWSER_WORKER=$(abspath workers/browser/dist/main.js) $(GO_TEST) -timeout 6m ./...
+	cd $(GO_ROOT) && LAZYBOX_V2_WORKER='$(abspath workers/claude-sdk/dist/main.js)' LAZYBOX_V2_BROWSER_WORKER='$(abspath workers/browser/dist/main.js)' $(GO_TEST) -timeout 6m ./...
 test-real: build-worker
 	cd $(GO_ROOT) && LAZYBOX_V2_REAL=1 LAZYBOX_V2_WORKER=$(abspath workers/claude-sdk/dist/main.js) go test -timeout 12m -v ./tests/integration -run TestReal
 

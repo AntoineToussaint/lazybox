@@ -44,7 +44,7 @@ test('every unit test suite here runs with a 30 s deadline per test', () => {
   assert.deepEqual(unitTestTimeoutViolations(root), []);
   const makefile = readFileSync(join(root, 'Makefile'), 'utf8');
   for (const target of ['test', 'test-outlive', 'test-reboot']) assert.match(makefile, new RegExp(`^${target}:[^\\n]*\\n(\\t[^\\n]*\\n)*\\t[^\\n]*\\$\\(GO_TEST\\)`, 'm'), `make ${target} goes through the Go guard`);
-  assert.match(makefile, /^GO_TEST := node \$\(abspath scripts\/go-test-guard\.mjs\)$/m);
+  assert.match(makefile, /^GO_TEST := node '\$\(abspath scripts\/go-test-guard\.mjs\)'$/m);
   assert.match(makefile, /^check-desktop:[^\n]*\n(\t[^\n]*\n)*\t\$\(NEXTEST\) --manifest-path apps\/desktop\/src-tauri\/Cargo\.toml\n\t\$\(NEXTEST\) --manifest-path tools\/lazybox-snippets\/Cargo\.toml$/m);
 });
 

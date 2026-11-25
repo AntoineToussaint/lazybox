@@ -244,7 +244,7 @@ try{
   await expect(chat.locator('article.message.message_delta').filter({hasText:'Shipped.'})).toHaveCount(0);
   await expect(editPage.getByText('Conversation could not be loaded')).toHaveCount(0);
   await expect(editPage.getByRole('button',{name:'Open previous conversation'})).toHaveCount(0);
-  assert.deepEqual(editErrors,[]);
+  await drainPageErrors(editErrors);assert.deepEqual(editErrors,[]);
   await editPage.close();
  }
 

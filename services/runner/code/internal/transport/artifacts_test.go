@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestAgentCredentialUsesOnlyItsOwnWorkspacesArtifacts(t *testing.T) {
+func TestAgentCredentialReadsAnyArtifactAndWritesOnlyItsOwn(t *testing.T) {
 	f := newTerminalFixture(t)
 	ctx := timeout(t)
 	agent := bearer(ctx, f.agentToken)
@@ -53,17 +53,39 @@ func TestAgentCredentialUsesOnlyItsOwnWorkspacesArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.client.ListArtifacts(agent, &pb.ListArtifactsRequest{CollectionId: f.theirs.Id})
-	denied("list another workspace", err)
-	_, err = f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id})
-	denied("get another workspace", err)
+	// Reading crosses workspaces: an agent lists and reads another workspace's artifacts.
+	if list, err := f.client.ListArtifacts(agent, &pb.ListArtifactsRequest{CollectionId: f.theirs.Id}); err != nil || len(list.Artifacts) != 1 || list.Artifacts[0].Id != theirs.Id {
+		t.Fatal("list another workspace", list, err)
+	}
+	if got, err := f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id}); err != nil || got.Content != "notes" {
+		t.Fatal("get another workspace", got, err)
+	}
+	// By its id alone, from the agent's own workspace (what `lazybox artifact get <id>` asks): read where it is.
+	if got, err := f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: theirs.Id}); err != nil || got.Content != "notes" || got.CollectionId != f.theirs.Id {
+		t.Fatal("read another workspace's artifact by id", got, err)
+	}
+	// Writing does not: not in their workspace, and not a version of their artifact from this one.
 	_, err = f.client.PutArtifact(agent, &pb.PutArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id, Content: "spoof"})
 	denied("put another workspace", err)
+	_, err = f.client.PutArtifact(agent, &pb.PutArtifactRequest{CollectionId: f.mine.Id, ArtifactId: theirs.Id, Content: "spoof"})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), f.theirs.Id) || !strings.Contains(err.Error(), "lazybox artifact get") {
+		t.Fatal("a version of another workspace's artifact says where it is", err)
+	}
+	_, err = f.client.PutArtifact(agent, &pb.PutArtifactRequest{CollectionId: f.mine.Id, Title: "Merged", Content: "x", Supersedes: []string{theirs.Id}})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatal("retiring another workspace's artifact", err)
+	}
+	if got, _ := f.client.GetArtifact(owner, &pb.GetArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id}); got.Content != "notes" || got.Retired != nil {
+		t.Fatal("their artifact changed", got)
+	}
+	// One that does not exist says so, not "file does not exist".
+	_, err = f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: "nosuchartifact"})
+	if status.Code(err) != codes.NotFound || !strings.Contains(err.Error(), `no artifact "nosuchartifact"`) || strings.Contains(err.Error(), "file does not exist") {
+		t.Fatal("missing artifact", err)
+	}
 	_, err = f.client.ListArtifacts(agent, &pb.ListArtifactsRequest{})
-	denied("list without a workspace", err)
-	// The artifact id alone never crosses workspaces.
-	if _, err = f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: theirs.Id}); status.Code(err) != codes.NotFound {
-		t.Fatal("read another workspace's artifact by id", err)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatal("list without a workspace", err)
 	}
 	_, err = f.client.TrackArtifactFile(agent, &pb.TrackArtifactFileRequest{CollectionId: f.mine.Id, Path: "api/PLAN.md"})
 	denied("track", err)

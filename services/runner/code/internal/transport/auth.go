@@ -104,13 +104,16 @@ var agentRPCs = map[string]func(agents AgentCredentials, who principal, req any)
 		r, ok := req.(*pb.ListCommandsRequest)
 		return ok && r.SessionId != "" && r.SessionId == who.session
 	},
+	// Reading is open across workspaces: an agent reads and lists any of the
+	// person's artifacts (one workspace builds on another's plan or review).
+	// Writing stays in its own workspace (PutArtifact, RetireArtifact).
 	pb.RunnerService_ListArtifacts_FullMethodName: func(agents AgentCredentials, who principal, req any) bool {
-		r, ok := req.(*pb.ListArtifactsRequest)
-		return ok && inOwnWorkspace(agents, who.session, r.CollectionId)
+		_, ok := req.(*pb.ListArtifactsRequest)
+		return ok
 	},
 	pb.RunnerService_GetArtifact_FullMethodName: func(agents AgentCredentials, who principal, req any) bool {
-		r, ok := req.(*pb.GetArtifactRequest)
-		return ok && inOwnWorkspace(agents, who.session, r.CollectionId)
+		_, ok := req.(*pb.GetArtifactRequest)
+		return ok
 	},
 	pb.RunnerService_PutArtifact_FullMethodName: func(agents AgentCredentials, who principal, req any) bool {
 		r, ok := req.(*pb.PutArtifactRequest)

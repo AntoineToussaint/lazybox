@@ -113,8 +113,9 @@ publish a console with (`RegisterPipe` for its own execution, and `Publish`,
 `lazybox ls` and `lazybox stop` use on the execution's own commands
 (`ListCommands` for its own execution, without the workspace's runs, and
 `CancelCommand` for commands it owns); the ones `lazybox artifact`
-uses on its own execution's workspace (`ListArtifacts`, `GetArtifact`,
-`PutArtifact`); and the ones `lazybox workspace` asks for a repository with
+uses: reading any workspace's artifacts (`ListArtifacts`, `GetArtifact`),
+writing only in its own execution's workspace (`PutArtifact`,
+`RetireArtifact`); and the ones `lazybox workspace` asks for a repository with
 (`ListWorkspaceRepositories` for its own workspace, `RequestRepository` for
 its own execution, `WaitRepositoryRequest` for its own requests — asking,
 never adding; see [workspaces](WORKSPACES.md#when-an-agent-needs-another-repository)).

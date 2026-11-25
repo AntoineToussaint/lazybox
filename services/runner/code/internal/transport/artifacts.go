@@ -96,10 +96,29 @@ func (s *Service) GetArtifact(_ context.Context, r *pb.GetArtifactRequest) (*pb.
 		return nil, err
 	}
 	doc, err := store.Get(r.CollectionId, r.ArtifactId, r.Version)
+	if errors.Is(err, fs.ErrNotExist) {
+		// Read by its id wherever it is: an agent in one workspace reads an artifact another published.
+		if ws, ok := store.Locate(r.ArtifactId); ok && ws != r.CollectionId {
+			doc, err = store.Get(ws, r.ArtifactId, r.Version)
+		}
+	}
 	if err != nil {
 		return nil, artifactError(err)
 	}
 	return wireDocument(doc), nil
+}
+
+// elsewhere refuses to write an artifact that another workspace holds, saying
+// where it is and that it can still be read: versions are published, and
+// artifacts retired, only in their own workspace.
+func elsewhere(store *artifacts.Store, ws, id string) error {
+	if id == "" {
+		return nil
+	}
+	if owner, ok := store.Locate(id); ok && owner != ws {
+		return grpcError(codes.FailedPrecondition, fmt.Errorf("artifact %q belongs to workspace %q: new versions are published only there. It can still be read (lazybox artifact get %s)", id, owner, id))
+	}
+	return nil
 }
 
 // callerSession is the execution whose agent credential made this call, or ""
@@ -148,6 +167,9 @@ func (s *Service) PutArtifact(ctx context.Context, r *pb.PutArtifactRequest) (*p
 	if err = s.liveWorkspace(r.CollectionId); err != nil {
 		return nil, err
 	}
+	if err = elsewhere(store, r.CollectionId, r.ArtifactId); err != nil {
+		return nil, err
+	}
 	// Every artifact it supersedes is checked before anything is written, so
 	// a refused merge publishes nothing.
 	supersedes := make([]string, 0, len(r.Supersedes))
@@ -158,6 +180,9 @@ func (s *Service) PutArtifact(ctx context.Context, r *pb.PutArtifactRequest) (*p
 		}
 		if id == r.ArtifactId {
 			return nil, grpcError(codes.InvalidArgument, errors.New("an artifact cannot supersede itself"))
+		}
+		if err = elsewhere(store, r.CollectionId, id); err != nil {
+			return nil, err
 		}
 		if err = retirableBy(ctx, store, r.CollectionId, id); err != nil {
 			return nil, err

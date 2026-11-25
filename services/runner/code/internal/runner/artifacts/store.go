@@ -237,8 +237,15 @@ func (s *Store) find(ws, id string) (*Artifact, error) {
 	if a := s.items[ws][id]; a != nil && segment.MatchString(id) {
 		return a, nil
 	}
-	return nil, fmt.Errorf("artifact %q: %w", id, fs.ErrNotExist)
+	return nil, notFound{id}
 }
+
+// notFound is an artifact no workspace asked about holds: it reads as such,
+// and is fs.ErrNotExist to callers that test for it.
+type notFound struct{ id string }
+
+func (e notFound) Error() string { return fmt.Sprintf("no artifact %q", e.id) }
+func (e notFound) Unwrap() error { return fs.ErrNotExist }
 
 // HasWorkspace reports whether a deleted workspace still has documents to list.
 func (s *Store) HasWorkspace(ws string) bool {
@@ -268,6 +275,22 @@ func (s *Store) List(ws string) ([]Artifact, error) {
 }
 
 // Get returns one version (0 is the latest) with its content.
+// Locate is the workspace that holds artifact id, if any: ids are unique
+// across workspaces, so an artifact can be read by its id alone.
+func (s *Store) Locate(id string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !segment.MatchString(id) {
+		return "", false
+	}
+	for ws, items := range s.items {
+		if items[id] != nil {
+			return ws, true
+		}
+	}
+	return "", false
+}
+
 func (s *Store) Get(ws, id string, version uint32) (Document, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

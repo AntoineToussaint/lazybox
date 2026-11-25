@@ -19,8 +19,9 @@ import (
 
 // `lazybox artifact` publishes and reads the workspace's artifacts: plans,
 // reports and specs an agent writes for the person, kept by the Runner as
-// versioned pages (ARTIFACTS.md). An agent's credential reaches only its
-// own workspace's artifacts, and retires only the ones agents published.
+// versioned pages (ARTIFACTS.md). An agent's credential reads any of the
+// person's artifacts (by ID wherever it is, or a workspace's list), publishes
+// only in its own workspace, and retires only the ones agents published.
 
 // artifactAPI is the part of the Runner API the verb uses.
 type artifactAPI interface {

@@ -427,13 +427,22 @@ Agents can publish a derived roadmap with `lazybox artifact put plan.md --title 
 
 Use `lazybox artifact template pr-walkthrough`, `incident-timeline`, or `release-checklist` for editable JSON starters. The first two use the report schema. The checklist uses the existing interactive to-do renderer. `lazybox artifact template delivery-spec` starts a `spec.v2` spec whose acceptance criteria each carry a stable ID and a required flag; a Mission plan pinned to it keeps those IDs. A version records the schema its body declares, so a `spec.v2` version reads as `spec.v2`. `lazybox delivery publish` creates a report whose body is a delivery outcome (`delivery-outcome.v1`): the Runner validates it strictly, and the reader shows its verdict per candidate with a table of criteria and evidence. Fill in real evidence and publish the file with the normal artifact command.
 
+## Agents and other workspaces
+
+An agent reads any of the person's artifacts: `lazybox artifact get ID` finds
+one by its ID in whichever workspace holds it (IDs are unique across
+workspaces), and `lazybox artifact list --collection WORKSPACE` lists another
+workspace's. It publishes and retires only in its own workspace: a new version
+of, or retiring, another workspace's artifact is refused with the workspace
+that holds it, so the agent publishes its own and links it instead. An ID no
+workspace holds is reported as `no artifact "ID"`.
+
 ## Known limits
 
 - **Every workspace is one call each:** "All workspaces" and ⌘K call
   `ListArtifacts` once per workspace. That is fine on one machine with tens of
   workspaces; a Runner with hundreds, or a remote one, would want an
-  all-workspaces `ListArtifacts` (additive in the proto, owner only, since an
-  agent's credential is limited to its own workspace).
+  all-workspaces `ListArtifacts` (additive in the proto).
 - **A workspace window fixed to one workspace** opens another workspace in its
   own window from ⌘K; that window does not open the artifact chosen.
 - **HTML artifacts** export their original HTML. The print action is

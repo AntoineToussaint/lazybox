@@ -79,6 +79,31 @@ func TestBriefCarriesTheGoalScopeEvidenceAndAlwaysTheReportingInstructions(t *te
 	}
 }
 
+// A reviewer's shell is read-only, so the brief sends its tests through the
+// Runner's disposable checkout, for every template and every person's
+// template, and no longer tells it to run them with `lazybox run`.
+func TestBriefSendsTestsThroughTheIsolatedCheckout(t *testing.T) {
+	for name, in := range map[string]BriefInput{
+		"default":  {Reviewer: "Codex", Scope: "Changes"},
+		"custom":   {Reviewer: "Codex", Scope: "PR #12", Template: "Be terse. Review {{scope}}."},
+		"verified": {Reviewer: "Codex", Scope: "Changes", Guidance: verificationGuidance},
+	} {
+		brief := Brief(in)
+		if !strings.Contains(brief, "lazybox review test --member <repository>") || !strings.Contains(brief, "disposable, writable checkout") {
+			t.Errorf("%s brief does not route tests through the isolated checkout:\n%s", name, brief)
+		}
+		for _, stale := range []string{"such as the tests, with `lazybox run`", "run the tests with `lazybox run`"} {
+			if strings.Contains(brief, stale) {
+				t.Errorf("%s brief still sends tests to the read-only shell (%q):\n%s", name, stale, brief)
+			}
+		}
+		// What is left to `lazybox run` is said to write nothing.
+		if run := strings.Index(brief, "Use `lazybox run -- <command>`"); run < 0 || !strings.Contains(brief[run:], "only for commands that write nothing") {
+			t.Errorf("%s brief leaves `lazybox run` without its limit:\n%s", name, brief)
+		}
+	}
+}
+
 func TestFindingsAreFiledOnceByKeyAndCountedByLiveSeverity(t *testing.T) {
 	dir := t.TempDir()
 	s, err := New(dir)

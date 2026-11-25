@@ -7,7 +7,7 @@ import (
 )
 
 func (s *Service) RunReviewVerification(ctx context.Context, r *pb.RunReviewVerificationRequest) (*pb.ReviewVerificationCheck, error) {
-	check, err := s.Bench.RunReviewVerification(ctx, r.SessionId, reviews.VerificationCheck{Name: r.Name, Member: r.Member, Expected: r.Expected, Argv: r.Argv, Regression: r.Regression})
+	check, err := s.Bench.RunReviewVerification(ctx, r.SessionId, reviews.VerificationCheck{Name: r.Name, Mode: r.Mode, Member: r.Member, Expected: r.Expected, Argv: r.Argv, Regression: r.Regression})
 	if err != nil {
 		return nil, rpcError(err)
 	}
@@ -15,7 +15,7 @@ func (s *Service) RunReviewVerification(ctx context.Context, r *pb.RunReviewVeri
 }
 
 func wireVerification(check reviews.VerificationCheck) *pb.ReviewVerificationCheck {
-	out := &pb.ReviewVerificationCheck{Name: check.Name, Member: check.Member, Expected: check.Expected, Argv: check.Argv, Regression: check.Regression}
+	out := &pb.ReviewVerificationCheck{Name: check.Name, Mode: check.Mode, Member: check.Member, Expected: check.Expected, Argv: check.Argv, Regression: check.Regression}
 	for _, result := range check.Runs {
 		r := &pb.ReviewVerificationExecution{Round: uint32(result.Round), Base: result.Base, Candidate: result.Candidate, BaseCommandId: result.BaseCommand, CandidateCommandId: result.CandidateCommand, State: result.State, Detail: result.Detail}
 		if result.BaseExit != nil {

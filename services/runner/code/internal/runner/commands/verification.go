@@ -12,8 +12,33 @@ import (
 )
 
 // isolateVerification is the command boundary: verification never inherits a
-// reviewer credential, user home, network, or write access to the host tree.
-// No supported isolation runtime means no execution, never a host fallback.
+// reviewer credential, user home, network beyond loopback, or write access to
+// the host tree. No supported isolation runtime means no execution, never a
+// host fallback.
+//
+// Loopback is allowed because tests start local servers (a Vite dev server,
+// a fixture Runner) and connect to them on 127.0.0.1. On Linux bubblewrap's
+// own network namespace has only its own loopback interface, which it brings
+// up: the command reaches the servers it started and nothing else, not even
+// the host's loopback. Seatbelt on macOS has no private network namespace,
+// and its only address filter is "localhost", which means this machine's
+// own addresses: the command may listen and connect there, and cannot
+// connect to any other machine (loopbackProfile).
+//
+// hw.pagesize_compat is what the numeric HW_PAGESIZE MIB resolves to on
+// arm64: without it no Go program (a test binary `go test` built, for one)
+// gets past its runtime's start.
+//
+// loopbackProfile is the only network a macOS verification command has:
+// binding, listening and connecting on this machine's addresses. A
+// connection to any other machine is refused (EPERM) before a packet leaves.
+// Seatbelt cannot narrow it further: it accepts no literal address (only "*"
+// or "localhost"), and it does not check the peer a listening socket accepts,
+// so a server the test binds to a wildcard address is reachable from the
+// network, unless the macOS firewall stops it, for the command's lifetime
+// (MaxDurationMs). The host's own loopback services are reachable too.
+const loopbackProfile = `(allow network-bind network-inbound (local ip "localhost:*"))(allow network-outbound (remote ip "localhost:*"))`
+
 func isolateVerification(spec Spec) (Spec, error) {
 	root, err := filepath.EvalSymlinks(spec.Cwd)
 	if err != nil {
@@ -37,12 +62,13 @@ func isolateVerification(spec Spec) (Spec, error) {
 		if err != nil {
 			return spec, errors.New("verification requires sandbox-exec")
 		}
-		profile := `(version 1)(deny default)(import "dyld-support.sb")(allow syscall* mach-bootstrap process-exec process-fork)(allow sysctl-read (sysctl-name "hw.ncpu" "hw.activecpu" "hw.physicalcpu" "hw.logicalcpu" "hw.memsize" "hw.pagesize" "hw.optional.arm64" "kern.ostype" "kern.osrelease" "kern.osversion" "kern.version" "kern.argmax"))(allow file-read-metadata)`
+		profile := `(version 1)(deny default)(import "dyld-support.sb")(allow syscall* mach-bootstrap process-exec process-fork)(allow sysctl-read (sysctl-name "hw.ncpu" "hw.activecpu" "hw.physicalcpu" "hw.logicalcpu" "hw.memsize" "hw.pagesize" "hw.pagesize_compat" "hw.optional.arm64" "kern.ostype" "kern.osrelease" "kern.osversion" "kern.version" "kern.argmax"))(allow file-read-metadata)`
 		for _, path := range []string{"/System/Library", "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/libexec", "/usr/share", "/bin", "/sbin", "/Library/Developer", "/usr/local/bin", "/usr/local/lib", "/opt/homebrew/Cellar", "/opt/homebrew/opt", "/opt/homebrew/bin"} {
 			profile += "(allow file-read* file-map-executable (subpath " + strconv.Quote(path) + "))"
 		}
 		profile += "(allow file-read* file-write* file-map-executable (subpath " + strconv.Quote(root) + "))"
 		profile += `(allow file-read* (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))(allow file-write* (literal "/dev/null"))`
+		profile += loopbackProfile
 		spec.Argv = append([]string{sandbox, "-p", profile, "--"}, spec.Argv...)
 	case "linux":
 		sandbox, err := exec.LookPath("bwrap")

@@ -225,7 +225,7 @@ export function restoreGrants(values: unknown): { grants: Grant[]; dropped: stri
 export function reviewToolDecision(name: string, action: unknown): 'allow' | 'deny' | 'ask' {
   if (['Read', 'Glob', 'Grep'].includes(name)) return 'allow';
   if (name === 'mcp__lazybox__command') {
-    if (action === 'verify') return 'ask';
+    if (action === 'verify' || action === 'test') return 'ask';
     if (['read', 'tail', 'wait', 'actions'].includes(String(action))) return 'allow';
   }
   return 'deny';

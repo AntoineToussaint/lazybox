@@ -149,7 +149,7 @@ func TestHelpAssistantCannotCallManagedCommands(t *testing.T) {
 }
 
 func TestReviewCommandAllowed(t *testing.T) {
-	for action, want := range map[string]bool{"start": false, "interactive": false, "start_action": false, "read": true, "wait": true, "verify": true} {
+	for action, want := range map[string]bool{"start": false, "interactive": false, "start_action": false, "read": true, "wait": true, "verify": true, "test": true} {
 		if got := agent.ReviewCommandAllowed(json.RawMessage(`{"action":"` + action + `"}`)); got != want {
 			t.Errorf("%s: got %t", action, got)
 		}

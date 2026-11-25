@@ -39288,13 +39288,16 @@ func (x *DecideTerminalHandoffRequest) GetAllowAgentInput() bool {
 }
 
 type RunReviewVerificationRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Member        string                 `protobuf:"bytes,3,opt,name=member,proto3" json:"member,omitempty"`
-	Expected      string                 `protobuf:"bytes,4,opt,name=expected,proto3" json:"expected,omitempty"`
-	Argv          []string               `protobuf:"bytes,5,rep,name=argv,proto3" json:"argv,omitempty"`
-	Regression    string                 `protobuf:"bytes,6,opt,name=regression,proto3" json:"regression,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	SessionId  string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Name       string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Member     string                 `protobuf:"bytes,3,opt,name=member,proto3" json:"member,omitempty"`
+	Expected   string                 `protobuf:"bytes,4,opt,name=expected,proto3" json:"expected,omitempty"`
+	Argv       []string               `protobuf:"bytes,5,rep,name=argv,proto3" json:"argv,omitempty"`
+	Regression string                 `protobuf:"bytes,6,opt,name=regression,proto3" json:"regression,omitempty"`
+	// "" is an acceptance check (base and candidate, behavior-verification
+	// reviews); "test" is a reviewer's test run (candidate only, any review).
+	Mode          string `protobuf:"bytes,7,opt,name=mode,proto3" json:"mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -39371,6 +39374,13 @@ func (x *RunReviewVerificationRequest) GetRegression() string {
 	return ""
 }
 
+func (x *RunReviewVerificationRequest) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
 type ReviewVerificationCheck struct {
 	state         protoimpl.MessageState         `protogen:"open.v1"`
 	Name          string                         `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -39379,6 +39389,7 @@ type ReviewVerificationCheck struct {
 	Argv          []string                       `protobuf:"bytes,4,rep,name=argv,proto3" json:"argv,omitempty"`
 	Regression    string                         `protobuf:"bytes,5,opt,name=regression,proto3" json:"regression,omitempty"`
 	Runs          []*ReviewVerificationExecution `protobuf:"bytes,6,rep,name=runs,proto3" json:"runs,omitempty"`
+	Mode          string                         `protobuf:"bytes,7,opt,name=mode,proto3" json:"mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -39453,6 +39464,13 @@ func (x *ReviewVerificationCheck) GetRuns() []*ReviewVerificationExecution {
 		return x.Runs
 	}
 	return nil
+}
+
+func (x *ReviewVerificationCheck) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
 }
 
 type ReviewVerificationExecution struct {
@@ -43278,7 +43296,7 @@ const file_api_proto_rawDesc = "" +
 	"\n" +
 	"handoff_id\x18\x01 \x01(\tR\thandoffId\x12\x16\n" +
 	"\x06accept\x18\x02 \x01(\bR\x06accept\x12*\n" +
-	"\x11allow_agent_input\x18\x03 \x01(\bR\x0fallowAgentInput\"\xb9\x01\n" +
+	"\x11allow_agent_input\x18\x03 \x01(\bR\x0fallowAgentInput\"\xcd\x01\n" +
 	"\x1cRunReviewVerificationRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
@@ -43288,7 +43306,8 @@ const file_api_proto_rawDesc = "" +
 	"\x04argv\x18\x05 \x03(\tR\x04argv\x12\x1e\n" +
 	"\n" +
 	"regression\x18\x06 \x01(\tR\n" +
-	"regression\"\xd8\x01\n" +
+	"regression\x12\x12\n" +
+	"\x04mode\x18\a \x01(\tR\x04mode\"\xec\x01\n" +
 	"\x17ReviewVerificationCheck\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06member\x18\x02 \x01(\tR\x06member\x12\x1a\n" +
@@ -43297,7 +43316,8 @@ const file_api_proto_rawDesc = "" +
 	"\n" +
 	"regression\x18\x05 \x01(\tR\n" +
 	"regression\x12A\n" +
-	"\x04runs\x18\x06 \x03(\v2-.lazybox.bench.v1.ReviewVerificationExecutionR\x04runs\"\xdc\x02\n" +
+	"\x04runs\x18\x06 \x03(\v2-.lazybox.bench.v1.ReviewVerificationExecutionR\x04runs\x12\x12\n" +
+	"\x04mode\x18\a \x01(\tR\x04mode\"\xdc\x02\n" +
 	"\x1bReviewVerificationExecution\x12\x14\n" +
 	"\x05round\x18\x01 \x01(\rR\x05round\x12\x12\n" +
 	"\x04base\x18\x02 \x01(\tR\x04base\x12\x1c\n" +

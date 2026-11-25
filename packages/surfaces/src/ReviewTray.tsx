@@ -115,21 +115,41 @@ function ReviewRuns({ runs, workspaceId, review, focus, onFocus }: { runs: reado
         <button type="button" className="review-icon" aria-label={`Open ${run.reviewerLabel}'s review conversation`} title="Open the review conversation" onClick={() => showConversation({ collectionId: workspaceId, sessionId: run.reviewerSessionId })}><Icon name="chat" size={13}/></button>
       </div>
       {run.verification.length > 0 && <details className="review-verification">
-        <summary>Acceptance checks · {run.verification.length}</summary>
-        {run.verification.map(check => <section key={check.name} aria-label={`Acceptance check ${check.name}`}>
-          <strong>{check.name}</strong><p>{check.expected}</p>
-          {check.runs.map(result => <div key={result.round}>
-            <span>Round {result.round} · {result.state}</span>
-            <p>Base {result.base.slice(0, 10)} · exit {result.baseExit ?? 'pending'}<br/>Candidate {result.candidate.slice(0, 10)} · exit {result.candidateExit ?? 'pending'}</p>
-            {result.detail && <p>{result.detail}</p>}
-            {[['Base output', result.baseCommandId], ['Candidate output', result.candidateCommandId]].map(([label, id]) => id && <button key={id} type="button" onClick={() => openPeek({kind: 'command', commandId: id, title: `${check.name} · ${label}`})}>{label}</button>)}
-          </div>)}
-          {check.regression && <p>Regression test proposal — {check.regression}</p>}
-        </section>)}
+        <summary>{verificationSummary(run.verification)}</summary>
+        {run.verification.map(check => check.mode === 'test'
+          ? <section key={check.name} aria-label={`Reviewer test ${check.name}`}>
+            <strong>{check.name}</strong><p>Ran by the reviewer in a disposable checkout: <code>{check.argv.join(' ')}</code></p>
+            {check.runs.map(result => <div key={result.round}>
+              <span>Round {result.round} · {result.state}</span>
+              <p>Candidate {result.candidate.slice(0, 10)} · exit {result.candidateExit ?? 'pending'}</p>
+              {result.detail && <p>{result.detail}</p>}
+              {result.candidateCommandId && <button type="button" onClick={() => openPeek({kind: 'command', commandId: result.candidateCommandId, title: `${check.name} · Test output`})}>Test output</button>}
+            </div>)}
+          </section>
+          : <section key={check.name} aria-label={`Acceptance check ${check.name}`}>
+            <strong>{check.name}</strong><p>{check.expected}</p>
+            {check.runs.map(result => <div key={result.round}>
+              <span>Round {result.round} · {result.state}</span>
+              <p>Base {result.base.slice(0, 10)} · exit {result.baseExit ?? 'pending'}<br/>Candidate {result.candidate.slice(0, 10)} · exit {result.candidateExit ?? 'pending'}</p>
+              {result.detail && <p>{result.detail}</p>}
+              {[['Base output', result.baseCommandId], ['Candidate output', result.candidateCommandId]].map(([label, id]) => id && <button key={id} type="button" onClick={() => openPeek({kind: 'command', commandId: id, title: `${check.name} · ${label}`})}>{label}</button>)}
+            </div>)}
+            {check.regression && <p>Regression test proposal — {check.regression}</p>}
+          </section>)}
       </details>}
       <ReviewLoop run={run} workspaceId={workspaceId} review={review}/>
     </li>)}
   </ul>;
+}
+
+/** The tray's heading for a run's recorded executions: acceptance checks
+ * (behavior verification), the tests any reviewer ran, or both. */
+export function verificationSummary(checks: ReviewRun['verification']): string {
+  const tests = checks.filter(check => check.mode === 'test').length;
+  const acceptance = checks.length - tests;
+  if (tests === 0) return `Acceptance checks · ${acceptance}`;
+  if (acceptance === 0) return `Tests the reviewer ran · ${tests}`;
+  return `Acceptance checks · ${acceptance} · Tests · ${tests}`;
 }
 
 /** Every comment and finding on the workspace's changes, by file; agent

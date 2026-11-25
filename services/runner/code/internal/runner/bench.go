@@ -1203,8 +1203,12 @@ func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args
 			return "", err
 		}
 		value = result
-	} else if p.Action == "verify" {
-		v, err := b.startVerification(ctx, e, reviews.VerificationCheck{Name: p.Name, Member: p.Member, Expected: p.Expected, Regression: p.Regression, Argv: p.Argv})
+	} else if p.Action == "verify" || p.Action == "test" {
+		check := reviews.VerificationCheck{Name: p.Name, Member: p.Member, Expected: p.Expected, Regression: p.Regression, Argv: p.Argv}
+		if p.Action == "test" {
+			check.Mode = reviews.ModeTest
+		}
+		v, err := b.startVerification(ctx, e, check)
 		if err != nil {
 			return "", err
 		}

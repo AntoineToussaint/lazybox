@@ -1027,7 +1027,10 @@ type RunnerServiceClient interface {
 	// The findings of the review an execution is the reviewer (or the author)
 	// of, from `lazybox review list`. The same agent rule as AddReviewFinding.
 	ListReviewFindings(context.Context, *connect.Request[gen.ListReviewFindingsRequest]) (*connect.Response[gen.ReviewFindings], error)
-	// Execute a frozen acceptance recipe for the caller’s active verification review.
+	// Execute a frozen acceptance recipe for the caller’s active verification
+	// review or, with mode "test", a test command against the captured candidate
+	// of any review the caller is reviewing. Both run in a disposable, writable
+	// checkout under Runner state, never in the author's worktree.
 	RunReviewVerification(context.Context, *connect.Request[gen.RunReviewVerificationRequest]) (*connect.Response[gen.ReviewVerificationCheck], error)
 	// The reviewer's verdict on one of its own findings in a later round
 	// (`lazybox review resolve|reopen <id> --note`): resolved, or still open.
@@ -4446,7 +4449,10 @@ type RunnerServiceHandler interface {
 	// The findings of the review an execution is the reviewer (or the author)
 	// of, from `lazybox review list`. The same agent rule as AddReviewFinding.
 	ListReviewFindings(context.Context, *connect.Request[gen.ListReviewFindingsRequest]) (*connect.Response[gen.ReviewFindings], error)
-	// Execute a frozen acceptance recipe for the caller’s active verification review.
+	// Execute a frozen acceptance recipe for the caller’s active verification
+	// review or, with mode "test", a test command against the captured candidate
+	// of any review the caller is reviewing. Both run in a disposable, writable
+	// checkout under Runner state, never in the author's worktree.
 	RunReviewVerification(context.Context, *connect.Request[gen.RunReviewVerificationRequest]) (*connect.Response[gen.ReviewVerificationCheck], error)
 	// The reviewer's verdict on one of its own findings in a later round
 	// (`lazybox review resolve|reopen <id> --note`): resolved, or still open.

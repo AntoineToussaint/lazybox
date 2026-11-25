@@ -81,7 +81,7 @@ func ReviewCommandAllowed(args json.RawMessage) bool {
 		return false
 	}
 	switch call.Action {
-	case "read", "tail", "wait", "actions", "verify":
+	case "read", "tail", "wait", "actions", "verify", "test":
 		return true
 	default:
 		return false

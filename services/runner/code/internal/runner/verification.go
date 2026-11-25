@@ -8,23 +8,39 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/codecheckpoints"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/collections"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/commands"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/reviews"
 )
 
+// maxRunningTests bounds a review's reviewer tests running at once: each is
+// a full checkout plus whatever its test builds.
+const maxRunningTests = 2
+
 // startVerification admits a recipe once and retains its receipts before the
 // reviewer can claim success. A retry returns the existing round's commands.
+//
+// An acceptance check (behavior-verification reviews only) runs in
+// independent base and candidate checkouts. A test run (check.Test(), any
+// review) runs only the candidate: the review's captured commit or, for a
+// review that captured none, a snapshot of the repository taken now. Either
+// way the command runs in a disposable, writable checkout under Runner
+// state, never in the author's worktree or the reviewer's read-only shell.
 func (b *Bench) startVerification(ctx context.Context, e *Execution, check reviews.VerificationCheck) (reviews.VerificationCheck, error) {
 	if b.Reviews == nil || b.Checkpoints == nil || b.Commands == nil {
 		return check, errors.New("verification is unavailable")
+	}
+	if check.Test() {
+		check = testDefaults(check)
 	}
 	if err := check.Validate(); err != nil {
 		return check, err
 	}
 	match, ok := b.Reviews.ReviewerRun(e.ID, conversationOf(e))
-	if !ok || match.Workspace != e.CollectionID || match.Run.TemplateID != reviews.VerificationTemplate {
+	if !ok || match.Workspace != e.CollectionID || (!check.Test() && match.Run.TemplateID != reviews.VerificationTemplate) {
 		return check, ErrNotReviewer
 	}
 	lock, _ := b.verificationLaunch.LoadOrStore(match.Run.ID, &sync.Mutex{})
@@ -35,40 +51,79 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 	if !ok {
 		return check, ErrNotReviewer
 	}
+	if check.Test() && !reviewTesting(match.Run) {
+		return check, errReviewNotTesting
+	}
 	workspace, err := b.Collections.Get(match.Workspace)
 	if err != nil {
 		return check, err
 	}
 	member := slices.IndexFunc(workspace.Members, func(m collections.Member) bool { return m.Name == check.Member && m.Ready })
 	input := slices.IndexFunc(match.Run.Input, func(i reviews.ReviewInput) bool { return i.Member == check.Member })
-	if member < 0 || input < 0 {
+	var captured reviews.ReviewInput
+	switch {
+	case member >= 0 && input >= 0:
+		captured = match.Run.Input[input]
+		if check.Test() {
+			// A test runs the candidate only; its receipt names no base.
+			captured.Base = ""
+		}
+	case member < 0 || !check.Test() || len(match.Run.Input) > 0:
 		return check, errors.New("verification repository is outside the captured input")
+	default:
+		// A review without captured input reads the files as they are now:
+		// its tests run on a snapshot of them, taken without touching the
+		// worktree, unless this round already ran this test.
+		if saved, ok := roundTest(match.Run, check.Name); ok {
+			return saved, nil
+		}
+		point, err := b.Checkpoints.CaptureReview(ctx, conversationOf(e), []codecheckpoints.Repository{{Member: check.Member, Path: workspace.Members[member].Path}})
+		if err != nil {
+			return check, err
+		}
+		captured = reviews.ReviewInput{Member: check.Member, Commit: point.Repos[0].Commit}
 	}
-	captured := match.Run.Input[input]
 
 	run, err := b.Reviews.UpdateRun(match.Workspace, match.Run.ID, func(r *reviews.Run) error {
-		if !r.Active() || r.Paused || r.Phase != reviews.PhaseReviewing || r.Round != match.Run.Round || !slices.Equal(r.Input, match.Run.Input) || len(r.Rounds) == 0 || !slices.Equal(r.Rounds[len(r.Rounds)-1].Input, r.Input) || len(r.Rounds[len(r.Rounds)-1].Input) == 0 {
+		if check.Test() {
+			if !reviewTesting(*r) || r.Round != match.Run.Round || !slices.Equal(r.Input, match.Run.Input) {
+				return errReviewNotTesting
+			}
+		} else if !r.Active() || r.Paused || r.Phase != reviews.PhaseReviewing || r.Round != match.Run.Round || !slices.Equal(r.Input, match.Run.Input) || len(r.Rounds) == 0 || !slices.Equal(r.Rounds[len(r.Rounds)-1].Input, r.Input) || len(r.Rounds[len(r.Rounds)-1].Input) == 0 {
 			return errors.New("verification review is not running")
 		}
 		index := slices.IndexFunc(r.Verification, func(c reviews.VerificationCheck) bool { return c.Name == check.Name })
 		if index >= 0 {
 			saved := r.Verification[index]
-			if saved.Member != check.Member || saved.Expected != check.Expected || saved.Regression != check.Regression || !slices.Equal(saved.Argv, check.Argv) {
-				return errors.New("an existing acceptance check cannot be changed; add a new criterion")
+			if saved.Mode != check.Mode || saved.Member != check.Member || saved.Expected != check.Expected || saved.Regression != check.Regression || !slices.Equal(saved.Argv, check.Argv) {
+				return errors.New("an existing check cannot be changed; give the new one another name")
 			}
 			if len(saved.Runs) > 0 && saved.Runs[len(saved.Runs)-1].Round == r.Round {
 				result := saved.Runs[len(saved.Runs)-1]
-				if result.Base != captured.Base || result.Candidate != captured.Commit || result.IsolationVersion != 1 {
+				if !check.Test() && (result.Base != captured.Base || result.Candidate != captured.Commit || result.IsolationVersion != 1) {
 					return errors.New("stale verification receipt; start a new review")
 				}
 				return nil
 			}
 		} else {
 			if len(r.Verification) >= 30 {
-				return errors.New("a review supports at most 30 acceptance checks")
+				return errors.New("a review supports at most 30 checks and tests")
 			}
 			r.Verification = append(r.Verification, check)
 			index = len(r.Verification) - 1
+		}
+		if check.Test() {
+			b.refreshVerification(r)
+			// Under the launch lock, no other start is preparing.
+			running := 0
+			for _, c := range r.Verification {
+				if c.Test() && len(c.Runs) > 0 && c.Runs[len(c.Runs)-1].State == "running" {
+					running++
+				}
+			}
+			if running >= maxRunningTests {
+				return fmt.Errorf("%d tests of this review are already running; wait for one to finish (the command tool's wait action, or `lazybox wait --id ID`) before starting another", running)
+			}
 		}
 		r.Verification[index].Runs = append(r.Verification[index].Runs, reviews.VerificationExecution{IsolationVersion: 1, Round: r.Round, Base: captured.Base, Candidate: captured.Commit, State: "preparing"})
 		return nil
@@ -79,7 +134,11 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 	index := slices.IndexFunc(run.Verification, func(c reviews.VerificationCheck) bool { return c.Name == check.Name })
 	b.refreshVerification(&run)
 	result := run.Verification[index].Runs[len(run.Verification[index].Runs)-1]
-	for _, side := range []string{"base", "candidate"} {
+	sides := []string{"base", "candidate"}
+	if check.Test() {
+		sides = sides[1:]
+	}
+	for _, side := range sides {
 		if (side == "base" && result.BaseCommand != "") || (side == "candidate" && result.CandidateCommand != "") {
 			continue
 		}
@@ -99,7 +158,11 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 					return check, errors.New("reviewer execution is unavailable")
 				}
 			}
-			command, startErr = b.Commands.Start(commands.Spec{SessionID: e.ID, Kind: "verification", Action: fmt.Sprintf("%s/%d/%s/%s", run.ID, run.Round, check.Name, side), Title: "Verify " + check.Name + " (" + side + ")", Cwd: dir, Argv: check.Argv})
+			title := "Verify " + check.Name + " (" + side + ")"
+			if check.Test() {
+				title = "Review test: " + check.Name
+			}
+			command, startErr = b.Commands.Start(commands.Spec{SessionID: e.ID, Kind: "verification", Action: fmt.Sprintf("%s/%d/%s/%s", run.ID, run.Round, check.Name, side), Title: title, Cwd: dir, Argv: check.Argv})
 			e.activity.Unlock()
 			if startErr != nil {
 				// Nothing will run in it; no finished command will name it.
@@ -137,6 +200,52 @@ func (b *Bench) startVerification(ctx context.Context, e *Execution, check revie
 	return check, nil
 }
 
+var errReviewNotTesting = errors.New("the review is not running: tests run only while its reviewer is reviewing")
+
+// reviewTesting: a reviewer runs tests only while it is reviewing.
+func reviewTesting(r reviews.Run) bool {
+	return r.Active() && !r.Paused && r.Phase == reviews.PhaseReviewing && r.State == reviews.RunRunning
+}
+
+// liveTest: a test run whose receipt last said it was starting or running.
+func liveTest(c reviews.VerificationCheck) bool {
+	if !c.Test() || len(c.Runs) == 0 {
+		return false
+	}
+	state := c.Runs[len(c.Runs)-1].State
+	return state == "preparing" || state == "running"
+}
+
+// roundTest is the test run of that name this round already has.
+func roundTest(r reviews.Run, name string) (reviews.VerificationCheck, bool) {
+	index := slices.IndexFunc(r.Verification, func(c reviews.VerificationCheck) bool { return c.Name == name && c.Test() })
+	if index < 0 {
+		return reviews.VerificationCheck{}, false
+	}
+	saved := r.Verification[index]
+	if len(saved.Runs) == 0 || saved.Runs[len(saved.Runs)-1].Round != r.Round {
+		return reviews.VerificationCheck{}, false
+	}
+	return saved, true
+}
+
+// testDefaults names a test run after its command, and states what it
+// expects, when its reviewer did not.
+func testDefaults(check reviews.VerificationCheck) reviews.VerificationCheck {
+	if strings.TrimSpace(check.Name) == "" {
+		name := strings.Join(check.Argv, " ")
+		for len(name) > 160 {
+			_, size := utf8.DecodeLastRuneInString(name)
+			name = name[:len(name)-size]
+		}
+		check.Name = name
+	}
+	if strings.TrimSpace(check.Expected) == "" {
+		check.Expected = reviews.TestExpected
+	}
+	return check
+}
+
 // refreshVerification uses Runner-owned command status, never the agent's
 // claimed exit code. Interrupted starts remain unverified after a restart.
 func (b *Bench) refreshVerification(run *reviews.Run) {
@@ -146,6 +255,10 @@ func (b *Bench) refreshVerification(run *reviews.Run) {
 			continue
 		}
 		result := &check.Runs[len(check.Runs)-1]
+		if check.Test() {
+			b.refreshTest(run, check, result)
+			continue
+		}
 		if result.Round != run.Round || result.IsolationVersion != 1 {
 			result.State, result.Detail = "unverified", "Receipt predates isolated, revision-bound verification"
 			continue
@@ -205,7 +318,55 @@ func (b *Bench) refreshVerification(run *reviews.Run) {
 	}
 }
 
-// RunReviewVerification is the CLI entry point for a reviewer's acceptance check.
+// refreshTest settles a reviewer's test run from its candidate command. A
+// receipt keeps the revision it ran on, so one from an earlier round stays
+// what it was: evidence about that round's candidate.
+func (b *Bench) refreshTest(run *reviews.Run, check *reviews.VerificationCheck, result *reviews.VerificationExecution) {
+	if result.State != "preparing" && result.State != "running" {
+		return
+	}
+	if result.CandidateCommand == "" {
+		action := fmt.Sprintf("%s/%d/%s/candidate", run.ID, result.Round, check.Name)
+		for _, status := range b.Commands.List("") {
+			if status.Spec.Kind == "verification" && status.Spec.Isolated && status.Spec.Action == action {
+				result.CandidateCommand = status.ID
+			}
+		}
+	}
+	if result.CandidateCommand == "" {
+		// Its start was interrupted (a Runner restart) before any command.
+		if result.Round != run.Round || !run.Active() {
+			result.State, result.Detail = "unverified", "The test did not start"
+		}
+		return
+	}
+	command, err := b.Commands.Get(result.CandidateCommand)
+	if err != nil {
+		result.State, result.Detail = "unverified", err.Error()
+		return
+	}
+	status := command.Status()
+	if !status.Spec.Isolated {
+		result.State = "unverified"
+		return
+	}
+	if !status.Done {
+		result.State = "running"
+		return
+	}
+	result.CandidateExit = status.ExitCode
+	if status.Signal != "" || status.Error != "" || status.ExitCode == nil {
+		result.State, result.Detail = "unverified", "The test did not exit on its own"
+		return
+	}
+	result.State = "failed"
+	if *status.ExitCode == 0 {
+		result.State = "passed"
+	}
+}
+
+// RunReviewVerification is the CLI entry point for a reviewer's acceptance
+// check or test run.
 func (b *Bench) RunReviewVerification(ctx context.Context, session string, check reviews.VerificationCheck) (reviews.VerificationCheck, error) {
 	e, err := b.Get(session)
 	if err != nil {
@@ -215,9 +376,10 @@ func (b *Bench) RunReviewVerification(ctx context.Context, session string, check
 }
 
 // cancelVerification also covers a command whose ID had not yet been saved
-// when cancellation or a Runner restart interrupted its start.
+// when cancellation or a Runner restart interrupted its start. Any review's
+// test runs end with it, as its acceptance checks do.
 func (b *Bench) cancelVerification(run reviews.Run) {
-	if run.TemplateID != reviews.VerificationTemplate || b.Commands == nil {
+	if b.Commands == nil {
 		return
 	}
 	for _, status := range b.Commands.List("") {
@@ -269,6 +431,10 @@ func (b *Bench) watchReviewWorkflows() {
 						b.sendReviewPRHandoff(workspace, run)
 					}
 					if run.TemplateID != reviews.VerificationTemplate {
+						// A test a review's end interrupted while it started.
+						if !run.Active() && slices.ContainsFunc(run.Verification, liveTest) {
+							b.cancelVerification(run)
+						}
 						continue
 					}
 					if !run.Active() {

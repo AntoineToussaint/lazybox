@@ -71,8 +71,9 @@ func (b *Bench) publishReviewVersion(workspace string, run reviews.Run, comments
 			result.Acceptance = "passed"
 		}
 		result.Verification = strings.TrimSpace(reply)
-		result.Checks = run.Verification
 	}
+	// Acceptance checks, and the tests any reviewer ran, with their receipts.
+	result.Checks = run.Verification
 	for _, f := range comments {
 		if f.ReviewID == run.ID {
 			result.Findings = append(result.Findings, reviewResultFinding{ID: f.ID, Member: f.Member, Path: f.Path,
@@ -89,11 +90,21 @@ func (b *Bench) publishReviewVersion(workspace string, run reviews.Run, comments
 		fmt.Fprintf(&body, "**Acceptance:** %s\n\n", result.Acceptance)
 	}
 	if len(result.Checks) > 0 {
-		body.WriteString("## Recorded acceptance checks\n\n| Criterion | Expected behavior | Round | State | Base exit | Candidate exit | Command output IDs |\n| --- | --- | --- | --- | --- | --- | --- |\n")
+		var acceptance, tests strings.Builder
 		for _, check := range result.Checks {
 			for _, receipt := range check.Runs {
-				fmt.Fprintf(&body, "| %s | %s | %d | %s | %v | %v | %s, %s |\n", verificationCell(check.Name), verificationCell(check.Expected), receipt.Round, receipt.State, verificationExit(receipt.BaseExit), verificationExit(receipt.CandidateExit), receipt.BaseCommand, receipt.CandidateCommand)
+				if check.Test() {
+					fmt.Fprintf(&tests, "| %s | %s | %d | %s | %s | %v | %s |\n", verificationCell(check.Name), verificationCell(strings.Join(check.Argv, " ")), receipt.Round, receipt.State, receipt.Candidate, verificationExit(receipt.CandidateExit), receipt.CandidateCommand)
+					continue
+				}
+				fmt.Fprintf(&acceptance, "| %s | %s | %d | %s | %v | %v | %s, %s |\n", verificationCell(check.Name), verificationCell(check.Expected), receipt.Round, receipt.State, verificationExit(receipt.BaseExit), verificationExit(receipt.CandidateExit), receipt.BaseCommand, receipt.CandidateCommand)
 			}
+		}
+		if acceptance.Len() > 0 {
+			body.WriteString("## Recorded acceptance checks\n\n| Criterion | Expected behavior | Round | State | Base exit | Candidate exit | Command output IDs |\n| --- | --- | --- | --- | --- | --- | --- |\n" + acceptance.String() + "\n")
+		}
+		if tests.Len() > 0 {
+			body.WriteString("## Tests the reviewer ran\n\nEach ran in a disposable checkout of the candidate, not in the author's worktree.\n\n| Test | Command | Round | State | Candidate | Exit | Command output ID |\n| --- | --- | --- | --- | --- | --- | --- |\n" + tests.String() + "\n")
 		}
 	}
 	if result.Verification != "" {

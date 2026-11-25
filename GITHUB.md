@@ -810,5 +810,15 @@ the new candidate and reruns the same checks. Missing or interrupted evidence
 cannot produce a clean result. Acceptance checks and their output are available
 in the review tray and the versioned report.
 
+Every review's reviewer, whatever its template, runs tests, builds and UI
+gates the same way: `lazybox review test --member <repository> -- <command>`
+(the `test` command tool action) runs the command in a disposable, writable
+checkout of the captured candidate, with loopback network for the servers a
+gate starts, never in the author's worktree and never in the reviewer's own
+read-only shell. The result is recorded in the review: the author's
+conversation hears it with the review's outcome ("2 tests: 2 passed"), the
+Review tray lists each test with its output, and the report keeps them. A test is evidence,
+not an acceptance check: it never makes a verification review clean.
+
 See [Review agent work](docs/guides/review-agent-work.md) for command recipes,
 regression tests, loop controls, execution limits and checkout isolation.

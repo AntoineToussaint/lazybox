@@ -21,6 +21,7 @@ import (
 
 const reviewUsage = `Usage:
   lazybox review add --file <repository>/<path> --line N[-M] --severity blocker|major|minor|nit --title "one line" [--body "details" | --body -] [--key KEY]
+  lazybox review test --member REPOSITORY [--name NAME] [--expected TEXT] -- COMMAND [ARGS...]
   lazybox review verify --name NAME --member REPOSITORY --expected TEXT [--regression TEXT] -- COMMAND [ARGS...]
   lazybox review list
   lazybox review resolve <finding-id> --note "how it was fixed"
@@ -34,6 +35,8 @@ func (c *cli) review(args []string) error {
 	switch args[0] {
 	case "verify":
 		return c.reviewVerify(args[1:])
+	case "test":
+		return c.reviewTest(args[1:])
 	case "add":
 		return c.reviewAdd(args[1:])
 	case "list", "ls":
@@ -330,6 +333,37 @@ func (c *cli) reviewVerify(args []string) error {
 		return err
 	}
 	check, err := got(cl.RunReviewVerification(c.ctx, connect.NewRequest(&pb.RunReviewVerificationRequest{SessionId: session, Name: *name, Member: *member, Expected: *expected, Regression: *regression, Argv: argv})))
+	if err != nil {
+		return err
+	}
+	return c.printProtoJSON(check)
+}
+
+// reviewTest runs a test command for any reviewer, against the review's
+// captured candidate, in a disposable writable checkout the Runner owns: a
+// reviewer's own shell is read-only, so `lazybox run` there cannot write the
+// caches, builds and temporary files tests need.
+func (c *cli) reviewTest(args []string) error {
+	f := c.flags("review test")
+	name := f.String("name", "", "a stable name for this test (default: the command)")
+	member := f.String("member", "", "workspace repository")
+	expected := f.String("expected", "", "what passing shows (default: the command exits 0)")
+	argv, err := c.parse(f, args)
+	if err != nil {
+		return err
+	}
+	if *member == "" || len(argv) == 0 {
+		return fail(exitUsage, "usage: lazybox review test --member REPOSITORY [--name NAME] -- COMMAND [ARGS...]")
+	}
+	session, err := c.reviewerSession()
+	if err != nil {
+		return err
+	}
+	cl, err := c.dial()
+	if err != nil {
+		return err
+	}
+	check, err := got(cl.RunReviewVerification(c.ctx, connect.NewRequest(&pb.RunReviewVerificationRequest{SessionId: session, Mode: "test", Name: *name, Member: *member, Expected: *expected, Argv: argv})))
 	if err != nil {
 		return err
 	}

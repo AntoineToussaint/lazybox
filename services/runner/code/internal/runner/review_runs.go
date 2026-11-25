@@ -859,6 +859,9 @@ func (b *Bench) recordReviewEvent(source *Execution, kind string, run reviews.Ru
 			text = "Review stopped · " + plural(counts.Total(), "finding", "findings") + " kept"
 		default:
 			text = run.ReviewerLabel + " reviewed " + lowerFirst(run.ScopeLabel) + " · " + counts.Summary()
+			if tests := reviews.TestSummary(run); tests != "" {
+				text += " · " + tests
+			}
 		}
 	}
 	_ = b.Record(head, agent.Event{Type: kind, Text: text, Status: run.State, RequestID: run.ID, Data: data})
@@ -967,7 +970,7 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match, operation, reply string) {
 		}
 		var err error
 		for i := range rv.Runs {
-			if rv.Runs[i].ID == m.Run.ID && rv.Runs[i].TemplateID == reviews.VerificationTemplate {
+			if rv.Runs[i].ID == m.Run.ID && len(rv.Runs[i].Verification) > 0 {
 				b.refreshVerification(&rv.Runs[i])
 			}
 		}
@@ -1041,8 +1044,10 @@ func (b *Bench) maybeAutoReview(e *Execution, operation string, matches []review
 // ReviewRunView is a run as it stands now: a review whose reviewer
 // conversation has ended or failed before its turn ended says so.
 func (b *Bench) ReviewRunView(run reviews.Run) reviews.Run {
-	if run.TemplateID == reviews.VerificationTemplate {
+	if run.TemplateID == reviews.VerificationTemplate || len(run.Verification) > 0 {
 		b.refreshVerification(&run)
+	}
+	if run.TemplateID == reviews.VerificationTemplate {
 		if run.StopReason == reviews.StopClean && !reviews.VerificationComplete(run) {
 			run.StopReason, run.Detail = reviews.StopUnverified, "Previous evidence does not verify this revision. Start a new review."
 		}

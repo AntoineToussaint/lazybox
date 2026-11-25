@@ -291,7 +291,10 @@ service RunnerService {
   // The findings of the review an execution is the reviewer (or the author)
   // of, from `lazybox review list`. The same agent rule as AddReviewFinding.
   rpc ListReviewFindings(ListReviewFindingsRequest) returns (ReviewFindings);
-  // Execute a frozen acceptance recipe for the caller’s active verification review.
+  // Execute a frozen acceptance recipe for the caller’s active verification
+  // review or, with mode "test", a test command against the captured candidate
+  // of any review the caller is reviewing. Both run in a disposable, writable
+  // checkout under Runner state, never in the author's worktree.
   rpc RunReviewVerification(RunReviewVerificationRequest) returns (ReviewVerificationCheck);
   // The reviewer's verdict on one of its own findings in a later round
   // (`lazybox review resolve|reopen <id> --note`): resolved, or still open.
@@ -4623,6 +4626,9 @@ message RunReviewVerificationRequest {
   string expected = 4;
   repeated string argv = 5;
   string regression = 6;
+  // "" is an acceptance check (base and candidate, behavior-verification
+  // reviews); "test" is a reviewer's test run (candidate only, any review).
+  string mode = 7;
 }
 message ReviewVerificationCheck {
   string name = 1;
@@ -4631,6 +4637,7 @@ message ReviewVerificationCheck {
   repeated string argv = 4;
   string regression = 5;
   repeated ReviewVerificationExecution runs = 6;
+  string mode = 7;
 }
 message ReviewVerificationExecution {
   uint32 round = 1;

@@ -11,6 +11,10 @@ import (
 // `lazybox run` reports) into an editable template (Settings → Review). The
 // reporting instructions are not the person's to drop: a template without
 // {{report}} still gets them at its end, or no finding would ever arrive.
+// They are the Runner's text, not the template's, so a person's customised
+// template gets each change to them (how a reviewer runs tests, for one)
+// with the next review it starts; a reviewer conversation already under way
+// hears of it from its briefing's versioned "run" section.
 
 // DefaultTemplate is the built-in brief. Placeholders: {{reviewer}},
 // {{author}}, {{conversation}}, {{goal}}, {{plan}}, {{scope}}, {{diff}},
@@ -55,7 +59,7 @@ If the tool is unavailable, use the Lazybox CLI:
 - If filing cannot be confirmed, include each finding’s file, lines, severity, title and body in your reply and mark it as unfiled.
 - To ask the author about its intent, run ` + "`lazybox ask author \"<question>\"`" + `; its reply comes back to you. Ask only what the code cannot tell you.
 
-You are read-only: never edit files, commit, push or open pull requests. Route implementation and merging back to the author conversation. You may run read-only commands, such as the tests, with ` + "`lazybox run -- <command>`" + `.
+You are read-only: never edit files, commit, push or open pull requests. Route implementation and merging back to the author conversation. Your shell is read-only too, so a test run there fails as soon as it writes a cache, a build or a temporary file. Run tests, builds and UI gates with ` + "`lazybox review test --member <repository> [--name NAME] -- <command>`" + ` (or the command tool's ` + "`test`" + ` action, with member and argv): the Runner runs that exact command in a disposable, writable checkout of the reviewed files, never in the author's worktree, and records its result in this review. It prints the test's command ID; read its exit status and output with the command tool's ` + "`wait`" + ` and ` + "`read`" + ` actions (or ` + "`lazybox wait --id ID`" + ` and ` + "`lazybox read --id ID`" + `). Two run at once; a test is not rerun under the same name in a round. Cite the command ID as evidence in a finding. Use ` + "`lazybox run -- <command>`" + ` only for commands that write nothing, such as git log.
 
 When you are done, end your turn with a short summary: what you checked, your findings by severity, and what you could not verify.`
 

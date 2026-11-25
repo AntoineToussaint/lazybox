@@ -118,6 +118,35 @@ rounds, and can review every turn that changes files. When the default
 reviewer is not installed or signed in, a fresh conversation of the author's
 agent reviews, and the review's card says so in a quiet line.
 
+### The reviewer runs the tests
+
+A reviewer's conversation is read-only, its shell included, so a test run
+there fails as soon as it writes a cache, a build or a temporary file ("read-only
+filesystem"). The brief tells every reviewer, in every template, to run tests,
+builds and UI gates through the Runner instead:
+
+```sh
+lazybox review test --member api -- go test ./...
+lazybox review test --member web --name "ui gates" -- npm run test:gates
+```
+
+(or the managed-command tool's **test** action, with `member` and `argv`). The
+Runner runs the exact command in a disposable, writable checkout of the
+review's captured candidate, uncommitted changes included, under the same
+isolation as acceptance checks below: a private home and temporary directory,
+no credentials, and loopback network only, so a gate's dev server and the
+browser that drives it reach each other on 127.0.0.1 and nothing else. The
+author's worktree and the checkout it came from are never touched. The result
+(exit status, output, the candidate it ran on) is recorded in the review: the
+author's conversation hears it with the review's outcome (*2 tests: 2 passed*),
+the Review tray lists each with its output, and the report keeps them under
+*Tests the reviewer ran*. Two tests
+run at once per review; the same name in a round returns the run already
+made; a review's tests end with it. A test is evidence for the reviewer's
+findings, not an acceptance check: it never makes a Behavior verification
+review clean. `lazybox run` stays for commands that write nothing, such as
+`git log`.
+
 ### Verify behavior with another agent
 
 In the workspace's **New tab** menu, choose **Behavior verification**. This
@@ -138,8 +167,12 @@ lazybox review verify --name "restart recovery" --member api \
 The Runner creates independent Git checkouts of the captured base and candidate,
 including captured uncommitted changes, and executes the same command in each.
 Commands run with a private home and temporary directory, without the reviewer's
-credentials or host network access. They can read system toolchains and their
-checkout, and write only inside that checkout. macOS uses sandbox-exec; Linux
+credentials, and with no network beyond loopback: a server the command starts
+is reachable from the command on 127.0.0.1 (on Linux inside its own network
+namespace; on macOS Seatbelt's `localhost` rule, which also reaches the host's
+own loopback services and refuses any other machine before a packet leaves).
+They can read system toolchains and their checkout, and write only inside that
+checkout. macOS uses sandbox-exec; Linux
 requires bubblewrap and enabled unprivileged namespaces. On Ubuntu 24.04,
 AppArmor also needs its distribution-provided `bwrap-userns-restrict` profile
 (from `apparmor-profiles`) loaded by the administrator. CI installs and loads

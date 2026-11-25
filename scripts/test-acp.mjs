@@ -50,7 +50,7 @@ try{
  await expect(card).toHaveCount(1);
  await expect(card.getByLabel('Command',{exact:true})).toContainText('make deploy');
  // Every approval also offers turning Full access on for the conversation (#137).
-await expect(card.locator('.decision-row')).toHaveText([/Allow once/,/Always allow `?make deploy`? commands/,/Deny…/,/Allow and enable Full access/]);
+ await expect(card.locator('.decision-row')).toHaveText([/Allow once/,/Always allow `?make deploy`? commands/,/Deny…/,/Allow and enable Full access/]);
  await page.screenshot({path:'.cache/acp-conversation.png'});
  await card.getByRole('button',{name:/Always allow/}).click();
  await expect.poll(()=>applied('approval').at(-1)).toEqual({requestId:pending[0].requestId,decision:'DECISION_ACCEPT',always:'allow-always'});

@@ -1,6 +1,6 @@
 // Fixture only: the chat header with the conversation from the report — a long
-// first prompt, a branch, a non-default subscription, 26 prompts, 19 background
-// tasks, 40.4% of the context, $13.65 and 276 tool calls of which 22 failed.
+// first prompt, a branch, a non-default subscription, 26 prompts, 19 finished background
+// tasks and one still running, 40.4% of the context, $13.65 and 276 tool calls of which 22 failed.
 // At 1440 the title has the first line and everything shows; in a 560px panel
 // the title keeps two clean lines and what the second line has no room for
 // folds whole into "⋯". Nothing in the header is cut inside a word. A click on

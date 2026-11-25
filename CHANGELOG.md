@@ -27,6 +27,9 @@ leave out.
 
 ### Install and updates
 
+- **Editor themes** Choose from seven editor-inspired presets, including Dracula. Saved selections for retired palettes move to a supported preset.
+- **Select text in a panel** Select All stays inside the active panel when copying text.
+
 - **Open source under Apache 2.0** Lazybox's code is licensed under the Apache License 2.0; versions published since 2026-09-02 are relicensed under it too.
 - **Dictation keeps the start of your sentence** If the browser sends an empty speech result during a pause, the message box keeps the words already heard.
 - **Faster pull request checks** CI spreads UI suites across six runners and uses a Playwright image with browsers and system libraries ready to go.

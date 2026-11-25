@@ -13,6 +13,8 @@ export const releaseNotes: readonly Release[] = [
     date: '2026-11-17',
     title: 'The first prerelease',
     items: [
+      { group: 'Install and updates', title: 'Editor themes', body: 'Choose from seven editor-inspired presets, including Dracula. Saved selections for retired palettes move to a supported preset.' },
+      { group: 'Install and updates', title: 'Select text in a panel', body: 'Select All stays inside the active panel when copying text.' },
       { group: 'Install and updates', title: 'Open source under Apache 2.0', body: 'Lazybox\'s code is licensed under the Apache License 2.0; versions published since 2026-09-02 are relicensed under it too.' },
       { group: 'Install and updates', title: 'Dictation keeps the start of your sentence', body: 'If the browser sends an empty speech result during a pause, the message box keeps the words already heard.' },
       { group: 'Install and updates', title: 'Faster pull request checks', body: 'CI spreads UI suites across six runners and uses a Playwright image with browsers and system libraries ready to go.' },

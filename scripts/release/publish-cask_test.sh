@@ -11,6 +11,8 @@
 # Run directly: `bash scripts/release/publish-cask_test.sh`.
 
 set -euo pipefail
+# Checks read their text from a string, never a pipe: `grep -q` exits at the first match, and under
+# pipefail a writer still writing to it dies of SIGPIPE (141) and fails a check that matched.
 
 SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/publish-cask.sh"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -48,9 +50,9 @@ bash "$SCRIPT" "$TMPL" "0.1.9" "deadbeefsha" "$bare1" >/dev/null 2>&1 \
 	|| fail "case 1: first publish exited non-zero"
 body="$(cask_in_tap "$bare1")"
 [ -n "$body" ] || fail "case 1: cask was NOT pushed on the first release (the original bug)"
-printf '%s' "$body" | grep -q 'version "0.1.9"' || fail "case 1: version not substituted"
-printf '%s' "$body" | grep -q 'sha256 "deadbeefsha"' || fail "case 1: sha not substituted"
-printf '%s' "$body" | grep -q 'Lazybox_#{version}_aarch64.dmg' \
+grep -q 'version "0.1.9"' <<<"$body" || fail "case 1: version not substituted"
+grep -q 'sha256 "deadbeefsha"' <<<"$body" || fail "case 1: sha not substituted"
+grep -q 'Lazybox_#{version}_aarch64.dmg' <<<"$body" \
 	|| fail "case 1: Ruby #{version} interpolation was clobbered"
 echo "PASS case 1: first publish commits + pushes a brand-new cask"
 
@@ -66,7 +68,7 @@ echo "PASS case 2: unchanged re-publish is a no-op"
 bash "$SCRIPT" "$TMPL" "0.2.0" "cafef00d" "$bare1" >/dev/null 2>&1 \
 	|| fail "case 3: version bump publish exited non-zero"
 [ "$(commits_in_tap "$bare1")" -gt "$after" ] || fail "case 3: version bump did not commit"
-cask_in_tap "$bare1" | grep -q 'version "0.2.0"' || fail "case 3: new version not published"
+grep -q 'version "0.2.0"' <<<"$(cask_in_tap "$bare1")" || fail "case 3: new version not published"
 echo "PASS case 3: version bump publishes a new commit"
 
 # ── Case 4: the tap advanced under us — first push is rejected, rebase + retry ─
@@ -99,7 +101,7 @@ chmod +x "$bare4/hooks/pre-receive"
 bash "$SCRIPT" "$TMPL" "0.3.0" "beadfeed" "$bare4" >/dev/null 2>&1 \
 	|| fail "case 4: publish did not recover from a rejected first push"
 [ -e "$bare4/.rejected_once" ] || fail "case 4: the race hook never fired (test is not exercising retry)"
-cask_in_tap "$bare4" | grep -q 'version "0.3.0"' || fail "case 4: cask missing after retry"
+grep -q 'version "0.3.0"' <<<"$(cask_in_tap "$bare4")" || fail "case 4: cask missing after retry"
 git -C "$bare4" show "main:OTHER.md" >/dev/null 2>&1 || fail "case 4: rebase dropped the concurrent commit"
 echo "PASS case 4: rejected first push is rebased and retried, keeping both changes"
 

@@ -23,13 +23,6 @@ written, fold the dated sections above it into it first: `make release`
 refuses a version with dated sections above its own, which its notes would
 leave out.
 
-## [2026-11-25.1] - 2026-11-25 · Conversation and workspace fixes
-
-- **Follow the latest reply** Sending a message or choosing Jump to latest keeps the last line visible as replies arrive.
-- **Open the intended panel** The panel you select stays in front when a crowded layout combines tabs.
-- **Review terminal requests** Interactive commands appear in the approval inbox. Expired requests collapse the command and explain how to request it again.
-- **Read command activity** Late command updates no longer appear as extra sub-agent cards in live or reopened conversations.
-
 ## [0.1.0-pre.1] - 2026-11-17 · The first prerelease
 
 ### Install and updates
@@ -63,6 +56,13 @@ leave out.
 - **Subscriptions grouped by provider** Settings → Subscriptions, the switch dialog, the limit card and the account pickers list your subscriptions under Claude, Codex and each ACP agent, the current one first, then the available ones, then by name; a limited one says when it is back. The limit card offers only the conversation's own provider, and the subscription in a conversation's header opens Switch subscription.
 
 ### Workspaces and tabs
+
+- **Follow the latest reply** Sending a message or choosing Jump to latest keeps the last line visible as replies arrive.
+- **Open the intended panel** The panel you select stays in front when a crowded layout combines tabs.
+- **Review terminal requests** Interactive commands appear in the approval inbox. Expired requests collapse the command and explain how to request it again.
+- **Read command activity** Late command updates no longer appear as extra sub-agent cards in live or reopened conversations.
+- **Detach browser panels** The desktop opens Web and Agent browser panels in their own windows.
+- **Send now** Delivery progress stays visible between the interrupted turn ending and the next message reaching the agent.
 
 - **Check all in the delete dialog** Check all selects artifact deletion, stopping active sessions and discarding workspace files together. Review your selections, then choose Delete workspace.
 - **Deleting a workspace keeps commits on no branch** A repository with commits only a detached HEAD reaches, or a rebase, merge, cherry-pick or bisect stopped part-way, counts as changed: deleting the workspace asks you to discard first instead of losing them.

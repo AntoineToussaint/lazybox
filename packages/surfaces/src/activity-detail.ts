@@ -13,7 +13,6 @@ import { showToast } from './toasts';
  */
 export const ACTIVITY_LABELS: Record<ActivityDetail, { label: string; detail: string }> = {
   quiet: { label: 'Quiet', detail: 'Only what the agent says, its decisions and its edits. Each turn’s work is one line: “Worked for 2m 10s · 14 steps · 1 failed”.' },
-  smart: { label: 'Smart', detail: 'Runs of tool calls between the agent’s words become one summary line you can open. Failures, edits, questions and the plan always show.' },
   verbose: { label: 'Verbose', detail: 'Every tool call on its own line, with its exit code and duration.' },
 };
 const defaultKey = 'chat.activity-detail';
@@ -33,7 +32,7 @@ export function readActivityDefault(store?: ViewStateStore): ActivityDetail {
 function readOverrides(store?: ViewStateStore): [string, ActivityDetail][] {
   try {
     const value = JSON.parse(readPreference(store, overridesKey) || '[]');
-    return Array.isArray(value) ? value.filter((pair): pair is [string, ActivityDetail] => Array.isArray(pair) && typeof pair[0] === 'string' && isActivityDetail(pair[1])).slice(0, OVERRIDES) : [];
+    return Array.isArray(value) ? value.map(pair => Array.isArray(pair) && pair[1] === 'smart' ? [pair[0], 'quiet'] : pair).filter((pair): pair is [string, ActivityDetail] => Array.isArray(pair) && typeof pair[0] === 'string' && isActivityDetail(pair[1])).slice(0, OVERRIDES) : [];
   } catch { return []; }
 }
 export function writeActivityDefault(store: ViewStateStore | undefined, detail: ActivityDetail) {
@@ -76,7 +75,7 @@ export function useResponseDetails(conversation: string) {
         if (value === null) {
           try { value = readPreference(store, prefix + encodeURIComponent(id)); } catch { /* Storage unavailable. */ }
         }
-        cache.set(id, isActivityDetail(value) || value === 'hidden' ? value : '');
+        cache.set(id, value === 'smart' ? 'quiet' : isActivityDetail(value) || value === 'hidden' ? value : '');
       }
       return cache.get(id) || '';
     }
@@ -102,7 +101,7 @@ export type ActivityDetailState = {
   overridden: boolean;
   /** For this conversation only; choosing the default clears its own. */
   choose(detail: ActivityDetail | null): void;
-  /** Quiet → Smart → Verbose → Quiet, for this conversation. */
+  /** Quiet → Verbose → Quiet, for this conversation. */
   cycle(): ActivityDetail;
 };
 /** The global default alone (Settings → Chat). */
@@ -163,7 +162,6 @@ export function useConversationActivity(store: ViewStateStore | undefined, conve
   useActions({
     'activity.cycle': enabled && { run: () => say(latest.current.cycle()), enabled: front },
     'activity.quiet': pick('quiet'),
-    'activity.smart': pick('smart'),
     'activity.verbose': pick('verbose'),
     'activity.default': enabled && { run: () => { latest.current.choose(null); say(latest.current.fallback); }, enabled: () => front() && latest.current.overridden },
   });

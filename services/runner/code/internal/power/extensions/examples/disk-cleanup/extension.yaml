@@ -1,4 +1,7 @@
 lazybox: 1
+category: Workspace tools
+caption: Disk Cleanup panel with fixture workspace data.
+keywords: [storage, reclaim]
 name: Disk Cleanup
 version: 1.0.0
 description: Review the daily disk scan on this Runner.

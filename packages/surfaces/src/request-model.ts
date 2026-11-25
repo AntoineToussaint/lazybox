@@ -162,7 +162,7 @@ export function requestNote(type: string, data: Record<string, any>, requestText
 
 /** How a request was answered, in one quiet line of the conversation. */
 export type AnswerNote =
-  | { kind: 'answered'; answers: { question: string; answer: string }[] }
+  | { kind: 'answered'; from?: string; answers: { question: string; answer: string }[] }
   | { kind: 'always'; tool: string; target: string; label: string; scope: string }
   | { kind: 'declined'; tool: string; target: string; reason: string };
 
@@ -172,7 +172,7 @@ export function answerNote(note: RequestNote | undefined, response: Record<strin
       const q = note?.kind === 'question' ? note.questions.find(q => q.key === key) : undefined;
       return { question: q?.header || q?.text || key, answer: (Array.isArray(values) ? values : [values]).join(', ') };
     });
-    return answers.length ? { kind: 'answered', answers } : undefined;
+    return answers.length ? { kind: 'answered', answers, ...(response.from ? {from: text(response.from)} : {}) } : undefined;
   }
   if (response.kind !== 'approve') return;
   const tool = note?.kind === 'approval' ? note.tool : 'Request', target = note?.kind === 'approval' ? note.target : '';

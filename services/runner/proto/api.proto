@@ -484,6 +484,8 @@ service RunnerService {
   // Owner only. Sandboxed panel extensions (EXTENSIONS.md): the folders in the
   // config folder's extensions/, each with what its manifest asks for, what
   // the person approved, and its state. Reloaded every second.
+  rpc GetCloneProfile(GetCloneProfileRequest) returns (CloneProfile);
+  rpc SaveCloneProfile(SaveCloneProfileRequest) returns (CloneProfile);
   rpc ListExtensions(ListExtensionsRequest) returns (Extensions);
   // Owner only. Approves exactly the grants and hosts the person was shown and
   // turns the extension on; refused when its manifest asks for anything else
@@ -1788,6 +1790,7 @@ message Answers {
 message Answer {
   string request_id = 1;
   map<string, Answers> answers = 2;
+  bool remember_for_clone = 3;
 }
 enum Decision {
   DECISION_UNSPECIFIED = 0;
@@ -4457,8 +4460,30 @@ message BrowserSettings {
 message ClearBrowserDataRequest {
   string collection_id = 1;
 }
-message ListExtensionsRequest {}
+message GetCloneProfileRequest { bool learn_from_history = 1; }
+message RememberedCloneAnswer {
+  string id = 1;
+  string workspace = 2;
+  string question = 3;
+  string answer = 4;
+}
+message CloneProfile {
+  string style = 1;
+  string testing = 2;
+  string ask_when = 3;
+  repeated string suggestions = 4;
+  uint64 revision = 5;
+  repeated string questions = 6;
+  repeated RememberedCloneAnswer remembered_answers = 7;
+}
+message SaveCloneProfileRequest {
+  CloneProfile profile = 1;
+  bool forget_answers = 2;
+  repeated string forget_answer_ids = 3;
+}
+message ListExtensionsRequest { string known_catalog = 1; }
 message Extensions {
+  string catalog_token = 6;
   // The config folder's extensions/ (it may not exist yet).
   string directory = 1;
   repeated Extension extensions = 2;
@@ -4496,6 +4521,7 @@ message Extension {
   // An account policy the Runner interprets (EXTENSIONS.md, "Account policy");
   // unset when the manifest declares none.
   ExtensionAccountPolicy account_policy = 18;
+  ExtensionListing listing = 19;
 }
 message ExtensionAccountPolicy {
   // The providers it applies to: "claude", "codex".
@@ -4513,11 +4539,18 @@ message ExtensionPanel {
   string entry = 4;
   string description = 5;
 }
+message ExtensionListing {
+  string category = 1;
+  repeated string keywords = 2;
+  bytes preview_jpeg = 3;
+  string caption = 4;
+}
 message ExtensionExample {
   string id = 1;
   string name = 2;
   string description = 3;
   bool installed = 4;
+  ExtensionListing listing = 5;
 }
 message ApproveExtensionRequest {
   string id = 1;

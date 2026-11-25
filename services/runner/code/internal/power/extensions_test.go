@@ -137,11 +137,14 @@ func TestCheckExtensionHost(t *testing.T) {
 
 func TestBundledExtensionsLoadCleanly(t *testing.T) {
 	examples := ExtensionExamples()
-	if len(examples) != 11 {
+	if len(examples) != 13 {
 		t.Fatalf("examples: %+v", examples)
 	}
 	dir := t.TempDir()
 	for _, x := range examples {
+		if x.Category == "" || len(x.Keywords) == 0 || len(x.PreviewJPEG) == 0 {
+			t.Errorf("missing catalog metadata for %s", x.ID)
+		}
 		if _, err := WriteExtension(dir, x.ID, "", x.ID); err != nil {
 			t.Fatal(err)
 		}
@@ -364,5 +367,41 @@ func TestBrokenExtensionNeverRuns(t *testing.T) {
 	}
 	if info, _ := e.Snapshot().Find("linked"); !strings.Contains(info.Err, "symbolic link") {
 		t.Errorf("linked: %s", info.Err)
+	}
+}
+
+func TestPreviewOnlyReplacementUpdatesCatalog(t *testing.T) {
+	dir := t.TempDir()
+	folder := writeExtension(t, dir, "board", boardManifest)
+	image := ExtensionExamples()[0].PreviewJPEG
+	path := filepath.Join(folder, "preview.jpg")
+	if err := os.WriteFile(path, image, 0600); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := NewExtensions(dir, filepath.Join(t.TempDir(), "approvals"))
+	before := e.Snapshot()
+	again, changed := e.Reload()
+	if changed || &again.Extensions[0].PreviewJPEG[0] != &before.Extensions[0].PreviewJPEG[0] {
+		t.Fatal("unchanged preview not reused")
+	}
+	edited := slices.Clone(image)
+	edited[len(edited)-1] ^= 1
+	replacement := filepath.Join(folder, ".new")
+	if err := os.WriteFile(replacement, edited, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, original.ModTime(), original.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	after, changed := e.Reload()
+	if !changed || after.Revision <= before.Revision || !slices.Equal(after.Extensions[0].PreviewJPEG, edited) {
+		t.Fatal("replacement with same size and modification time did not update catalog")
 	}
 }

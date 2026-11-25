@@ -60,7 +60,7 @@ import { contextMenu } from './ContextMenu';
 import { ResumeBar, TranscriptNotice } from './SessionNotices';
 import { useSubagentHost } from './SubagentHost';
 import { LiveBar } from './LiveBar';
-import { QueuedMessages, useQueuedDelivery } from './QueuedMessages';
+import { QueuedMessages, queueTurnRunning, useQueuedDelivery } from './QueuedMessages';
 import { SubagentContext } from './subagent-view';
 import { BackgroundWorkButton, SubagentAttention } from './SubagentTray';
 import { SubagentPanel } from './SubagentPanel';
@@ -190,6 +190,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const [handoffMessage, setHandoffMessage] = useState<HandoffMessage>();
   const [heldSession, setSession] = useState<Session | undefined>(transcript.reader.session);
   const session = currentSession(sessionID, heldSession, transcript.reader.session);
+  const workingTurn = queueTurnRunning(session, transcript.turnRunning);
   useMarkViewed(session, mode === 'agent');
   const workspace = useSessionWorkspace(api, session?.collectionId || collectionId, !!info, revision);
   const { recent: events, messages: conversation, status: stream } = transcript;
@@ -371,7 +372,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       // Queued behind a busy turn, it shows above the box now, not at the next poll.
       refreshSession();
       // Behind a busy turn the message was queued: it goes next, the turn stopped for it.
-      if (now && destination === sessionID && session?.busy && !session.closed) void queuedDelivery.deliver(attempt.id, 'now', true);
+      if (now && destination === sessionID) void queuedDelivery.deliver(attempt.id, 'now', true);
       if (!signal.aborted) { setMessage(''); setFiles([]); boxes.clearRejected(); setUncertainSend(''); sendAttempt.current = null; persistDraft('', [], []); if (destination !== sessionID) { persistDraft('', [], [], '', destination); setSessionID(destination); onSessionChange?.(destination); refresh(); } if (afterDelivery) setError(afterDelivery); }
       return !signal.aborted;
     } catch (e) { if (!signal.aborted) { setError(humanError(e)); if (snippetText) setMessage(text); } return false; }
@@ -438,22 +439,20 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // Words dictated into this box count before `message` shows them: a key pressed right after them can
   // run before that render (a busy machine). The form's submit waits for the last words (Composer).
   const saidHere = () => dictating() && voiceState().kind === 'composer' && !!voiceState().text.trim() && document.activeElement === composer.current;
-  const workingTurn = () => !!session?.busy && !session.closed;
   const sendNow = () => {
     if (draftToSend() || saidHere()) {
-      if (workingTurn()) sendNowAt.current = Date.now();
+      if (workingTurn) sendNowAt.current = Date.now();
       composer.current?.form?.requestSubmit();
       return;
     }
-    const oldest = workingTurn() ? queued[0] : undefined;
+    const oldest = workingTurn ? queued[0] : undefined;
     if (oldest) { jumpToLatest(); void queuedDelivery.deliver(oldest.operationId, 'now'); }
-    else showMenuNotice(workingTurn() ? 'Nothing queued to send now' : 'Nothing to send');
   };
   useActions({
     'chat.send-now': mode === 'agent' && !!sessionID && {
       run: sendNow,
-      // From the message box always (an empty one says so); from the palette, in the chat in front, when there is something to send now.
-      enabled: () => document.activeElement === composer.current || (activity.current() && canCompose && workingTurn() && (draftToSend() || queued.length > 0)),
+      // From the message box always; from the palette, in the chat in front, when there is something to send now.
+      enabled: () => document.activeElement === composer.current || (activity.current() && canCompose && workingTurn && (draftToSend() || queued.length > 0)),
     },
   });
   const disconnected = stream.startsWith('Disconnected') || stream === 'Reconnecting';
@@ -618,15 +617,15 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const [rewindSession, setRewindSession] = useState('');
   const escapePress = useRef<{ source: string; at: number } | undefined>(undefined);
   const canBranch = allowStart && !assistant && (session?.provider === 'codex' || session?.provider === 'claude');
-  const pendingRestartKey = (id: string, sideQuestion = false) => JSON.stringify(['restart', viewState?.key, sessionID, id, sideQuestion]);
-  const selectBranch = (entry: TranscriptMessage, sideQuestion = false) => {
+  const pendingRestartKey = useCallback((id: string, sideQuestion = false) => JSON.stringify(['restart', viewState?.key, sessionID, id, sideQuestion]), [viewState?.key, sessionID]);
+  const selectBranch = useCallback((entry: TranscriptMessage, sideQuestion = false) => {
     setRewindSession('');
     setBranchSelection({ message: entry, source: sessionID, sideQuestion });
     const pending = sessionStorage.getItem(pendingRestartKey(entry.id, sideQuestion));
     const saved = pending ? JSON.parse(pending) : undefined;
     setRetryDraft(saved?.text ?? (sideQuestion ? '' : entry.text));
     setBranchFromCheckpoint(saved?.checkpoint ?? (!!session?.collectionId && !!onOpenHandoff));
-  };
+  }, [sessionID, pendingRestartKey, session?.collectionId, onOpenHandoff]);
   const openBranch = async () => {
     if (!branchMessage || !branchSelection) return;
     const retry = branchMessage.type === 'operation_accepted';
@@ -820,7 +819,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             <span>{run.reviewerLabel}{run.paused ? ' · Paused' : run.phase === 'triage' ? ' · Findings ready' : run.phase === 'fixing' ? ' · Fixes in progress' : ''}</span>
             <button type="button" onClick={() => showReview({collectionId: chatReview.workspaceId, reviewId: run.id})}>View review</button>
           </div>)}
-          <Composer textarea={composer} fileInput={fileInput} agentName={agentName} embedded={embedded} session={session} sessionID={sessionID} viewState={viewState} keymap={keymap}
+          <Composer workingTurn={workingTurn} textarea={composer} fileInput={fileInput} agentName={agentName} embedded={embedded} session={session} sessionID={sessionID} viewState={viewState} keymap={keymap}
             limited={limited} message={message} files={files} attachments={boxes} missingFiles={missingFiles} uncertainSend={uncertainSend} handedOver={handedOver}
             sending={sending} canCompose={canCompose} canAttach={canAttach} canSend={canSend}
             permissionPrompt={<>{restartTo && <PermissionRestartPrompt mode={restartTo} restarting={permissionRestarting} busy={!!session?.busy} returnTo={composer} onRestart={() => void restartWithPermission(restartTo)} onCancel={() => setRestartTo('')}/>}{slash.prompt}</>}

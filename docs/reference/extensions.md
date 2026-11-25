@@ -15,8 +15,9 @@ completion.
 | `lazybox` | The bridge protocol: `1`. |
 | `name` | What Settings and the panel show (48 characters). Required. |
 | `version`, `description`, `author` | Shown in Settings and the approval sheet. |
+| `category`, `keywords`, `caption` | Catalog classification, search terms and preview description. See the listing reference below. |
 | `homepage` | An `https://` address. |
-| `panels` | 1–8 panels: `id` (lowercase, digits, dashes), `title`, `entry` (an `.html` page of the folder, default `index.html`), `icon`, `description`. Optional with an `accountPolicy`. |
+| `panels` | 1–8 panels: `id` (lowercase, digits, dashes), `title`, `entry` (an `.html` page of the folder, default `index.html`), `icon`, `description`. Optional with an `accountPolicy` or a Runner-managed workflow grant. |
 | `grants` | What it asks for (below), up to 40. `switch:claude` and `switch:codex` are an account policy's: the providers it may switch. |
 | `accountPolicy` | What the Runner does at a subscription limit: `switchOnLimit` (`true` moves the conversation to another signed-in account of its provider) and `accounts` (ids to try, in order; empty is every other one). Needs a `switch:<provider>` grant. See [account policies](../guides/extensions.md#account-policies). |
 | `network` | Origins it may fetch from, up to 16: `https://host[:port]`, `https://*.example.com`, or `http://localhost[:port]` / `http://127.0.0.1[:port]`. No paths. |
@@ -93,3 +94,20 @@ safe (show, focus or arrange): `inbox.open`, `attention.next`,
 | `lazybox extension path` | The extensions folder. |
 
 Approving happens in the app (Settings → Extensions, or the Extensions panel).
+
+## Catalog listings and background workflows
+
+Choose `category` from Agents & conversations, Code & documentation, Workspace tools, Monitoring & costs, Notifications or Other for the main function, up to twelve `keywords` for search, and
+`caption` for the preview description. Include a JPEG named `preview.jpg` in
+the extension folder, at most 32 KiB and 1280 pixels on either axis. Settings
+and the Extensions panel show it before approval. Older manifests are listed
+under Other. The bundled screenshots use fixture data and can be refreshed
+with `node scripts/capture-extension-previews.mjs`.
+
+Clone Me uses the Runner-managed `answer:preferences` grant. Open **Teach Clone Me** in Settings → Extensions to describe coding style, testing expectations and decisions you want to make. The interview suggests explicit preferences found in retained messages. **Learn from recent conversations** asks a read-only assistant on your most recent coding account to infer preferences and tailor follow-up questions from bounded conversation excerpts. Saving shares the confirmed profile with coding agents. The interview lists saved answers by workspace and lets you forget individual answers. An owner can mark a non-secret answer for reuse in the same workspace. Before reusing it, the assistant checks the question, the saved answer and your current “ask me when” preferences. Authorization, disclosure, deployment, spending and destructive decisions stay with you. Older answers saved without a workspace are ignored. For new single-choice questions, the assistant considers choices named in your confirmed profile. Needs-input hooks fire immediately, including while the assistant is checking. A successful Clone Me answer resolves the pending question in the conversation.
+
+Compound Engineering uses `review:archives`. Archiving a workspace or
+conversation starts a read-only summary assistant with recent conversation
+excerpts and the source account. Its proposal appears in workspace Artifacts.
+For a standalone conversation, the proposal stays in History as **Compound Engineering · documentation review**. Closing a tab leaves the conversation running. Programs in actions.yaml can
+also subscribe to `workspace.archived` and `conversation.archived`.

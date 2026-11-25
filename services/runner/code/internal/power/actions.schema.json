@@ -150,6 +150,6 @@
       },
       "oneOf": [ { "required": ["run"] }, { "required": ["shell"] }, { "required": ["webhook"] } ]
     },
-    "event": { "enum": ["agent.needs-input", "turn.done", "turn.failed", "pr.opened", "pr.checks-failed", "pr.checks-passed", "pr.changes-requested", "pr.approved", "pr.merged", "pr.closed", "pr.conflicts", "mission.accepted"] }
+    "event": { "enum": ["workspace.archived", "conversation.archived", "agent.needs-input", "turn.done", "turn.failed", "pr.opened", "pr.checks-failed", "pr.checks-passed", "pr.changes-requested", "pr.approved", "pr.merged", "pr.closed", "pr.conflicts", "mission.accepted"] }
   }
 }

@@ -1,10 +1,4 @@
-// Activity detail: Quiet / Smart (the default) / Verbose. A realistic long run
-// of shell reads between two sentences of the agent (the run a person saw as
-// "Ran <script> / exit 0 / 0.1s / Thought for 1.4s" eight times over) is one
-// summary line in Smart, expandable in place to short command lines; failures
-// and edits stay visible; the step running now shows live. Verbose is every
-// line; Quiet is one line per turn. A conversation's own choice (⋯ menu,
-// palette, ] ] v) and the default (Settings → Chat) are remembered. Fake Runner only.
+// Conversation and per-response display settings against the fixture Runner.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
@@ -56,13 +50,16 @@ try{
  await expect(details.locator('p')).toBeHidden();
  const override=messages.getByLabel('Response detail for this prompt').last();
  await override.selectOption('quiet');
+ // Reopen a response preference written by an earlier release.
+ await page.evaluate(()=>{
+  const key=Object.keys(localStorage).find(k=>k.includes('chat.response-detail.') && localStorage.getItem(k)==='quiet');
+  if(!key)throw new Error('Expected the saved response preference');
+  localStorage.setItem(key,'smart');
+ });
  await page.reload();
  await expect(override).toHaveValue('quiet');
  await expect(messages.locator('.tool-lines').first()).toHaveAttribute('data-detail','quiet');
  await expect(messages.getByLabel('Response detail for this prompt').first()).toHaveValue('');
- await override.selectOption('smart');
- await page.reload();
- await expect(override).toHaveValue('smart');
  await override.selectOption('hidden');
  await page.reload();
  await expect(override).toHaveValue('hidden');
@@ -77,55 +74,21 @@ try{
  await expect(override).toHaveValue('');
  const cycle=page.getByTitle('Cycle conversation activity detail').first();
  await cycle.click(); await expect(cycle).toHaveText('Verbose');
- await cycle.click(); await cycle.click();
+ await cycle.click(); await expect(cycle).toHaveText('Quiet');
  const runs=messages.locator('.tool-lines');
-
- // ── Smart, the default: the long run is one line; the failure and the edit stay.
- const first=runs.first();
- await expect(first.locator(':scope > .tool-line > .tool-line-row')).toHaveText([/^Explored the codebase8 commands, 2 files readthought for 11s\d+s$/,/^Run the unit tests npm testexit 13s$/,/^Edited services\/runner\/code\/internal\/runtime\/runtime_access\.go\+1 −1$/]);
- await expect(first.locator('.tool-line-problem')).toHaveText('FAIL src/access.test.ts › owner can read');
- await expect(messages.locator('.tool-meta span',{hasText:/^exit 0$/})).toHaveCount(0);
- await expect(messages.getByText(/Thought for/)).toHaveCount(0);
- await expect(messages.locator('.tool-inline-diff')).toHaveCount(0);
- const smartRows=await messages.locator('.tool-line-row').count();
- // The step running now shows live under its run's summary.
- const second=runs.nth(1);
- await expect(second.locator(':scope > .tool-summary > .tool-line-row')).toHaveText(/^Running tests and exploring the codebase…3 commands$/);
- await expect(second.locator('.tool-summary-live .tool-line-row')).toHaveText(/^Run the runtime tests go test \.\/internal\/runtime\/\.\.\.$/);
- await expect(second.locator('.tool-summary-live .tool-spinner')).toHaveCount(1);
- await page.screenshot({path:'.cache/activity-detail-smart.png'});
- // Expanding shows each call in short form: the agent's words, else program + target; never the script.
- await first.getByRole('button',{name:/^Explored the codebase/}).click();
- const steps=first.getByRole('list',{name:'Steps'}).locator(':scope > .tool-line > .tool-line-row');
- await expect(steps).toHaveCount(10);
- await expect(steps.nth(0)).toHaveText('Read the access check sed …/runtime_access.go');
- await expect(steps.nth(1)).toHaveText('Ran sed …/policy.go');
- await expect(steps.nth(2)).toHaveText('Ran sed …/owner.go');
- await expect(steps.nth(8)).toHaveText(/^Read internal\/runtime\/policy_test\.go/);
- for(const text of await steps.allTextContents())assert.ok(!/echo|\n|cd \//.test(text),`a short line, not the script: ${text}`);
- // A line opens to the full command.
- await steps.nth(2).click();
- await expect(first.locator('[data-tool-id=sh-2] .tool-details').getByLabel(/^Command/).first()).toContainText('echo ---');
- await page.screenshot({path:'.cache/activity-detail-smart-open.png'});
- await first.getByRole('button',{name:/^Explored the codebase/}).click();
- await expect(first.getByRole('list',{name:'Steps'})).toHaveCount(0);
- // The running step finishes: the summary says what was done, in the past tense.
+ await expect(messages.locator('.tool-turn')).toHaveCount(1);
+ await expect(messages.locator('[data-tool-id=gotest] .tool-spinner')).toHaveCount(1);
  tool('gotest',{status:'completed',output:'ok  runtime 2.1s'},4);
- await expect(second.locator(':scope > .tool-summary > .tool-line-row')).toHaveText(/^Ran tests and explored the codebase3 commands\d+(\.\d)?s$/);
- await expect(second.locator('.tool-summary-live')).toHaveCount(0);
-
  // ── This conversation, Verbose, from its ⋯ menu: every line, remembered.
  const chat=page.locator('.agent-window').first();
  await chat.getByLabel('Session actions',{exact:true}).click();
  const choice=page.getByRole('group',{name:'Activity detail'});
- await expect(choice.getByRole('button',{name:'Smart'})).toHaveAttribute('aria-pressed','true');
+ await expect(choice.getByRole('button',{name:'Quiet'})).toHaveAttribute('aria-pressed','true');
  await expect(choice.locator('strong')).toHaveText('Activity detail · default');
  await choice.getByRole('button',{name:'Verbose'}).click();
  await expect(messages.locator('.tool-meta span',{hasText:/^exit 0$/})).toHaveCount(0);
  await expect(messages.getByText(/^Thought for 1\.4s$/)).toHaveCount(8);
  await expect(messages.locator('[data-tool-id=edit] .tool-inline-diff')).toHaveCount(1);
- const verboseRows=await messages.locator('.tool-line-row').count();
- assert.ok(smartRows*3<verboseRows,`Smart mounts far fewer lines (${smartRows} vs ${verboseRows})`);
  await page.reload();
  await expect(messages.getByText(/^Thought for 1\.4s$/)).toHaveCount(8);
  await expect(messages.locator('.tool-meta span',{hasText:/^exit 0$/})).toHaveCount(0);
@@ -141,7 +104,7 @@ try{
  await palette.getByRole('combobox',{name:'Search commands'}).fill('>activity detail');
  await expect(palette.getByRole('option',{name:/Activity detail: Verbose/})).toHaveCount(0);
  await palette.getByRole('option',{name:/Activity detail: Quiet/}).click();
- await expect(page.locator('.toast',{hasText:'Activity detail: Quiet'})).toContainText('This conversation only. The default is Smart');
+ await expect(page.locator('.toast',{hasText:'Activity detail: Quiet'})).toContainText('This conversation follows the default.');
  const turn=messages.locator('.tool-turn');
  await expect(turn).toHaveCount(1);
  await expect(turn.locator(':scope > .tool-line-row')).toHaveText(/^Worked for (\d+m )?\d+s15 steps1 failed$/);
@@ -153,19 +116,18 @@ try{
  await expect(turn.getByRole('list',{name:'Steps'}).locator(':scope > .tool-line')).toHaveCount(14);
  await expect(turn.locator('[data-tool-id=fail] .tool-line-problem')).toHaveText('FAIL src/access.test.ts › owner can read');
 
- // ── ] ] v cycles: Quiet → Smart, which is the default again.
  await messages.click({position:{x:5,y:5}});
  await page.keyboard.press(']');await page.keyboard.press(']');await page.keyboard.press('v');
- await expect(page.locator('.toast',{hasText:'Activity detail: Smart'})).toContainText('This conversation follows the default.');
- await expect(runs.first().locator(':scope > .tool-line > .tool-line-row').first()).toHaveText(/^Explored the codebase/);
+ await expect(page.locator('.toast',{hasText:'Activity detail: Verbose'})).toContainText('This conversation only.');
 
+ await cycle.click(); await expect(cycle).toHaveText('Quiet');
  // ── The default, in Settings → Chat, with a live preview; remembered across a reload.
  await page.getByRole('button',{name:'Settings',exact:true}).click();
  await page.getByRole('tab',{name:'Chat'}).click();
  const settings=page.getByRole('tabpanel',{name:'Chat'});
- await expect(settings.getByRole('radio',{name:/Smart/})).toBeChecked();
+ await expect(settings.getByRole('radio',{name:/Quiet/})).toBeChecked();
  const preview=settings.getByLabel(/^Preview of/);
- await expect(preview.locator(':scope > .tool-lines > .tool-line > .tool-line-row')).toHaveText([/^Ran tests and explored the codebase3 commands, 1 file readthought for 12s33s$/,/^Run the runtime tests go test \.\/internal\/runtime\/\.\.\.exit 18s$/,/^Edited internal\/runtime\/runtime_access\.go\+1 −1$/]);
+ await expect(preview.locator('.tool-turn')).toHaveCount(1);
  await settings.getByRole('radio',{name:/Verbose/}).check();
  await expect(preview).toHaveAttribute('aria-label','Preview of Verbose');
  await expect(preview.locator('.tool-meta span',{hasText:/^exit 0$/})).toHaveCount(0);
@@ -177,5 +139,4 @@ try{
  await expect(choice.locator('strong')).toHaveText('Activity detail · default');
  await expect(choice.getByRole('button',{name:'Verbose'})).toHaveAttribute('aria-pressed','true');
  await drainPageErrors(errors);assert.deepEqual(errors,[]);
- console.log(`PASS: Smart folds a ${files.length}-command run into one summary (${smartRows} lines mounted against ${verboseRows} in Verbose), expandable to short command lines and the full command; failures and edits stay; the running step shows live; Verbose and Quiet per conversation from the ⋯ menu and the palette, ] ] v cycles, the default in Settings → Chat with a preview, all remembered across reloads. Fixture only.`);
 }finally{await browser?.close();await server.close();await fixture.close();}

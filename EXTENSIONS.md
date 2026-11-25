@@ -75,6 +75,14 @@ approves anything or sees a credential** — there is no grant to ask for.
 a panel. They are what an [account policy](#account-policy) may do, and the
 Runner acts on them itself.
 
+The Runner also implements two optional workflows. Clone Me uses
+`answer:preferences` to conduct a coding-style interview and consult confirmed
+preferences for agent questions. Compound Engineering uses `review:archives`
+to review archived conversations and publish documentation proposals. Their
+read-only assistants use the configured provider account. These grants expose
+no history or files to extension JavaScript. See the [catalog and workflow
+reference](docs/reference/extensions.md#catalog-listings-and-background-workflows).
+
 ## Installing, updating, removing
 
 - **Nothing runs until approved.** A new folder shows as *Needs your approval*

@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
-import { runnerApprovesTerminalAction, alwaysChoices, commandPrefix, covers, decide, describeUpdates, offered, restoreGrant, restoreGrants } from './permissions.js';
+import { reviewToolDecision, runnerApprovesTerminalAction, alwaysChoices, commandPrefix, covers, decide, describeUpdates, offered, restoreGrant, restoreGrants } from './permissions.js';
 
 // What CLI 2.1.325 suggested for `npm run lint --silent` in default mode.
 const npmRun: PermissionUpdate[] = [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'npm run *' }], behavior: 'allow', destination: 'localSettings' }];
@@ -148,4 +148,12 @@ test('the Runner owns permission for terminal handoff and its approved input', (
     assert.ok(!runnerApprovesTerminalAction('Bash', action));
   }
   assert.ok(!runnerApprovesTerminalAction('mcp__lazybox__command', 'start'));
+});
+
+test('review permissions settle file reads and escalations without waiting', () => {
+  for (const tool of ['Read', 'Glob', 'Grep']) assert.equal(reviewToolDecision(tool, undefined), 'allow');
+  for (const tool of ['Bash', 'Write', 'ExitPlanMode']) assert.equal(reviewToolDecision(tool, undefined), 'deny');
+  assert.equal(reviewToolDecision('mcp__lazybox__command', 'start'), 'deny');
+  assert.equal(reviewToolDecision('mcp__lazybox__command', 'read'), 'allow');
+  assert.equal(reviewToolDecision('mcp__lazybox__command', 'verify'), 'ask');
 });

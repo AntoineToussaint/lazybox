@@ -75,7 +75,7 @@ hooks:
     webhook: { url: "https://hooks.slack.com/services/…" }
 ```
 
-| Events | `agent.needs-input`, `turn.done`, `turn.failed`, `mission.accepted`, and a tracked pull request's: `pr.opened`, `pr.checks-failed`, `pr.checks-passed`, `pr.changes-requested`, `pr.approved`, `pr.merged`, `pr.closed`, `pr.conflicts` (each once, when it happens) |
+| Events | `workspace.archived`, `conversation.archived`, `agent.needs-input`, `turn.done`, `turn.failed`, `mission.accepted`, and a tracked pull request's: `pr.opened`, `pr.checks-failed`, `pr.checks-passed`, `pr.changes-requested`, `pr.approved`, `pr.merged`, `pr.closed`, `pr.conflicts` (each once, when it happens) |
 | --- | --- |
 | What runs | `run:` a program and its arguments (no shell), `shell:` a line for `/bin/sh -c`, or `webhook:` a POST of the event as JSON |
 | What it gets | The event as JSON in `$LAZYBOX_EVENT_FILE`, and `LAZYBOX_EVENT_*` variables (workspace, conversation, title, PR URL…). Quote them: `"$LAZYBOX_EVENT_TITLE"`. |

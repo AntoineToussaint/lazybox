@@ -1,4 +1,7 @@
 lazybox: 1
+category: Workspace tools
+caption: Preview Desk panel with fixture workspace data.
+keywords: [services, logs]
 name: Preview Desk
 version: 1.0.0
 description: See service status, previews and logs for the selected workspace.

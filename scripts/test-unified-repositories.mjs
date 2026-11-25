@@ -140,7 +140,9 @@ try {
     .check();
   // Start from: the added repository's branch starts from another branch of origin (⌥B, type, Enter).
   await page.keyboard.press("Alt+KeyB");
-  const startPicker = d.getByRole("dialog", { name: "Start fixture-team/web from" });
+  const selectedRepos = d.getByRole("region", { name: "Selected repositories" });
+  await expect(selectedRepos).toContainText("its default branch");
+  const startPicker = selectedRepos.locator(".workspace-start-from-repo").filter({has: page.getByRole("button", {name:"Unselect fixture-team/web"})}).getByRole("dialog", { name: "Start fixture-team/web from" });
   await expect(startPicker.getByRole("combobox")).toBeFocused();
   await page.keyboard.type("release/1.4");
   await expect(startPicker.getByRole("option").first()).toContainText("release/1.4");
@@ -207,6 +209,13 @@ try {
   const phoneUnfiltered = await phoneBounds();
   await d.getByRole('searchbox',{name:'Find repositories'}).fill('no-such-repository');
   await expect(d.getByText("No matches in the current catalog")).toBeVisible();
+  const selection = d.getByRole('region',{name:'Selected repositories'});
+  assert.ok((await selection.boundingBox()).y < (await d.getByRole('searchbox',{name:'Find repositories'}).boundingBox()).y);
+  const remove = selection.getByRole('button',{name:'Unselect large-team/service-with-a-long-name-19',exact:true});
+  await expect(selection.locator('[data-start-from="github:large-team/service-with-a-long-name-19"]')).toHaveCount(1);
+  await remove.click();
+  await expect(remove).toHaveCount(0);
+  await expect(selection.getByRole('button',{name:'Unselect large-team/service-with-a-long-name-18',exact:true})).toBeFocused();
   assert.deepEqual(await phoneBounds(), phoneUnfiltered, "the phone dialog and its primary action stay put as results disappear");
   await d.getByRole('button',{name:'Clear search',exact:true}).click();
   await expect(d.getByRole('searchbox',{name:'Find repositories'})).toHaveValue('');

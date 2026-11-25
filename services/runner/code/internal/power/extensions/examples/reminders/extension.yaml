@@ -1,4 +1,7 @@
 lazybox: 1
+category: Notifications
+caption: Reminders panel with fixture workspace data.
+keywords: [schedule, follow-up]
 name: Reminders
 version: 1.0.0
 description: Schedule a follow-up in the Lazybox main window on this device.

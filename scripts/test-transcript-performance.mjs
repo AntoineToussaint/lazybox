@@ -84,6 +84,21 @@ try{
   const mounted=await page.locator('.messages:visible .message').count();
   assert.ok(mounted>0&&mounted<=40,`a long conversation opens with its latest messages only (${mounted} mounted)`);
   await expect(page.getByRole('button',{name:'Show earlier messages'})).toBeVisible();
+  const pane=page.locator('.messages:visible');
+  const prompts=page.locator('.prompt-rail:visible button');
+  await expect(prompts).toHaveCount(count);
+  await prompts.first().evaluate(button=>button.click());
+  await expect.poll(()=>pane.locator('.message').count()).toBeGreaterThan(mounted);
+  // A reveal of an already mounted prompt runs on the next animation frame.
+  // The newer jump must win even if that frame hasn't run yet.
+  await page.getByRole('button',{name:'Jump to latest'}).evaluate(async button=>{
+   document.querySelector('.prompt-rail button').click();
+   button.click();
+   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  });
+  await expect.poll(()=>pane.evaluate(node=>Math.abs(node.scrollHeight-node.clientHeight-node.scrollTop))).toBeLessThan(3);
+  await expect(pane.locator('.message')).toHaveCount(mounted);
+  await expect(page.getByRole('button',{name:'Jump to latest'})).toBeHidden();
   }
   await drainPageErrors(errors);assert.deepEqual(errors,[]);
   await page.close();

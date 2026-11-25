@@ -14,11 +14,8 @@ import (
 // so a resume or a subscription rotation keeps the new mode.
 func (b *Bench) SetPermission(ctx context.Context, e *Execution, operationID, mode, exitPlanRequestID string) (agent.Receipt, error) {
 	exitPlan := exitPlanRequestID != ""
-	if exitPlan {
-		request := e.Engine.Snapshot().Pending[exitPlanRequestID]
-		if mode != "yolo" || e.Profile.Provider != "claude" || e.Options.Workflow != "plan" || request.Type != "approval" || request.Text != "ExitPlanMode" || (request.AgentID != "" && request.AgentID != "root") {
-			return agent.Receipt{}, errors.New("the conversation has no matching plan exit approval")
-		}
+	if exitPlan && (mode != "yolo" || !planExit(e, e.Engine.Snapshot().Pending[exitPlanRequestID])) {
+		return agent.Receipt{}, errors.New("the conversation has no matching plan exit approval")
 	}
 	if err := b.permissionAllowed(e, mode, exitPlan); err != nil {
 		return agent.Receipt{}, err
@@ -33,6 +30,30 @@ func (b *Bench) SetPermission(ctx context.Context, e *Execution, operationID, mo
 	// The conversation says what changed, where the person reads it.
 	_ = b.Record(e, agent.Event{Type: "permission_changed", Text: mode, Status: "live"})
 	return r, nil
+}
+
+// planExit says whether request is the plan's own exit approval in a Claude
+// conversation that is planning.
+func planExit(e *Execution, request agent.Event) bool {
+	return e.Profile.Provider == "claude" && e.Options.Workflow == "plan" && request.Type == "approval" && request.Text == "ExitPlanMode" && (request.AgentID == "" || request.AgentID == "root")
+}
+
+// PlanApproved records that the person approved the plan: the agent leaves
+// plan mode whichever allow they chose, so the conversation does too, and a
+// later request can offer Full access and a resume does not plan again.
+func (b *Bench) PlanApproved(ctx context.Context, e *Execution, request agent.Event) error {
+	if !planExit(e, request) {
+		return nil
+	}
+	execute := func(options *accounts.Options) { options.Workflow = "execute" }
+	if err := b.History.Amend(ctx, e.ID, func(r *sessionstore.Record) { execute(&r.Options) }); err != nil {
+		return err
+	}
+	e.activity.Lock()
+	execute(&e.Options)
+	execute(&e.Saved.Options)
+	e.activity.Unlock()
+	return nil
 }
 
 func (b *Bench) permissionAllowed(e *Execution, mode string, exitPlan bool) error {

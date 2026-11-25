@@ -177,6 +177,7 @@ type Execution struct {
 	browserTools bool
 }
 type Bench struct {
+	cloneMu            sync.Mutex
 	conversationCosts  sync.Map
 	verificationFlow   sync.Map
 	verificationLaunch sync.Map
@@ -1144,6 +1145,9 @@ func withCommandEnv(base, pinned, extra []string) ([]string, error) {
 func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args json.RawMessage, pinnedEnv []string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
+	}
+	if e.Purpose == agent.Reviewer && (agent.BrowserTool(name) || name == agent.CommandTool && !agent.ReviewCommandAllowed(args)) {
+		return "", errors.New("review is read-only; use native file inspection tools")
 	}
 	if agent.BrowserTool(name) {
 		return b.browserTool(ctx, e, name, args)

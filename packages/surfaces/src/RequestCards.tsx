@@ -1,3 +1,4 @@
+import {useExtensions} from './useExtensions';
 import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { providerData, type RunnerClient } from '@lazybox/client-core';
 import { Decision, type AgentEvent } from '@lazybox/protocol';
@@ -33,13 +34,15 @@ export type RequestCardProps = {
   confirmAllow?(approval: Approval): Promise<boolean>;
   /** On a paired phone: a request to start a conversation is Start or Deny, as asked. */
   remote?: boolean;
+  workspace?: string;
 };
 
 export function AgentRequestCard(props: RequestCardProps) {
   if (props.request.type === 'repository_request') return <RepositoryRequestCard {...props}/>;
   if (props.request.type === 'browser_request') return <BrowserRequestCard {...props}/>;
   if (props.request.type === 'conversation_request') return <ConversationRequestCard {...props}/>;
-  return props.request.type === 'question' ? <QuestionCard {...props}/> : <ApprovalCard {...props}/>;
+  if (props.request.type !== 'question') return <ApprovalCard {...props}/>;
+  return props.workspace && !props.remote ? <OwnerQuestionCard {...props}/> : <QuestionCard {...props}/>;
 }
 
 /** A label with `code` spans, as the providers write commands in them. */
@@ -150,7 +153,14 @@ export function answerValues(q: Question, a: Answer = empty): string[] {
 
 /** Answers typed or picked, per request, kept while the card remounts (a refresh, the phone re-rendering its list). */
 const answerDrafts = new Map<string, Record<string, Answer>>();
-function QuestionCard({ request, api, session, onError, position }: RequestCardProps) {
+function OwnerQuestionCard(props: RequestCardProps) {
+  const {value: extensions} = useExtensions();
+  const canRemember = extensions?.extensions.some(e => ['enabled','review'].includes(e.state) && e.grants.includes('answer:preferences') && e.approvedGrants.includes('answer:preferences'));
+  return <QuestionCard {...props} canRemember={canRemember}/>;
+}
+
+function QuestionCard({ request, api, session, onError, position, canRemember = false }: RequestCardProps & { canRemember?: boolean }) {
+  const [remember, setRemember] = useState(false);
   const data = useMemo(() => providerData(request.providerDataJson), [request.providerDataJson]);
   const questions = useMemo(() => questionsOf(data), [data]);
   const [answers, setAnswersState] = useState<Record<string, Answer>>(() => answerDrafts.get(request.requestId) || {});
@@ -163,7 +173,7 @@ function QuestionCard({ request, api, session, onError, position }: RequestCardP
   const send = async () => {
     if (!complete || sent.current) return;
     sent.current = true; setWaiting(true);
-    try { await api.apply({ sessionId: session, operationId: crypto.randomUUID(), operation: { case: 'answer', value: { requestId: request.requestId, answers: Object.fromEntries(questions.map(q => [q.key, { values: answerValues(q, answers[q.key]) }])) } } }); answerDrafts.delete(request.requestId); }
+    try { await api.apply({ sessionId: session, operationId: crypto.randomUUID(), operation: { case: 'answer', value: { rememberForClone: !!canRemember && remember, requestId: request.requestId, answers: Object.fromEntries(questions.map(q => [q.key, { values: answerValues(q, answers[q.key]) }])) } } }); answerDrafts.delete(request.requestId); }
     catch (e) { onError(humanError(e)); setWaiting(false); sent.current = false; }
   };
   const update = (q: Question, change: (a: Answer) => Answer) => setAnswers(all => ({ ...all, [q.key]: change(all[q.key] || empty) }));
@@ -213,6 +223,7 @@ function QuestionCard({ request, api, session, onError, position }: RequestCardP
       onSubmit={() => void send()} complete={complete}/>)}
     {/* The raw request is a diagnostic: shown only for a question Lazybox could not read. */}
     {!questions.length && <details className="request-metadata"><summary>Request details</summary><CodeBlock text={JSON.stringify(data, null, 2)} language="json"/><small className="mono">{request.requestId}</small></details>}
+    {canRemember && questions.length > 0 && questions.every(q => !q.secret) && <label><input type="checkbox" checked={remember} onChange={event => setRemember(event.target.checked)}/> Let Clone Me reuse this answer for identical questions in this workspace</label>}
     <footer className="question-footer">
       <small className="question-hint" aria-hidden="true">{questions.some(q => q.options.length) ? '1–9 to choose · ↑↓ to move · ' : ''}⌘↵ to send</small>
       <button type="button" className="primary question-send" disabled={waiting || !complete} onClick={() => void send()}>{waiting ? 'Sending…' : 'Send answer'}</button>
@@ -275,7 +286,7 @@ function QuestionField({ question: q, index, total, answer, disabled, onPick, on
 
 /** How a request was answered: one quiet line where it was asked. */
 export function AnsweredLine({ note }: { note: AnswerNote }) {
-  if (note.kind === 'answered') return <div className="request-answered" role="note" data-kind="answered"><Icon name="check" size={13}/><span>{note.answers.map((a, i) => <span key={i}>{i > 0 && ' · '}{a.question}: <strong>{a.answer}</strong></span>)}</span></div>;
+  if (note.kind === 'answered') return <div className="request-answered" role="note" data-kind="answered"><Icon name="check" size={13}/><span>{note.from && <strong>{note.from} · </strong>}{note.answers.map((a, i) => <span key={i}>{i > 0 && ' · '}{a.question}: <strong>{a.answer}</strong></span>)}</span></div>;
   if (note.kind === 'always') return <div className="request-answered" role="note" data-kind="always"><Icon name="shield" size={13}/><span>Always allowed <strong><CodeText text={note.label}/></strong>{note.scope ? ` ${scopeWords(note.scope)}` : ''}</span></div>;
   return <div className="request-answered" role="note" data-kind="declined"><Icon name="close" size={13}/><span>Denied {note.tool}{note.target ? <> · <code>{note.target.length > 80 ? note.target.slice(0, 79) + '…' : note.target}</code></> : null}{note.reason ? <> — “{note.reason}”</> : null}</span></div>;
 }

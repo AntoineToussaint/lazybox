@@ -84,7 +84,7 @@ export const settingsTabs: { id: SettingsTab; label: string; icon: string; group
 ];
 
 const settingsTopics: { id: SettingsTab; label: string; keywords: string; anchor?: string }[] = [
-  { id: 'chat', label: 'Activity detail', anchor: 'chat-activity-detail', keywords: 'quiet smart verbose output command commands ran logs tool tools activity less noisy fold hide reduce verbosity transcript' },
+  { id: 'chat', label: 'Activity detail', anchor: 'chat-activity-detail', keywords: 'quiet verbose output command commands ran logs tool tools activity less noisy fold hide reduce verbosity transcript' },
   { id: 'chat', label: 'Conversation tabs', anchor: 'chat-conversation-tabs', keywords: 'open close preview conversations chat tabs' },
   { id: 'appearance', label: 'Display and zoom', keywords: 'theme dark light font text size zoom scale colour color' },
   { id: 'extensions', label: 'Extensions', keywords: 'plugin plugins installed panels' },

@@ -38,12 +38,18 @@ export function parseManifest(text) {
 
 const subset = (a, b) => a.every(v => b.includes(v));
 
+async function listing(folder, manifest) {
+  const image = await readFile(join(folder,'preview.jpg')).catch(() => undefined);
+  return {category:manifest.category, keywords:manifest.keywords, caption:manifest.caption, previewJpeg:image?.toString('base64')};
+}
+
 export async function createExtensionsFake({ mutations }) {
   const dir = await mkdtemp(join(tmpdir(), 'lazybox-extensions-'));
   const approvals = new Map(), sessions = new Map(), creds = new Map();
+  let profile = {rememberedAnswers:[{id:'w/naming',workspace:'Workspace A',question:'Naming convention?',answer:'camelCase'}],style:'',testing:'',askWhen:'',revision:'0',suggestions:['I prefer explicit errors.']};
   let revision = 1, origin = '';
   const examples = [];
-  for (const id of await readdir(examplesDir)) { const m = parseManifest(await readFile(join(examplesDir, id, 'extension.yaml'), 'utf8')); examples.push({ id, name: m.name, description: m.description || '' }); }
+  for (const id of await readdir(examplesDir)) { const m = parseManifest(await readFile(join(examplesDir, id, 'extension.yaml'), 'utf8')); examples.push({ id, listing: await listing(join(examplesDir,id),m), name: m.name, description: m.description || '' }); }
 
   async function scan(id) {
     const folder = join(dir, id);
@@ -56,11 +62,11 @@ export async function createExtensionsFake({ mutations }) {
     const a = approvals.get(id);
     const grants = m.grants || [], hosts = m.network || [];
     const issues = [];
-    for (const [i, g] of grants.entries()) if (!/^(read:(workspaces|sessions|attention|commands|missions|usage|runtime|pulls|releases|artifacts|mailbox)|show:(conversations|runtime|github)|manage:reminders|scan:disk|draft:artifact|send:messages|switch:(claude|codex)|do:[\w.-]+)$/.test(g)) issues.push({ path: `grants[${i}]`, line: 1, message: `there is no grant "${g}"`, severity: 'error' });
+    for (const [i, g] of grants.entries()) if (!/^(read:(workspaces|sessions|attention|commands|missions|usage|runtime|pulls|releases|artifacts|mailbox)|show:(conversations|runtime|github)|manage:reminders|answer:preferences|review:archives|scan:disk|draft:artifact|send:messages|switch:(claude|codex)|do:[\w.-]+)$/.test(g)) issues.push({ path: `grants[${i}]`, line: 1, message: `there is no grant "${g}"`, severity: 'error' });
     // An account policy (EXTENSIONS.md): the subset parser keeps its key; its two fields are read from the text.
     const accountPolicy = m.accountPolicy !== undefined ? { providers: grants.filter(g => g.startsWith('switch:')).map(g => g.slice(7)), switchOnLimit: /^\s+switchOnLimit:\s*true\b/m.test(text), accounts: [] } : undefined;
     const state = issues.length || !m.name ? 'broken' : !a ? 'new' : !a.enabled ? 'disabled' : !subset(grants, a.grants) || !subset(hosts, a.hosts) ? 'review' : 'enabled';
-    return { id, name: m.name || '', version: m.version || '', description: m.description || '', author: m.author || '', homepage: '', path: folder, state, panels, grants, hosts, ...(accountPolicy ? { accountPolicy } : {}), approvedGrants: a?.grants || [], approvedHosts: a?.hosts || [], approvedAtUnixMillis: a ? String(a.at) : '0', error: m.name ? '' : 'the manifest needs a name', issues, digest: createHash('sha256').update(digest).digest('hex').slice(0, 16) };
+    return { id, listing: await listing(folder,m), name: m.name || '', version: m.version || '', description: m.description || '', author: m.author || '', homepage: '', path: folder, state, panels, grants, hosts, ...(accountPolicy ? { accountPolicy } : {}), approvedGrants: a?.grants || [], approvedHosts: a?.hosts || [], approvedAtUnixMillis: a ? String(a.at) : '0', error: m.name ? '' : 'the manifest needs a name', issues, digest: createHash('sha256').update(digest).digest('hex').slice(0, 16) };
   }
   async function list() {
     const extensions = [];
@@ -121,6 +127,8 @@ export async function createExtensionsFake({ mutations }) {
     },
     async handle(method, body) {
       switch (method) {
+        case 'GetCloneProfile': return {value:body.learnFromHistory ? {...profile,questions:['How should agents test error paths?']} : profile};
+        case 'SaveCloneProfile': mutations.push({method,body}); profile={...body.profile,rememberedAnswers:profile.rememberedAnswers.filter(item=>!body.forgetAnswerIds?.includes(item.id)),revision:String(Number(profile.revision)+1)}; return {value:profile};
         case 'ListExtensions': return { value: await list() };
         case 'InstallExampleExtension': {
           mutations.push({ method, body });
@@ -167,6 +175,18 @@ export async function createExtensionsFake({ mutations }) {
     },
     async close() { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(dir, { recursive: true, force: true }); },
   };
+  // A disconnected browser can still have a catalog poll reading the folders.
+  // Drain those requests before tearing down the fixture directory.
+  const handle = fake.handle.bind(fake);
+  const close = fake.close.bind(fake);
+  let pending = Promise.resolve(), closing = false;
+  fake.handle = (method, body) => {
+    if (closing) return Promise.resolve(undefined);
+    const request = pending.then(() => handle(method, body));
+    pending = request.catch(() => {});
+    return request;
+  };
+  fake.close = async () => { closing = true; await pending; await close(); };
   return fake;
 }
 

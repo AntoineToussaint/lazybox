@@ -106,7 +106,7 @@ closed, with the step and the reason.
 | Field | Meaning |
 |---|---|
 | `id`, `description` | as for actions |
-| `on` | one or more of `agent.needs-input`, `turn.done`, `turn.failed`, `pr.opened`, `pr.checks-failed`, `pr.checks-passed`, `pr.changes-requested`, `pr.approved`, `pr.merged`, `pr.closed`, `pr.conflicts`, `mission.accepted` (the `pr.*` events are tracked pull requests' transitions, GITHUB.md) |
+| `on` | one or more of `conversation.archived`, `workspace.archived`, `agent.needs-input`, `turn.done`, `turn.failed`, `pr.opened`, `pr.checks-failed`, `pr.checks-passed`, `pr.changes-requested`, `pr.approved`, `pr.merged`, `pr.closed`, `pr.conflicts`, `mission.accepted` (the `pr.*` events are tracked pull requests' transitions, GITHUB.md) |
 | `filter` | `workspace`, `conversation` (name or title), `repository` (`owner/name`); `*` and `?` wildcards, case-insensitive; every filter set must match |
 | `run` / `shell` / `webhook` | exactly one: a program and its arguments (no shell), a line for `/bin/sh -c`, or `{url, headers}` |
 | `grants` | `read`, `respond`, `start` — a Runner credential for the hook's own `lazybox` calls (below) |

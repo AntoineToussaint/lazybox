@@ -59,7 +59,7 @@ If the tool is unavailable, use the Lazybox CLI:
 - If filing cannot be confirmed, include each finding’s file, lines, severity, title and body in your reply and mark it as unfiled.
 - To ask the author about its intent, run ` + "`lazybox ask author \"<question>\"`" + `; its reply comes back to you. Ask only what the code cannot tell you.
 
-You are read-only: never edit files, commit, push or open pull requests. Route implementation and merging back to the author conversation. Your shell is read-only too, so a test run there fails as soon as it writes a cache, a build or a temporary file. Run tests, builds and UI gates with ` + "`lazybox review test --member <repository> [--name NAME] -- <command>`" + ` (or the command tool's ` + "`test`" + ` action, with member and argv): the Runner runs that exact command in a disposable, writable checkout of the reviewed files, never in the author's worktree, and records its result in this review. It prints the test's command ID; read its exit status and output with the command tool's ` + "`wait`" + ` and ` + "`read`" + ` actions (or ` + "`lazybox wait --id ID`" + ` and ` + "`lazybox read --id ID`" + `). Two run at once; a test is not rerun under the same name in a round. Cite the command ID as evidence in a finding. Use ` + "`lazybox run -- <command>`" + ` only for commands that write nothing, such as git log.
+You are read-only: never edit files, commit, push or open pull requests. Route implementation and merging back to the author conversation. Inspect files and diffs using the provider’s native read-only tools. Use the author’s recorded test evidence and report any checks you could not verify. Your shell is read-only too, so a test run there fails as soon as it writes a cache, a build or a temporary file. Run tests, builds and UI gates with ` + "`lazybox review test --member <repository> [--name NAME] -- <command>`" + ` (or the command tool's ` + "`test`" + ` action, with member and argv): the Runner runs that exact command in a disposable, writable checkout of the reviewed files, never in the author's worktree, and records its result in this review. It prints the test's command ID; read its exit status and output with the command tool's ` + "`wait`" + ` and ` + "`read`" + ` actions (or ` + "`lazybox wait --id ID`" + ` and ` + "`lazybox read --id ID`" + `). Two run at once; a test is not rerun under the same name in a round. Cite the command ID as evidence in a finding. Use ` + "`lazybox run -- <command>`" + ` only for commands that write nothing, such as git log.
 
 When you are done, end your turn with a short summary: what you checked, your findings by severity, and what you could not verify.`
 
@@ -150,7 +150,7 @@ func Brief(in BriefInput) string {
 			files += fmt.Sprintf("\n- …and %d more", n-filesLimit)
 		}
 	}
-	evidence := "No `lazybox run` results were recorded in that conversation. Run the relevant tests yourself if you can."
+	evidence := "No `lazybox run` results were recorded in that conversation. Report the missing test evidence."
 	if n := len(in.Evidence); n > 0 {
 		shown := in.Evidence
 		if n > runsShown {

@@ -1,5 +1,5 @@
 import {useCallback,useLayoutEffect,useRef,useState,type UIEvent} from 'react';
-import {EARLIER_MESSAGES,type ConversationReader} from './transcript-cache';
+import {EARLIER_MESSAGES,INITIAL_MESSAGES,type ConversationReader} from './transcript-cache';
 /** How close to the bottom a reader scrolling down picks up following again. */
 const FOLLOW_THRESHOLD=48;
 
@@ -33,6 +33,7 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  const following=useRef(reader.view.following);
  const [followingLatest,setFollowingLatest]=useState(reader.view.following);
  const [visibleMessages,setVisibleMessages]=useState(reader.view.visibleMessages);
+ const pinAfterTrim=useRef(false);
  const prependHeight=useRef<number|undefined>(undefined);
  const dimensions=useRef({height:0,width:0,content:0});
  const hidden=useRef(0);hidden.current=Math.max(0,messages.length-visibleMessages);
@@ -141,7 +142,8 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  },[reader,setFollowing]);
  useLayoutEffect(()=>{
   const pane=paneRef.current;if(!pane)return;
-  if(prependHeight.current!==undefined){place(pane,pane.scrollTop+pane.scrollHeight-prependHeight.current);prependHeight.current=undefined;measure(pane);capture(pane);}
+  if(pinAfterTrim.current){pinAfterTrim.current=false;if(following.current)pin(pane);}
+  else if(prependHeight.current!==undefined){place(pane,pane.scrollTop+pane.scrollHeight-prependHeight.current);prependHeight.current=undefined;measure(pane);capture(pane);}
   else if(following.current)follow(pane);
   reader.view.visibleMessages=visibleMessages;
   if(reveal.current&&revealNow())return;
@@ -169,7 +171,17 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   if(following.current)anchor.current=undefined;else capture(pane);
   if(nearTop(pane))loadEarlier(pane);
  };
- const jumpToLatest=()=>{intent.current=undefined;setFollowing(true);if(paneRef.current)pin(paneRef.current);};
+ const jumpToLatest=()=>{
+  intent.current=undefined;pressed.current=false;anchor.current=undefined;
+  reveal.current=undefined;prependHeight.current=undefined;
+  setFollowing(true);
+  if(visibleMessages!==INITIAL_MESSAGES){
+   // Dropping earlier rows changes the scroll range. Pin after React commits
+   // the short tail, before a resize observer can interpret the clamp as input.
+   pinAfterTrim.current=true;
+   setVisibleMessages(INITIAL_MESSAGES);
+  }else if(paneRef.current)pin(paneRef.current);
+ };
  // Jumping to a message (a prompt) may need earlier history mounted first:
  // widen the window, then scroll it to the top once it is rendered.
  const reveal=useRef<string|undefined>(undefined);

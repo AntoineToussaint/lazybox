@@ -6,6 +6,9 @@
 # conversation forward in the window. It cannot send anything, change
 # anything or reach the network.
 lazybox: 1
+category: Monitoring & costs
+caption: Cost dashboard panel with fixture workspace data.
+keywords: [usage, tokens]
 name: Cost dashboard
 version: 1.2.0
 description: Estimated spend by pull request, workspace, conversation and model.

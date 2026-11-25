@@ -219,3 +219,14 @@ export function restoreGrants(values: unknown): { grants: Grant[]; dropped: stri
   }
   return { grants, dropped };
 }
+
+/** A reviewer can inspect and file findings without an approval card. Verification
+ * executes a recipe in separate checkouts and keeps its normal approval flow. */
+export function reviewToolDecision(name: string, action: unknown): 'allow' | 'deny' | 'ask' {
+  if (['Read', 'Glob', 'Grep'].includes(name)) return 'allow';
+  if (name === 'mcp__lazybox__command') {
+    if (action === 'verify') return 'ask';
+    if (['read', 'tail', 'wait', 'actions'].includes(String(action))) return 'allow';
+  }
+  return 'deny';
+}

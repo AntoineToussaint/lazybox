@@ -3,7 +3,7 @@ import {create} from '@bufbuild/protobuf';import {JournalEventSchema} from '@laz
 import {appendTranscript,emptyTranscript} from '../packages/surfaces/src/transcript-model';
 import {boxAfterCommand,commandLine,decideSend,DEFAULT_MODEL,emptyCatalog,findCommand,lazyboxCommands,MODEL_CHOICES_SHOWN,mergeCatalog,mergeModels,modelChoices,permissionBlocked,shownModelChoices,modelRestartText,paletteCommand,parseSlash,providerCommands,rankChoices,rankCommands,resolveModel,sameModel,shortTokens,slashCommandList,slashMenu,snippetCommands,type SlashContext} from '../packages/surfaces/src/slash-commands';
 
-const ctx=(over:Partial<SlashContext>={}):SlashContext=>({provider:'claude',live:true,busy:false,coding:true,workspace:true,permission:'ask',planWorkflow:false,livePermission:true,model:'claude-opus-5-5',liveModel:true,resumable:true,models:[{value:'claude-opus-5-5',displayName:'Opus 5.5',description:'Most capable'},{value:'claude-sonnet-5',displayName:'Sonnet 5',description:'Fast'}],agentMessage:true,shellBlock:true,compact:true,detail:'smart',subscriptions:1,...over});
+const ctx=(over:Partial<SlashContext>={}):SlashContext=>({provider:'claude',live:true,busy:false,coding:true,workspace:true,permission:'ask',planWorkflow:false,livePermission:true,model:'claude-opus-5-5',liveModel:true,resumable:true,models:[{value:'claude-opus-5-5',displayName:'Opus 5.5',description:'Most capable'},{value:'claude-sonnet-5',displayName:'Sonnet 5',description:'Fast'}],agentMessage:true,shellBlock:true,compact:true,detail:'quiet',subscriptions:1,...over});
 const catalog=mergeCatalog(emptyCatalog(),{commands:[{name:'compact',description:'Clear history but keep a summary',argumentHint:'<instructions>',builtin:true},{name:'review-pr',description:'Review a pull request',argumentHint:'<number>'},{name:'/init',description:'Initialize CLAUDE.md',argumentHint:''},{name:'model',description:'native model picker',argumentHint:''},{name:'exit',description:'Exit',argumentHint:''},{name:'bad name',description:'',argumentHint:''}],models:[{value:'opus',displayName:'Opus'}],terminal:['exit']});
 const all=(c=ctx())=>{const lazybox=lazyboxCommands(c);return [...lazybox,...providerCommands(catalog,lazybox),...snippetCommands([{key:'review',description:'Review this change',category:'Review',body:'Review the current change carefully.'},{key:'test',description:'Run tests',category:'Testing',body:'Run the relevant tests.'}],['test'])];};
 
@@ -89,11 +89,11 @@ test('choices: Full access is refused in plan mode; detail marks the current one
  const {items,best}=rankChoices('',perms.choices!);assert.equal(items[best].value,'read-only','the current one is not the default pick');
  assert.equal(rankChoices('yo',perms.choices!).items[0].value,'yolo');
  assert.equal(rankChoices('bypass',perms.choices!).items[0].value,'yolo','keywords');
- const detail=lazyboxCommands(ctx()).find(c=>c.name==='detail')!;assert.equal(detail.choices!.find(c=>c.current)!.value,'smart');});
+ const detail=lazyboxCommands(ctx()).find(c=>c.name==='detail')!;assert.equal(detail.choices!.find(c=>c.current)!.value,'quiet');});
 
 test('argument hints, and what cannot run now says why',()=>{
  const byName=Object.fromEntries(lazyboxCommands(ctx({busy:true,shellBlock:false,workspace:false,compact:false,provider:'codex',liveModel:false,models:[]})).map(c=>[c.name,c]));
- assert.equal(byName.model.argumentHint,'<name> [effort]');assert.equal(byName.detail.argumentHint,'quiet|smart|verbose');assert.equal(byName.rename.argumentHint,'<title>');
+ assert.equal(byName.model.argumentHint,'<name> [effort]');assert.equal(byName.detail.argumentHint,'quiet|verbose');assert.equal(byName.rename.argumentHint,'<title>');
  assert.match(byName.model.description,/restarts the agent/,'a model change that is not live says so');
  assert.deepEqual(byName.model.choices!.map(c=>[c.value,c.current]),[['claude-opus-5-5',true]],'the current model is listed even when the provider lists none');
  assert.equal(byName.compact.disabled,'Wait for the turn to finish');

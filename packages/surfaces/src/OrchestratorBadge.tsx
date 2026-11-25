@@ -39,7 +39,7 @@ export function OrchestratorBadge({ session, sessionID }: { session?: Session; s
   const open = useOpenConversation();
   return <>
     {lineage?.grantId && session && <OrchestratorChip session={session}/>}
-    {lineage?.parentConversationId && <button type="button" className="lineage-crumb" title={`Started by the orchestrator “${lineage.parentTitle || 'Orchestrator'}” for the mission “${lineage.missionTitle}”${lineage.role ? ` as its ${lineage.role}` : ''}. Its approvals and questions still come to you.`}
+    {lineage?.missionId && lineage.parentConversationId && <button type="button" className="lineage-crumb" title={`Started by the orchestrator “${lineage.parentTitle || 'Orchestrator'}” for the mission “${lineage.missionTitle}”${lineage.role ? ` as its ${lineage.role}` : ''}. Its approvals and questions still come to you.`}
       aria-label={`Started by ${lineage.parentTitle || 'an orchestrator'}: open it`} onClick={() => open(lineage.parentConversationId)}>
       <Icon name="subagent" size={11}/><span>{lineage.parentTitle || 'Orchestrator'}</span>{lineage.role && <small>{lineage.role}</small>}
     </button>}

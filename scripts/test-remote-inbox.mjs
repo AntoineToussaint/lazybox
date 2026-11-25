@@ -158,6 +158,7 @@ try {
 
   // Every phone call carried a device credential and stayed on the device allowlist.
   assert.deepEqual(f.remote.deviceDenied, []);
+  assert.ok(!f.calls.some(c=>c.device && c.method==='ListExtensions'),'phone questions do not request the owner catalog');
   const phoneCalls = f.calls.filter(c => c.device);
   assert.ok(phoneCalls.length > 0);
   assert.deepEqual([...new Set(phoneCalls.map(c => c.method))].sort().filter(m => !['Apply', 'GetPushSettings', 'GetSession', 'Info', 'ListCollections', 'ListCommands', 'ListLinks', 'ReadSessionTail', 'WatchEvents'].includes(m)), [], 'the phone used an RPC it does not need');

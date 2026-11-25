@@ -133,6 +133,9 @@ func (b *Bench) briefingSections(provider, purpose, workspace string, browser bo
 	} else {
 		dynamic(briefingSection{id: "document-style", heading: "## How to present workflows and decisions", text: documentStyle})
 	}
+	if !agent.IsAssistant(purpose) {
+		dynamic(briefingSection{id: "clone-me", text: b.cloneBriefing()})
+	}
 	dynamic(briefingSection{id: "browser", text: b.browserBriefing(provider, purpose, workspace, browser)})
 	return out
 }
@@ -140,6 +143,7 @@ func (b *Bench) briefingSections(provider, purpose, workspace string, browser bo
 // goneNotes: what an update says of a section the conversation was given
 // that is now empty: only the person's own text is ever removed.
 var goneNotes = []struct{ id, note string }{
+	{"clone-me", "The Clone Me profile was cleared or turned off. Disregard its earlier preferences."},
 	{"settings", "The person removed their instructions in Settings → Agents: disregard them."},
 	{"provider", "The person removed their provider-specific instructions in Settings → Agents: disregard them."},
 }

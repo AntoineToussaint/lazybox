@@ -14,6 +14,15 @@ import (
 // or a send without the option, leaves it open. Its findings stay readable.
 func TestReviewerTypeClosesOnceItsFindingsAreAllHandedOn(t *testing.T) {
 	f := newReviewFixture(t)
+	// The person hands the findings on: the loop asks between rounds.
+	settings, err := f.client.GetRunnerSettings(f.owner, &pb.InfoRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Review.Loop = "ask"
+	if _, err = f.client.SaveRunnerSettings(f.owner, settings); err != nil {
+		t.Fatal(err)
+	}
 	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID})
 	if err != nil {
 		t.Fatal(err)

@@ -228,6 +228,11 @@ function QueuedItem({ message, index, session, busy, steer, agentName, stops, se
   </li>;
 }
 
+/** The event stream can announce a running turn before the next session poll. */
+export function queueTurnRunning(session: Session | undefined, turnRunning?: boolean): boolean {
+  return !!session && !session.closed && (session.busy || !!turnRunning);
+}
+
 export function QueuedMessages({ session, queued, turnRunning, live, agentName, activity, delivery, sendNowKey }: {
   session?: Session;
   /** What waits, as `queuedMessages` (transcript-model.ts) merges it: at once, and in one place only. */
@@ -242,7 +247,7 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
   /** Send now's key as it reads (⌘↵), when it has one: it sends the oldest queued message. */
   sendNowKey?: string;
 }) {
-  const busy = (!!session?.busy || !!turnRunning) && !!session && !session.closed;
+  const busy = queueTurnRunning(session, turnRunning);
   const [collapsed, setCollapsed] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const step = useMemo(() => busy ? stepName(activity) : {}, [busy, activity]);

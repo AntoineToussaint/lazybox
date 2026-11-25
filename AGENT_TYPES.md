@@ -24,13 +24,15 @@ including their requests in the inbox. Help, planning and summary stay in their 
 | Artifact companion (`artifact`) | yes | no | no | yes | no | companion |
 | Ask Lazybox (`help`), planning, summary | no | no | no | no | no | assistant |
 
+Reviewers inspect workspace files and file findings without approval cards. Operations requiring elevated access are declined immediately. A verification review can separately request execution of a test recipe in isolated checkouts.
+
 - **Works in a workspace**: it edits files, runs interactive commands and
   workspace actions, gets your behaviour profile, and is checkpointed.
 - **Starts agents**: missions, `lazybox agents spawn`, conversations it
   hands work to.
 - **Listed**: a conversation of its own in the sidebar, tabs and workspace
   lists. A companion is reached from its artifact, and a reviewer from its
-  review card and the review tray.
+  review card, the review tray, and a sidebar row nested under the conversation that requested it.
 - **Reaches the inbox**: its questions, approvals, interactive commands and
   failures reach the inbox and notifications. An agent that can act always
   does, listed or not. Hiding a companion from the sidebar must never hide

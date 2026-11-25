@@ -13,7 +13,7 @@ import { openArtifact } from './artifact-events';
 import { requestOrchestrate } from './OrchestratorBadge';
 import { humanError } from './human-error';
 
-type RowId = 'start' | 'start-new' | 'edit' | 'deny';
+type RowId = 'start' | 'start-new' | 'start-here' | 'edit' | 'deny';
 type Row = { id: RowId; label: string; detail?: string; key: string; tone: 'allow' | 'always' | 'deny' };
 type Draft = { title: string; brief: string; profile: string; model: string; mode: 'same' | 'new' };
 
@@ -45,9 +45,13 @@ export function ConversationRequestCard({ request, api, session, onError, positi
   const busy = useRef(false);
   const agent = capital(agentName);
   const canBranch = !!view.workspace;
+  // Start names where it starts, and the other place is one click away too.
   const rows: Row[] = [
-    { id: 'start', label: 'Start', detail: view.mode === 'new' ? 'In a new workspace, as asked' : 'In this workspace, as asked', key: 'y', tone: 'allow' },
+    view.mode === 'new'
+      ? { id: 'start', label: 'Start in a new workspace', detail: 'Its own branches, as asked', key: 'y', tone: 'allow' }
+      : { id: 'start', label: 'Start in this workspace', detail: 'Beside this conversation, as asked', key: 'y', tone: 'allow' },
     ...(!remote && canBranch && view.mode === 'same' ? [{ id: 'start-new', label: 'Start in a new workspace', detail: 'Its own branches, so it does not edit the same files', key: 'w', tone: 'always' } as Row] : []),
+    ...(!remote && view.mode === 'new' ? [{ id: 'start-here', label: 'Start in this workspace', detail: 'No new workspace: it works on this one’s files', key: 'h', tone: 'always' } as Row] : []),
     ...(!remote ? [{ id: 'edit', label: 'Edit…', detail: 'Change the title, brief, agent or workspace first', key: 'e', tone: 'always' } as Row] : []),
     { id: 'deny', label: 'Deny…', detail: `Tell ${agentName} why`, key: 'n', tone: 'deny' },
   ];
@@ -79,6 +83,7 @@ export function ConversationRequestCard({ request, api, session, onError, positi
     if (panel !== 'rows' || sending) return;
     if (row.id === 'start') void start();
     else if (row.id === 'start-new') void start({ mode: 'new' });
+    else if (row.id === 'start-here') void start({ mode: 'same' });
     else if (row.id === 'edit') { setDraft(asked); setPanel('edit'); focusLater('.start-edit input[name=title]'); }
     else { setPanel('deny'); focusLater('.deny-reason textarea'); }
   };

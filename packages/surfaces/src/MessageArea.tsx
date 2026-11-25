@@ -29,7 +29,7 @@ type Transcript = ReturnType<typeof useTranscript>;
  * the agent's pending requests (and a subscription limit) in the scrolling pane, and a way back to the
  * latest message once the reader scrolled away from it.
  */
-export function MessageArea({ api, session, sessionID, transcript, scroll, spoken, agentName, limited, onContinueTurn, nameFor, onOpenFile, onError, onHandoff, onOpenHandoff, onBranch, subscription, enableFullAccess, detail = 'smart', alwaysShowTime }: {
+export function MessageArea({ api, session, sessionID, transcript, scroll, spoken, agentName, limited, onContinueTurn, nameFor, onOpenFile, onError, onHandoff, onOpenHandoff, onBranch, subscription, enableFullAccess, detail = 'quiet', alwaysShowTime }: {
   api: RunnerClient;
   alwaysShowTime?: boolean;
   session?: Session;
@@ -137,6 +137,6 @@ function EmptyConversation({ agentName }: { agentName: string }) {
 /** Questions and approvals the agent waits on, answered in place. */
 function PendingRequests({ api, session, sessionID, agentName, onError, enableFullAccess }: { api: RunnerClient; enableFullAccess?(exitPlanRequestId?: string): Promise<boolean>; session?: Session; sessionID: string; agentName: string; onError(message: string): void }) {
   const count = session?.pending.length || 0;
-  return <>{session?.pending.map((p, index) => <RequestCard enableFullAccess={session.workflow !== 'plan' ? enableFullAccess :
+  return <>{session?.pending.map((p, index) => <RequestCard workspace={session.collectionId} enableFullAccess={session.workflow !== 'plan' ? enableFullAccess :
     enableFullAccess && session.provider === 'claude' && p.type === 'approval' && p.text === 'ExitPlanMode' && (!p.agentId || p.agentId === 'root') ? () => enableFullAccess(p.requestId) : undefined} key={p.requestId} request={p} api={api} session={sessionID} onError={onError} root={session.workingDirectory} agentName={agentName} position={{ index, count }}/>)}</>;
 }

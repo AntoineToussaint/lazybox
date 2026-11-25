@@ -11,7 +11,9 @@ import (
 // Events hooks may follow.
 const (
 	// EventNeedsInput: an agent asks for an approval or an answer.
-	EventNeedsInput = "agent.needs-input"
+	EventWorkspaceArchived    = "workspace.archived"
+	EventConversationArchived = "conversation.archived"
+	EventNeedsInput           = "agent.needs-input"
 	// EventTurnDone: an agent's turn ended normally.
 	EventTurnDone = "turn.done"
 	// EventTurnFailed: a turn ended in a failure (a fault, a provider error).
@@ -32,7 +34,7 @@ const (
 )
 
 // Events lists every event, in the order Settings shows them.
-var Events = []string{EventNeedsInput, EventTurnDone, EventTurnFailed, EventPROpened, EventChecksFailed, EventChecksPassed, EventChangesRequested, EventPRApproved, EventPRMerged, EventPRClosed, EventPRConflicts, EventMissionAccepted}
+var Events = []string{EventWorkspaceArchived, EventConversationArchived, EventNeedsInput, EventTurnDone, EventTurnFailed, EventPROpened, EventChecksFailed, EventChecksPassed, EventChangesRequested, EventPRApproved, EventPRMerged, EventPRClosed, EventPRConflicts, EventMissionAccepted}
 
 // Event is what happened, as a hook receives it: JSON on stdin and in the
 // file $LAZYBOX_EVENT_FILE, the main fields also as LAZYBOX_EVENT_*

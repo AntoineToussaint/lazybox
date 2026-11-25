@@ -45,7 +45,7 @@ try{
  const chat=page.locator('.embedded-chat:visible').first(),composer=chat.getByRole('textbox',{name:'Message',exact:true});
  const strip=chat.getByRole('region',{name:'Queued messages'});
  // Send now's key, as the app shows it and as it is pressed.
- const mac=await page.evaluate(()=>/Mac|iPhone|iPad/.test(navigator.platform)),nowKey=mac?'⌘↵':'Ctrl+↵',sendNowKey='Meta+Enter';
+ const mac=await page.evaluate(()=>/Mac|iPhone|iPad/.test(navigator.platform)),nowKey=mac?'⌘↵':'Ctrl+↵',sendNowKey=mac?'Meta+Enter':'Control+Enter';
  const hint=chat.locator('.composer .keyboard-hint');
 
  // ── Sent during a busy turn, the message waits, and the strip says why.
@@ -144,6 +144,8 @@ try{
  await expect(deleted).toHaveCount(0);
  await expect(youSaid(chat,'Delete this queued follow-up')).toHaveCount(0);
  assert.equal(claude.interrupted,interruptedBeforeDelete);
+ // The session poll still says idle, but the transcript has already started the turn.
+ claude.busy=false;f.freezeSession(claude.id);claude.busy=true;
  await page.reload();
  await expect(strip.locator('.queued-head [role=status]')).toHaveText(/^3 messages queued/);
  await expect(youSaid(chat,'Delete this queued follow-up')).toHaveCount(0);
@@ -165,6 +167,7 @@ try{
  await composer.focus();await expect(composer).toHaveValue('');
  await composer.press(sendNowKey);
  await expect.poll(()=>deliveries().at(-1)).toEqual({operationId:sentAs('First follow-up'),how:'now'});
+ f.thawSession(claude.id);
  assert.equal(claude.interrupted,3);
  assert.deepEqual(claude.queuedMessages.map(m=>m.text),['Second follow-up','Third follow-up']);
  await expect(strip.locator('.queued-head [role=status]')).toHaveText(/^2 messages queued — Claude is busy/,{timeout:5000});
@@ -194,10 +197,10 @@ try{
  assert.equal(codex.interrupted,undefined);
  await expect(youSaid(chat,'Inspect the error path independently').locator('.message-tag')).toHaveText('sub-agent requested');
  await expect(strip).toHaveCount(0);
- // Steer stays a button: ⌘↵ with nothing typed and nothing queued sends nothing, and says so quietly.
+ // Steer stays a button: ⌘↵ with nothing typed and nothing queued sends nothing and stays quiet.
  const before=f.mutations.filter(m=>m.method==='Apply').length;
  await composer.focus();await composer.press(sendNowKey);
- await expect(page.locator('.context-menu-notice')).toHaveText('Nothing queued to send now');
+ assert.deepEqual(await page.locator('.context-menu-notice').allTextContents(), [], 'an empty Send now is silent');
  assert.equal(f.mutations.filter(m=>m.method==='Apply').length,before,'nothing sent');
 
  // ── A Claude worker that steers (Capabilities.steer) offers Steer too, and no "can't" note; ⌘↵ stays Send now.
@@ -215,6 +218,7 @@ try{
  await open(codex);
 
  // ── The agent idle: ⌘↵ is an ordinary send, nothing interrupted.
+ channels[codex.id].push({type:'turn_ended',status:'done'});
  Object.assign(codex,{busy:false,status:'ready',agents:[]});
  await expect(hint).toHaveText('Enter to send · Shift+Enter for a new line',{timeout:5000});
  const delivered=deliveries().length;
@@ -245,7 +249,7 @@ try{
  await page.getByRole('button',{name:'Work',exact:true}).click();
  await open(codex);
  await expect(hint).toHaveText('Shift+Enter to send');
- busy(codex,'codex');
+ busy(codex,'codex');channels[codex.id].push({type:'turn_started'});
  for (const text of ['Shift queue first', 'Shift queue second', 'Shift queue third']) {
    await composer.fill(text);
    await composer.press('Shift+Enter');
@@ -258,7 +262,7 @@ try{
  const editingRow=strip.getByRole('listitem',{name:/Shift queue first/});
  // Edit is one of the message's actions, in their row, right before Send now; Tab follows the same order.
  const actionNames=row=>row.locator('.queued-actions button').evaluateAll(buttons=>buttons.map(button=>button.textContent.trim()));
- assert.deepEqual(await actionNames(editingRow),['Steer','Request delegation','Edit','Send now','Delete']);
+ await expect.poll(()=>actionNames(editingRow)).toEqual(['Steer','Request delegation','Edit','Send now','Delete']);
  await editingRow.getByRole('button',{name:'Request delegation'}).focus();
  for (const name of ['Edit','Send now','Delete']) {
    await page.keyboard.press('Tab');

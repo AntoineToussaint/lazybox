@@ -300,6 +300,32 @@ export function WorkspaceRepositoryDialog({
       )}
       {!empty && <div className="workspace-picker-body">
         <RepositoryBrowser
+          renderBranch={identity => (<>
+            <StartFromChip
+              identity={identity}
+              repository={repositoryName(identity)}
+              branch={starts[identity] ?? ""}
+              info={startInfo[identity]}
+              disabled={busy}
+              expanded={startPicker === identity}
+              onOpen={() => (startPicker === identity ? closeStart(identity) : setStartPicker(identity))}
+            />
+            {startPicker === identity && !busy && (
+              <StartFromPicker
+                api={api}
+                identity={identity}
+                repository={repositoryName(identity)}
+                info={startInfo[identity]}
+                current={starts[identity] ?? ""}
+                onInfo={(info) => setStartInfo(identity, info)}
+                onClose={() => closeStart(identity)}
+                onPick={(picked) => {
+                  setStarts((current) => ({ ...current, [identity]: picked }));
+                  closeStart(identity);
+                }}
+              />
+            )}
+          </>)}
           selected={selected}
           included={included}
           disabled={busy || !copyLoaded}
@@ -318,44 +344,6 @@ export function WorkspaceRepositoryDialog({
           chooseRepositoryFolder={chooseRepositoryFolder}
         />
       </div>}
-      {!empty && (
-        <div className="workspace-start-from-field">
-          {/* Always one line, so choosing the first repository does not move the dialog under the pointer. */}
-          <div className="workspace-start-from" role="group" aria-label="Start from">
-            <span className="workspace-start-from-label"><Icon name="branch" size={13} />Start from</span>
-            {!chosen.length && <small>each repository's default branch</small>}
-            {chosen.map((identity) => (
-              <span key={identity} className="workspace-start-from-repo">
-                {repositoryName(identity)}
-                <StartFromChip
-                  identity={identity}
-                  repository={repositoryName(identity)}
-                  branch={starts[identity] ?? ""}
-                  info={startInfo[identity]}
-                  disabled={busy}
-                  expanded={startPicker === identity}
-                  onOpen={() => (startPicker === identity ? closeStart(identity) : setStartPicker(identity))}
-                />
-              </span>
-            ))}
-          </div>
-          {startPicker && chosen.includes(startPicker) && !busy && (
-            <StartFromPicker
-              api={api}
-              identity={startPicker}
-              repository={repositoryName(startPicker)}
-              info={startInfo[startPicker]}
-              current={starts[startPicker] ?? ""}
-              onInfo={(info) => setStartInfo(startPicker, info)}
-              onClose={() => closeStart(startPicker)}
-              onPick={(picked) => {
-                setStarts((current) => ({ ...current, [startPicker]: picked }));
-                closeStart(startPicker);
-              }}
-            />
-          )}
-        </div>
-      )}
       {error && (
         <p className="error" role="alert">
           {error}

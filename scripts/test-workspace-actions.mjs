@@ -141,5 +141,10 @@ for(const viewport of [{width:900,height:420},{width:390,height:640}]){
  await expect(removeApi).toHaveCount(0);
  await expect(repositories.getByRole('button',{name:'Remove web from Alpha feature'})).toBeVisible();
  assert.deepEqual(fixture.mutations.filter(m=>m.method==='RemoveCollectionRepository').map(m=>m.body),[{collectionId:'alpha',memberName:'api'}]);
+ await repositories.getByRole('button',{name:'Close workspace repositories'}).click();
+ await page.getByLabel('Actions for Alpha feature',{exact:true}).click();
+ await page.getByRole('button',{name:'Archive workspace…',exact:true}).click();
+ await page.getByRole('dialog',{name:'Archive workspace?'}).getByRole('button',{name:'Archive workspace',exact:true}).click();
+ await expect.poll(()=>fixture.mutations.filter(m=>m.method==='ArchiveCollection').map(m=>m.body.collectionId)).toEqual(['alpha']);
 await drainPageErrors(errors);assert.deepEqual(errors,[],'no page errors');console.log('PASS: reachable top-layer actions in clipped/narrow panels; right-click, keyboard and outside dismissal; no toolbar overlap; focused cancel, dirty/running guards, Check all ticking the required consents (not the artifacts choice) and focusing Delete (Cancel while blocked), a held Enter not confirming, scoped workspace deletion and repository removal. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

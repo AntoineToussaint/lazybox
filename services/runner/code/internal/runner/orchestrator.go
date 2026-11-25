@@ -1137,10 +1137,19 @@ type SessionLineage struct {
 
 // LineageOf is a conversation's place in a tree, or false when it has none.
 func (b *Bench) LineageOf(ctx context.Context, e *Execution) (SessionLineage, bool) {
+	conversation := conversationOf(e)
+	if b.Reviews != nil {
+		if review, ok := b.Reviews.ReviewerRun(e.ID, conversation); ok {
+			parent := review.Run.SourceConversation
+			if parent == "" {
+				parent = review.Run.SourceSession
+			}
+			return SessionLineage{Parent: parent, ParentTitle: review.Run.SourceTitle, Role: "reviewer"}, true
+		}
+	}
 	if b.Work == nil {
 		return SessionLineage{}, false
 	}
-	conversation := conversationOf(e)
 	var out SessionLineage
 	found := false
 	if p, ok := b.Work.ParentOf(conversation); ok {

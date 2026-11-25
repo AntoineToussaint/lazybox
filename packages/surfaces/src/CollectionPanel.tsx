@@ -1,6 +1,6 @@
 import { useKeyboardAction, useKeymap } from "./keyboard";
 import { useConversationIndex } from "./useConversationIndex";
-import { isListed } from "./attention";
+import { isListed, reviewParent } from "./attention";
 import { useDeleteConversation } from "./useDeleteConversation";
 import { repositoryLabel } from "./repository-model";
 import { WorkspaceRepositories } from "./WorkspaceRepositories";
@@ -300,7 +300,7 @@ function WorkspaceList({
     onError: (body) => showToast({ tone: "failed", title: "Workspaces not reordered", body }),
   });
   const choose = (collection: Collection) => {
-    const rows = index.sessions.filter((s) => s.collectionId === collection.id && isListed(s) && !isArchivedAway(s));
+    const rows = index.sessions.filter((s) => s.collectionId === collection.id && isListed(s) && !reviewParent(s) && !isArchivedAway(s));
     const sessionId =
       index.complete && rows.length === 1
         ? rows[0].id
@@ -387,8 +387,13 @@ function WorkspaceList({
         <span className="sr-only" role="status" aria-live="polite">{reorder.announcement}</span>
         {reorder.items.map((collection) => {
           const rows = index.sessions.filter(
-            (s) => s.collectionId === collection.id && isListed(s) && !isArchivedAway(s),
+            (s) => s.collectionId === collection.id && isListed(s) && !reviewParent(s) && !isArchivedAway(s),
           );
+          const reviews = index.sessions.filter(s => s.collectionId === collection.id && reviewParent(s) && !isArchivedAway(s));
+          const reviewsOf = (author: typeof rows[number]) => reviews.filter(s => {
+            const parent = reviewParent(s);
+            return parent && (parent === author.id || parent === author.conversationId);
+          });
           const single =
             index.complete && rows.length === 1 ? rows[0] : undefined;
           return (
@@ -427,6 +432,11 @@ function WorkspaceList({
                 fold={rows.length > 1 ? { folded: folded.includes(collection.id), count: rows.length, toggle: () => toggleFold(collection.id) } : undefined}
                 hover={{ sessions: rows, summary: git.byWorkspace.get(collection.id), links: tracked.links, onOpenConversation: (sessionId) => onTarget({ collectionId: collection.id, sessionId, commandId: "" }) }}
               />
+              {single && reviewsOf(single).length > 0 && (
+                <div className="workspace-conversations">
+                  <ConversationList sessions={reviewsOf(single)} compact collectionId={collection.id} target={target} onTarget={onTarget}/>
+                </div>
+              )}
               {rows.length > 1 && !folded.includes(collection.id) && (
                 <div className="workspace-conversations">
                   <ConversationList
@@ -436,6 +446,7 @@ function WorkspaceList({
                       refresh();
                     }}
                     sessions={rows}
+                    reviewsOf={reviewsOf}
                     compact
                     collectionId={collection.id}
                     target={target}

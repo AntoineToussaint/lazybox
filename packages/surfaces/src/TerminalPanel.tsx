@@ -116,6 +116,7 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
     if (fresh.length) choose(fresh.at(-1)!);
     else setSelected(current => ids.includes(current) ? current : ids.at(-1) || '');
     known.current = new Set(ids);
+    return result.terminals;
   };
   const open = async () => {
     if (!workspaceId || opening) return;
@@ -128,15 +129,12 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
     } catch (error) { setError(String(error)); }
     finally { setOpening(false); }
   };
-  const close = async (id: string) => {
-    try { await api.closeTerminal({ terminalId: id }); await refresh(); }
-    catch (error) { setError(String(error)); }
-  };
-  // A shell that exits cleanly (exit, Ctrl+D) closes its tab like any terminal
-  // app; the panel closes with the last one. A failure stays to be read.
-  const exitedCleanly = async (id: string) => {
-    await close(id);
-    if (!listed.current.some(terminal => terminal.id !== id && !terminal.done)) onClosePanel?.();
+  const close = async (id: string, cleanExit = false) => {
+    try {
+      await api.closeTerminal({ terminalId: id });
+      const remaining = await refresh();
+      if (remaining && (cleanExit ? remaining.every(terminal => terminal.done) : remaining.length === 0)) onClosePanel?.();
+    } catch (error) { setError(String(error)); }
   };
   // Another workspace starts from an empty list. A Runner restart (a new
   // address or bearer, so a new `api`) does not: its terminals outlive it, so
@@ -202,7 +200,7 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
           <button aria-label="New terminal" title="New terminal" disabled={!ready || opening} onClick={() => void open()}><Icon name="plus" size={14}/><span>New terminal</span></button>
         </span>
       </div>
-      {current ? <TerminalView key={current.id} api={api} terminal={current} initialCommand={current.id === initialTerminalId ? initialCommand : undefined} focusRef={focusView} workspaceId={workspaceId} canSend={!!conversation} onSendToAgent={sendToAgent} onNewTerminal={ready ? () => void open() : undefined} onCloseTerminal={() => void close(current.id)} onCleanExit={current.place === 'interactive-command' ? undefined : () => void exitedCleanly(current.id)} onSize={value => { size.current = value; }} onError={setError}/>
+      {current ? <TerminalView key={current.id} api={api} terminal={current} initialCommand={current.id === initialTerminalId ? initialCommand : undefined} focusRef={focusView} workspaceId={workspaceId} canSend={!!conversation} onSendToAgent={sendToAgent} onNewTerminal={ready ? () => void open() : undefined} onCloseTerminal={() => void close(current.id)} onCleanExit={current.place === 'interactive-command' ? undefined : () => void close(current.id, true)} onSize={value => { size.current = value; }} onError={setError}/>
         : <p className="module-empty">{ready ? 'No terminal is open in this workspace. A terminal runs your login shell on the Runner, in the directory you choose, and keeps running when the Runner restarts.' : 'The workspace is not ready for a terminal.'}{ready && <><br/><button className="primary" disabled={opening} onClick={() => void open()}>Start terminal</button></>}</p>}
     </>}
   </section>;

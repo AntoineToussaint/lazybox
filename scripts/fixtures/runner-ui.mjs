@@ -177,7 +177,7 @@ export async function startRunnerFixture() {
   // shows it again, as zsh's line editor does with typeahead.
   // A line starting `watch ` keeps running until Ctrl+C.
   const terminals=new Map();let terminalStartDelayMs=0;
-  const terminalStatus=t=>({id:t.id,collectionId:t.collectionId,directory:t.directory,title:t.title,shell:'/bin/fixture-sh',cols:t.cols,rows:t.rows,offset:String(t.output.length),retained:String(t.output.length),done:t.done,...(t.done?{exitCode:0}:{}),createdAtUnixMillis:String(t.createdAt),...(t.place?{place:t.place,repositoryId:t.repositoryId||'',cwd:t.cwd}:{}),...shellMarks(t)});
+  const terminalStatus=t=>({id:t.id,collectionId:t.collectionId,directory:t.directory,title:t.title,shell:'/bin/fixture-sh',cols:t.cols,rows:t.rows,offset:String(t.output.length),retained:String(t.output.length),done:t.done,...(t.signal?{signal:t.signal}:t.done?{exitCode:0}:{}),createdAtUnixMillis:String(t.createdAt),...(t.place?{place:t.place,repositoryId:t.repositoryId||'',cwd:t.cwd}:{}),...shellMarks(t)});
   // As the Runner does: the shell's command-end marks (OSC 133;D;<status>) counted, with the latest status; prompts ready (133;B); idle at the last one.
   const shellMarks=t=>{const text=t.output.toString();const ends=[...text.matchAll(/\x1b\]133;D;(\d+)\x07/g)];const marks=[...text.matchAll(/\x1b\]133;([BCD])/g)];const ready=marks.filter(m=>m[1]==='B').length;
     return {promptMarks:true,...(ends.length?{commandEnds:String(ends.length),lastCommandStatus:Number(ends.at(-1)[1])}:{}),...(ready?{promptsReady:String(ready)}:{}),idle:!t.done&&marks.at(-1)?.[1]==='B'};};
@@ -640,7 +640,7 @@ actions:
         else if(scope==='pr'){const pr=shipState(collection.id,body.member).pr;if(!pr)return error('failed_precondition','this branch has no pull request to review');scopeLabel=`PR #${pr.number}`;}
         else scopeLabel=!body.compare?'Changes':body.compare===':uncommitted'?'Uncommitted changes':`Changes vs ${body.compare}`;
         const label=providerName(profile.provider),title=`${body.templateId==='behavior-verification-v1'?'Behavior verification':body.templateId==='security-review-v1'?'Security review':'Review'} · ${scopeLabel} · ${label}`;
-        const reviewer={id:`review-${sessions.length}`,purpose:'reviewer',collectionId:collection.id,workId:collection.id,profileId:profile.id,provider:profile.provider,model,permission:'read-only',title,status:'running',busy:true,capabilities:{files:true},pending:[]};sessions.push(reviewer);
+        const reviewer={id:`review-${sessions.length}`,purpose:'reviewer',lineage:{role:'reviewer',parentConversationId:source.conversationId||source.id},collectionId:collection.id,workId:collection.id,profileId:profile.id,provider:profile.provider,model,permission:'read-only',title,status:'running',busy:true,capabilities:{files:true},pending:[]};sessions.push(reviewer);
         const now=String(Math.floor(Date.now()/1000));
         const loop=body.templateId==='behavior-verification-v1'?'auto':body.templateId?'off':runnerSettings.review?.loop||'ask',maxRounds=Math.min(10,Math.max(1,runnerSettings.review?.maxRounds||3));
         const run={templateId:body.templateId||'',loop,maxRounds,round:1,phase:'reviewing',paused:false,stopReason:'',rounds:[{number:1,trigger:'start',startedAtUnix:now}],timeline:[],id:'rv-'+randomUUID().slice(0,8),reviewerSessionId:reviewer.id,reviewerTitle:title,reviewerLabel:label,reviewerProvider:profile.provider,reviewerProfileId:profile.id,sourceSessionId:source.id,sourceTitle:source.title||'',sourceLabel:providerName(authorProvider),sourceProvider:authorProvider,scope,scopeLabel,turn:body.turn||0,compare:body.compare||'',state:'running',detail:`${label} is reviewing ${scopeLabel.toLowerCase()}.${fallback?' '+fallback:''}`,fallback,focus:(body.focus||'').trim(),createdAtUnix:now,updatedAtUnix:now};
@@ -997,7 +997,7 @@ actions:
       case 'ResizeTerminal': {const t=terminals.get(body.terminalId);if(!t)return error('not_found','Terminal missing');Object.assign(t,{cols:body.cols,rows:body.rows});t.resizes.push([body.cols,body.rows]);return json(terminalStatus(t));}
       case 'CloseTerminal': {
         const t=terminals.get(body.terminalId);if(!t)return error('not_found','Terminal missing');mutations.push({method,body});
-        t.done=true;for(const client of t.clients)client.end(Buffer.concat([frame({offset:String(t.output.length),status:terminalStatus(t)}),frame({},2)]));terminals.delete(t.id);return json(terminalStatus(t));
+        if(!t.done)t.signal="SIGHUP";t.done=true;for(const client of t.clients)client.end(Buffer.concat([frame({offset:String(t.output.length),status:terminalStatus(t)}),frame({},2)]));terminals.delete(t.id);return json(terminalStatus(t));
       }
       case 'CreateCollection': {
         mutations.push({ method, body });

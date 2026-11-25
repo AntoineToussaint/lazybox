@@ -50,7 +50,12 @@ export type Attention = {
  */
 const legacyAssistants = new Set(['help', 'planning', 'summary']);
 const legacyUnlisted = new Set([...legacyAssistants, 'artifact', 'reviewer']);
-/** A conversation of its own in the sidebar, tabs and workspace lists. A companion or a reviewer is reached from its artifact or review instead. */
+/** The author above this review in the workspace sidebar. Mission agents have their own lineage. */
+export function reviewParent(session: Session): string | undefined {
+  const lineage = session.lineage;
+  return lineage?.role === 'reviewer' && !lineage.missionId ? lineage.parentConversationId : undefined;
+}
+/** A conversation of its own in the sidebar, tabs and workspace lists. */
 export function isListed(session: Session): boolean {
   return session.agentType ? session.agentType.listed : !legacyUnlisted.has(session.purpose);
 }

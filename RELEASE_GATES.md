@@ -113,7 +113,7 @@ and choose the branch and **full**. Manual runs default to full.
 | Catalog, spelling, export, private-file checks | Yes | Yes |
 | TypeScript, client and worker tests | Yes | Yes |
 | Codefly and Buf regeneration, wire compatibility | Yes | Yes |
-| Linux Go | Format, vet and full tests | Format, vet, full tests and restart race checks |
+| Linux Go | Format, vet and the tests (`make test`) | Format, vet, the tests and restart race checks |
 | macOS Go and launcher | — | Full tests, restart race checks and launcher tests |
 | macOS Tauri | — | Build, format, tests and clippy |
 | Playwright | Workspace, inbox, send recovery and voice, in parallel | Every UI gate across six shards |

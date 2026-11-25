@@ -41,6 +41,32 @@ type terminalFixture struct {
 
 func newTerminalFixture(t *testing.T) *terminalFixture {
 	t.Helper()
+	f := newServedRunner(t)
+	s, fake := f.service, f.fake
+	ctx := context.Background()
+	for i, name := range []string{"Parser", "Release"} {
+		r := f.createWorkspace(t, name)
+		e, err := s.Bench.OpenCollection("claude-default", r.Collection.Id, "", accounts.Options{}, "direct", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			f.mine, f.conversation, f.agentToken = r.Collection, e, agentToken(t, fake.Session.Open.Env)
+			if _, err = s.RenameConversation(ctx, &pb.RenameConversationRequest{SessionId: e.ID, Title: "Fix the parser"}); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			f.theirs, f.elsewhere = r.Collection, e
+		}
+	}
+	f.terminal, f.terminalToken = f.openTerminal(t, f.mine.Id)
+	return f
+}
+
+// newServedRunner is the Runner behind the production interceptors, reached
+// over gRPC, with no workspace yet.
+func newServedRunner(t *testing.T) *terminalFixture {
+	t.Helper()
 	t.Setenv("SHELL", "/bin/sh")
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ENV", "")
@@ -57,27 +83,17 @@ func newTerminalFixture(t *testing.T) *terminalFixture {
 	}
 	t.Cleanup(func() { conn.Close() })
 	f.conn, f.client = conn, pb.NewRunnerServiceClient(conn)
-	ctx := context.Background()
-	for i, name := range []string{"Parser", "Release"} {
-		r, err := s.CreateCollection(ctx, &pb.CreateCollectionRequest{RequestKey: name, Spec: &pb.CollectionSpec{Name: name, Members: []*pb.WorktreeSpec{{Name: "api", RepositoryId: "api"}}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		e, err := s.Bench.OpenCollection("claude-default", r.Collection.Id, "", accounts.Options{}, "direct", "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if i == 0 {
-			f.mine, f.conversation, f.agentToken = r.Collection, e, agentToken(t, fake.Session.Open.Env)
-			if _, err = s.RenameConversation(ctx, &pb.RenameConversationRequest{SessionId: e.ID, Title: "Fix the parser"}); err != nil {
-				t.Fatal(err)
-			}
-		} else {
-			f.theirs, f.elsewhere = r.Collection, e
-		}
-	}
-	f.terminal, f.terminalToken = f.openTerminal(t, f.mine.Id)
 	return f
+}
+
+// createWorkspace creates a workspace with one member, api.
+func (f *terminalFixture) createWorkspace(t *testing.T, name string) *pb.CollectionResponse {
+	t.Helper()
+	r, err := f.service.CreateCollection(context.Background(), &pb.CreateCollectionRequest{RequestKey: name, Spec: &pb.CollectionSpec{Name: name, Members: []*pb.WorktreeSpec{{Name: "api", RepositoryId: "api"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
 
 // openTerminal starts a shell and returns its id and the credential the shell

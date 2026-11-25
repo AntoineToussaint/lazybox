@@ -19,9 +19,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// reviewFixture: the terminal fixture's author conversation (Claude, "Fix
-// the parser") has done one turn that changed api/handler.go; Codex is the
-// other provider, fake, to review it.
+// reviewFixture: in one workspace (mine), the author conversation (Claude,
+// "Fix the parser") has done one turn that changed api/handler.go; Codex is
+// the other provider, fake, to review it. Nothing else runs: no second
+// workspace, conversation or shell, which no review test uses.
 type reviewFixture struct {
 	*terminalFixture
 	codex  *agenttest.Adapter
@@ -31,7 +32,8 @@ type reviewFixture struct {
 
 func newReviewFixture(t *testing.T) *reviewFixture {
 	t.Helper()
-	f := &reviewFixture{terminalFixture: newTerminalFixture(t), codex: &agenttest.Adapter{}, claude: &agenttest.Adapter{}}
+	f := &reviewFixture{terminalFixture: newServedRunner(t), codex: &agenttest.Adapter{}, claude: &agenttest.Adapter{}}
+	f.mine = f.createWorkspace(t, "Parser").Collection
 	f.bench.Adapters["codex"] = f.codex
 	ctx := timeout(t)
 	f.owner = bearer(ctx, ownerToken)
@@ -529,125 +531,131 @@ func TestVerificationExecutesCapturedTreesAndRecordsResults(t *testing.T) {
 	}
 }
 
+// A failed check goes to the author as a finding; the repair starts round 2,
+// which reruns the frozen check on the repaired input; a retained regression
+// runs; the resolved blocker ends the loop clean with both rounds' evidence.
+// In a workspace review, and in a review pinned to a mission candidate, whose
+// evidence must move to the repaired commit. Two tests, not two subtests of
+// one: each is a whole review loop of its own.
 func TestVerificationRepairsAndRerunsFrozenChecks(t *testing.T) {
-	for _, pinned := range []bool{false, true} {
-		name := "workspace"
-		if pinned {
-			name = "mission-candidate"
-		}
-		t.Run(name, func(t *testing.T) {
-			f := newReviewFixture(t)
-			started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, TemplateId: "behavior-verification-v1"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if pinned {
-				_, err = f.bench.Reviews.UpdateRun(f.mine.Id, started.Run.Id, func(r *reviews.Run) error {
-					r.ContractDigest = "approved-contract"
-					r.ReviewWorkspace = f.mine.Id
-					r.MemberHeads = map[string]string{"api": git(t, f.mine.Members[0].Path, "rev-parse", "HEAD")}
-					return nil
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			<-f.codex.Session.Applied
-			call := f.codex.Session.Open.Tools
-			args := json.RawMessage(`{"action":"verify","name":"repair result","member":"api","expected":"acceptance.txt contains correct","argv":["sh","-c","test \"$(cat acceptance.txt)\" = correct"]}`)
-			waitCheck := func() reviews.VerificationCheck {
-				t.Helper()
-				raw, err := call(timeout(t), "lazybox_command", args)
-				if err != nil {
-					t.Fatal(err)
-				}
-				var check reviews.VerificationCheck
-				if err := json.Unmarshal([]byte(raw), &check); err != nil {
-					t.Fatal(err)
-				}
-				receipt := check.Runs[len(check.Runs)-1]
-				for _, id := range []string{receipt.BaseCommand, receipt.CandidateCommand} {
-					wait, _ := json.Marshal(map[string]string{"action": "wait", "id": id})
-					if _, err := call(timeout(t), "lazybox_command", wait); err != nil {
-						t.Fatal(err)
-					}
-				}
-				return check
-			}
-			first := waitCheck()
-			reviewer := bearer(timeout(t), agentToken(t, f.codex.Session.Open.Env))
-			filed, err := f.client.AddReviewFinding(reviewer, &pb.AddReviewFindingRequest{SessionId: started.Session.Id, File: "api/handler.go", StartLine: 1, Severity: "blocker", Title: "Missing acceptance output", Body: "Reproduce with the recorded repair result check. Retain a regression test."})
-			if err != nil {
-				t.Fatal(err)
-			}
-			f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "Review coverage: candidate check failed."}
-			f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
-			applied(t, f.claude, "Missing acceptance output")
-			runUntil(t, f, func(r *pb.ReviewRun) bool { return r.Phase == "fixing" })
-			record, err := f.bench.Checkpoints.List(f.conversation.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			rv, err := f.bench.Reviews.Load(f.mine.Id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, turn := range record.Turns {
-				if turn.OperationID == "review-"+strings.TrimPrefix(started.Run.Id, "rv-")+"-findings-1" && rv.Runs[0].FixingSince > turn.Before.At.Unix() {
-					t.Fatalf("repair starts at %d before its findings boundary %d", turn.Before.At.Unix(), rv.Runs[0].FixingSince)
-				}
-			}
-			if err := os.WriteFile(filepath.Join(f.mine.Members[0].Path, "acceptance.txt"), []byte("correct"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(f.mine.Members[0].Path, "recovery_test.sh"), []byte("test \"$(cat acceptance.txt)\" = correct\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if pinned {
-				git(t, f.mine.Members[0].Path, "add", ".")
-				git(t, f.mine.Members[0].Path, "commit", "-m", "repair acceptance")
-			}
-			f.claude.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
-			applied(t, f.codex, "Round 2")
-			second := waitCheck()
-			if pinned {
-				rv, err := f.bench.Reviews.Load(f.mine.Id)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if got, want := rv.Runs[0].MemberHeads["api"], git(t, f.mine.Members[0].Path, "rev-parse", "HEAD"); got != want {
-					t.Fatalf("repair evidence still names the old candidate: got %s want %s", got, want)
-				}
-			}
-			regression := &pb.RunReviewVerificationRequest{SessionId: started.Session.Id, Name: "retained regression", Member: "api", Expected: "the retained recovery test passes", Argv: []string{"sh", "recovery_test.sh"}, Regression: "recovery_test.sh"}
-			retained, err := f.client.RunReviewVerification(reviewer, regression)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, id := range []string{retained.Runs[0].BaseCommandId, retained.Runs[0].CandidateCommandId} {
-				wait, _ := json.Marshal(map[string]string{"action": "wait", "id": id})
-				if _, err := call(timeout(t), "lazybox_command", wait); err != nil {
-					t.Fatal(err)
-				}
-			}
+	verificationRepairsAndReruns(t, false)
+}
 
-			if len(second.Runs) != 2 || first.Runs[0].Candidate == second.Runs[1].Candidate || first.Runs[0].CandidateCommand == second.Runs[1].CandidateCommand {
-				t.Fatalf("check not rerun on repaired input: %+v", second)
-			}
-			if _, err := f.bench.ReviewVerdict(started.Session.Id, filed.Finding.Id, "resolved", "Recorded check passes"); err != nil {
-				t.Fatal(err)
-			}
-			f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "Review coverage: repaired candidate passed."}
-			f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
-			runUntil(t, f, func(r *pb.ReviewRun) bool { return r.StopReason == "clean" && r.Round == 2 })
-			report, err := f.client.GetArtifact(f.owner, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: started.Run.Id})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(report.Versions) != 2 || !strings.Contains(report.Content, "repaired candidate passed") {
-				t.Fatalf("round evidence missing: %+v", report)
-			}
+func TestVerificationRepairsAndRerunsFrozenChecksOfAMissionCandidate(t *testing.T) {
+	verificationRepairsAndReruns(t, true)
+}
+
+func verificationRepairsAndReruns(t *testing.T, pinned bool) {
+	f := newReviewFixture(t)
+	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, TemplateId: "behavior-verification-v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned {
+		_, err = f.bench.Reviews.UpdateRun(f.mine.Id, started.Run.Id, func(r *reviews.Run) error {
+			r.ContractDigest = "approved-contract"
+			r.ReviewWorkspace = f.mine.Id
+			r.MemberHeads = map[string]string{"api": git(t, f.mine.Members[0].Path, "rev-parse", "HEAD")}
+			return nil
 		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-f.codex.Session.Applied
+	call := f.codex.Session.Open.Tools
+	args := json.RawMessage(`{"action":"verify","name":"repair result","member":"api","expected":"acceptance.txt contains correct","argv":["sh","-c","test \"$(cat acceptance.txt)\" = correct"]}`)
+	waitCheck := func() reviews.VerificationCheck {
+		t.Helper()
+		raw, err := call(timeout(t), "lazybox_command", args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var check reviews.VerificationCheck
+		if err := json.Unmarshal([]byte(raw), &check); err != nil {
+			t.Fatal(err)
+		}
+		receipt := check.Runs[len(check.Runs)-1]
+		for _, id := range []string{receipt.BaseCommand, receipt.CandidateCommand} {
+			wait, _ := json.Marshal(map[string]string{"action": "wait", "id": id})
+			if _, err := call(timeout(t), "lazybox_command", wait); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return check
+	}
+	first := waitCheck()
+	reviewer := bearer(timeout(t), agentToken(t, f.codex.Session.Open.Env))
+	filed, err := f.client.AddReviewFinding(reviewer, &pb.AddReviewFindingRequest{SessionId: started.Session.Id, File: "api/handler.go", StartLine: 1, Severity: "blocker", Title: "Missing acceptance output", Body: "Reproduce with the recorded repair result check. Retain a regression test."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "Review coverage: candidate check failed."}
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	applied(t, f.claude, "Missing acceptance output")
+	runUntil(t, f, func(r *pb.ReviewRun) bool { return r.Phase == "fixing" })
+	record, err := f.bench.Checkpoints.List(f.conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rv, err := f.bench.Reviews.Load(f.mine.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, turn := range record.Turns {
+		if turn.OperationID == "review-"+strings.TrimPrefix(started.Run.Id, "rv-")+"-findings-1" && rv.Runs[0].FixingSince > turn.Before.At.Unix() {
+			t.Fatalf("repair starts at %d before its findings boundary %d", turn.Before.At.Unix(), rv.Runs[0].FixingSince)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(f.mine.Members[0].Path, "acceptance.txt"), []byte("correct"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.mine.Members[0].Path, "recovery_test.sh"), []byte("test \"$(cat acceptance.txt)\" = correct\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if pinned {
+		git(t, f.mine.Members[0].Path, "add", ".")
+		git(t, f.mine.Members[0].Path, "commit", "-m", "repair acceptance")
+	}
+	f.claude.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	applied(t, f.codex, "Round 2")
+	second := waitCheck()
+	if pinned {
+		rv, err := f.bench.Reviews.Load(f.mine.Id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := rv.Runs[0].MemberHeads["api"], git(t, f.mine.Members[0].Path, "rev-parse", "HEAD"); got != want {
+			t.Fatalf("repair evidence still names the old candidate: got %s want %s", got, want)
+		}
+	}
+	regression := &pb.RunReviewVerificationRequest{SessionId: started.Session.Id, Name: "retained regression", Member: "api", Expected: "the retained recovery test passes", Argv: []string{"sh", "recovery_test.sh"}, Regression: "recovery_test.sh"}
+	retained, err := f.client.RunReviewVerification(reviewer, regression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{retained.Runs[0].BaseCommandId, retained.Runs[0].CandidateCommandId} {
+		wait, _ := json.Marshal(map[string]string{"action": "wait", "id": id})
+		if _, err := call(timeout(t), "lazybox_command", wait); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if len(second.Runs) != 2 || first.Runs[0].Candidate == second.Runs[1].Candidate || first.Runs[0].CandidateCommand == second.Runs[1].CandidateCommand {
+		t.Fatalf("check not rerun on repaired input: %+v", second)
+	}
+	if _, err := f.bench.ReviewVerdict(started.Session.Id, filed.Finding.Id, "resolved", "Recorded check passes"); err != nil {
+		t.Fatal(err)
+	}
+	f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "Review coverage: repaired candidate passed."}
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	runUntil(t, f, func(r *pb.ReviewRun) bool { return r.StopReason == "clean" && r.Round == 2 })
+	report, err := f.client.GetArtifact(f.owner, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: started.Run.Id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Versions) != 2 || !strings.Contains(report.Content, "repaired candidate passed") {
+		t.Fatalf("round evidence missing: %+v", report)
 	}
 }
 

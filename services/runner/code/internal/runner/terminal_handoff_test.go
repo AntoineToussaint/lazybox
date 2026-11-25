@@ -70,6 +70,12 @@ exit 23`, "fixture", "literal $(false)",
 		return ev, done
 	}
 	pending, rejected := start(0, false)
+	if ids := b.PendingTerminalHandoffs(e); len(ids) != 1 || ids[0] != pending.RequestID {
+		t.Fatalf("missing terminal approval in session attention: %v", ids)
+	}
+	if ids := b.PendingTerminalHandoffs(&Execution{ID: "another"}); len(ids) != 0 {
+		t.Fatalf("approval in another conversation: %v", ids)
+	}
 	if len(b.Terminals.List(c.ID)) != 0 {
 		t.Fatal("approval must precede launch, including in full access")
 	}
@@ -89,6 +95,9 @@ exit 23`, "fixture", "literal $(false)",
 	}
 	if retried, err := b.DecideTerminalHandoff(pending.RequestID, true, false); err != nil || retried != terminal {
 		t.Fatalf("retry did not return the same terminal: %v", err)
+	}
+	if ids := b.PendingTerminalHandoffs(e); len(ids) != 0 {
+		t.Fatalf("accepted terminal still requests attention: %v", ids)
 	}
 	id := terminal.Status().ID
 	for _, action := range []string{"interactive_read", "interactive_write"} {

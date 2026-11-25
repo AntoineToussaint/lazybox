@@ -549,6 +549,8 @@ how you arrange it:
   the preview tab, or make a regular tab the preview tab), Dock left / right / top / bottom (the keyboard way to move a
   panel to an edge of the content area), Close other tabs, Close tabs to the
   right, Close.
+- Opening a panel brings its tab forward, including when the window is too narrow
+  to show it beside existing panels or another group is maximized.
 - **×** on a tab closes the panel. Every panel can be closed; **Panels** in the
   workspace header lists every kind, focuses one that is shown and reopens a
   closed one where its kind was last docked. ⌘\ splits the active panel: a
@@ -1006,7 +1008,9 @@ event buffer. It renders the latest 40 messages initially; **Show earlier messag
 reveals retained messages while preserving the reading position. Scrolling through
 history moves a bounded window of rows in either direction. A jump to an old
 prompt mounts the rows around that prompt. Incoming output
-only scrolls when already following the bottom; **Jump to latest** resumes following.
+only scrolls when already following the bottom. **Jump to latest** floats over the
+transcript. Sending a message or choosing **Jump to latest** keeps the newest
+turn visible as the reply arrives.
 Replay gaps and terminal stream errors appear in the chat with **Retry conversation**.
 They never masquerade as a new, empty conversation.
 
@@ -1157,13 +1161,11 @@ or discarding changed/untracked/ignored files. A repository whose HEAD is
 detached (its commits may be on no branch) or with a rebase, merge,
 cherry-pick, revert or bisect stopped part-way counts as changed too, even
 when `git status` is clean: removing the worktree deletes its HEAD history and
-the operation's state, so deleting asks you to discard first. When the dialog
-asks for both confirmations deletion needs (stop sessions, discard files),
-**Check all** in its footer ticks them while either is unticked and moves the
-focus to **Delete workspace** (to Cancel if deletion is still blocked): Enter
-or one more click deletes. Check all never deletes by itself, a held Enter
-does not carry on into Delete, and unticking a box brings it back. Deleting
-the artifacts too is a choice, not a confirmation: Check all leaves it to you. Cleanup first fences new workspace
+the operation's state, so deleting asks you to discard first. When the dialog offers multiple
+options, **Check all** selects them together, including artifact deletion.
+You can untick any option before choosing **Delete workspace**. Selecting
+the options moves focus to Delete workspace, or Cancel if deletion is blocked.
+Cleanup first fences new workspace
 attachments, closes owned provider processes, cancels and waits for owned commands,
 then removes each worktree through Git and removes the workspace folder. Source
 repositories, branches (including committed work), accounts and conversation

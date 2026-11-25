@@ -579,3 +579,15 @@ test('an open task panel follows the spawn once the provider links the two IDs',
   assert.equal(panelAgent(t.subagents, task)?.id, spawn);
   assert.equal(panelAgent(t.subagents, task)?.items.length, 1);
 });
+
+test('a retained tail starting at a command lifecycle frame never creates a reviewer card', () => {
+  for (const name of ['command', 'mcp__lazybox__command']) {
+    const agentId = 'attempt-1:claude-tool:shell';
+    const started = fold(emptyTranscript(), record(0, {type:'agent_status', agentId, agentKind:name, name, status:'running'}));
+    const ended = fold(started,
+      record(1, {type:'activity', agentId, status:'working'}),
+      record(2, {type:'agent_status', agentId, status:'unknown'}));
+    assert.deepEqual(ended.subagents.order, []);
+    assert.ok(!ended.messages.some(message => message.type === 'subagent'));
+  }
+});

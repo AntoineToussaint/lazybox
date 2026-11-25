@@ -90,6 +90,8 @@ type Props = {
   /** What closing it does, for its × ("Close Changes page" when it is the last panel of a page that goes with it). */
   closeLabel?(panel: Panel, title: string): string;
   sidebarWidth: number;
+  /** An explicit navigation still being applied when panels must fit as tabs. */
+  requestedPanel: React.RefObject<string>;
   onSidebarWidth(width: number): void;
   /** The person rearranged the dock: drag, drop, resize, tab switch, float, pop out. */
   onArrange(next: Arranged): void;
@@ -103,6 +105,7 @@ type Props = {
   renderAdd?(group: GroupView, handle: DockHandle): ReactNode;
   /** A key pressed in a popped-out group's window (its document is not this one: the page's keys do not see it). */
   onPopoutKey?(event: KeyboardEvent, groupID: string): void;
+  onPopoutError(message: string): void;
   popoutUrl: string;
   /** Whether a Web panel can go into a popped-out window with its page: native views that come home (the desktop app). A browser's frame would reload there. */
   webPopouts?: boolean;
@@ -287,7 +290,7 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
   /** Brings dockview to the saved arrangement, in place where it can. */
   /** Panels that would be crushed below their minimum width become tabs instead (reported, then drawn). */
   const fits = () => {
-    const page = latest.current.page, fitted = fitWidth(page.layout, size.current.width, latest.current.sidebarWidth);
+    const page = latest.current.page, fitted = fitWidth(page.layout, size.current.width, latest.current.sidebarWidth, latest.current.requestedPanel.current);
     if (fitted === page.layout || latest.current.locked) return true;
     latest.current.onArrange({ layout: fitted, floating: page.floating, popouts: page.popouts });
     return false;
@@ -625,7 +628,16 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
         if (intoSidebar ? moved.some(panel => !sidebarKinds.has(kindOf(panel))) : sidebarMoving) event.preventDefault();
       }
     });
-    const subscriptions = [dropRules, dock.onWillDragPanel(dragging(true)), dock.onWillDragGroup(dragging(true)), dock.onDidDrop(dragging(false)), dock.onDidLayoutChange(dragging(false)),
+    const popoutFailures = dock.onDidOpenPopoutWindowFail(({ reason, error }) => {
+      const message = {
+        blocked: 'The host blocked the new panel window.',
+        closed: 'The panel window closed before it finished opening.',
+        unscriptable: 'Lazybox could not display the panel in the new window.',
+        'url-refused': 'Lazybox could not open the panel window address.',
+      }[reason];
+      latest.current.onPopoutError(error ? `${message} ${error.message}` : message);
+    });
+    const subscriptions = [popoutFailures, dropRules, dock.onWillDragPanel(dragging(true)), dock.onWillDragGroup(dragging(true)), dock.onDidDrop(dragging(false)), dock.onDidLayoutChange(dragging(false)),
       { dispose: () => { endDrag?.(); element.removeEventListener('keydown', tabKey); element.removeEventListener('pointerdown', pressed, true); window.removeEventListener('pointerup', lifted, true); clearTimeout(released); } },
       dock.onDidLayoutChange(event => report([...event.reasons].every(reason => reason === 'geometry') ? 200 : 0)), dock.onDidMaximizedGroupChange(() => { bump(); refreshNativeWebViews(); }), dock.onDidActiveGroupChange(bump), dock.onDidAddPopoutGroup(event => { bump(); refreshNativeWebViews(); listenInPopout(event.window); attachPopoutTitleBar(event.window, event.group.element.querySelector('.dv-tabs-and-actions-container')); forgetFocus(event.group); }), dock.onDidRemovePopoutGroup(event => { bump(); refreshNativeWebViews(); forgetFocus(event.group); })];
     // A panel that changed windows does not get the focus back where it was: that place belonged to the other window (Monaco keeps the window it was in).

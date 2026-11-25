@@ -294,7 +294,9 @@ function PhoneConversation({ sessionId, commandId, device, collections, go }: { 
       {transcript.loading && !transcript.messages.length && <ConversationLoading replay={transcript.replay}/>}
       <MessageList conversationId={`remote:${device.id}:${session?.conversationId || sessionId}`} key={sessionId} messages={transcript.messages} visible={visible} agentName={agentName} onShowEarlier={() => setVisible(value => value + 60)} loadingEarlier={transcript.partial}/>
       {session?.fault && <p className="remote-error" role="alert">{session.fault}</p>}
-      {session?.pending.map(request => request.type === 'repository_request'
+      {session?.pending.map(request => request.type === 'terminal_handoff'
+        ? <p key={request.requestId} className="remote-hint">Review and run the interactive command on your computer.</p>
+        : request.type === 'repository_request'
         ? <p key={request.requestId} className="remote-hint">{requestSummary(request)}? The agent waits for this repository. Add it or decline on your computer.</p>
         : request.type === 'browser_request'
         ? <p key={request.requestId} className="remote-hint">Browser · {requestSummary(request)}? The agent's browsing waits for you. Answer on your computer.</p>

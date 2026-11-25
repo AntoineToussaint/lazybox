@@ -12,7 +12,7 @@ import { limitStatus } from './subscription-model';
  */
 export type LiveTone = 'busy' | 'waiting' | 'idle' | 'failed' | 'saved';
 /** `label` is stable while a step lasts (for assistive technology); `text` adds the moving elapsed time. */
-export type LiveStatus = { tone: LiveTone; label: string; text: string; since?: number };
+export type LiveStatus = { tone: LiveTone; label: string; text: string; since?: number; toolPhase?: boolean };
 const fixed = (tone: LiveTone, label: string): LiveStatus => ({ tone, label, text: label });
 
 const millis = (value: bigint | number | undefined) => { const n = Number(value || 0); return Number.isFinite(n) && n > 0 ? n : 0; };
@@ -113,6 +113,7 @@ export function liveStatus(session: Session | undefined, now: number, events?: r
   if (session.pending.length || session.status === 'waiting_input' || session.status === 'waiting_approval') {
     const question = session.pending[0] ? session.pending[0].type === 'question' : session.status === 'waiting_input';
     const more = session.pending.length > 1 ? ` · ${session.pending.length} waiting` : '';
+    if (session.pending[0]?.type === 'terminal_handoff') return fixed('waiting', 'Waiting for terminal approval' + more);
     if (session.pending[0]?.type === 'repository_request') return fixed('waiting', 'Waiting for a repository' + more);
     if (session.pending[0]?.type === 'browser_request') return fixed('waiting', 'Waiting for you' + more);
     if (session.pending[0]?.type === 'conversation_request') return fixed('waiting', 'Waiting to start a conversation' + more);
@@ -134,7 +135,8 @@ export function liveStatus(session: Session | undefined, now: number, events?: r
   if (rootWorking) {
     const journal = events ? phaseFromEvents(events) : undefined;
     const step: Phase = journal || { phase: root?.phase || (session.status === 'starting' ? 'starting' : 'working'), tool: root?.tool || '', at: millis(root?.phaseSinceUnixMillis) || millis(root?.turnStartedAtUnixMillis) || undefined };
-    return timed(phaseLabel(step.phase, step.tool), step.at, now);
+    const status = timed(phaseLabel(step.phase, step.tool), step.at, now);
+    return step.phase === 'tool' ? { ...status, toolPhase: true } : status;
   }
   if (children || commands) return fixed('busy', ['Running', !subagentsShown && children && `${children} ${children === 1 ? 'sub-agent' : 'sub-agents'}`, commands && `${commands} background ${commands === 1 ? 'command' : 'commands'}`].filter(Boolean).join(' · '));
   if (session.status === 'starting') return fixed('busy', 'Starting…');

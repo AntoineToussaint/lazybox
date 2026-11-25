@@ -214,7 +214,7 @@ function QueuedItem({ message, index, session, busy, steer, agentName, stops, se
         : <q className="queued-text" title={message.text}>{clip(message.text)}</q>}
       <span className="queued-actions">
         {/* Edit stays offered while a delivery is at work, as it was before it joined this row. */}
-        {mine ? <><span className="queued-working" role="status">{working.how === 'now' && working.acknowledged ? 'Waiting for the current turn to end…' : queueFeedback[working.how].pending}</span>{edit}</> : <>
+        {mine ? <><span className="queued-working" role="status">{working.how === 'now' && working.acknowledged ? 'Waiting for message delivery…' : queueFeedback[working.how].pending}</span>{edit}</> : <>
           {busy && !message.editing && steer && <button type="button" onClick={() => void deliver('steer')}
             title={`Give ${agentName} this message now, inside the running turn, without stopping it`}><Icon name="send" size={11}/>Steer</button>}
           {busy && !message.editing && steer && session.capabilities?.subagents && !origin && <button type="button" onClick={() => void deliver('delegate')}

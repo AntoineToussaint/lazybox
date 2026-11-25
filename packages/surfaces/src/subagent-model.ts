@@ -136,7 +136,7 @@ const GENERIC_TYPES = new Set(['', 'general-purpose', 'general', 'agent', 'local
 const GENERIC_NAMES = new Set(['', 'agent', 'sub-agent', 'subagent', 'sub agent', 'task']);
 export const genericType = (type: string) => GENERIC_TYPES.has(type.trim().toLowerCase());
 export const genericName = (name: string) => GENERIC_NAMES.has(name.trim().toLowerCase());
-const MANAGED_TOOLS = new Set(['mcp__lazybox__command', 'lazybox_command']);
+const MANAGED_TOOLS = new Set(['command', 'mcp__lazybox__command', 'lazybox_command']);
 const SPAWN_TOOLS = new Set(['Task', 'Agent']);
 /** Tools the agent reads a background command's output with. */
 const READ_TOOLS = new Set(['BashOutput', 'TaskOutput']);
@@ -403,18 +403,22 @@ export class SubagentFold {
   record(record: JournalEvent): void {
     const e = record.event;
     if (!e) return;
-    // Legacy journals may include synthetic children for an interactive MCP
-    // command. Keep the parent tool call and ignore its duplicate child.
-    if (e.type === 'tool_activity' && /"name"\s*:\s*"(?:mcp__lazybox__command|lazybox_command)"/.test(peek(e.providerDataJson))) {
-      const call = payload(e.providerDataJson);
-      if (call && MANAGED_TOOLS.has(call.name) && typeof call.id === 'string') {
-        const known = this.managedCalls ??= new Set(this.state.managedCalls);
-        known.add(call.id);
-        if (known.size > COMMAND_CALLS) known.delete(known.values().next().value!);
-      }
-    }
+    // Replay may start at a synthetic child's status, after its parent call.
+    // Remember either identity so later untyped steps cannot recreate the card.
     const childCall = /(?:^|:)claude-tool:(.+)$/.exec(e.agentId)?.[1];
-    if (MANAGED_TOOLS.has(e.agentKind) || (childCall && (this.managedCalls ?? this.state.managedCalls)?.has(childCall))) return;
+    let managedId: string | undefined;
+    if (e.type === 'tool_activity' && /"name"\s*:\s*"(?:command|mcp__lazybox__command|lazybox_command)"/.test(peek(e.providerDataJson))) {
+      const call = payload(e.providerDataJson);
+      if (call && MANAGED_TOOLS.has(call.name) && typeof call.id === 'string') managedId = call.id;
+    }
+    const managedChild = MANAGED_TOOLS.has(e.agentKind);
+    if (managedChild) managedId = childCall || e.agentId;
+    if (managedId) {
+      const known = this.managedCalls ??= new Set(this.state.managedCalls);
+      known.add(managedId);
+      if (known.size > COMMAND_CALLS) known.delete(known.values().next().value!);
+    }
+    if (managedChild || (this.managedCalls ?? this.state.managedCalls)?.has(childCall || e.agentId)) return;
     const at = time(record.capturedAt);
     if (!e.agentId || e.agentId === 'root') {
       switch (e.type) {

@@ -73,7 +73,7 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
   // A turn Send now stopped: one quiet line, not an error.
   if (m.type === 'stopped') return <div className="command-line stopped-line" role="note" data-message-id={m.id}><Icon name="stop" size={12}/><span>{m.text}</span></div>;
   if (m.origin) return <SystemEvent message={m} agentName={agentName} onOpenFile={onOpenFile} onContextMenu={menu && contextMenu<MessageMenuDetail>('message', menu, { message: m, role: messageRole(m), sessionId }, 'Message actions')}/>;
-  if (m.terminalHandoff) return <TerminalHandoffCard key={m.terminalHandoff.id} handoff={m.terminalHandoff}/>;
+  if (m.terminalHandoff) return <TerminalHandoffCard messageId={m.id} key={m.terminalHandoff.id} handoff={m.terminalHandoff}/>;
   if (m.type === 'notice') return <RunnerNoticeLine message={m}/>;
   if (m.type === 'operation_accepted' && m.command) return <div className="command-line command-sent" role="note" data-message-id={m.id} title="You ran this command" onContextMenu={menu && contextMenu<MessageMenuDetail>('message', menu, { message: m, role: messageRole(m), sessionId }, 'Message actions')}><Icon name="chevronRight" size={12}/><code>{m.text.trim()}</code></div>;
   if (m.type === 'review' && m.review) return <div className="review-card-anchor" data-message-id={m.id}><ReviewCard data={m.review}/></div>;

@@ -246,7 +246,8 @@
 .conversation-history-dialog .conversation-filter{margin-bottom:12px}
 .transcript-notice{padding:12px 20px;border-bottom:1px solid var(--line,var(--line-strong));display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .transcript-notice.error{color:var(--danger-strong)}.transcript-notice button{margin-left:auto}
-.jump-to-latest{align-self:center;margin:6px;padding:5px 12px;font-size:calc(12px * var(--text-scale))}
+.chat-scroll-actions{position:absolute;align-self:center;bottom:6px;display:flex;flex-wrap:wrap;justify-content:center;gap:6px;max-width:calc(100% - 12px);max-height:40%;overflow:auto}
+.chat-scroll-actions button{padding:5px 12px;font-size:calc(12px * var(--text-scale))}
 
 /* Navigation: restrained selection, consistent row rhythm, workspace-only scope. */
 

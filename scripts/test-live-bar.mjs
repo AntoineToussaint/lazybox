@@ -111,11 +111,31 @@ try{
  await bar.getByRole('button',{name:'Interrupt'}).click();
  await expect.poll(()=>f.mutations.some(m=>m.method==='Apply'&&m.body.interrupt)).toBe(true);
 
+ live({type:'tool_activity',data:{type:'tool_call',id:'toolu_check',status:'completed'}});
+ live({type:'activity',status:'working'});
+ await expect(bar.locator('.live-activity')).toContainText('Working');
+ // Observe every paint while a short tool starts and finishes between clock ticks.
+ await bar.evaluate(node => {
+   window.quickToolFrames = [];
+   const record = () => window.quickToolFrames.push(node.innerText);
+   window.quickToolObserver = new MutationObserver(record);
+   window.quickToolObserver.observe(node, {childList:true, subtree:true, characterData:true});
+ });
+ live({type:'activity',status:'tool',name:'Bash'});
+ live({type:'tool_activity',data:{type:'tool_call',id:'quick',name:'Bash',status:'running',input:{command:'short-lived-sentinel'}}});
+ await new Promise(resolve => setTimeout(resolve, 100));
+ live({type:'tool_activity',data:{type:'tool_call',id:'quick',status:'completed'}});
+ live({type:'activity',status:'working'});
  // A step that is not a command says what it does, in words.
  live({type:'tool_activity',data:{type:'tool_call',id:'toolu_check',status:'completed',output:'ok'}});
  live({type:'tool_activity',data:{type:'tool_call',id:'toolu_read',name:'Read',status:'running',input:{file_path:'services/front-door/src/app.ts'}}});
  await expect(bar.locator('.live-activity')).toHaveText(/^Reading services\/front-door\/src\/app\.ts · \ds$/);
  await expect(bar.locator('.live-bar-code')).toHaveCount(0);
+
+ assert.equal(await page.evaluate(() => {
+   window.quickToolObserver.disconnect();
+   return window.quickToolFrames.some(frame => frame.includes('short-lived-sentinel') || frame.includes('Running a command'));
+ }), false, 'short calls never flash in the live bar');
 
  // A `lazybox run` that will not end (it listens on a port) can move to the background: the agent's call returns, the server keeps running.
  live({type:'tool_activity',data:{type:'tool_call',id:'toolu_read',status:'completed',output:'ok'}});

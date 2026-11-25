@@ -253,6 +253,8 @@ restores the existing composer and shows its error.
 
 Both adapters run the same conformance cases. Capability reporting permits differences such as mid-turn steering or pending-request restoration without silently simulating them. Adapter code should be small because shared mechanics have one owner; no percentage-of-generic-code target overrides correctness.
 
+Managed command calls appear in the tool transcript and console. Late command lifecycle events do not create sub-agent cards.
+
 Command capture is a separate generic service. Each provider proves how its tools publish output or invoke managed commands without bypassing permissions. Seeing a provider's tool summary does not establish access to the full live shell output.
 
 ## Proposed RPC stack

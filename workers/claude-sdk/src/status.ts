@@ -19,6 +19,7 @@ const usage=(u:TaskUsage|undefined)=>u?{totalTokens:u.total_tokens,toolUses:u.to
 // Drop absent fields, so the journal holds only what the provider reported.
 const compact=(value:Record<string,unknown>)=>Object.fromEntries(Object.entries(value).filter(([,v])=>v!==undefined&&v!==''));
 const TERMINAL=['done','failed','stopped'];
+const MANAGED_COMMANDS = new Set(['command', 'mcp__lazybox__command', 'lazybox_command']);
 // The tools whose child runs are tasks: the provider reports their lifecycle.
 const SPAWN_TOOLS=new Set(['Task','Agent']);
 // Tool calls remembered for naming a forked run, and forked runs at once: the newest.
@@ -76,6 +77,17 @@ export class NativeStatus {
   private tools = new Map<string, string>();
   // Every tool call by id, until its result: who made it, with what.
   private calls = new Map<string, { name: string; input: unknown; agent: string }>();
+  // The SDK may report child frames and task updates after the tool result.
+  private managedCalls = new Set<string>();
+  private managedTasks = new Set<string>();
+  private isManagedCall(id: string) {
+    return this.managedCalls.has(id) || MANAGED_COMMANDS.has(this.calls.get(id)?.name || '');
+  }
+  private rememberManaged(ids: Set<string>, id: string) {
+    ids.delete(id);
+    ids.add(id);
+    if (ids.size > CALL_LIMIT) ids.delete(ids.values().next().value!);
+  }
   // Forked runs in progress (a Skill with `context: fork`), by the call that
   // runs them: a child the provider reports no task for, only the call and
   // its result. Their lifecycle is the call's.
@@ -99,7 +111,10 @@ export class NativeStatus {
     const parentCall = 'parent_tool_use_id' in m ? m.parent_tool_use_id : undefined;
     // The SDK can attach lifecycle events to an MCP invocation. The managed
     // command has its own tool result and console, never a forked agent.
-    if (parentCall && this.calls.get(parentCall)?.name === 'mcp__lazybox__command') return out;
+    if (parentCall && this.isManagedCall(parentCall)) {
+      if (m.type === 'system' && 'task_id' in m && typeof m.task_id === 'string') this.rememberManaged(this.managedTasks, m.task_id);
+      return out;
+    }
     const child = parentCall ? (this.tools.get(parentCall) || `claude-tool:${parentCall}`) : undefined;
     if (!child && m.type === 'system' && (m.subtype === 'init' || m.subtype === 'status') && m.permissionMode) {
       emit({ type: 'agent_permission', text: m.permissionMode });
@@ -119,10 +134,7 @@ export class NativeStatus {
         if(block.type==='thinking'||block.type==='redacted_thinking')emit({type:'activity',agentId:child,status:'thinking'});
         else if(block.type==='text')emit({type:'activity',agentId:child,status:'responding'});
         else if(block.type==='tool_use') {
-          if (block.name === 'mcp__lazybox__command') {
-            if (this.calls.size >= CALL_LIMIT) this.calls.delete(this.calls.keys().next().value!);
-            this.calls.set(block.id, { name: block.name, input: undefined, agent: child || 'root' });
-          }
+          if (MANAGED_COMMANDS.has(block.name)) this.rememberManaged(this.managedCalls, block.id);
           emit({type:'activity',agentId:child,status:'tool',name:block.name});
         }
       }
@@ -177,6 +189,7 @@ export class NativeStatus {
       }
       for (const content of m.message.content) if (content.type === 'tool_use') {
         if (this.calls.size >= CALL_LIMIT) this.calls.delete(this.calls.keys().next().value!);
+        if (MANAGED_COMMANDS.has(content.name)) this.rememberManaged(this.managedCalls, content.id);
         this.calls.set(content.id, { name: content.name, input: content.input, agent: child || 'root' });
         emit({ type: 'tool_activity', agentId: child, data: {type:'tool_call',id:content.id,name:content.name,status:'running',input:toolPreview(content.input)} });
       }
@@ -187,6 +200,7 @@ export class NativeStatus {
         // A forked run ends with the call that ran it.
         const fork = this.forks.get(content.tool_use_id);
         if (fork) { this.forks.delete(content.tool_use_id); emit({ type: 'agent_status', agentId: fork, status: content.is_error ? 'failed' : 'done', data: { toolUseId: content.tool_use_id } }); }
+        if (this.isManagedCall(content.tool_use_id)) this.rememberManaged(this.managedCalls, content.tool_use_id);
         this.calls.delete(content.tool_use_id);
       }
     } else if (m.type === 'result') {
@@ -207,6 +221,10 @@ export class NativeStatus {
       }
     } else if (m.type === 'system' && (m.subtype === 'task_started' || m.subtype === 'task_progress' || m.subtype === 'task_notification')) {
       if ('ambient' in m && m.ambient) return out;
+      if ((m.tool_use_id && this.isManagedCall(m.tool_use_id)) || ('task_type' in m && MANAGED_COMMANDS.has(m.task_type || ''))) {
+        this.rememberManaged(this.managedTasks, m.task_id);
+      }
+      if (this.managedTasks.has(m.task_id)) return out;
       const old = this.tasks.get(m.task_id);
       if (m.run_id && old?.run && m.run_id < old.run) return out;
       // Delayed activity for a finished run must not reopen its timer or tray entry.
@@ -248,13 +266,16 @@ export class NativeStatus {
       this.remember(m.task_id, { ...old, run: m.run_id || old.run, status: next });
       emit({ type: 'agent_status', agentId: old.id, nativeId: m.task_id, status: next, data: error || backgrounded ? compact({ error, backgrounded: backgrounded || undefined }) : undefined });
     } else if (m.type === 'system' && m.subtype === 'background_tasks_changed') {
-      const next = new Set(m.tasks.filter(t => !t.ambient).map(t => t.task_id));
+      for (const task of m.tasks) {
+        if (MANAGED_COMMANDS.has(task.task_type)) this.rememberManaged(this.managedTasks, task.task_id);
+      }
+      const tasks = m.tasks.filter(task => !task.ambient && !this.managedTasks.has(task.task_id));
+      const next = new Set(tasks.map(task => task.task_id));
       for (const id of this.background) if (!next.has(id)) {
         const task = this.tasks.get(id);
         if (task?.status === 'running') { task.status = 'unknown'; emit({ type: 'agent_status', agentId: task.id, status: 'unknown' }); }
       }
-      for (const task of m.tasks) {
-        if (task.ambient) continue;
+      for (const task of tasks) {
         const old = this.tasks.get(task.task_id);
         const was = old ? undefined : this.gone.get(task.task_id);
         const ended = old || was;

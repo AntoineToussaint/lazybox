@@ -226,6 +226,28 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'no horizontal overflow on a phone');
   await page.screenshot({ path: '.cache/web-viewer-phone.png' });
 
+  // At a remembered left edge, Web can be folded into the same group as
+  // Artifacts on the right. Opening it and restoring the saved page must
+  // both show the panel the person selected.
+  const crowded = await browser.newPage({ viewport: { width: 800, height: 800 } });
+  await collectPageErrors(crowded, errors);
+  await crowded.goto(app);
+  await crowded.locator('summary[aria-label="Panels"]').click();
+  await crowded.getByRole('button', { name: 'Show Artifacts', exact: true }).click();
+  await expect(crowded.locator('.panel-artifacts:visible')).toHaveCount(1);
+  await crowded.evaluate(async token => {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(location.origin + '\0' + token));
+    const scope = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem(scope + ':dock:web', 'left');
+  }, fixture.token);
+  await crowded.locator('summary[aria-label="Panels"]').click();
+  await crowded.getByRole('button', { name: 'New Web panel', exact: true }).click();
+  await expect(crowded.locator('.panel-web:visible')).toHaveCount(1);
+  await expect(crowded.locator('.panel-artifacts:visible')).toHaveCount(0);
+  await crowded.reload();
+  await expect(crowded.locator('.panel-web:visible')).toHaveCount(1);
+  await crowded.close();
+
   // Native web views (the desktop app), on a Retina display: the host records
   // where it is asked to draw each page. The frame is exactly the page area
   // under the address bar, in every layout, and the view steps aside for

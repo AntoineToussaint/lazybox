@@ -221,6 +221,29 @@ test('managed command frames never create a forked agent', () => {
   assert.ok(result.some(event => event.type === 'tool_activity' && !event.agentId));
 });
 
+test('late command frames and task notifications after the tool result stay with the command', () => {
+  for (const name of ['mcp__lazybox__command', 'command', 'lazybox_command']) {
+    const status = new NativeStatus();
+    status.normalize(message({type:'assistant', message:{id:'m1', model:'m', content:[{type:'tool_use',id:'cmd',name,input:{action:'start',argv:['node','test.js']}}]}}));
+    status.normalize(message({type:'user', message:{content:[{type:'tool_result',tool_use_id:'cmd',content:'started'}]}}));
+    assert.deepEqual(status.normalize(message({type:'system',subtype:'task_started',task_id:'task',tool_use_id:'cmd',description:'command'})), []);
+    assert.deepEqual(status.normalize(message({type:'system',subtype:'task_progress',task_id:'task',description:'command'})), []);
+    assert.deepEqual(status.normalize(message({type:'assistant',parent_tool_use_id:'cmd',message:{id:'m2',model:'m',content:[{type:'text',text:'output'}]}})), []);
+  }
+});
+
+test('an active managed call survives churn in the finished-call history', () => {
+  const status = new NativeStatus();
+  const start = (id: string) => status.normalize(message({type:'assistant',message:{id,model:'m',content:[{type:'tool_use',id,name:'command',input:{action:'wait'}}]}}));
+  const finish = (id: string) => status.normalize(message({type:'user',message:{content:[{type:'tool_result',tool_use_id:id,content:'done'}]}}));
+  start('long');
+  for(let i=0;i<513;i++){ const id='short-'+i; start(id); finish(id); }
+  const late = () => status.normalize(message({type:'system',subtype:'task_started',task_id:'delayed',tool_use_id:'long',description:'command'}));
+  assert.deepEqual(late(), []);
+  finish('long');
+  assert.deepEqual(late(), []);
+});
+
 test('late progress and start notifications cannot restart a completed task', () => {
   const status = new NativeStatus();
   const task = { type: 'system', task_id: 't', tool_use_id: 'spawn', run_id: '002' };

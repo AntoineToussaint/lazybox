@@ -57,7 +57,7 @@ export type Transcript = { messages: TranscriptMessage[]; recent: JournalEvent[]
   sendingNow?: boolean;
   /** The agent's turn is running (or a switch of subscription started one): a message accepted now waits in the queue. */
   turnRunning?: boolean;
-  /** Journal cursor of the last root turn start or end, even when both arrive in one batch. */
+  /** A new root turn supersedes the previous interrupt. Dispatch can still be in progress after the old turn ends. */
   turnBoundary?: bigint;
   /** Where the running turn's output starts in `messages`, until a receipt arrives in it. */
   turnStart?: number;
@@ -184,7 +184,7 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
     }
     if (!event || (event.agentId && event.agentId !== 'root')) continue;
     // While a turn runs (as the Runner counts it), a message waits in the queue.
-    if (event.type === 'turn_started' || event.type === 'turn_ended' || event.type === 'session_closed') next.turnBoundary = record.cursor;
+    if (event.type === 'turn_started' || event.type === 'session_closed') next.turnBoundary = record.cursor;
     if (event.type === 'turn_started') { next.turnRunning = true; next.turnStart = (messages ?? state.messages).length; }
     else if (event.type === 'turn_ended' || event.type === 'session_closed') { next.turnRunning = false; next.turnStart = undefined; }
     else if (event.type === 'profile_changed' && event.status !== 'checkpoint_next_message') next.turnRunning = true;

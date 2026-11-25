@@ -1,4 +1,4 @@
-import { useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { RunnerClient } from '@lazybox/client-core';
 import type { Session } from '@lazybox/protocol';
 import type { OpenModifiers } from './file-links';
@@ -56,6 +56,31 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
   detail?: ActivityDetail;
 }) {
   const conversation = transcript.messages;
+  const approvals = (session?.pending ?? []).filter(request => request.type === 'terminal_handoff').map(request => ({
+    requestId: request.requestId,
+    messageId: conversation.findLast(message => message.terminalHandoff?.id === request.requestId)?.id,
+  }));
+  const approvalIds = JSON.stringify(approvals.map(request => request.messageId));
+  const [visibleApprovals, setVisibleApprovals] = useState<string[]>([]);
+  useEffect(() => {
+    const pane = scroll.paneRef.current;
+    const visible = new Set<string>();
+    setVisibleApprovals([]);
+    if (!pane) return;
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        const id = (entry.target as HTMLElement).dataset.terminalDecision!;
+        if (entry.intersectionRatio >= 1) visible.add(id); else visible.delete(id);
+      }
+      setVisibleApprovals([...visible]);
+    }, { root: pane, threshold: 1 });
+    for (const id of JSON.parse(approvalIds) as (string | null)[]) {
+      const control = id && pane.querySelector(`[data-terminal-decision="${CSS.escape(id)}"]`);
+      if (control) observer.observe(control);
+    }
+    return () => observer.disconnect();
+  }, [approvalIds, scroll.paneRef, scroll.end, scroll.visibleMessages]);
+  const offscreen = approvals.filter(request => !request.messageId || !visibleApprovals.includes(request.messageId));
   // Artifact actions on agent messages, and "Open source message" from an artifact.
   const artifactScope = useMemo(() => session?.collectionId ? { collectionId: session.collectionId, sessionId: sessionID, conversationId: session.conversationId } : undefined, [session?.collectionId, session?.conversationId, sessionID]);
   // A file an agent named is tracked from its link, as from the Files tree.
@@ -100,9 +125,12 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
           {subscription}
         </div>
       </div>
+      {(offscreen.length > 0 || (!scroll.followingLatest && conversation.length > 0)) && <div className="chat-scroll-actions">
+        {offscreen.map(({ requestId, messageId }) => <button key={requestId} disabled={!messageId} onClick={() => messageId && scroll.revealMessage(messageId)}>{messageId ? 'Review terminal request' : 'Loading terminal request…'}{approvals.length > 1 && ` ${approvals.findIndex(request => request.requestId === requestId) + 1}`}</button>)}
+        {!scroll.followingLatest && <button className="jump-to-latest" onClick={scroll.jumpToLatest}>Jump to latest</button>}
+      </div>}
     </div>
     {fileTracking.element}
-    {!scroll.followingLatest && conversation.length > 0 && <button className="jump-to-latest" onClick={scroll.jumpToLatest}>Jump to latest</button>}
   </>;
 }
 
@@ -137,7 +165,9 @@ function EmptyConversation({ agentName }: { agentName: string }) {
 
 /** Questions and approvals the agent waits on, answered in place. */
 function PendingRequests({ api, session, sessionID, agentName, onError, enableFullAccess }: { api: RunnerClient; enableFullAccess?(exitPlanRequestId?: string): Promise<boolean>; session?: Session; sessionID: string; agentName: string; onError(message: string): void }) {
-  const count = session?.pending.length || 0;
-  return <>{session?.pending.map((p, index) => <RequestCard workspace={session.collectionId} enableFullAccess={session.workflow !== 'plan' ? enableFullAccess :
+  // Terminal handoffs have a dedicated transcript card and decision RPC.
+  const pending = session?.pending.filter(request => request.type !== 'terminal_handoff');
+  const count = pending?.length || 0;
+  return <>{session && pending?.map((p, index) => <RequestCard workspace={session.collectionId} enableFullAccess={session.workflow !== 'plan' ? enableFullAccess :
     enableFullAccess && session.provider === 'claude' && p.type === 'approval' && p.text === 'ExitPlanMode' && (!p.agentId || p.agentId === 'root') ? () => enableFullAccess(p.requestId) : undefined} key={p.requestId} request={p} api={api} session={sessionID} onError={onError} root={session.workingDirectory} agentName={agentName} position={{ index, count }}/>)}</>;
 }

@@ -46,7 +46,9 @@ nothing in it is hidden. **Working directory** names the folder from the
 workspace (`lazybox/scripts`); expand it to see the full path.
 Choose **Run and take over** to launch the command and focus its terminal, or
 **Decline** to tell the agent to continue without it. This decision is required
-even in full-access mode.
+even in full-access mode. Pending requests appear in the inbox and use the
+existing approval notification preferences. After expiry, the transcript keeps
+the command under **View command**. A new request is needed to run it.
 
 For sign-in, **Run and take over** gives you the keyboard. The agent receives
 only the exit status or signal. For ordinary prompts, the agent can request

@@ -282,7 +282,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   // Conversations are tabs (preview and regular, ⇧⌘T, related ones beside their parent): useConversationTabs.ts.
   const tabs = useConversationTabs({
     livePage, layout: () => current.current, changePage, commit: next => commit(next), closePanel: panel => closePanel(panel), scope: workspaceID, tabs: tabsOn, store: viewState,
-    shown: (id, how) => { setSettings(false); setMobilePanelId(id); if (how === 'focus') focusAfter.ask({ panel: id }); else revealAfter.current = id; },
+    shown: (id, how) => { setSettings(false); selectShownPanel(id); if (how === 'focus') focusAfter.ask({ panel: id }); },
     title: target => conversationTitle(info?.sessions.find(session => session.id === target.sessionId)) || 'Conversation',
     announce: text => dock.current?.announce(text), error: setError,
   });
@@ -399,35 +399,43 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const focusAfter = useMemo(() => ({ ask: (request: { panel: string } | 'content') => { focusRequest.ask(request); requestAnimationFrame(() => runFocus.current()); } }), [focusRequest]);
   /** A panel navigated to (a conversation opened): a maximized group gives it the zoom, without taking the focus. */
   const revealAfter = useRef('');
+  const selectShownPanel = (id: string) => { revealAfter.current = id; setMobilePanelId(id); };
   useEffect(() => {
-    const reveal = revealAfter.current; revealAfter.current = '';
-    if (reveal) dock.current?.reveal(reveal);
+    const reveal = revealAfter.current;
+    if (reveal && dock.current?.hasPanel(reveal)) { dock.current.reveal(reveal); revealAfter.current = ''; }
+    else if (reveal && (narrow || !shownPanels(page).some(panel => panel.id === reveal))) revealAfter.current = '';
     // The dock reporting its settled sizes changes the layout again within the frame: run after it.
     const frame = requestAnimationFrame(() => runFocus.current());
     return () => cancelAnimationFrame(frame);
   }, [layout]);
   /** Show the page's panel of this kind, or dock a new one where this kind was last docked (or beside the group ⌘\ asked from). */
-  const showModule = (kind: string) => {
+  const showModule = (kind: string, newInstance = false) => {
     if (kind === 'missions') { showMissionsPage(); return ''; }
     const live = livePage(), placement = beside;
     setBeside(undefined);
     if (kind === 'console') putConsoleAway(false);
     // Agents the person closed stays closed: only they bring it back (bringBackAgents).
     if (kind === 'agents' && agentsChoice.current === 'closed') return '';
-    if (kind === 'web' && !placement) return openWeb({ url: '', newPanel: true }) ? 'web' : '';
-    const existing = shownPanels(live).find(panel => panel.kind === kind && !panel.detached);
+    if (kind === 'web' && !placement) return openWeb({ url: '', newPanel: true });
+    const multiple = newInstance && !!registry[kind]?.multiple;
+    const existing = multiple ? undefined : shownPanels(live).find(panel => panel.kind === kind && !panel.detached);
     if (!existing && allPanels(live).length >= PANEL_LIMIT) { setError(`This page already has ${PANEL_LIMIT} panels; close one to add ${sentence(registry[kind]?.title || kind)}.`); return ''; }
-    if (placement && groupById(live, placement.group)) {
+    const besideGroup = placement && groups(live.layout).find(group => group.id === placement.group);
+    if (placement && besideGroup) {
+      if (existing && besideGroup.panels.length === 1 && besideGroup.panels[0].id === existing.id) {
+        focusAfter.ask({ panel: existing.id });
+        return existing.id;
+      }
       // Beside the asking group: a new panel, or the existing one moved there.
       const panel = existing || { id: crypto.randomUUID(), kind, binding: { mode: 'follow' as const }, detached: false };
       const without = existing ? removeFromPage(live, existing.id) : live;
       if (!changePage({ ...without, layout: splitBeside(without.layout, placement.group, panel, placement.side === 'right' ? 'right' : 'bottom') })) return '';
-      setSettings(false); setMobilePanelId(panel.id); focusAfter.ask({ panel: panel.id });
+      setSettings(false); selectShownPanel(panel.id); focusAfter.ask({ panel: panel.id });
       return panel.id;
     }
-    const shown = kind === 'files' || kind === 'editor' ? showCodePanel(live, kind, rememberedDock(kind), () => crypto.randomUUID()) : showPanel(live, kind, rememberedDock(kind), () => crypto.randomUUID());
+    const shown = kind === 'files' || kind === 'editor' ? showCodePanel(live, kind, rememberedDock(kind), () => crypto.randomUUID()) : showPanel(live, kind, rememberedDock(kind), () => crypto.randomUUID(), multiple);
     if (!changePage(shown.page)) return '';
-    setSettings(false); setMobilePanelId(shown.id);
+    setSettings(false); selectShownPanel(shown.id);
     return shown.id;
   };
   const openExtensionPanel = (choice?: ExtensionPanelChoice) => {
@@ -456,7 +464,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   const showCode = (kind: 'files' | 'editor') => {
     const live = livePage(), existing = shownPanels(live).find(panel => panel.kind === kind && !panel.detached);
     const group = existing && groupOf(live, existing.id);
-    if (existing && group?.active === existing.id && !group.minimized && !settings) { setMobilePanelId(existing.id); return existing.id; }
+    if (existing && group?.active === existing.id && !group.minimized && !settings) { dock.current?.reveal(existing.id); setMobilePanelId(existing.id); return existing.id; }
     return showModule(kind);
   };
   useEffect(() => {
@@ -473,20 +481,20 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   useKeyboardAction('artifacts.open', showWorkspaceArtifacts, () => !missionOpen && !!workspaceID);
   /** A web page in the page's Web panel (the one used last), or in a new one beside the work. */
   useLinkPreferences(viewState);
-  const openWeb = ({ url, newPanel }: ViewerRequest): boolean => {
+  const openWeb = ({ url, newPanel }: ViewerRequest): string => {
     const live = livePage();
     const shown = shownPanels(live).filter(panel => panel.kind === 'web' && !panel.detached);
     let chosen = newPanel ? undefined : shown.find(panel => panel.id === lastWebPanel()) || shown[0];
     if (!chosen) {
-      if (allPanels(live).length >= PANEL_LIMIT) { setError(`This page already has ${PANEL_LIMIT} panels; close one to open a web page here.`); return false; }
+      if (allPanels(live).length >= PANEL_LIMIT) { setError(`This page already has ${PANEL_LIMIT} panels; close one to open a web page here.`); return ''; }
       chosen = { id: crypto.randomUUID(), kind: 'web', binding: { mode: 'follow' }, detached: false };
-      if (!changePage({ ...live, layout: insertDocked(live.layout, chosen, rememberedDock('web')) })) return false;
-    } else if (!changePage(activatePanel(live, chosen.id))) return false;
+      if (!changePage({ ...live, layout: insertDocked(live.layout, chosen, rememberedDock('web')) })) return '';
+    } else if (!changePage(activatePanel(live, chosen.id))) return '';
     requestWebPage(chosen.id, url);
-    setSettings(false); setMobilePanelId(chosen.id);
-    return true;
+    setSettings(false); selectShownPanel(chosen.id);
+    return chosen.id;
   };
-  useWebViewer(openWeb);
+  useWebViewer(request => !!openWeb(request));
   useKeyboardAction('web.open', () => { openWeb({ url: '', newPanel: !shownPanels(livePage()).some(panel => panel.kind === 'web' && !panel.detached) }); }, () => !missionOpen);
   // Ask Lazybox (Help menu, ⌘K, ]] h): its panel on this page, with the message box focused.
   useKeyboardAction('help.training', () => showModule('training'));
@@ -601,14 +609,17 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     if (!target || sidebarKinds.has(kind)) return;
     const multiple = !!registry[kind]?.multiple;
     const existing = multiple ? undefined : kind === 'chat' ? tabFor(live, live.selection) || shownPanels(live).find(isChatTab) : shownPanels(live).find(panel => panel.kind === kind && !panel.detached);
-    if (existing && target.panels.some(panel => panel.id === existing.id)) { changePage(activatePanel(live, existing.id)); focusAfter.ask({ panel: existing.id }); return; }
+    if (existing && target.panels.some(panel => panel.id === existing.id)) {
+      if (changePage(activatePanel(live, existing.id))) { selectShownPanel(existing.id); focusAfter.ask({ panel: existing.id }); }
+      return;
+    }
     if (!existing && allPanels(live).length >= PANEL_LIMIT) { setError(`This page already has ${PANEL_LIMIT} panels; close one to add ${sentence(registry[kind]?.title || kind)}.`); return; }
     const panel: Panel = existing || { id: crypto.randomUUID(), kind, binding: { mode: 'follow' }, detached: false };
     if (!changePage(addToGroup(existing ? removeFromPage(live, existing.id) : live, groupID, panel))) return;
     if (kind === 'console') putConsoleAway(false);
     if (kind === 'web') requestWebPage(panel.id, '');
     if (kind === 'terminal' && workspaceID) requestTerminal(workspaceID);
-    setSettings(false); setMobilePanelId(panel.id);
+    setSettings(false); selectShownPanel(panel.id);
     focusAfter.ask({ panel: panel.id });
     dock.current?.announce(`${existing ? 'Moved' : 'Opened'} ${titleOf(panel)} here`);
   };
@@ -643,12 +654,12 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     const anchor = tabFor(live, live.selection) || chats[0], group = anchor && groupOf(live, anchor.id);
     const docked = !!group && groups(live.layout).some(value => value.id === group.id);
     // Already beside it, or alone in its group: it is brought forward where it is.
-    if (already && (!group?.panels.includes(already) || group.panels.length < 2)) { if (changePage(withSelection(activatePanel(live, already.id), target))) { setSettings(false); setMobilePanelId(already.id); focusAfter.ask({ panel: already.id }); } return; }
+    if (already && (!group?.panels.includes(already) || group.panels.length < 2)) { if (changePage(withSelection(activatePanel(live, already.id), target))) { setSettings(false); selectShownPanel(already.id); focusAfter.ask({ panel: already.id }); } return; }
     if (!already && allPanels(live).length >= PANEL_LIMIT) { setError(`This page already has ${PANEL_LIMIT} panels; close one to open a conversation ${side === 'right' ? 'beside' : 'below'}.`); return; }
     const panel: Panel = already ? { ...already, preview: undefined } : { id: crypto.randomUUID(), kind: 'chat', binding: { mode: 'pinned', target: { ...target, commandId: '' } }, detached: false };
     const without = already ? removeFromPage(live, already.id) : live;
     if (!changePage(withSelection({ ...without, layout: docked ? splitBeside(without.layout, group!.id, panel, side) : insertDocked(without.layout, panel, side, 0.5) }, target))) return;
-    setSettings(false); setMobilePanelId(panel.id); focusAfter.ask({ panel: panel.id });
+    setSettings(false); selectShownPanel(panel.id); focusAfter.ask({ panel: panel.id });
   };
   /**
    * A conversation of another workspace (or another Runner) opens on its own
@@ -694,7 +705,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       const live = livePage(), agents = shownPanels(live).find(panel => panel.kind === 'agents');
       // Closed or folded is the person's choice: the Inbox lists over the page instead of reopening it.
       if (!agents || groupOf(live, agents.id)?.minimized || !changePage(activatePanel(live, agents.id))) return false;
-      setSettings(false); setMobilePanelId(agents.id);
+      setSettings(false); selectShownPanel(agents.id);
       return true;
     },
   });
@@ -844,13 +855,14 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         }
         return;
       }
-      void handle.popout(panel.id).then(opened => { if (!opened) setError('The new window was blocked. Allow pop-ups for Lazybox and try again.'); });
+      void handle.popout(panel.id).catch(error => setError(String(error)));
     },
     minimize: setMinimized,
     dockTo,
     splitWith: (groupID, panel, side) => {
-      const group = groupById(livePage(), groupID);
-      if (group && group.panels.length > 1) {
+      const group = groups(livePage().layout).find(group => group.id === groupID);
+      if (!group) { setError('Dock this group on the page before splitting it.'); return; }
+      if (group.panels.length > 1) {
         const without = removeFromPage(livePage(), panel.id);
         // The group stays (it still has tabs): the panel goes beside it.
         changePage({ ...without, layout: splitBeside(without.layout, groupID, panel, side === 'right' ? 'right' : 'bottom') });
@@ -1085,7 +1097,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       editing={editing} canOpenWorkspaceWindow={!!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId}
       layoutMenu={workspaceOpen && !narrow && <>
         <PanelsMenu menu={panelsMenu} registry={registry} shown={kindsShown} beside={beside?.title} disabled={kind => locked || (kind === 'terminal' && !terminalReady)}
-          onShow={kind => { if (kind === 'terminal') showTerminal(); else if (kind === 'chat' && !beside) showSession(page.selection); else if (kind === 'artifacts') showWorkspaceArtifacts(); else { const id = kind === 'agents' ? bringBackAgents() : showModule(kind); if (id) focusAfter.ask({ panel: id }); } }}
+          onShow={kind => { if (kind === 'terminal') showTerminal(); else if (kind === 'chat' && !beside) showSession(page.selection); else if (kind === 'artifacts') showWorkspaceArtifacts(); else { const id = kind === 'agents' ? bringBackAgents() : showModule(kind, !!registry[kind]?.multiple); if (id) focusAfter.ask({ panel: id }); } }}
           onClose={() => setBeside(undefined)}/>
         <LayoutMenu menu={layoutMenu} current={templateOf(page)} saved={savedLayouts} broken={layoutFiles.broken} folder={layoutFiles.folder} cycleKey={keymap['layout.cycle'] ? displayBinding(bindings(keymap['layout.cycle'])[0]).join('') : undefined}
           icons={kindIcons} disabled={locked || !!pending} onApply={applyLayout} onSave={saveLayout}
@@ -1152,8 +1164,8 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         <div className="page-layout" data-page-id={page.id}>
           {narrow
             ? mobilePanel ? <MobilePanel host={panelHosts.hostFor(mobilePanel)} title={titleOf(mobilePanel)} onClose={mobilePanel.kind === 'chat' || mobilePanel.detached ? undefined : () => closePanel(mobilePanel)}/> : <p className="module-empty">Your conversations are open in separate windows.</p>
-            : <DockLayout ref={dock} page={page} hostFor={panelHosts.hostFor} titleOf={titleOf} badgeOf={badgeOf} iconOf={iconOf} imageOf={panel => liveTitles[panel.id]?.icon} canClose={groupCommands.canClose}
-              sidebarWidth={sidebarWidth} onSidebarWidth={saveSidebarWidth} popoutUrl={POPOUT_URL} webPopouts={webPopouts}
+            : <DockLayout ref={dock} page={page} requestedPanel={revealAfter} hostFor={panelHosts.hostFor} titleOf={titleOf} badgeOf={badgeOf} iconOf={iconOf} imageOf={panel => liveTitles[panel.id]?.icon} canClose={groupCommands.canClose}
+              sidebarWidth={sidebarWidth} onSidebarWidth={saveSidebarWidth} onPopoutError={setError} popoutUrl={POPOUT_URL} webPopouts={webPopouts}
               closeLabel={(panel, title) => layout.pages.length > 1 && shownPanels(page).length === 1 && !page.detached.length && shownPanels(page)[0].id === panel.id ? `Close ${title} page` : `Close ${title} panel`}
               locked={locked} onArrange={next => { if (locked) return; const live = livePage(); changePage(followFrontTab(live, { ...live, ...next })); }}
               agentOf={panel => {

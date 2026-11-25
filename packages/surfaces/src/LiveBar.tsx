@@ -32,20 +32,20 @@ const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 /** The newest output of a Lazybox-managed command, as it streams. */
 function useCommandTail(api: RunnerClient, commandId: string): string {
-  const [text, setText] = useState('');
+  const [output, setOutput] = useState({ commandId: '', text: '' });
   useEffect(() => {
-    setText('');
+    setOutput({ commandId, text: '' });
     if (!commandId) return;
     const control = new AbortController(), decoders = new Map<string, TextDecoder>();
     void follow((after, signal) => api.watchOutput({ commandId, after }, { signal }), control.signal, event => {
       if (!event.data.length) return;
       let decoder = decoders.get(event.channel); if (!decoder) { decoder = new TextDecoder(); decoders.set(event.channel, decoder); }
       const chunk = decoder.decode(event.data, { stream: true });
-      setText(value => (value + chunk).slice(-TAIL_BYTES));
+      if (!control.signal.aborted) setOutput(value => ({ commandId, text: ((value.commandId === commandId ? value.text : '') + chunk).slice(-TAIL_BYTES) }));
     }, () => {}, () => {});
     return () => control.abort();
   }, [api, commandId]);
-  return text;
+  return output.commandId === commandId ? output.text : '';
 }
 
 /** This conversation's commands, while it works: the Runner owns their output. */
@@ -93,7 +93,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
 }) {
   const rootBusy = !!session?.busy && !session.closed && live.tone === 'busy';
   const background = useBackgroundRunning();
-  const step = useMemo(() => rootBusy ? rootStep(activity) : undefined, [rootBusy, activity]);
+  const candidate = useMemo(() => rootBusy ? rootStep(activity) : undefined, [rootBusy, activity]);
   const commands = useSessionCommands(api, sessionID, rootBusy);
   const managed = rootBusy ? runningCommand(commands, sessionID) : undefined;
   // Behind another tab, the command's output is not followed (AgentWindow, the transcript's stream).
@@ -136,6 +136,9 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
   const changed = useRef({ id: '', at: 0, tail: '' });
   if (managed && (changed.current.id !== managed.id || changed.current.tail !== tail)) changed.current = { id: managed.id, at: Date.now(), tail };
   const now = useNow(rootBusy);
+  // Fast tool calls stay in history. Only sustained work needs to change the live row.
+  const step = candidate?.startedAt !== undefined && now - candidate.startedAt < 250 ? undefined : candidate;
+  const label = live.toolPhase && live.since !== undefined && now - live.since < 250 && !managed ? 'Working' : live.label;
   useEffect(() => { setStopping(''); setMoving(''); setError(''); }, [managed?.id]);
   useEffect(() => { if (!moved) return; const timer = setTimeout(() => setMoved(''), 8000); return () => clearTimeout(timer); }, [moved]);
   // What moving to the background did is said even when the turn ended right after (the bar itself is gone then).
@@ -193,7 +196,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
     }}>
       <LiveIndicator tone="busy"/>
       {/* The step and its time, as the status line says them. */}
-      <span className="live-activity" data-tone="busy" aria-hidden="true">{detail.code ? live.label : detail.words || live.label}{startedAt !== undefined && now >= startedAt ? ` · ${elapsedLabel(now - startedAt)}` : live.text.slice(live.label.length) || '…'}</span>
+      <span className="live-activity" data-tone="busy" aria-hidden="true">{detail.code ? label : detail.words || label}{startedAt !== undefined && now >= startedAt ? ` · ${elapsedLabel(now - startedAt)}` : live.text.slice(live.label.length) || '…'}</span>
       {detail.code && (openOutput
         ? <button type="button" className="live-bar-code live-bar-command" aria-label={`View command output: ${detail.code}`} title={detail.full} onClick={openOutput}>{detail.code}</button>
         : <code className="live-bar-code" title={detail.full}>{detail.code}</code>)}

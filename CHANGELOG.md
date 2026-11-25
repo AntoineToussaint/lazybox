@@ -57,7 +57,14 @@ leave out.
 
 ### Workspaces and tabs
 
-- **Check all in the delete dialog** When deleting a workspace asks you to confirm both stopping its sessions and discarding its files, Check all ticks both and moves the focus to Delete workspace, so Enter deletes. It never deletes by itself, and whether to delete the artifacts stays your choice.
+- **Follow the latest reply** Sending a message or choosing Jump to latest keeps the last line visible as replies arrive.
+- **Open the intended panel** The panel you select stays in front when a crowded layout combines tabs.
+- **Review terminal requests** Interactive commands appear in the approval inbox. Expired requests collapse the command and explain how to request it again.
+- **Read command activity** Late command updates no longer appear as extra sub-agent cards in live or reopened conversations.
+- **Detach browser panels** The desktop opens Web and Agent browser panels in their own windows.
+- **Send now** Delivery progress stays visible between the interrupted turn ending and the next message reaching the agent.
+
+- **Check all in the delete dialog** Check all selects artifact deletion, stopping active sessions and discarding workspace files together. Review your selections, then choose Delete workspace.
 - **Deleting a workspace keeps commits on no branch** A repository with commits only a detached HEAD reaches, or a rebase, merge, cherry-pick or bisect stopped part-way, counts as changed: deleting the workspace asks you to discard first instead of losing them.
 - **Reverting files keeps what the checkpoint could not save** A file the safety checkpoint skipped (ignored, too large, past the untracked limit, in a nested repository) is left as it is and named, instead of being overwritten where undo could not bring it back. Ignored files in a folder the revert would replace with a file stay too.
 - **A deleted workspace stays deleted** Retrying an add-repositories request no longer brings back a workspace that is being deleted or was deleted.

@@ -278,30 +278,34 @@ export function minimumWidth(node: LayoutNode | null, sidebarWidth: number): num
  * The arrangement fitted to `available` pixels: while its panels' minimum
  * widths do not fit, the rightmost two side-by-side panels (never the
  * sidebar) become tabs of one group, showing the one that was on the right
- * (usually the one just opened). Unchanged when it already fits.
+ * unless a navigation request selects another tab. Keep the layout object
+ * when it already fits or no more groups can merge.
  */
-export function fitWidth(node: LayoutNode | null, available: number, sidebarWidth: number): LayoutNode | null {
+export function fitWidth(node: LayoutNode | null, available: number, sidebarWidth: number, requestedPanel?: string): LayoutNode | null {
   let current = node;
   for (let step = 0; step < PANEL_LIMIT && current && available > 0 && minimumWidth(current, sidebarWidth) > available; step++) {
-    const next = mergeRightmost(current);
+    const next = mergeRightmost(current, requestedPanel);
     if (next === current) break;
     current = next;
   }
   return current;
 }
-function mergeRightmost(root: LayoutNode): LayoutNode {
+function mergeRightmost(root: LayoutNode, requestedPanel?: string): LayoutNode {
   let done = false;
   const visit = (node: LayoutNode): LayoutNode => {
     if (node.type === 'group') return node;
     const children = [...node.children];
     // Deepest first: a row inside the last column is merged before the row it sits in.
     for (let index = children.length - 1; index >= 0 && !done; index--) children[index] = visit(children[index]);
-    if (done || node.direction !== 'row') return { ...node, children };
+    if (done) return { ...node, children };
+    if (node.direction !== 'row') return node;
     const open = children.map((child, index) => ({ child, index })).filter(item => !isSidebar(item.child));
-    if (open.length < 2) return { ...node, children };
+    if (open.length < 2) return node;
     const last = open[open.length - 1], previous = open[open.length - 2];
     const moved = groups(last.child), into = groups(previous.child), target = into.reduce((best, group) => group.panels.length >= best.panels.length ? group : best, into[0]);
-    const merged: Group = { ...target, panels: [...target.panels, ...moved.flatMap(group => group.panels)], active: moved[moved.length - 1]?.active || target.active, minimized: false };
+    const panels = [...target.panels, ...moved.flatMap(group => group.panels)];
+    const active = requestedPanel && panels.some(panel => panel.id === requestedPanel) ? requestedPanel : moved[moved.length - 1]?.active || target.active;
+    const merged: Group = { ...target, panels, active, minimized: false };
     const replaced = mapGroups(previous.child, group => group.id === target.id ? merged : group)!;
     const sizes = [...node.sizes];
     sizes[previous.index] += sizes[last.index];
@@ -385,9 +389,9 @@ export function dockedSide(node: LayoutNode | null, panelID: string): DockSide |
   return dockSides.find(side => JSON.stringify(shape(dockPanel(node, panelID, side))) === current);
 }
 
-/** Show the page's panel of this kind (in front, restored) or dock a new one; never a second copy. */
-export function showPanel(page: WorkspacePage, kind: string, side: DockSide, newID: () => string): { page: WorkspacePage; id: string; added: boolean } {
-  const existing = shownPanels(page).find(panel => panel.kind === kind && !panel.detached);
+/** Show the page's panel of this kind (in front, restored) or dock a new instance when requested. */
+export function showPanel(page: WorkspacePage, kind: string, side: DockSide, newID: () => string, newInstance = false): { page: WorkspacePage; id: string; added: boolean } {
+  const existing = !newInstance && shownPanels(page).find(panel => panel.kind === kind && !panel.detached);
   if (existing) return { page: activatePanel(page, existing.id), id: existing.id, added: false };
   const id = newID();
   return { page: { ...page, layout: insertDocked(page.layout, { id, kind, binding: { mode: 'follow' }, detached: false }, side) }, id, added: true };

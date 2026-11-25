@@ -484,17 +484,14 @@ export function latestPlanId(messages: readonly { tools?: ToolEntry[] }[]): stri
 // ---- Activity detail ------------------------------------------------------
 //
 // How much of the agent's tool activity a conversation shows. Verbose is every
-// call on its own line. Smart (the default) folds a run of calls between two
-// pieces of the agent's prose into one summary line ("Explored the codebase ·
-// 8 commands, 3 files read · 58s") and keeps on their own lines only what a
-// person must see: failures, edits, the live plan. Quiet folds a whole turn's
+// call on its own line. Quiet, the default, folds a whole turn's
 // activity into "Worked for 2m 10s · 14 steps · 1 failed". The journal and the
 // Activity dialog keep every call in every mode.
 
-export type ActivityDetail = 'quiet' | 'smart' | 'verbose';
-export const ACTIVITY_DETAILS: readonly ActivityDetail[] = ['quiet', 'smart', 'verbose'];
-export const DEFAULT_ACTIVITY_DETAIL: ActivityDetail = 'smart';
-export const isActivityDetail = (value: unknown): value is ActivityDetail => value === 'quiet' || value === 'smart' || value === 'verbose';
+export type ActivityDetail = 'quiet' | 'verbose';
+export const ACTIVITY_DETAILS: readonly ActivityDetail[] = ['quiet', 'verbose'];
+export const DEFAULT_ACTIVITY_DETAIL: ActivityDetail = 'quiet';
+export const isActivityDetail = (value: unknown): value is ActivityDetail => value === 'quiet' || value === 'verbose';
 /** Thinking shorter than this is not worth a word in Smart and Quiet. */
 export const THINKING_WORTH_MS = 10_000;
 /** A duration shorter than this is not worth a word in Smart and Quiet. */

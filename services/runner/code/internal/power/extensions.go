@@ -1,6 +1,7 @@
 package power
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"embed"
@@ -10,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"image/jpeg"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -71,6 +74,8 @@ const (
 	GrantReadReleases      = "read:releases"
 	GrantReadArtifacts     = "read:artifacts"
 	GrantReminders         = "manage:reminders"
+	GrantClone             = "answer:preferences"
+	GrantCompound          = "review:archives"
 	GrantDiskScan          = "scan:disk"
 	GrantReadMailbox       = "read:mailbox"
 	GrantShowRuntime       = "show:runtime"
@@ -93,7 +98,7 @@ const SwitchAccountsPrefix = "switch:"
 var AccountPolicyGrants = []string{SwitchAccountsPrefix + "claude", SwitchAccountsPrefix + "codex"}
 
 // ExtensionGrants are the fixed grants, in the order the sheet lists them.
-var ExtensionGrants = []string{GrantReadWorkspaces, GrantReadSessions, GrantReadAttention, GrantReadCommands, GrantReadMissions, GrantReadUsage, GrantReadRuntime, GrantReadPulls, GrantReadReleases, GrantReadArtifacts, GrantReadMailbox, GrantShowRuntime, GrantShowGitHub, GrantDraftArtifact, GrantShowConversations, GrantDiskScan, GrantReminders, GrantSendMessages}
+var ExtensionGrants = []string{GrantReadWorkspaces, GrantReadSessions, GrantReadAttention, GrantReadCommands, GrantReadMissions, GrantReadUsage, GrantReadRuntime, GrantReadPulls, GrantReadReleases, GrantReadArtifacts, GrantReadMailbox, GrantShowRuntime, GrantShowGitHub, GrantDraftArtifact, GrantShowConversations, GrantDiskScan, GrantReminders, GrantSendMessages, GrantClone, GrantCompound}
 
 // ExtensionIcons are the icons a panel may name (the app's own set).
 var ExtensionIcons = []string{"puzzle", "chart", "columns", "activity", "target", "sliders", "globe", "bell", "inbox", "checklist", "report", "notes", "card", "tag", "sparkle", "shield", "agent", "eye", "history", "file", "folder", "chat", "terminal", "branch", "cloud", "review", "layout"}
@@ -132,6 +137,9 @@ type ExtensionAccountPolicy struct {
 
 // ExtensionManifest is what extension.yaml declares.
 type ExtensionManifest struct {
+	Category    string           `json:"category,omitempty"`
+	Keywords    []string         `json:"keywords,omitempty"`
+	Caption     string           `json:"caption,omitempty"`
 	Name        string           `json:"name"`
 	Version     string           `json:"version"`
 	Description string           `json:"description"`
@@ -144,6 +152,8 @@ type ExtensionManifest struct {
 	// AccountPolicy is nil when the manifest declares none.
 	AccountPolicy *ExtensionAccountPolicy `json:"accountPolicy,omitempty"`
 }
+
+var listingCategories = []string{"Agents & conversations", "Code & documentation", "Workspace tools", "Monitoring & costs", "Notifications", "Other"}
 
 var versionPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$`)
 var hostPattern = regexp.MustCompile(`^(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
@@ -161,7 +171,7 @@ func ParseExtension(data []byte) (ExtensionManifest, []Issue, error) {
 		return out, nil, errors.New("the file is empty: it needs at least a name and one panel")
 	}
 	p := &parser{}
-	known := []string{"version", "name", "description", "author", "homepage", "lazybox", "panels", "grants", "network", "accountPolicy"}
+	known := []string{"version", "name", "description", "author", "homepage", "category", "keywords", "caption", "lazybox", "panels", "grants", "network", "accountPolicy"}
 	seen := map[string]*yaml.Node{}
 	for key, value := range pairs(root) {
 		seen[key.Value] = key
@@ -176,6 +186,19 @@ func ParseExtension(data []byte) (ExtensionManifest, []Issue, error) {
 			}
 		case "description":
 			out.Description = strings.TrimSpace(p.str(value, "description", 240))
+		case "category":
+			out.Category = strings.TrimSpace(p.str(value, "category", 48))
+			if !slices.Contains(listingCategories, out.Category) {
+				p.warn(value, "category", "unknown category %q; listed under Other", out.Category)
+				out.Category = "Other"
+			}
+		case "caption":
+			out.Caption = strings.TrimSpace(p.str(value, "caption", 160))
+		case "keywords":
+			out.Keywords = p.list(value, "keywords", 48)
+			if len(out.Keywords) > 12 {
+				p.fail(value, "keywords", "use up to 12 keywords")
+			}
 		case "author":
 			out.Author = strings.TrimSpace(p.str(value, "author", 80))
 		case "homepage":
@@ -205,7 +228,7 @@ func ParseExtension(data []byte) (ExtensionManifest, []Issue, error) {
 	if out.Name == "" && seen["name"] == nil {
 		p.issues = append(p.issues, Issue{Path: "name", Line: 1, Message: "an extension needs a name, as Settings and its panel show it", Severity: "error"})
 	}
-	if len(out.Panels) == 0 && seen["panels"] == nil && seen["accountPolicy"] == nil {
+	if len(out.Panels) == 0 && seen["panels"] == nil && seen["accountPolicy"] == nil && !slices.Contains(out.Grants, GrantClone) && !slices.Contains(out.Grants, GrantCompound) {
 		p.issues = append(p.issues, Issue{Path: "panels", Line: 1, Message: "an extension needs at least one panel, or an account policy", Severity: "error"})
 	}
 	// Approving the grants is approving the policy, so they must agree.
@@ -475,6 +498,8 @@ func CheckExtensionHost(raw string) (string, string) {
 
 // ExtensionInfo is one extension folder as last scanned.
 type ExtensionInfo struct {
+	previewFile    fs.FileInfo
+	PreviewJPEG    []byte            `json:"-"`
 	ID             string            `json:"id"`
 	Path           string            `json:"path"`
 	State          string            `json:"state"`
@@ -664,6 +689,10 @@ func extensionsStamp(list []ExtensionInfo) string {
 	h := sha256.New()
 	data, _ := json.Marshal(list)
 	h.Write(data)
+	for _, ext := range list {
+		preview := sha256.Sum256(ext.PreviewJPEG)
+		h.Write(preview[:])
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -698,6 +727,17 @@ func (e *Extensions) scan(id string) ExtensionInfo {
 	default:
 		manifest, issues, parseErr := ParseExtension(data)
 		info.Manifest, info.Issues = manifest, issues
+		if stat, err := os.Lstat(filepath.Join(folder, "preview.jpg")); err == nil && stat.Mode().IsRegular() {
+			info.previewFile = stat
+			previous, _ := e.snap.Find(id)
+			f := previous.previewFile
+			if f != nil && os.SameFile(f, stat) && f.Size() == stat.Size() && f.ModTime().Equal(stat.ModTime()) {
+				info.PreviewJPEG = previous.PreviewJPEG
+			} else if root, err := os.OpenRoot(folder); err == nil {
+				info.PreviewJPEG = listingPreview(root.FS(), "preview.jpg")
+				root.Close()
+			}
+		}
 		if parseErr != nil {
 			info.Err = parseErr.Error()
 		}
@@ -887,7 +927,27 @@ func (e *Extensions) Remove(id string) (ExtensionsSnapshot, error) {
 
 // ExtensionExample is an extension bundled with Lazybox.
 type ExtensionExample struct {
-	ID, Name, Description string
+	ID, Name, Description, Category, Caption string
+	Keywords                                 []string
+	PreviewJPEG                              []byte
+}
+
+// listingPreview accepts bounded JPEG thumbnails before an extension is approved.
+func listingPreview(files fs.FS, name string) []byte {
+	f, err := files.Open(name)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 32769))
+	if err != nil || len(data) > 32768 {
+		return nil
+	}
+	cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width > 1280 || cfg.Height > 1280 {
+		return nil
+	}
+	return data
 }
 
 // ExtensionExamples are the bundled examples.
@@ -900,7 +960,7 @@ func ExtensionExamples() []ExtensionExample {
 			continue
 		}
 		m, _, _ := ParseExtension(data)
-		out = append(out, ExtensionExample{ID: entry.Name(), Name: m.Name, Description: m.Description})
+		out = append(out, ExtensionExample{ID: entry.Name(), Name: m.Name, Description: m.Description, Category: m.Category, Caption: m.Caption, Keywords: m.Keywords, PreviewJPEG: listingPreview(extensionAssets, "extensions/examples/"+entry.Name()+"/preview.jpg")})
 	}
 	return out
 }
@@ -1175,6 +1235,9 @@ func ExtensionSchema() string {
 			"name":        map[string]any{"type": "string", "maxLength": 48},
 			"version":     map[string]any{"type": "string", "pattern": versionPattern.String()},
 			"description": map[string]any{"type": "string", "maxLength": 240},
+			"category":    map[string]any{"enum": listingCategories},
+			"caption":     map[string]any{"type": "string", "maxLength": 160},
+			"keywords":    map[string]any{"type": "array", "maxItems": 12, "items": map[string]any{"type": "string", "maxLength": 48}},
 			"author":      map[string]any{"type": "string", "maxLength": 80},
 			"homepage":    map[string]any{"type": "string", "pattern": "^https://"},
 			"panels": map[string]any{"type": "array", "minItems": 1, "maxItems": maxExtensionPanels, "items": map[string]any{

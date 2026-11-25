@@ -67,6 +67,8 @@ work, Claude reviews Codex's. It is a conversation of its own in the
 workspace, briefed with the goal, the plan, the diff and the test runs; you
 can talk to it like any other.
 
+Standard reviews send findings to the author conversation automatically, including minor findings and nits. You can choose manual triage in **Settings → Review by another agent → Between rounds**.
+
 - **From the chat:** the header's **Review** (its tooltip names the reviewer),
   `/review` in the message box, or `] ] ⇧R` (⌘K *Review this workspace's
   changes*) review the workspace's changes — committed, uncommitted and

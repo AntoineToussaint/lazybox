@@ -834,6 +834,16 @@ func (s *session) read() {
 				}
 				switch m.Method {
 				case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", permissionsMethod:
+					if s.purpose == agent.Reviewer {
+						reply, err := nativeResponse(m.Method, m.Params, agent.Operation{Decision: "decline"})
+						if err == nil {
+							err = s.p.Reply(m.ID, reply)
+						}
+						if err == nil && m.Redelivered {
+							emit(agent.Event{Type: "request_resolved", RequestID: id, Status: "declined"})
+						}
+						return
+					}
 					ev.Type = "approval"
 					ev.Text = m.Method
 					ev.Data = withAlways(m.Method, m.Params)
@@ -846,6 +856,10 @@ func (s *session) read() {
 					}
 					if !toolOffered(s.purpose, call.Tool) {
 						_ = s.p.Reject(m.ID, "unknown dynamic tool")
+						return
+					}
+					if s.purpose == agent.Reviewer && call.Tool == agent.CommandTool && !agent.ReviewCommandAllowed(call.Arguments) {
+						s.replyTool(m.ID, id, "Review is read-only. Inspect files with native read-only tools.", false)
 						return
 					}
 					if agent.IsInteractiveCommand(call.Tool, call.Arguments) {

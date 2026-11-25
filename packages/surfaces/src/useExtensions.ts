@@ -28,7 +28,12 @@ function publish(store: Store, value: Extensions | undefined, error: string) {
 async function load(api: RunnerClient, store: Store) {
   if (store.loading) return store.loading;
   store.loading = (async () => {
-    try { publish(store, await api.listExtensions({}, { timeoutMs: 5000 }), ''); }
+    try {
+      const knownCatalog = store.value?.catalogToken;
+      const next = await api.listExtensions({ knownCatalog }, { timeoutMs: 5000 });
+      if (!knownCatalog || next.catalogToken !== knownCatalog) publish(store, next, '');
+      else if (store.error) publish(store, undefined, '');
+    }
     catch (error) { publish(store, undefined, ConnectError.from(error).rawMessage || String(error)); }
     finally { store.loading = undefined; }
   })();

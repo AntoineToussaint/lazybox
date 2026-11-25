@@ -40,13 +40,13 @@ const lastRunning = (entries: readonly ToolEntry[]) => { for (let i = entries.le
 
 /**
  * A run of tool calls, as the activity detail says: every call (reads and
- * edits grouped) in Verbose; in Smart one summary for what needs no attention;
+ * edits grouped) in Verbose;
  * in Quiet only edits, and `turn` (the whole turn's calls, given on its first
  * run) as the turn's one line.
  */
 export const ToolLines = memo(function ToolLines({ entries, turn }: { entries: readonly ToolEntry[]; turn?: readonly ToolEntry[] }) {
   const { detail = 'verbose', latestPlan = '' } = useContext(ToolLineContext);
-  const items = useMemo<(ToolItem | BriefItem)[]>(() => detail === 'verbose' ? groupTools(entries) : briefItems(entries, latestPlan, detail === 'quiet'), [entries, detail, latestPlan]);
+  const items = useMemo<(ToolItem | BriefItem)[]>(() => detail === 'verbose' ? groupTools(entries) : briefItems(entries, latestPlan, true), [entries, detail, latestPlan]);
   const showTurn = detail === 'quiet' && !!turn && (stepsOf(turn).length > 0 || turn.some(e => e.status === 'running'));
   if (!items.length && !showTurn) return <PublishedCards entries={entries}/>;
   return <>

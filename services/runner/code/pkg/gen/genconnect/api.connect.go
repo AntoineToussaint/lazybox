@@ -658,6 +658,12 @@ const (
 	// RunnerServiceUpdateConfigFileProcedure is the fully-qualified name of the RunnerService's
 	// UpdateConfigFile RPC.
 	RunnerServiceUpdateConfigFileProcedure = "/lazybox.bench.v1.RunnerService/UpdateConfigFile"
+	// RunnerServiceGetCloneProfileProcedure is the fully-qualified name of the RunnerService's
+	// GetCloneProfile RPC.
+	RunnerServiceGetCloneProfileProcedure = "/lazybox.bench.v1.RunnerService/GetCloneProfile"
+	// RunnerServiceSaveCloneProfileProcedure is the fully-qualified name of the RunnerService's
+	// SaveCloneProfile RPC.
+	RunnerServiceSaveCloneProfileProcedure = "/lazybox.bench.v1.RunnerService/SaveCloneProfile"
 	// RunnerServiceListExtensionsProcedure is the fully-qualified name of the RunnerService's
 	// ListExtensions RPC.
 	RunnerServiceListExtensionsProcedure = "/lazybox.bench.v1.RunnerService/ListExtensions"
@@ -1211,6 +1217,8 @@ type RunnerServiceClient interface {
 	// Owner only. Sandboxed panel extensions (EXTENSIONS.md): the folders in the
 	// config folder's extensions/, each with what its manifest asks for, what
 	// the person approved, and its state. Reloaded every second.
+	GetCloneProfile(context.Context, *connect.Request[gen.GetCloneProfileRequest]) (*connect.Response[gen.CloneProfile], error)
+	SaveCloneProfile(context.Context, *connect.Request[gen.SaveCloneProfileRequest]) (*connect.Response[gen.CloneProfile], error)
 	ListExtensions(context.Context, *connect.Request[gen.ListExtensionsRequest]) (*connect.Response[gen.Extensions], error)
 	// Owner only. Approves exactly the grants and hosts the person was shown and
 	// turns the extension on; refused when its manifest asks for anything else
@@ -2564,6 +2572,18 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("UpdateConfigFile")),
 			connect.WithClientOptions(opts...),
 		),
+		getCloneProfile: connect.NewClient[gen.GetCloneProfileRequest, gen.CloneProfile](
+			httpClient,
+			baseURL+RunnerServiceGetCloneProfileProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("GetCloneProfile")),
+			connect.WithClientOptions(opts...),
+		),
+		saveCloneProfile: connect.NewClient[gen.SaveCloneProfileRequest, gen.CloneProfile](
+			httpClient,
+			baseURL+RunnerServiceSaveCloneProfileProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("SaveCloneProfile")),
+			connect.WithClientOptions(opts...),
+		),
 		listExtensions: connect.NewClient[gen.ListExtensionsRequest, gen.Extensions](
 			httpClient,
 			baseURL+RunnerServiceListExtensionsProcedure,
@@ -2924,6 +2944,8 @@ type runnerServiceClient struct {
 	completeUiRequest            *connect.Client[gen.CompleteUiRequestRequest, gen.UiRequest]
 	getConfigFiles               *connect.Client[gen.GetConfigFilesRequest, gen.ConfigFiles]
 	updateConfigFile             *connect.Client[gen.UpdateConfigFileRequest, gen.ConfigFiles]
+	getCloneProfile              *connect.Client[gen.GetCloneProfileRequest, gen.CloneProfile]
+	saveCloneProfile             *connect.Client[gen.SaveCloneProfileRequest, gen.CloneProfile]
 	listExtensions               *connect.Client[gen.ListExtensionsRequest, gen.Extensions]
 	approveExtension             *connect.Client[gen.ApproveExtensionRequest, gen.Extensions]
 	setExtensionEnabled          *connect.Client[gen.SetExtensionEnabledRequest, gen.Extensions]
@@ -4005,6 +4027,16 @@ func (c *runnerServiceClient) UpdateConfigFile(ctx context.Context, req *connect
 	return c.updateConfigFile.CallUnary(ctx, req)
 }
 
+// GetCloneProfile calls lazybox.bench.v1.RunnerService.GetCloneProfile.
+func (c *runnerServiceClient) GetCloneProfile(ctx context.Context, req *connect.Request[gen.GetCloneProfileRequest]) (*connect.Response[gen.CloneProfile], error) {
+	return c.getCloneProfile.CallUnary(ctx, req)
+}
+
+// SaveCloneProfile calls lazybox.bench.v1.RunnerService.SaveCloneProfile.
+func (c *runnerServiceClient) SaveCloneProfile(ctx context.Context, req *connect.Request[gen.SaveCloneProfileRequest]) (*connect.Response[gen.CloneProfile], error) {
+	return c.saveCloneProfile.CallUnary(ctx, req)
+}
+
 // ListExtensions calls lazybox.bench.v1.RunnerService.ListExtensions.
 func (c *runnerServiceClient) ListExtensions(ctx context.Context, req *connect.Request[gen.ListExtensionsRequest]) (*connect.Response[gen.Extensions], error) {
 	return c.listExtensions.CallUnary(ctx, req)
@@ -4604,6 +4636,8 @@ type RunnerServiceHandler interface {
 	// Owner only. Sandboxed panel extensions (EXTENSIONS.md): the folders in the
 	// config folder's extensions/, each with what its manifest asks for, what
 	// the person approved, and its state. Reloaded every second.
+	GetCloneProfile(context.Context, *connect.Request[gen.GetCloneProfileRequest]) (*connect.Response[gen.CloneProfile], error)
+	SaveCloneProfile(context.Context, *connect.Request[gen.SaveCloneProfileRequest]) (*connect.Response[gen.CloneProfile], error)
 	ListExtensions(context.Context, *connect.Request[gen.ListExtensionsRequest]) (*connect.Response[gen.Extensions], error)
 	// Owner only. Approves exactly the grants and hosts the person was shown and
 	// turns the extension on; refused when its manifest asks for anything else
@@ -5953,6 +5987,18 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(runnerServiceMethods.ByName("UpdateConfigFile")),
 		connect.WithHandlerOptions(opts...),
 	)
+	runnerServiceGetCloneProfileHandler := connect.NewUnaryHandler(
+		RunnerServiceGetCloneProfileProcedure,
+		svc.GetCloneProfile,
+		connect.WithSchema(runnerServiceMethods.ByName("GetCloneProfile")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceSaveCloneProfileHandler := connect.NewUnaryHandler(
+		RunnerServiceSaveCloneProfileProcedure,
+		svc.SaveCloneProfile,
+		connect.WithSchema(runnerServiceMethods.ByName("SaveCloneProfile")),
+		connect.WithHandlerOptions(opts...),
+	)
 	runnerServiceListExtensionsHandler := connect.NewUnaryHandler(
 		RunnerServiceListExtensionsProcedure,
 		svc.ListExtensions,
@@ -6521,6 +6567,10 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceGetConfigFilesHandler.ServeHTTP(w, r)
 		case RunnerServiceUpdateConfigFileProcedure:
 			runnerServiceUpdateConfigFileHandler.ServeHTTP(w, r)
+		case RunnerServiceGetCloneProfileProcedure:
+			runnerServiceGetCloneProfileHandler.ServeHTTP(w, r)
+		case RunnerServiceSaveCloneProfileProcedure:
+			runnerServiceSaveCloneProfileHandler.ServeHTTP(w, r)
 		case RunnerServiceListExtensionsProcedure:
 			runnerServiceListExtensionsHandler.ServeHTTP(w, r)
 		case RunnerServiceApproveExtensionProcedure:
@@ -7420,6 +7470,14 @@ func (UnimplementedRunnerServiceHandler) GetConfigFiles(context.Context, *connec
 
 func (UnimplementedRunnerServiceHandler) UpdateConfigFile(context.Context, *connect.Request[gen.UpdateConfigFileRequest]) (*connect.Response[gen.ConfigFiles], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.UpdateConfigFile is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) GetCloneProfile(context.Context, *connect.Request[gen.GetCloneProfileRequest]) (*connect.Response[gen.CloneProfile], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.GetCloneProfile is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) SaveCloneProfile(context.Context, *connect.Request[gen.SaveCloneProfileRequest]) (*connect.Response[gen.CloneProfile], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.SaveCloneProfile is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) ListExtensions(context.Context, *connect.Request[gen.ListExtensionsRequest]) (*connect.Response[gen.Extensions], error) {

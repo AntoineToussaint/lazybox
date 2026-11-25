@@ -11,6 +11,8 @@ export type GrantText = { grant: string; icon: string; title: string; detail: st
 
 const fixed: Record<string, Omit<GrantText, 'grant'>> = {
   'manage:reminders': { icon: 'bell', title: 'Manage follow-up reminders', detail: 'Schedule, view and cancel this extension’s reminders on this device', tone: 'act' },
+  'answer:preferences': { icon: 'ask', title: 'Reuse your confirmed coding preferences', detail: 'On request, review recent chats with your account to suggest preferences, share confirmed preferences with coding agents and consult your account for matching coding choices. Reuse marked answers on this Runner.', tone: 'act' },
+  'review:archives': { icon: 'notes', title: 'Review archived conversations', detail: 'Send recent conversation text and repository AGENTS.md files to a read-only assistant on your account to propose documentation changes. Uses your subscription.', tone: 'act' },
   'scan:disk': { icon: 'activity', title: 'Scan this Runner for reclaimable space', detail: 'Run a daily dev-cleaner dry run and see candidate paths and sizes', tone: 'act' },
   'read:workspaces': { icon: 'collections', title: 'See your workspaces', detail: 'Their names and repositories', tone: 'read' },
   'read:sessions': { icon: 'history', title: 'See your conversations', detail: 'Titles, workspace, provider, model and status — not their messages', tone: 'read' },

@@ -94,12 +94,12 @@ type Action struct {
 	Escalate string
 }
 
-// LoopMode reads a mode word; "" is ask.
+// LoopMode reads a mode word; "" is automatic.
 func LoopMode(mode string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", LoopAsk:
+	case LoopAsk:
 		return LoopAsk, nil
-	case LoopAuto:
+	case "", LoopAuto:
 		return LoopAuto, nil
 	case LoopOff:
 		return LoopOff, nil
@@ -239,6 +239,9 @@ func RoundEnded(rv *Review, runID string, now int64) (Action, error) {
 			why = fmt.Sprintf("No blocker open after %s; %d major still open.", plural(r.Round, "round", "rounds"), majors)
 		}
 		r.stop(now, StopClean, why)
+		if r.Loop == LoopAuto && !r.Paused && r.TemplateID == "" {
+			return Action{SendFindings: unsentFindings(rv, r.ID)}, nil
+		}
 		return Action{}, nil
 	case r.Loop == LoopOff:
 		r.Phase = PhaseDone
@@ -248,17 +251,8 @@ func RoundEnded(rv *Review, runID string, now int64) (Action, error) {
 		r.stop(now, StopMaxRounds, why)
 		return Action{Escalate: why}, nil
 	case r.Loop == LoopAuto && !r.Paused:
-		var ids []string
-		for _, c := range rv.Comments {
-			if c.ReviewID == r.ID && (c.Disposition == Proposed || c.Disposition == Open) {
-				ids = append(ids, c.ID)
-			}
-		}
 		r.Phase = PhaseTriage
-		if len(ids) == 0 {
-			return Action{}, nil
-		}
-		return Action{SendFindings: ids}, nil
+		return Action{SendFindings: unsentFindings(rv, r.ID)}, nil
 	}
 	// Findings the person already sent while the reviewer worked: the loop
 	// waits for the author's fix, from when they were sent.
@@ -331,6 +325,16 @@ func FindingsSent(rv *Review, runID string, ids []string, by, to string, now int
 		r.Phase, r.FixingSince = PhaseFixing, now
 		r.note(now, "fixing", "Lazybox", fmt.Sprintf("Waiting for %s to change files; then %s re-reviews.", firstNonEmpty(r.SourceLabel, "the author"), r.ReviewerLabel), "")
 	}
+}
+
+func unsentFindings(rv *Review, runID string) []string {
+	var ids []string
+	for _, c := range rv.Comments {
+		if c.ReviewID == runID && (c.Disposition == Proposed || c.Disposition == Open) {
+			ids = append(ids, c.ID)
+		}
+	}
+	return ids
 }
 
 func containsID(ids []string, id string) bool {

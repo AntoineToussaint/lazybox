@@ -141,6 +141,7 @@ func (s *Service) ArchiveCollection(ctx context.Context, r *pb.CollectionRequest
 	if err != nil {
 		return nil, rpcError(err)
 	}
+	s.Bench.Archived(ctx, c.ID, "", "")
 	return &pb.CollectionResponse{Collection: wireCollection(c)}, nil
 }
 

@@ -3,10 +3,16 @@
 An extension is a panel you write in HTML, JavaScript and CSS — a board of
 your agents, a cost dashboard, a view of your own service — and keep in a
 folder. It can also be an [account policy](#account-policies) with no panel at
-all, such as *Subscription rotation*. It runs in a sandbox, apart from Lazybox, and can read and do **only
+all, such as *Subscription rotation*. A panel runs in a sandbox, apart from Lazybox, and can read and do **only
 what you allow** it, which Lazybox shows you in words before it runs. It cannot
 read your files, terminals or messages, run commands, change a setting, see a
 credential, or reach any site you did not allow.
+
+Clone Me and Compound Engineering are background workflows run by the Runner.
+In Settings → Extensions, search by name or keyword, filter by category, and
+expand a thumbnail to see the plugin before adding it. After approval, choose
+**Teach Clone Me** to build your profile. Compound Engineering publishes its
+documentation proposals in workspace Artifacts. Use **Archive workspace…** in the workspace menu or **Archive conversation** to trigger a review.
 
 ## Try one
 

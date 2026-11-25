@@ -5,6 +5,9 @@
 # conversation and run two actions that only move focus. It cannot read your
 # messages, send anything, change a setting or reach the network.
 lazybox: 1
+category: Agents & conversations
+caption: Agent board panel with fixture workspace data.
+keywords: [kanban, attention]
 name: Agent board
 version: 1.0.0
 description: Every conversation as a card, in a column of what it needs from you.

@@ -191,7 +191,7 @@ failed`. A `when:` step reacts to the last step before it that has no `when:`.
 | Field | Meaning |
 | --- | --- |
 | `id`, `description` | As for actions. |
-| `on` | One or more of `agent.needs-input`, `turn.done`, `turn.failed`, `pr.opened`, `pr.checks-failed`, `pr.checks-passed`, `pr.changes-requested`, `pr.approved`, `pr.merged`, `pr.closed`, `pr.conflicts`, `mission.accepted`. A `pr.*` event is a [tracked pull request](../guides/review-agent-work.md#pull-requests-your-agents-open)'s transition, sent once. |
+| `on` | One or more of `conversation.archived`, `workspace.archived`, `agent.needs-input`, `turn.done`, `turn.failed`, `pr.opened`, `pr.checks-failed`, `pr.checks-passed`, `pr.changes-requested`, `pr.approved`, `pr.merged`, `pr.closed`, `pr.conflicts`, `mission.accepted`. A `pr.*` event is a [tracked pull request](../guides/review-agent-work.md#pull-requests-your-agents-open)'s transition, sent once. |
 | `filter` | `workspace`, `conversation` (name or title), `repository` (`owner/name`); `*` and `?` wildcards, case-insensitive; all set filters must match. |
 | `run` / `shell` / `webhook` | Exactly one: a program and its arguments (no shell); a line for `/bin/sh -c`; or a URL / `{url, headers}` that receives the event as a JSON `POST`. |
 | `grants` | `read`, `respond`, `start` — a Lazybox credential for the hook's own `lazybox` calls, live only while it runs. None by default. With `respond`, a hook may also `lazybox do` the actions marked *safe* (they only show, focus or arrange). |

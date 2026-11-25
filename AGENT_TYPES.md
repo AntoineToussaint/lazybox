@@ -24,6 +24,8 @@ including their requests in the inbox. Help, planning and summary stay in their 
 | Artifact companion (`artifact`) | yes | no | no | yes | no | companion |
 | Ask Lazybox (`help`), planning, summary | no | no | no | no | no | assistant |
 
+Reviewers inspect workspace files and file findings without approval cards. Operations requiring elevated access are declined immediately. A verification review can separately request execution of a test recipe in isolated checkouts.
+
 - **Works in a workspace**: it edits files, runs interactive commands and
   workspace actions, gets your behaviour profile, and is checkpointed.
 - **Starts agents**: missions, `lazybox agents spawn`, conversations it

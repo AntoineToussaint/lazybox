@@ -174,7 +174,7 @@ checked out as its own git worktree, plus every conversation about that work.
    - **GitHub:** *Connections & folders → Connect with a personal token*. The
      form links to GitHub with the right scope (`repo`) already set; the output
      of `gh auth token` works too. Nothing is cloned until you create a workspace.
-3. **Select** one or more repositories, accept or edit the name, and
+3. **Select** one or more repositories. **Selected repositories** above the search field shows every choice, even while filtering. Click a selected name to remove it, or its branch control to change the starting branch. Accept or edit the workspace name, then choose
    **Create workspace**. Progress streams while the Runner clones (once) and
    creates the worktrees. Double-clicking a repository creates the workspace at
    once.

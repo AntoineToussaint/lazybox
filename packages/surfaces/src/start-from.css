@@ -39,3 +39,7 @@
   .start-from-picker{left:0}
   .start-from-chip{max-width:140px}
 }
+
+.repository-selection:has(.start-from-picker){height:auto;max-height:50dvh}
+.repository-selection .workspace-start-from-repo:has(.start-from-picker){width:100%;flex-wrap:wrap}
+.repository-selection .start-from-picker{position:static;flex:0 0 100%;height:min(200px,28dvh)}

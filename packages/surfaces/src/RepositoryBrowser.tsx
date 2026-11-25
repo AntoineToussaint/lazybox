@@ -1,4 +1,4 @@
-import { createContext, Fragment, useContext, useEffect, useRef, useState } from "react";
+import { type ReactNode, createContext, Fragment, useContext, useEffect, useRef, useState } from "react";
 import type { WorkspaceHost } from "@lazybox/platform";
 import { useRunner } from "./RunnerContext";
 import { useRepositoryCatalog } from "./repository-catalog";
@@ -17,6 +17,7 @@ export const RepositoryHostContext = createContext<
   >
 >({});
 type Props = {
+  renderBranch?(identity: string): ReactNode;
   selected?: ReadonlySet<string>;
   onSelected?(value: Set<string>): void;
   /** Double-click: choose this repository and finish (create or add) at once. */
@@ -29,6 +30,7 @@ type Props = {
 };
 /** Shared identity browser: selecting is presentation state, never a clone/import. */
 export function RepositoryBrowser({
+  renderBranch,
   selected = new Set(),
   onSelected,
   onActivate,
@@ -49,6 +51,7 @@ export function RepositoryBrowser({
     [removing, setRemoving] = useState<string>(),
     [replacing, setReplacing] = useState<string>(),
     [replacedNote, setReplacedNote] = useState("");
+  const search = useRef<HTMLInputElement>(null);
   const results = useRef<HTMLDivElement>(null);
   useEffect(() => { if (results.current) results.current.scrollTop = 0; }, [query]);
   const entries = [...(catalog?.entries || [])].sort(compareRepositories),
@@ -78,9 +81,42 @@ export function RepositoryBrowser({
   };
   return (
     <section className="repository-browser" aria-label="Repository browser">
+      {onSelected && (
+        <div
+          className="repository-selection"
+          role="region"
+          aria-label="Selected repositories"
+          tabIndex={0}
+        >
+          <strong>Selected repositories ({selected.size})</strong>
+          {renderBranch && <small>Each repository starts from its default branch unless you choose another.</small>}
+          {onActivate && <small>Double-click a result to continue with all selected repositories.</small>}
+          {[...selected].map((id) => (
+            <div className="workspace-start-from-repo" key={id}>
+              <button
+                type="button"
+                disabled={disabled}
+                aria-label={`Unselect ${entries.find((e) => e.identity === id)?.name || id}`}
+                onClick={event => {
+                  const row = event.currentTarget.parentElement;
+                  const sibling = row?.nextElementSibling || row?.previousElementSibling;
+                  (sibling?.querySelector("button") || search.current)?.focus();
+                  const next = new Set(selected);
+                  next.delete(id);
+                  onSelected(next);
+                }}
+              >
+                {entries.find((e) => e.identity === id)?.name || id} ×
+              </button>
+              {renderBranch?.(id)}
+            </div>
+          ))}
+        </div>
+      )}
       <div className="repository-browser-toolbar">
         <input
           autoFocus
+          ref={search}
           data-autofocus
           type="search"
           spellCheck={false}
@@ -327,33 +363,6 @@ export function RepositoryBrowser({
           >
             Remove from suggestions
           </button>
-        </div>
-      )}
-      {/* Always present, so choosing the first repository does not shift the
-          list under the pointer (a double-click would land on another row). */}
-      {onSelected && (
-        <div
-          className="repository-selection"
-          role="region"
-          aria-label="Selected repositories"
-          tabIndex={0}
-        >
-          {!selected.size && <span className="repository-selection-empty">No repository selected yet · double-click one to choose it and continue</span>}
-          {[...selected].map((id) => (
-            <button
-              type="button"
-              disabled={disabled}
-              key={id}
-              aria-label={`Unselect ${entries.find((e) => e.identity === id)?.name || id}`}
-              onClick={() => {
-                const next = new Set(selected);
-                next.delete(id);
-                onSelected(next);
-              }}
-            >
-              {entries.find((e) => e.identity === id)?.name || id} ×
-            </button>
-          ))}
         </div>
       )}
     </section>

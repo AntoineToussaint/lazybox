@@ -46,6 +46,7 @@ export function ExtensionApprovalSheet({ extension, onClose, onApproved }: { ext
     setBusy(false);
     if (failed) setError(failed); else onClose();
   };
+  const workflow = shown.grants.some(grant => grant === 'answer:preferences' || grant === 'review:archives');
   const grants = shown.grants.map(describeGrant);
   return <DraggableDialog ref={dialog} className="extension-approval" aria-labelledby="extension-approval-title" aria-describedby="extension-approval-summary"
     onCancel={event => { if (busy) event.preventDefault(); else onClose(); }}>
@@ -60,7 +61,7 @@ export function ExtensionApprovalSheet({ extension, onClose, onApproved }: { ext
     <p id="extension-approval-summary" className="extension-approval-summary">
       {shown.description ? <>{shown.description} </> : null}
       {shown.panels.length ? <>It adds {shown.panels.length === 1 ? 'a panel' : `${shown.panels.length} panels`} ({panels}) that runs in a sandbox, apart from Lazybox.</>
-        : <>It has no panel and runs no code: Lazybox follows its account policy.</>}
+        : workflow ? <>Lazybox runs this workflow on the Runner.</> : <>It has no panel and runs no code: Lazybox follows its account policy.</>}
     </p>
     {shown.accountPolicy && <section aria-labelledby="extension-policy" className="extension-policy">
       <h3 id="extension-policy">At a limit</h3>
@@ -87,13 +88,13 @@ export function ExtensionApprovalSheet({ extension, onClose, onApproved }: { ext
         <span><strong>{h.title}</strong><small>{h.detail}</small></span>
         {added.hosts.includes(h.host) && update && <em className="extension-new">New</em>}
         <code>{h.host}</code>
-      </li>)}</ul> : <p className="extension-none"><Icon name="lock" size={13}/> Nothing: it cannot use the network.</p>}
+      </li>)}</ul> : <p className="extension-none"><Icon name="lock" size={13}/> {workflow ? 'The Runner uses your configured agent account for analysis.' : 'Nothing: it cannot use the network.'}</p>}
       {shown.hosts.length > 0 && (shown.grants.some(g => g.startsWith('read:'))) && <p className="extension-caution"><Icon name="alert" size={13}/> What it can see, it could send to these sites.</p>}
     </section>
-    <details className="extension-never">
+    {!workflow && <details className="extension-never">
       <summary><Icon name="shield" size={14}/> It can never…</summary>
       <ul>{extensionNever.map(line => <li key={line}>{line}</li>)}</ul>
-    </details>
+    </details>}
     <p className="extension-path" title={shown.path}><Icon name="folder" size={12}/> <span className="mono">{shown.path}</span></p>
     {error && <p className="settings-error" role="alert">{error}</p>}
     {viewing ? <footer>

@@ -3,7 +3,12 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner"
+	"maps"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/power"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
@@ -14,9 +19,60 @@ import (
 // none is on the agent, terminal, device or hook allowlists, and an
 // extension's own credential reaches none of them (extension_auth.go).
 
-func (s *Service) ListExtensions(context.Context, *pb.ListExtensionsRequest) (*pb.Extensions, error) {
+var catalogEpoch = time.Now().UnixNano()
+
+func catalogToken(snap power.ExtensionsSnapshot) string {
+	return fmt.Sprintf("%x-%x", catalogEpoch, snap.Revision)
+}
+
+func (s *Service) ListExtensions(_ context.Context, r *pb.ListExtensionsRequest) (*pb.Extensions, error) {
 	snap, _ := s.Bench.Extensions().Reload()
+	if token := catalogToken(snap); token == r.KnownCatalog {
+		return &pb.Extensions{CatalogToken: token}, nil
+	}
 	return wireExtensions(snap), nil
+}
+
+func (s *Service) GetCloneProfile(ctx context.Context, r *pb.GetCloneProfileRequest) (*pb.CloneProfile, error) {
+	p, suggestions, err := s.Bench.CloneProfile()
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	var questions []string
+	if r.LearnFromHistory {
+		suggestions, questions, err = s.Bench.LearnCloneStyle(ctx)
+		if err != nil {
+			return nil, rpcError(err)
+		}
+	}
+	profile := wireCloneProfile(p)
+	profile.Suggestions, profile.Questions = suggestions, questions
+	return profile, nil
+}
+
+func wireCloneProfile(p runner.CloneProfile) *pb.CloneProfile {
+	out := &pb.CloneProfile{Style: p.Style, Testing: p.Testing, AskWhen: p.AskWhen, Revision: p.Revision}
+	for _, id := range slices.Sorted(maps.Keys(p.Remembered)) {
+		saved := p.Remembered[id]
+		var values []string
+		for _, key := range slices.Sorted(maps.Keys(saved.Answers)) {
+			values = append(values, saved.Answers[key]...)
+		}
+		out.RememberedAnswers = append(out.RememberedAnswers, &pb.RememberedCloneAnswer{Id: id, Workspace: saved.Workspace, Question: saved.Question, Answer: strings.Join(values, ", ")})
+	}
+	return out
+}
+
+func (s *Service) SaveCloneProfile(_ context.Context, r *pb.SaveCloneProfileRequest) (*pb.CloneProfile, error) {
+	p := r.GetProfile()
+	if p == nil {
+		return nil, grpcError(codes.InvalidArgument, errors.New("profile required"))
+	}
+	saved, err := s.Bench.SaveCloneProfile(runner.CloneProfile{Style: p.Style, Testing: p.Testing, AskWhen: p.AskWhen, Revision: p.Revision}, r.ForgetAnswers, r.ForgetAnswerIds)
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	return wireCloneProfile(saved), nil
 }
 
 func (s *Service) ApproveExtension(_ context.Context, r *pb.ApproveExtensionRequest) (*pb.Extensions, error) {
@@ -71,11 +127,11 @@ func extensionError(err error) error {
 }
 
 func wireExtensions(snap power.ExtensionsSnapshot) *pb.Extensions {
-	out := &pb.Extensions{Directory: snap.Dir, Revision: snap.Revision, Protocol: power.ExtensionProtocol}
+	out := &pb.Extensions{CatalogToken: catalogToken(snap), Directory: snap.Dir, Revision: snap.Revision, Protocol: power.ExtensionProtocol}
 	for _, e := range snap.Extensions {
 		m := e.Manifest
 		w := &pb.Extension{Id: e.ID, Name: m.Name, Version: m.Version, Description: m.Description, Author: m.Author, Homepage: m.Homepage, Path: e.Path, State: e.State,
-			Grants: m.Grants, Hosts: m.Hosts, ApprovedGrants: e.ApprovedGrants, ApprovedHosts: e.ApprovedHosts, Error: e.Err, Digest: e.Digest}
+			Listing: &pb.ExtensionListing{Category: m.Category, Keywords: m.Keywords, Caption: m.Caption, PreviewJpeg: e.PreviewJPEG}, Grants: m.Grants, Hosts: m.Hosts, ApprovedGrants: e.ApprovedGrants, ApprovedHosts: e.ApprovedHosts, Error: e.Err, Digest: e.Digest}
 		if !e.ApprovedAt.IsZero() && e.ApprovedAt.UnixMilli() > 0 {
 			w.ApprovedAtUnixMillis = e.ApprovedAt.UnixMilli()
 		}
@@ -92,7 +148,7 @@ func wireExtensions(snap power.ExtensionsSnapshot) *pb.Extensions {
 	}
 	for _, x := range power.ExtensionExamples() {
 		installed := slices.ContainsFunc(snap.Extensions, func(e power.ExtensionInfo) bool { return e.ID == x.ID })
-		out.Examples = append(out.Examples, &pb.ExtensionExample{Id: x.ID, Name: x.Name, Description: x.Description, Installed: installed})
+		out.Examples = append(out.Examples, &pb.ExtensionExample{Id: x.ID, Name: x.Name, Description: x.Description, Installed: installed, Listing: &pb.ExtensionListing{Category: x.Category, Keywords: x.Keywords, Caption: x.Caption, PreviewJpeg: x.PreviewJPEG}})
 	}
 	return out
 }

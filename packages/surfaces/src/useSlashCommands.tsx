@@ -321,7 +321,7 @@ export function useSlashCommands(o: Options) {
       case 'stop': actions.interrupt(); break;
       case 'detail': {
         const value = args.toLowerCase();
-        if (!['quiet', 'smart', 'verbose'].includes(value)) { onError(`“${args}” is not a detail: choose quiet, smart or verbose.`); break; }
+        if (!['quiet', 'verbose'].includes(value)) { onError(`“${args}” is not a detail: choose quiet or verbose.`); break; }
         if (!runAction(`activity.${value}`)) notice(`Already ${value[0].toUpperCase()}${value.slice(1)}`);
         break;
       }

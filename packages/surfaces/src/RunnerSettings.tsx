@@ -45,7 +45,7 @@ export function AgentSettings() {
   if (!settings) return <><SettingsHeader title="Agents & workspaces"/><SettingsLoading error={error} what="agent settings"/></>;
   const dirty = !!baseline && editable(settings) !== baseline;
   const change = (patch: Partial<RunnerSettings>) => { setSettings({ ...settings, ...patch }); setSaved(false); };
-  const review: ReviewSettings = settings.review || { $typeName: 'lazybox.bench.v1.ReviewSettings', reviewer: '', reviewerMode: 'other', reviewerModel: '', template: '', autoStart: false, defaultTemplate: '', loop: 'ask', maxRounds: 3 };
+  const review: ReviewSettings = settings.review || { $typeName: 'lazybox.bench.v1.ReviewSettings', reviewer: '', reviewerMode: 'other', reviewerModel: '', template: '', autoStart: false, defaultTemplate: '', loop: 'auto', maxRounds: 3 };
   // The built-in template is stored as none, so a later release's improvements reach it.
   const changeReview = (patch: Partial<ReviewSettings>) => { const next = { ...review, ...patch }; if (next.template.trim() === review.defaultTemplate.trim()) next.template = ''; change({ review: next }); };
   // A fixed reviewer: an agent (its best subscription), or one subscription; ACP agents have one each.
@@ -101,7 +101,7 @@ export function AgentSettings() {
         <input id="setting-reviewer-model" type="text" spellCheck={false} maxLength={128} placeholder="The agent’s default" value={review.reviewerModel} onChange={e => changeReview({ reviewerModel: e.target.value.trim() })}/>
       </SettingsRow>}
       <SettingsRow label="Between rounds" htmlFor="setting-review-loop" description="After a review, its findings go to the author; when the author's turn then changes files, the reviewer re-reviews that change against its open findings, until no blocker is open. Ask me: you accept and send the findings each round. Automatically: Lazybox sends them. One pass: no re-review.">
-        <select id="setting-review-loop" value={review.loop || 'ask'} onChange={e => changeReview({ loop: e.target.value })}>
+        <select id="setting-review-loop" value={review.loop || 'auto'} onChange={e => changeReview({ loop: e.target.value })}>
           {loopModes.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
         </select>
       </SettingsRow>

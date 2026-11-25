@@ -142,11 +142,15 @@
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
-  max-height: 76px;
+  height: 76px;
+  align-content: flex-start;
   overflow: auto;
   overscroll-behavior: contain;
   padding: 2px;
 }
+.repository-selection .workspace-start-from-repo { display: inline-flex; align-items: center; max-width: 100%; gap: 2px; }
+.repository-selection small { width: 100%; color: var(--text-subtle); }
+.repository-selection strong { width: 100%; font-size: calc(12px * var(--text-scale)); }
 .repository-selection button {
   font-size: calc(11px * var(--text-scale));
   padding: 4px 8px;

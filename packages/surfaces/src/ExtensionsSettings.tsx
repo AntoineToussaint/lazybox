@@ -1,3 +1,5 @@
+import {CloneInterview} from './CloneInterview';
+import { ExtensionPreview, useExtensionCatalog } from './ExtensionCatalog';
 import { useState } from 'react';
 import type { Extension } from '@lazybox/protocol';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -16,6 +18,7 @@ import './extensions.css';
  */
 export function ExtensionsSettings({ onOpenPanel }: { onOpenPanel?(choice?: ExtensionPanelChoice): void }) {
   const { value, error, change } = useExtensions();
+  const [interview,setInterview] = useState(false);
   const [reviewing, setReviewing] = useState<Extension>();
   const [removing, setRemoving] = useState<Extension>();
   const [problem, setProblem] = useState('');
@@ -41,13 +44,14 @@ export function ExtensionsSettings({ onOpenPanel }: { onOpenPanel?(choice?: Exte
     if (failed) setProblem(failed); else if (added) setReviewing(added);
   };
   const copy = (text: string) => void navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => undefined);
-  const list = value?.extensions || [];
+  const { extensions: list, available, controls } = useExtensionCatalog(value?.extensions || [], value?.examples || []);
   return <div className="extensions-settings">
     <SettingsHeader title="Extensions" description="Install extensions, open their panels, and manage what they can access." actions={onOpenPanel && <button type="button" onClick={() => onOpenPanel()}><Icon name="puzzle" size={14}/> Browse panels</button>}/>
     {(error && !value) && <p className="settings-error" role="alert">{error}</p>}
     {problem && <p className="settings-error" role="alert">{problem}</p>}
     {!value && !error && <p className="settings-empty" role="status">Loading extensions…</p>}
     {value && <>
+      {controls}
       <SettingsGroup title="Installed">
         {list.length ? <ul className="extension-cards" aria-label="Your extensions">{list.map(ext => {
           const added = widening(ext), on = ext.state === 'enabled' || ext.state === 'review';
@@ -55,7 +59,7 @@ export function ExtensionsSettings({ onOpenPanel }: { onOpenPanel?(choice?: Exte
             <span className="extension-mark" aria-hidden="true"><Icon name={ext.state === 'broken' ? 'alert' : ext.panels[0]?.icon || 'puzzle'} size={18}/></span>
             <div className="extension-card-body">
               <div className="extension-card-title"><strong>{ext.name || ext.id}</strong>{ext.version && <small>{ext.version}</small>}<span className={`extension-chip state-${ext.state}`}>{extensionStateLabel[ext.state]}</span></div>
-              {ext.description && <p>{ext.description}</p>}
+              <ExtensionPreview entry={ext}/>{ext.description && <p>{ext.description}</p>}
               {ext.state === 'broken' ? <ul className="extension-problems" aria-label={`Problems in ${ext.id}/extension.yaml`}>
                 {ext.error && <li>{ext.error}</li>}
                 {ext.issues.filter(i => i.severity === 'error').map((i, n) => <li key={n}><span className="where">line {i.line}</span> {i.message}</li>)}
@@ -68,6 +72,7 @@ export function ExtensionsSettings({ onOpenPanel }: { onOpenPanel?(choice?: Exte
               <small className="extension-path mono" title={ext.path}>{ext.path}</small>
             </div>
             <div className="extension-card-actions">
+              {on && ext.grants.includes('answer:preferences') && ext.approvedGrants.includes('answer:preferences') && <button onClick={() => setInterview(true)}>Teach Clone Me</button>}
               {onOpenPanel && on && ext.panels.map(panel => <button type="button" key={panel.id}
                 aria-label={`Open ${panel.title}`} onClick={() => onOpenPanel({ id: ext.id, panel: panel.id })}>
                 {ext.panels.length === 1 ? 'Open panel' : panel.title}
@@ -78,12 +83,12 @@ export function ExtensionsSettings({ onOpenPanel }: { onOpenPanel?(choice?: Exte
               <button type="button" className="quiet" aria-label={`Remove ${ext.name || ext.id}`} title="Remove" onClick={() => setRemoving(ext)}><Icon name="close" size={13}/></button>
             </div>
           </li>;
-        })}</ul> : <p className="settings-empty">No extensions yet. Add an example below, or make your own.</p>}
+        })}</ul> : <p className="settings-empty">No installed extensions to show.</p>}
       </SettingsGroup>
-      {value.examples.length > 0 && <SettingsGroup title="Examples" description="Bundled with Lazybox. Adding one copies its folder into yours; you still approve what it may do.">
-        <ul className="extension-cards" aria-label="Example extensions">{value.examples.map(x => <li key={x.id} className="extension-card">
+      {available.length > 0 && <SettingsGroup title="Examples" description="Bundled with Lazybox. Adding one copies its folder into yours; you still approve what it may do.">
+        <ul className="extension-cards" aria-label="Example extensions">{available.map(x => <li key={x.id} className="extension-card">
           <span className="extension-mark" aria-hidden="true"><Icon name="puzzle" size={18}/></span>
-          <div className="extension-card-body"><div className="extension-card-title"><strong>{x.name}</strong></div><p>{x.description}</p></div>
+          <div className="extension-card-body"><div className="extension-card-title"><strong>{x.name}</strong></div><ExtensionPreview entry={x}/><p>{x.description}</p></div>
           <div className="extension-card-actions">{x.installed ? <small className="muted">Added</small> : <button type="button" disabled={!!busy} onClick={() => void add(x.id)}>{busy === x.id ? 'Adding…' : 'Add'}</button>}</div>
         </li>)}</ul>
       </SettingsGroup>}
@@ -97,6 +102,7 @@ export function ExtensionsSettings({ onOpenPanel }: { onOpenPanel?(choice?: Exte
         </div></div>
       </SettingsGroup>
     </>}
+    {interview && <CloneInterview onClose={() => setInterview(false)}/>}
     {reviewing && <ExtensionApprovalSheet extension={reviewing} onClose={() => setReviewing(undefined)}/>}
     {removing && <RemoveExtensionDialog extension={removing} onClose={() => setRemoving(undefined)} onRemove={() => run(removing.id, api => api.removeExtension({ id: removing.id })).then(() => setRemoving(undefined))}/>}
   </div>;

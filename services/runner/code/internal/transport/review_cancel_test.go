@@ -54,6 +54,15 @@ func nothingApplied(t *testing.T, fake *agenttest.Adapter, want string) {
 // may cancel.
 func TestCancelReviewMidRoundStopsTheLoopAndKeepsTheFindings(t *testing.T) {
 	f := newReviewFixture(t)
+	// The person sends round 1's findings: the loop asks between rounds.
+	settings, err := f.client.GetRunnerSettings(f.owner, &pb.InfoRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Review.Loop = "ask"
+	if _, err = f.client.SaveRunnerSettings(f.owner, settings); err != nil {
+		t.Fatal(err)
+	}
 	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Scope: "turn", Turn: 1, Provider: "codex"})
 	if err != nil {
 		t.Fatal(err)

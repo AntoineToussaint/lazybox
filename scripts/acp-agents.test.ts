@@ -57,7 +57,7 @@ test('command lines and environments typed in Settings', () => {
 test('an ACP conversation is named by its agent, not as Claude', () => {
   const session = { id: 's', profileId: 'acp-gemini', provider: 'acp:gemini', model: '' } as never;
   assert.equal(conversationDetails(session, [{ id: 'acp-gemini', provider: 'acp:gemini', label: 'Gemini CLI', isolation: 'inherited' } as never], false), 'Gemini CLI');
-  const ctx = { provider: 'acp:gemini', agentName: 'Gemini CLI', live: true, busy: false, coding: true, workspace: true, permission: 'ask', planWorkflow: false, livePermission: true, model: '', liveModel: true, resumable: true, models: [], agentMessage: true, shellBlock: false, compact: false, detail: 'smart', subscriptions: 1 } satisfies SlashContext;
+  const ctx = { provider: 'acp:gemini', agentName: 'Gemini CLI', live: true, busy: false, coding: true, workspace: true, permission: 'ask', planWorkflow: false, livePermission: true, model: '', liveModel: true, resumable: true, models: [], agentMessage: true, shellBlock: false, compact: false, detail: 'quiet', subscriptions: 1 } satisfies SlashContext;
   const commands = lazyboxCommands(ctx);
   assert.equal(commands.find(c => c.name === 'stop')?.description, 'Interrupt Gemini CLI');
   assert.match(commands.find(c => c.name === 'compact')?.disabled || '', /Gemini CLI has no \/compact/);

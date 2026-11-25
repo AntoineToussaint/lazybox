@@ -128,7 +128,7 @@ export function SessionMenu({ session, sessionID, accountName, stream, allowStar
     </dl>}
     {takesPermissions(session) && <div className="session-permission" role="group" aria-label="Permissions">
       <strong>Permissions{session.permission ? '' : ' · CLI settings'}{session.capabilities?.livePermission ? '' : ' · restart needed'}</strong>
-      {/* The current mode is selected (pressed), like Smart below: never greyed. Greyed is only a mode it cannot take, with why. */}
+      {/* The current mode is selected (pressed), like Quiet below: never greyed. Greyed is only a mode it cannot take, with why. */}
       {PERMISSION_CHOICES.map(([mode, label]) => {
         const current = session.permission === mode, blocked = permissionBlocked(session.workflow, mode);
         return <button key={mode} aria-pressed={current} aria-disabled={blocked ? true : undefined} data-blocked={blocked ? true : undefined}
@@ -210,7 +210,7 @@ function ModelChoiceGroup({ models }: { models: ModelChoices }) {
   </div>;
 }
 
-/** Quiet, Smart or Verbose for this conversation, in its ⋯ menu; the default is marked. */
+/** Quiet or Verbose for this conversation, in its ⋯ menu; the default is marked. */
 function ActivityDetailChoice({ activity }: { activity: ActivityChoice }) {
   return <div className="session-permission session-activity" role="group" aria-label="Activity detail">
     <strong>Activity detail{activity.overridden ? ' · this conversation' : ' · default'}</strong>

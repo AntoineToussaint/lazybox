@@ -751,7 +751,7 @@ func (b *Bench) startReview(ctx context.Context, req ReviewRequest, markStarted 
 	}
 	run.BriefOperation = "review-brief-" + strings.TrimPrefix(e.ID, "e_")
 	// The loop: how findings reach the author between rounds, and its limit.
-	mode, rounds := reviews.LoopAsk, 0
+	mode, rounds := reviews.LoopAuto, 0
 	if b.Preferences != nil {
 		prefs := b.Preferences.Snapshot().Review
 		if m, err := reviews.LoopMode(prefs.Loop); err == nil {

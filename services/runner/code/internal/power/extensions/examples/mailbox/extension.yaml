@@ -1,4 +1,7 @@
 lazybox: 1
+category: Notifications
+caption: Mailbox panel with fixture workspace data.
+keywords: [github, inbox]
 name: Mailbox
 version: 1.0.0
 description: See your unread GitHub activity and open it in Inbox.

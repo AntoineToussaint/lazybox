@@ -73,3 +73,17 @@ func ToolReplaySafe(name string, args json.RawMessage) bool {
 	}
 	return call.Action == "interactive_read" || call.Action == "read" || call.Action == "tail" || call.Action == "wait" || call.Action == "actions"
 }
+
+// ReviewCommandAllowed limits reviewers to inspection and the dedicated verification workflow.
+func ReviewCommandAllowed(args json.RawMessage) bool {
+	var call struct{ Action string }
+	if json.Unmarshal(args, &call) != nil {
+		return false
+	}
+	switch call.Action {
+	case "read", "tail", "wait", "actions", "verify":
+		return true
+	default:
+		return false
+	}
+}

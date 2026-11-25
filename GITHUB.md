@@ -602,9 +602,9 @@ structured channels only, and you see every step.
    (`internal/runner/reviews/testdata/findings-message.json`). How they get
    there is the loop's mode, per review (the tray) and by default
    (**Settings → Review by another agent → Between rounds**):
-   - **Ask me between rounds** (the default): you accept and send them from the
+   - **Ask me between rounds**: you accept and send them from the
      tray; nothing is sent for you.
-   - **Send findings automatically**: Lazybox sends the open ones (accepting
+   - **Send findings automatically** (the default): Lazybox sends open findings of every severity, including rounds with only minors or nits (accepting
      proposed ones) and marks them sent.
    - **One pass**: no re-review.
 3. **The fix.** When the author's turn that began after the findings were sent

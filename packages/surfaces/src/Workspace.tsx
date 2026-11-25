@@ -847,7 +847,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         }
         return;
       }
-      void handle.popout(panel.id).then(opened => { if (!opened) setError('The new window was blocked. Allow pop-ups for Lazybox and try again.'); });
+      void handle.popout(panel.id).catch(error => setError(String(error)));
     },
     minimize: setMinimized,
     dockTo,
@@ -1154,7 +1154,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
           {narrow
             ? mobilePanel ? <MobilePanel host={panelHosts.hostFor(mobilePanel)} title={titleOf(mobilePanel)} onClose={mobilePanel.kind === 'chat' || mobilePanel.detached ? undefined : () => closePanel(mobilePanel)}/> : <p className="module-empty">Your conversations are open in separate windows.</p>
             : <DockLayout ref={dock} page={page} requestedPanel={revealAfter} hostFor={panelHosts.hostFor} titleOf={titleOf} badgeOf={badgeOf} iconOf={iconOf} imageOf={panel => liveTitles[panel.id]?.icon} canClose={groupCommands.canClose}
-              sidebarWidth={sidebarWidth} onSidebarWidth={saveSidebarWidth} popoutUrl={POPOUT_URL} webPopouts={webPopouts}
+              sidebarWidth={sidebarWidth} onSidebarWidth={saveSidebarWidth} onPopoutError={setError} popoutUrl={POPOUT_URL} webPopouts={webPopouts}
               closeLabel={(panel, title) => layout.pages.length > 1 && shownPanels(page).length === 1 && !page.detached.length && shownPanels(page)[0].id === panel.id ? `Close ${title} page` : `Close ${title} panel`}
               locked={locked} onArrange={next => { if (locked) return; const live = livePage(); changePage(followFrontTab(live, { ...live, ...next })); }}
               agentOf={panel => {

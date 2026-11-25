@@ -105,6 +105,7 @@ type Props = {
   renderAdd?(group: GroupView, handle: DockHandle): ReactNode;
   /** A key pressed in a popped-out group's window (its document is not this one: the page's keys do not see it). */
   onPopoutKey?(event: KeyboardEvent, groupID: string): void;
+  onPopoutError(message: string): void;
   popoutUrl: string;
   /** Whether a Web panel can go into a popped-out window with its page: native views that come home (the desktop app). A browser's frame would reload there. */
   webPopouts?: boolean;
@@ -627,7 +628,16 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
         if (intoSidebar ? moved.some(panel => !sidebarKinds.has(kindOf(panel))) : sidebarMoving) event.preventDefault();
       }
     });
-    const subscriptions = [dropRules, dock.onWillDragPanel(dragging(true)), dock.onWillDragGroup(dragging(true)), dock.onDidDrop(dragging(false)), dock.onDidLayoutChange(dragging(false)),
+    const popoutFailures = dock.onDidOpenPopoutWindowFail(({ reason, error }) => {
+      const message = {
+        blocked: 'The host blocked the new panel window.',
+        closed: 'The panel window closed before it finished opening.',
+        unscriptable: 'Lazybox could not display the panel in the new window.',
+        'url-refused': 'Lazybox could not open the panel window address.',
+      }[reason];
+      latest.current.onPopoutError(error ? `${message} ${error.message}` : message);
+    });
+    const subscriptions = [popoutFailures, dropRules, dock.onWillDragPanel(dragging(true)), dock.onWillDragGroup(dragging(true)), dock.onDidDrop(dragging(false)), dock.onDidLayoutChange(dragging(false)),
       { dispose: () => { endDrag?.(); element.removeEventListener('keydown', tabKey); element.removeEventListener('pointerdown', pressed, true); window.removeEventListener('pointerup', lifted, true); clearTimeout(released); } },
       dock.onDidLayoutChange(event => report([...event.reasons].every(reason => reason === 'geometry') ? 200 : 0)), dock.onDidMaximizedGroupChange(() => { bump(); refreshNativeWebViews(); }), dock.onDidActiveGroupChange(bump), dock.onDidAddPopoutGroup(event => { bump(); refreshNativeWebViews(); listenInPopout(event.window); attachPopoutTitleBar(event.window, event.group.element.querySelector('.dv-tabs-and-actions-container')); forgetFocus(event.group); }), dock.onDidRemovePopoutGroup(event => { bump(); refreshNativeWebViews(); forgetFocus(event.group); })];
     // A panel that changed windows does not get the focus back where it was: that place belonged to the other window (Monaco keeps the window it was in).

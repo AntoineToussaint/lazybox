@@ -67,6 +67,23 @@ try {
   const tab = page.locator('.dv-tab').filter({ has: page.locator('.dock-tab-title', { hasText: 'docs.example.com' }) });
   await expect(tab).toHaveCount(1);
 
+  await page.evaluate(() => { window.savedOpen = window.open; window.open = () => null; });
+  await page.getByRole('button', { name: 'Detach browser panel' }).click();
+  const refusal = page.getByRole('alert').filter({ hasText: 'The host blocked the new panel window.' });
+  await expect(refusal).toBeVisible();
+  await expect(toolbar).toBeVisible();
+  await refusal.getByRole('button', { name: 'Dismiss' }).click();
+  // A native host can create the window but deny access to its document.
+  await page.evaluate(() => {
+    window.open = () => ({ close() {}, addEventListener() { throw new Error('Window access refused'); } });
+  });
+  await page.getByRole('button', { name: 'Detach browser panel' }).click();
+  const inaccessible = page.getByRole('alert').filter({ hasText: 'Lazybox could not display the panel in the new window. Window access refused' });
+  await expect(inaccessible).toBeVisible();
+  await expect(toolbar).toBeVisible();
+  await inaccessible.getByRole('button', { name: 'Dismiss' }).click();
+  await page.evaluate(() => { window.open = window.savedOpen; });
+
   const [detached] = await Promise.all([context.waitForEvent('page'), page.getByRole('button', { name: 'Detach browser panel' }).click()]);
   await expect(detached.getByRole('toolbar', { name: 'Agent browser' }).getByRole('status')).toHaveText('Claude is browsing');
   await detached.getByRole('button', { name: 'Put back in main window' }).click();

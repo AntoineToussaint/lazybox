@@ -114,7 +114,7 @@ https.
 - A plain click still opens your browser. Prefer the opposite? Settings → Web &
   links swaps them, and picks the search engine.
 - An empty Web panel lists the workspace's running previews, one click each.
-- **Detach browser panel** in the panel header opens the page in its own window. The Agent browser has the same button.
+- **Detach browser panel** in the panel header opens the page in its own window. The Agent browser has the same button. If its window fails to open, the panel stays in the workspace and an alert shows the reason reported by the host.
 
 ## Read output as a log
 

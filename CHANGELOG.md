@@ -23,6 +23,13 @@ written, fold the dated sections above it into it first: `make release`
 refuses a version with dated sections above its own, which its notes would
 leave out.
 
+## [2026-11-25.1] - 2026-11-25 · Conversation and workspace fixes
+
+- **Follow the latest reply** Sending a message or choosing Jump to latest keeps the last line visible as replies arrive.
+- **Open the intended panel** The panel you select stays in front when a crowded layout combines tabs.
+- **Review terminal requests** Interactive commands appear in the approval inbox. Expired requests collapse the command and explain how to request it again.
+- **Read command activity** Late command updates no longer appear as extra sub-agent cards in live or reopened conversations.
+
 ## [0.1.0-pre.1] - 2026-11-17 · The first prerelease
 
 ### Install and updates

@@ -9,6 +9,17 @@ import type { Release } from './onboarding-model';
  */
 export const releaseNotes: readonly Release[] = [
   {
+    id: '2026-11-25.1',
+    date: '2026-11-25',
+    title: 'Conversation and workspace fixes',
+    items: [
+      { title: 'Follow the latest reply', body: 'Sending a message or choosing Jump to latest keeps the last line visible as replies arrive.' },
+      { title: 'Open the intended panel', body: 'The panel you select stays in front when a crowded layout combines tabs.' },
+      { title: 'Review terminal requests', body: 'Interactive commands appear in the approval inbox. Expired requests collapse the command and explain how to request it again.' },
+      { title: 'Read command activity', body: 'Late command updates no longer appear as extra sub-agent cards in live or reopened conversations.' },
+    ],
+  },
+  {
     id: '0.1.0-pre.1',
     date: '2026-11-17',
     title: 'The first prerelease',

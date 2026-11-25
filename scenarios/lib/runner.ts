@@ -11,7 +11,7 @@ import react from '@vitejs/plugin-react';
 import { chromium, devices, type Browser, type BrowserContext, type Page } from '../../scripts/fixtures/playwright.mjs';
 import { startRunnerFixture, type RunnerFixture } from '../../scripts/fixtures/runner-ui.mjs';
 import { testViteCache } from '../../scripts/fixtures/vite-cache.mjs';
-import { collectPageErrors } from '../../scripts/fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from '../../scripts/fixtures/page-errors.mjs';
 import { ScenarioClock } from './clock.ts';
 import { World, ConversationHandle, WorkspaceHandle } from './world.ts';
 import { Overlay, installOverlay, type PointerStyle } from './overlay.ts';
@@ -127,6 +127,10 @@ export async function runScenario(stage: Stage, name: string, scenario: Scenario
       ...(phone ? { userAgent: devices['iPhone 13'].userAgent, hasTouch: true, isMobile: false } : {}),
       ...(options.video && !ffmpeg ? { recordVideo: { dir: join(OUTPUT_DIR, '.playwright-video'), size: viewport } } : {}),
     });
+    // The page's errors, first: an init script below that threw would otherwise go unheard. Each
+    // carries the step it was dispatched in: the list is drained before a step begins.
+    let during = 'opening the app';
+    await collectContextPageErrors(context, report.pageErrors, { format: message => `${message.split('\n')[0]} (during: ${during})`, onError: (message, stack) => { if (process.env.SCENARIO_DEBUG) console.error(stack || message); } });
     // tsx compiles with esbuild's keepNames: a function sent to the page may call its __name helper.
     await context.addInitScript({ content: 'globalThis.__name = globalThis.__name || (fn => fn);' });
     await context.addInitScript(() => performance.setResourceTimingBufferSize(100_000));
@@ -134,8 +138,6 @@ export async function runScenario(stage: Stage, name: string, scenario: Scenario
     await context.addInitScript(installOverlay, { pointer: (phone ? 'touch' : 'arrow') as PointerStyle, compact: phone });
     const page = await context.newPage();
     page.setDefaultTimeout(options.timeout);
-    let during = 'opening the app';
-    await collectPageErrors(page, [], { onError: (message, stack) => { report.pageErrors.push(`${message.split('\n')[0]} (during: ${during})`); if (process.env.SCENARIO_DEBUG) console.error(stack || message); } });
     if (process.env.SCENARIO_DEBUG) page.on('console', message => { if (message.type() === 'error') console.error('console:', message.text().slice(0, 2000)); });
     // The page's clock is the scenario's (SCENARIO_REAL_CLOCK=1 leaves it real, to tell a clock artefact from a bug).
     const syncPage = () => process.env.SCENARIO_REAL_CLOCK ? Promise.resolve() : page.clock.setFixedTime(clock.now);
@@ -191,6 +193,7 @@ export async function runScenario(stage: Stage, name: string, scenario: Scenario
     let failed: Error | undefined;
     for (const [index, item] of steps.entries()) {
       if (failed) { report.steps.push({ index, kind: item.kind, label: item.label, status: 'skipped', checks: [] }); continue; }
+      await drainPageErrors(report.pageErrors);
       checks = []; during = `step ${index + 1}, ${item.label}`;
       if (process.env.SCENARIO_DEBUG) console.error(`${name}: ${during}`);
       if (item.caption) { if (captionOpen) await keyframe(captionOpen); captionOpen = item.caption; }
@@ -208,6 +211,7 @@ export async function runScenario(stage: Stage, name: string, scenario: Scenario
       }
     }
     if (!failed && options.video) { await ctx.beat(1.4); if (captionOpen) await keyframe(captionOpen); else await keyframe('The end'); }
+    await drainPageErrors(report.pageErrors);
     report.checks = report.steps.reduce((n, s) => n + s.checks.length, 0);
     if (failed) { report.status = 'failed'; report.error = failed.message.split('\n')[0]; }
     else if (report.pageErrors.length) { report.status = 'failed'; report.error = `the page threw: ${report.pageErrors[0]}`; }

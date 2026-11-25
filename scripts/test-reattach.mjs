@@ -19,7 +19,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectContextPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 // An agent of the chat publishes an artifact (its `lazybox artifact put`), once, when a scenario asks.
@@ -203,7 +203,7 @@ async function scenario(browser,scheme){
  await expect(reader).toBeVisible();
  await pane.getByRole('button',{name:'Open in main window'}).click();
  await expect(page.getByRole('article',{name:'Rollout plan'}).locator('.artifact-document')).toContainText('Ship in three phases.');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  await context.close();
 }
 

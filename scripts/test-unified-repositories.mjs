@@ -5,7 +5,7 @@ import { webkit, expect } from "./fixtures/playwright.mjs";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { startRunnerFixture } from "./fixtures/runner-ui.mjs";
-import { collectPageErrors } from "./fixtures/page-errors.mjs";
+import { collectPageErrors, drainPageErrors } from "./fixtures/page-errors.mjs";
 const f = await startRunnerFixture();
 Object.assign(f.github, {
   state: "connected",
@@ -246,7 +246,7 @@ try {
   assert.equal(prepared.length,before+1,'one double-click creates exactly one workspace');
   assert.deepEqual(prepared.at(-1).body.repositoryIdentities,['github:fixture-team/api']);
   assert.ok(f.collections.some(c=>c.name==='api'),'the new workspace is named after its repository');
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log(
     "PASS one catalog across new workspace, add repositories, settings and reload; remote discovery without imports; selected identities survive partial failure; idempotent retry; invalid-name guard; 320/390px long selections, fixed actions, clear search, repository-detail retry; no duplicate GitHub tab.",
   );

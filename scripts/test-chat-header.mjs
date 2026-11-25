@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 // The prompt from the report, which the header showed cut mid-sentence.
 const PROMPT = 'I want to start a plan, we want to look at SOTA but the goal is to write down a design for how Lazybox names conversations and lays out the chat header, then build it with tests.';
@@ -196,7 +196,7 @@ try {
       await expect(page.getByRole('status').filter({ hasText: 'Agent settings saved.' })).toBeVisible();
       assert.equal(f.mutations.findLast(m => m.method === 'SaveRunnerSettings').body.plainTitles, true);
     }
-    assert.deepEqual(errors, []);
+    await drainPageErrors(errors);assert.deepEqual(errors, []);
     await context.close();
   }
   console.log('chat header: titles whole, nothing cut, ⋯ at narrow widths; screenshots in .cache/chat-header-*.png');

@@ -9,7 +9,7 @@ import {webkit, chromium, expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -257,6 +257,6 @@ try {
 
   // Settings → Notifications saves to settings.yaml (UpdateConfigFile, package C): a preference, not an agent action.
   assert.deepEqual(f.mutations.filter(m => m.method !== 'UpdateConfigFile'), [], 'the inbox never starts, stops or answers an agent');
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS inbox: counts across workspaces, grouping, j/k/m/Enter, open in workspace, seen on view, sidebar unread, notifications on watched transitions only, notification click, settings, phone; j/k stop on a mission task, and a typed note survives a click outside and Escape (Back).');
 } finally { await browser?.close(); await server.close(); await f.close(); }

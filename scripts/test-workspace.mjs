@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectContextPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const internalRepoID='github-'+'9'.repeat(64);
@@ -21,9 +21,9 @@ try {
   browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1500, height: 1100 } });
   // One chat that shows the conversation chosen (the preview tab): "Open a workspace's conversations as tabs" off; test-conversation-tabs covers it on.
-  await context.addInitScript(() => { try { localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'); } catch { /* a popup without storage */ } });
   // Every page of the context: this one, the chat windows it pops out and the page that replaces it.
   const errors = await collectContextPageErrors(context);
+  await context.addInitScript(() => { try { localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'); } catch { /* a popup without storage */ } });
   let page = await context.newPage();
   await page.goto(url);
   await expect(page.locator('.workspace-row').filter({hasText:'Alpha feature'}).locator('.workspace-link')).toBeVisible();
@@ -213,6 +213,7 @@ try {
   assert.equal(fixture.mutations.length, 1, 'restoring assistant started another provider');
   fixture.sessions.push(...['a', 'b', 'c'].map(id => ({ ...fixture.sessions[0], agents: [], busy: false, id: `plain-${id}`, collectionId: '', title: `Conversation ${id}` })));
   const olderContext = await browser.newContext();
+  await collectContextPageErrors(olderContext, errors);
   await olderContext.addInitScript(() => { try { localStorage.setItem('lazybox:workspace.conversation-tabs', 'off'); } catch { /* a popup without storage */ } });
   const olderPage = await olderContext.newPage();
   await olderPage.clock.install();
@@ -246,7 +247,7 @@ try {
   await expect(sidebar.getByRole('button', { name: /Conversation a/ })).toContainText(olderInfoCalls % 2 ? 'Ready' : 'Turn done');
   await expect(sidebar.locator('strong')).toHaveText(beforeSelection);
   await olderContext.close();
-  assert.equal(errors.length, 0, errors.join('\n'));
+  await drainPageErrors(errors);assert.equal(errors.length, 0, errors.join('\n'));
   console.log('PASS: real shared panels in two saved compositions; independent targets/drafts/console state; pin/follow, reorder, resize, restore, detach/dock, close-host continuity, unknown module preservation; zero implicit execution mutations; explicit workspace-attributed assistant startup and retained session after reload. Explicitly fake RPC fixture; no Git/model/account access.');
 } finally {
   await browser?.close(); await server.close(); await fixture.close();

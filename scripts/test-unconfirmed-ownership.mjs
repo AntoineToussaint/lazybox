@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const alpha = f.collections.find(c => c.id === 'alpha'), beta = f.collections.find(c => c.id === 'beta');
@@ -158,7 +158,7 @@ try {
   assert.equal(session.recoveryRequired, false);
   await page.keyboard.press('Escape');
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('Unconfirmed ownership: what is unconfirmed is shown, settled by stopping or by the person’s word, cleared by itself when proved, all by keyboard.');
 } finally {
   await browser?.close(); await server.close(); await f.close();

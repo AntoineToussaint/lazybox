@@ -14,7 +14,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import {collectPageErrors} from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 // Eight workspaces: more than a short window shows, so the list scrolls.
@@ -170,7 +170,7 @@ try {
   await expect(titles).toHaveText(before);
   await expect.poll(()=>f.mutations.filter(m=>m.method==='ArrangeConversations').length).toBe(2);
   await expect(names).toHaveText(afterKeys);
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS workspace reorder: a mouse drag shows where the row lands and keeps the order on the Runner (no text selected, no hover card, the drop is no click), Esc puts it back, the list scrolls at its edge, ⌥⇧↑/⌥⇧↓ move a focused row and keep its focus (⌥↓ still opens the card, right-click the menu), and the order survives a reload; dark and light.');
 } finally {
   await browser?.close(); await server.close(); await f.close();

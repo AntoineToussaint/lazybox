@@ -4,7 +4,9 @@ import type { BrowserContext, Page } from './playwright.mjs';
 export interface PageErrorOptions {
   /** Prefixes each message, for several pages pooled into one list. */
   label?: string;
-  /** Sees each error as it comes, after it is recorded. */
+  /** Rewrites each message as it is recorded (after `label`). */
+  format?: (message: string) => string;
+  /** Sees each error as it comes, after it is recorded; one the app then handles is retracted from the list only. */
   onError?: (message: string, stack: string) => void;
 }
 
@@ -13,3 +15,6 @@ export function collectPageErrors(page: Page, errors?: string[], options?: PageE
 
 /** The same for every page of `context`, popups included; call before it opens a page. */
 export function collectContextPageErrors(context: BrowserContext, errors?: string[], options?: PageErrorOptions): Promise<string[]>;
+
+/** Waits until everything the collected pages dispatched so far has reached `errors` (or been retracted). */
+export function drainPageErrors(errors: string[]): Promise<string[]>;

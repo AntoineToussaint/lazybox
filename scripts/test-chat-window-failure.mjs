@@ -12,7 +12,7 @@ import {webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),logLevel:'warn',plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
@@ -81,6 +81,6 @@ try{
  // Back in Alpha, the shell is there.
  await alphaLink.click();
  await expect(page.locator('.panel-terminal').getByTestId('terminal')).toContainText('ran: curl -fsSL https://claude.ai/install.sh | bash');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: a chat whose window is refused comes back on its page, and after a workspace switch meanwhile, in the workspace it left, not the one on screen; an installer shell opened after a switch waits in its workspace and shows on return. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

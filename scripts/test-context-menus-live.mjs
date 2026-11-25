@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f=await startRunnerFixture();
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
@@ -41,13 +41,13 @@ try{
  await server.listen();
  browser=await(process.env.TEST_CHROMIUM?chromium:webkit).launch({headless:true});
  const context=await browser.newContext({viewport:{width:1440,height:900}});
+ const errors=await collectContextPageErrors(context);
  await context.addInitScript(()=>{
   window.__copied=[];
   Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__copied.push(text);},readText:async()=>'',write:async items=>{for(const item of items)for(const type of item.types)await item.getType(type).catch(()=>{});},read:async()=>[]}});
   window.__menus=[];window.addEventListener('contextmenu',event=>{setTimeout(()=>window.__menus.push(event.defaultPrevented),0);});
  });
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${session.id}#token=${f.token}`);
  const chat=page.locator('.embedded-chat:visible').first(),bar=chat.getByRole('region',{name:'What the agent is doing'});
  const menu=page.locator('.context-menu[data-depth="0"]'),item=name=>menu.getByRole('menuitem',{name,exact:true});
@@ -90,6 +90,6 @@ try{
  await open(bg);await item('Show output').click();await expect(page.locator('.background-command').first()).toBeVisible();
  await close().catch(()=>{});
 
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: context menus on the running turn: the live bar (stop, open in console, copy), a sub-agent card and chip (steps, panel, copy prompt, stop) and a background command (show output, copy command). Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

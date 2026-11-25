@@ -5,6 +5,7 @@ import { webkit, expect } from "./fixtures/playwright.mjs";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { startRunnerFixture } from "./fixtures/runner-ui.mjs";
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const f = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url),
   configFile: false,
@@ -23,6 +24,7 @@ try {
   const page = await browser.newPage({
     viewport: { width: 1200, height: 850 },
   });
+  const errors = await collectPageErrors(page);
   await page.goto(
     `http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${f.token}`,
   );
@@ -119,6 +121,8 @@ try {
     ).length,
     0,
   );
+  await drainPageErrors(errors);
+  assert.deepEqual(errors, [], 'no page errors');
   console.log(
     "PASS shared local discovery, deduplicated clones/worktrees, cached reload, corrected naming, explicit empty workspace, removal preserves workspaces; UI never prepares sources individually.",
   );

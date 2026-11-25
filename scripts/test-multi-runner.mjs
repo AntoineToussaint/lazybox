@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const dev = await startRunnerFixture(), working = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -404,7 +404,7 @@ try {
       await expect(page.locator('.runner-group[data-active]')).toHaveAttribute('data-runner', 'window', { timeout: 15_000 });
       listing.workingState = 'running';
     }
-    assert.deepEqual(errors, []);
+    await drainPageErrors(errors);assert.deepEqual(errors, []);
     await context.close();
   }
   console.log('multi-runner: ok');

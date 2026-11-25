@@ -9,7 +9,7 @@
 // switching on, with its warning for Claude.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const f=await startRunnerFixture();
 // Someone for whom both changes matter, as the migration leaves them: switching was on (kept, through the
 // extension), and Claude subscriptions were saved in Lazybox (kept working: sign-in carried over on), one imported from a token.
@@ -144,6 +144,6 @@ try{
  await page.getByRole('tab',{name:'Subscriptions'}).click();
  await page.evaluate(()=>window.dispatchEvent(new Event('lazybox-settings-saved')));
  await expect(page.getByRole('article',{name:'Saved Codex subscription'}).getByRole('switch',{name:'Automatic switching'})).toBeChecked();
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS notices of what the migration kept (shown, dismissed for good, open where to review it), Claude sign-in carried over on and turned off, an imported-token account marked and removed, Claude sign-in line, an API key saved by its last four characters and forgotten (a subscription token refused), Claude sign-in in Lazybox off by default (no Claude sign-in offered, saved Claude subscriptions marked unused) and on with a warning, Install Claude Code in the shell, Subscription rotation allowed with its Claude warning turning automatic switching on. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

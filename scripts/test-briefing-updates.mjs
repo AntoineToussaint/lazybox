@@ -6,7 +6,7 @@
 // .cache/briefing-updates-*.png, in dark and light.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {webkit,chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f=await startRunnerFixture();
 const DELTA='[Lazybox] Since this conversation started, Lazybox added or changed the following; everything else you were told still holds.\n- Start another conversation with any agent (Claude, Codex, …) when the person asks: `lazybox conversation new --provider P --title T --brief-artifact ID` (or `--brief "…"`), which the person approves in one click. Your own sub-agent tool only starts copies of yourself, and switching this conversation\'s subscription never changes its provider.';
@@ -75,6 +75,6 @@ try{
  await composer.fill('And keep the tests green.');await composer.press('Enter');
  await expect.poll(()=>f.mutations.filter(m=>m.method==='Apply'&&m.body.message).length).toBe(2);
  await expect(update).toHaveCount(1);
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('briefing updates: one quiet event before the message it went with, opened to what the agent received');
 }finally{await browser?.close();await server.close();await f.close();}

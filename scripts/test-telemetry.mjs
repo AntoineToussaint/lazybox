@@ -5,7 +5,7 @@ import {chromium,webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 let browser;
@@ -66,6 +66,7 @@ try{
      categories:[['uncached_input','66000'],['cached_input','300000'],['reasoning_output','800'],['other_output','300']].map(([name,tokens])=>({name,tokens,kind:'used',included:true}))}]
  });
  const codex = await browser.newPage({viewport:{width:1500,height:1100}});
+ await collectPageErrors(codex, errors);
  const reads=[];
  await codex.route('**/GetTelemetry',route=>{const scope=route.request().postDataJSON();reads.push(scope);return route.fulfill({json:usageReport(scope.conversation==='alpha-conversation'?'380000':'367100')});});
  // The session is held until the popover is open with a group unfolded.
@@ -110,6 +111,7 @@ try{
  await codex.keyboard.press('Meta+2');
  await expect(codex.getByRole('combobox',{name:'Workspace',exact:true})).toHaveValue('beta');
  await expect(codexPanel).toBeHidden();
+ await drainPageErrors(errors);
  await codex.close();
 
  // A window that moves to another conversation reads that one's usage, never the one it left,
@@ -117,6 +119,7 @@ try{
  const alpha=fixture.sessions.find(s=>s.id==='alpha-session');
  fixture.sessions.push({...structuredClone(alpha),id:'fork-session',conversationId:'fork-conversation',title:'Forked',forkedFromSessionId:'alpha-session',forkedFromCursor:'0'});
  const forkWindow=await browser.newPage({viewport:{width:1200,height:900}});
+ await collectPageErrors(forkWindow, errors);
  await forkWindow.route('**/GetTelemetry',route=>{const scope=route.request().postDataJSON();return route.fulfill({json:usageReport(scope.conversation==='fork-conversation'?'100000':'237500')});});
  // Opening the linked conversation reads its session once; the window's own reads of it wait.
  let alphaReads=0,releaseAlpha;const alphaHeld=new Promise(resolve=>{releaseAlpha=resolve;});
@@ -136,6 +139,7 @@ try{
  await expect(forkPanel).toBeHidden();
  await expect(chip).toContainText('50%');
  releaseAlpha();
+ await drainPageErrors(errors);
  await forkWindow.close();
- assert.deepEqual(errors,[]);assert.equal(fixture.mutations.length,0);console.log('PASS: normalized context, deferred counts, partial pricing, disconnect/retry recovery. Fixture only.');
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);assert.equal(fixture.mutations.length,0);console.log('PASS: normalized context, deferred counts, partial pricing, disconnect/retry recovery. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

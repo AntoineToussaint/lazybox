@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -297,7 +297,7 @@ try {
   await panel.getByLabel('Mission: Speed up startup', { exact: true }).click();
   await page.getByRole('group', { name: 'Mission: Speed up startup menu' }).getByRole('button', { name: /^Ship the parser split\s*1 needs you · 1 of 2 done$/ }).click();
   await expect(panel.getByLabel('Mission: Ship the parser split', { exact: true })).toBeVisible();
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   await page.reload();
   await expect(page.getByRole('region', { name: 'Missions and tasks', exact: true }).getByRole('heading', { name: 'Ship the parser split' })).toBeVisible();
 
@@ -308,7 +308,7 @@ try {
   await expect(body).toBeVisible();
   assert.ok(await body.evaluate(node => node.scrollWidth <= node.clientWidth + 1), 'no sideways scroll on a phone');
   await page.screenshot({ path: '/tmp/lazybox-missions-phone.png', fullPage: false });
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   const popup = page.waitForEvent('popup');
   await panel.getByRole('button', {name: 'Detach mission'}).click();
   const detached = await popup;

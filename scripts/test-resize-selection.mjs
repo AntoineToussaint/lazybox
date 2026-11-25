@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 for(const id of ['alpha','beta']){
@@ -181,7 +181,7 @@ async function run(type,name){
    await gesture('a dialog\'s header',{handle:header,from:{x:b.x+35,y:b.y+b.height/2},by:{x:0,y:900},text:words,measure:rect(dialog)});}
   await page.keyboard.press('Escape');
 
-  assert.deepEqual(errors,[],`${name}: page errors`);
+  await drainPageErrors(errors);assert.deepEqual(errors,[],`${name}: page errors`);
  }finally{await browser.close();}
 }
 

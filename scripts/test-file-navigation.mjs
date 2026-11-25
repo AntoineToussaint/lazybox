@@ -9,7 +9,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const channel=fixture.openEvents('alpha-session');
@@ -176,6 +176,6 @@ try{
  await expect(tree.locator('[data-path="web/config.toml"]')).toHaveAttribute('aria-selected','true');
  await page.screenshot({path:'.cache/file-navigation.png'});
  await noLoadingText();
- assert.deepEqual(errors,[],'page errors: '+errors.join(' | '));
+ await drainPageErrors(errors);assert.deepEqual(errors,[],'page errors: '+errors.join(' | '));
  console.log('PASS: Files tree with repositories and keyboard navigation, preview/pinned tabs, drag reorder, dirty markers and save, unsaved-close guard, split right/down with per-group tabs, keyboard reorder, persisted layout, Cmd/Ctrl+P fuzzy finder, link resolution (unique, chooser, missing), quick look, reveal. WebKit fixtures only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const HOUR = 3600000, DAY = 24 * HOUR;
 // The browser runs in UTC, so the dashboard's local days are UTC days here.
@@ -259,7 +259,7 @@ f.tracked.links.push(link('alpha', 'alpha', 'acme/parser', 1), link('alpha', 'c-
 
   // No policy violation, no refusal and no error, in the panel or the app.
   await expect(page.locator('.extension-notice')).toHaveCount(0);
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   await context.close();
 }
 

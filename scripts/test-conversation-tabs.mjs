@@ -29,7 +29,7 @@ import {createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 // Five conversations in Alpha, so the sidebar lists them under the workspace, and the review of the first.
@@ -52,11 +52,9 @@ await server.listen();
 await mkdir('.cache',{recursive:true});
 const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
 
-/** The page's errors, and a reload that waits for the chat to come back. */
-async function watchErrors(page){
- const errors=await collectPageErrors(page);
- const reload=async()=>{await page.reload();await page.locator('.page-layout .panel-chat').first().waitFor({state:'attached'});await page.waitForTimeout(400);};
- return {errors,reload};
+/** A reload of `page()` that waits for the chat to come back. */
+function reloader(page){
+ return async()=>{await page().reload();await page().locator('.page-layout .panel-chat').first().waitFor({state:'attached'});await page().waitForTimeout(400);};
 }
 /** What every scenario reads of the chat tabs. */
 function tabsOf(page){
@@ -97,12 +95,14 @@ async function sourceAfterResume(){
  const continued=fixture.openEvents(id);
  for(const record of sourceEvents.events) continued.push(record.event);
  const context=await browser.newContext({viewport:{width:1600,height:900}});
+ const resumedErrors=await collectContextPageErrors(context);
  try{
   const page=await context.newPage();
   await page.goto(origin+'/?view=workspace&collection=alpha&session='+recipient.id+'#token='+fixture.token);
   await page.getByRole('link',{name:'source message',exact:true}).click();
   await expect.poll(()=>tabsOf(page).inFront('Resumed source conversation')).toBe(true);
   await expect(page.locator('article.message').filter({hasText:'A cache entry expires after ten minutes.'})).toHaveClass(/message-flash/);
+  await drainPageErrors(resumedErrors);assert.deepEqual(resumedErrors,[]);
  }finally{await context.close();}
 }
 
@@ -118,9 +118,11 @@ async function tabsOn(){
  // Beta as builds before tabs saved it: one chat following the page.
  const beta=work('beta','beta-session',panel('beta-chat','chat'));
  const context=await browser.newContext({viewport:{width:1600,height:900}});
+ // Every page of the context, collected before its init scripts.
+ const errors=await collectContextPageErrors(context);
+ const reload=reloader(()=>page);
  await context.addInitScript(([key,a,b])=>{if(sessionStorage.getItem('seeded'))return;sessionStorage.setItem('seeded','1');localStorage.setItem(`${key}:workspace:alpha:pages`,a);localStorage.setItem(`${key}:workspace:beta:pages`,b);},[scope,JSON.stringify(alpha),JSON.stringify(beta)]);
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const watched=await watchErrors(page);
  const {chatTabs,tab,titles,previews,row,inFront,workspace}=tabsOf(page);
  const all=['Review of the main conversation','Main alpha conversation','Second alpha conversation','Third alpha conversation','Fourth alpha conversation','Fifth alpha conversation'];
  await page.goto(`${origin}/?view=workspace&collection=alpha#token=${fixture.token}`);
@@ -184,7 +186,7 @@ async function tabsOn(){
  // A tab closed stays closed when the workspace loads again; opening the conversation brings it back.
  await tab('Fifth alpha conversation').locator('.dock-tab-close').click();
  await expect(chatTabs).toHaveCount(5);
- await watched.reload();
+ await reload();
  await expect.poll(async()=>(await titles()).sort()).toEqual(all.filter(title=>title!=='Fifth alpha conversation').sort());
  await row('Fifth alpha conversation').click();
  await expect(chatTabs).toHaveCount(6);
@@ -233,16 +235,18 @@ async function tabsOn(){
  await tab('Third alpha conversation').locator('.dock-tab-close').click();
  await row('Third alpha conversation').click();
  await expect.poll(previews).toEqual(['Third alpha conversation']);
- assert.deepEqual(watched.errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  await context.close();
 }
 
 /** With the setting off: the preview tab, kept tabs, and everything a tab does. */
 async function previewTabs(){
  const context=await browser.newContext({viewport:{width:1600,height:900},colorScheme:'dark'});
+ // Every page of the context, collected before its init scripts.
+ const errors=await collectContextPageErrors(context);
+ const reload=reloader(()=>page);
  await context.addInitScript(()=>{try{localStorage.setItem('lazybox:workspace.conversation-tabs','off');}catch{/* a popup without storage */}});
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const watched=await watchErrors(page);
  const shot=name=>page.screenshot({path:`.cache/conversation-tabs-${name}.png`});
  await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const {chatTabs,tab,groupOf,titles,previews,row,inFront,fontStyle}=tabsOf(page);
@@ -347,7 +351,7 @@ async function previewTabs(){
  await expect.poll(titles).toEqual(['Third alpha conversation','Second alpha conversation','Fifth alpha conversation','Fourth alpha conversation','Main alpha conversation']);
  await expect.poll(previews).toEqual(['Fifth alpha conversation']);
  const before={titles:await titles(),previews:await previews()};
- await watched.reload();
+ await reload();
  await expect.poll(titles).toEqual(before.titles);
  await expect.poll(previews).toEqual(before.previews);
  await expect(page.locator('.dv-groupview').filter({has:chatTabs})).toHaveCount(3);
@@ -386,6 +390,6 @@ async function previewTabs(){
  await expect(sessionPicker).toHaveValue('');
 
 
- assert.deepEqual(watched.errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  await context.close();
 }

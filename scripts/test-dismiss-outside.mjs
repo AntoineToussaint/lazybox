@@ -14,7 +14,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const alpha=fixture.openEvents('alpha-session');
@@ -29,9 +29,9 @@ try{
  browser=await(process.env.TEST_CHROMIUM?chromium:webkit).launch({headless:true});
  const context=await browser.newContext({viewport:{width:1400,height:900}});
  // A Mac, as far as the keymap is concerned (⌘ is Mod).
+ const errors=await collectContextPageErrors(context);
  await context.addInitScript(()=>{Object.defineProperty(navigator,'platform',{get:()=>'MacIntel'});});
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const errors=[];await collectPageErrors(page, errors);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
  const chat=page.locator('.panel-chat');
  const composer=chat.getByRole('textbox',{name:'Message',exact:true});
@@ -202,6 +202,6 @@ try{
  await page.keyboard.press('Escape');
  await expect(track).toHaveCount(0);
 
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: Escape and a click outside close the prompt history, the slash menu, the conversation history, the command palette, the shortcuts overlay and Track as artifact; a selection dragged out never does; typed edits keep their dialog open and nudge it; focus returns to the message box; a context menu over a dialog or a popover closes alone, on a press outside it or Escape');
 }finally{await browser?.close();await server.close();await fixture.close();}

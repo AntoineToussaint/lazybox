@@ -14,7 +14,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const author=fixture.sessions[0];
@@ -317,6 +317,6 @@ try{
  await expect(page.getByText('ACCEPTANCE_OUTPUT',{exact:false})).toBeVisible();
 
 
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('Review from the chat: the header button, /review <focus> and ⌘K; the other agent by default, the fallback said; a background tab with its findings; the review card focuses it; cancelled from the card, Esc, the reviewer’s menu and ⌘K; stopped when its reviewer is ended.');
 }finally{await browser?.close();await server.close();await fixture.close();}

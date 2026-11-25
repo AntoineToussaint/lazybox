@@ -16,7 +16,7 @@ import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const shots = fileURLToPath(new URL('../.cache/', import.meta.url));
 mkdirSync(shots, { recursive: true });
@@ -198,6 +198,7 @@ async function run(scheme) {
   await sheet.getByRole('radio', {name: /Ship search/}).check();
   await expect(sheet.getByRole('button', {name: 'Let it run agents'})).toBeEnabled();
   await sheet.getByRole('button', {name:'Cancel'}).click();
+  await drainPageErrors(errors);
   assert.deepEqual(errors, []);
   await context.close();
 }

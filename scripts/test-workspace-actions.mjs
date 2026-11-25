@@ -5,12 +5,13 @@ import {chromium,webkit,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 const regression=process.env.REPRO_OLD_BLUR?{name:'reproduce-old-blur',enforce:'pre',transform(code,id){if(id.endsWith('/CollectionPanel.tsx'))return code.replace('<details className="workspace-actions"','<details className="workspace-actions" onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node))event.currentTarget.open=false;}}');}}:null;
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[regression,react()].filter(Boolean),server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 let browser;
 try{
- await server.listen();browser=await(process.env.TEST_WEBKIT?webkit:chromium).launch({headless:true});const page=await browser.newPage({viewport:{width:1250,height:900}});page.setDefaultTimeout(8000);
+ await server.listen();browser=await(process.env.TEST_WEBKIT?webkit:chromium).launch({headless:true});const page=await browser.newPage({viewport:{width:1250,height:900}});const errors=await collectPageErrors(page);page.setDefaultTimeout(8000);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`,{waitUntil:'domcontentloaded',timeout:30000});
  const rows=page.locator('.workspace-row');await expect(rows).toHaveCount(2);
  for(const row of await rows.all()){const name=await row.locator('.workspace-label strong').boundingBox(),bounds=await row.boundingBox(),action=await row.locator('summary').boundingBox();assert.ok(Math.abs((name.y+name.height/2)-(action.y+action.height/2))<2,'actions must align with workspace name');assert.ok(action.x+action.width<=bounds.x+bounds.width,'actions remain inside the row at its right edge');}
@@ -140,5 +141,5 @@ for(const viewport of [{width:900,height:420},{width:390,height:640}]){
  await expect(removeApi).toHaveCount(0);
  await expect(repositories.getByRole('button',{name:'Remove web from Alpha feature'})).toBeVisible();
  assert.deepEqual(fixture.mutations.filter(m=>m.method==='RemoveCollectionRepository').map(m=>m.body),[{collectionId:'alpha',memberName:'api'}]);
-console.log('PASS: reachable top-layer actions in clipped/narrow panels; right-click, keyboard and outside dismissal; no toolbar overlap; focused cancel, dirty/running guards, Check all ticking the required consents (not the artifacts choice) and focusing Delete (Cancel while blocked), a held Enter not confirming, scoped workspace deletion and repository removal. Fixture only.');
+await drainPageErrors(errors);assert.deepEqual(errors,[],'no page errors');console.log('PASS: reachable top-layer actions in clipped/narrow panels; right-click, keyboard and outside dismissal; no toolbar overlap; focused cancel, dirty/running guards, Check all ticking the required consents (not the artifacts choice) and focusing Delete (Cancel while blocked), a held Enter not confirming, scoped workspace deletion and repository removal. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

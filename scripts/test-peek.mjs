@@ -12,7 +12,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const [alphaSession,betaSession]=fixture.sessions;
@@ -143,6 +143,6 @@ try{
 
  // The rows' git line answered meanwhile (peek and the sidebar's poll share the window).
  await expect(nav.locator('.workspace-git[data-git-line]').first()).toBeVisible();
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('peek: Alt-click, Space, arrows, send, open here, context menu, process stop, file — ok');
 }finally{await browser?.close();await server.close();await fixture.close();}

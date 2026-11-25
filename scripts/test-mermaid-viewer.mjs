@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];
 Object.assign(session,{busy:false,status:'done',agents:[{id:'root',status:'done'}]});
@@ -167,6 +167,6 @@ try{
  await page.setViewportSize({width:700,height:800});await pane.evaluate(node=>{node.scrollTop=node.scrollHeight;});
  const overflow=await figure.evaluate(node=>node.scrollWidth-node.clientWidth);assert.ok(overflow<=1,`diagram block fits a narrow window (overflow ${overflow}px)`);
  await mkdir('.cache',{recursive:true});await page.screenshot({path:'.cache/mermaid-viewer-narrow.png'});
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: Mermaid diagrams fit, zoom (buttons, keys, Ctrl+wheel, double-click), pan (drag, arrows, clamped), copy source/SVG, toggle source, open full screen (wheel pans, Esc returns focus) and render only near the viewport. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

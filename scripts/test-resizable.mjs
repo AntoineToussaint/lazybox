@@ -18,7 +18,7 @@ import {testViteCache} from './fixtures/vite-cache.mjs';
 import {seedDesignDoc} from './fixtures/artifact-sample.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
 import {SPLITS} from '../packages/surfaces/src/resizable-model.ts';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 for(const id of ['alpha','beta']){
@@ -264,6 +264,6 @@ try{
  await expect.poll(()=>height(steps)).toBe(stepsChosen);
  await shot(page,'browser');
 
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS resizable: Changes (file list with fold to a rail, review tray, narrow column, none on a phone), Artifacts list and history, Settings, Documentation and the agent browser steps: drag, double-click reset, arrows/Shift/Home/End, limits that keep the content readable, remembered across reload and workspace switch. WebKit, fixture Runner.');
 }finally{await browser?.close();await server.close();await fixture.close();}

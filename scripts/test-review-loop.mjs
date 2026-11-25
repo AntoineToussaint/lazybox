@@ -15,7 +15,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const author=fixture.sessions[0];
@@ -212,6 +212,6 @@ try{
  await page.getByRole('button',{name:'Save agent settings'}).click();
  await expect.poll(()=>fixture.mutations.filter(m=>m.method==='SaveRunnerSettings').at(-1)?.body.review).toMatchObject({loop:'auto',maxRounds:5});
 
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('Review loop: two rounds ending clean with a question answered between the agents; a stuck blocker escalated to you; pause, resume, mode and take over; settings.');
 }finally{await browser?.close();await server.close();await fixture.close();}

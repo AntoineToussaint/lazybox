@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();fixture.sessions[0].model='model-fixture';fixture.sessions[0].modelReported=true;fixture.sessions[0].provider='claude';fixture.sessions[0].profileId='claude-work';fixture.profiles.push({id:'claude-work',provider:'claude',label:'Work account',isolation:'environment'});
 const channel=fixture.openEvents('alpha-session');channel.push({type:'message_delta',text:'Open [README](api/README.md).'});
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react(),monacoVimCompat()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
@@ -44,5 +44,5 @@ try{
  await trash.locator('summary').click();
  await trash.getByRole('button',{name:/Undo deletion of /}).click();
  await expect(page.locator('.workspace-agent[title*="model-fixture"]')).toBeVisible();
- assert.deepEqual(errors,[]);console.log('PASS: metadata, rename without replay, cached navigation/draft, scoped repository management, tall Monaco editing, version conflict, unsaved guard, deletion. WebKit fixtures only.');
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);console.log('PASS: metadata, rename without replay, cached navigation/draft, scoped repository management, tall Monaco editing, version conflict, unsaved guard, deletion. WebKit fixtures only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

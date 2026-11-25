@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 Object.assign(f.sessions[0], { title: 'fix the tests', status: 'done', agents: [{ id: 'root', status: 'done' }] });
@@ -178,6 +178,6 @@ try {
   await expect(panel).toBeVisible();
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), 'no horizontal page scroll');
   await page.screenshot({ path: '.cache/power-settings-phone.png' });
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS power actions: ]] keys and taken keys, send/run/failed branch, refusal toast, picker with confirm, workspace and conversation menus, hot reload, CLI open/action/shot answered, Settings problems by line, hook test and output, stale file, create file, phone width. Fixture only.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

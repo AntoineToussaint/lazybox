@@ -11,7 +11,7 @@
 // palette and ] ] r open the last block in the terminal. Fake Runner only.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const b64=value=>Buffer.from(JSON.stringify(value)).toString('base64');
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.agents=[];session.status='ready';
@@ -267,6 +267,6 @@ try{
  await api.locator('.code-run-self').getByRole('button',{name:'Stop'}).click();
  await expect.poll(()=>fixture.mutations.some(m=>m.method==='StopWorkspaceAction'&&m.body.action==='api/dev')).toBe(true);
  await expect(actionChip).toHaveText(/^■ Stopped/,{timeout:5000});
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: shell blocks in agent messages get Run (the Terminal panel: one line runs, a placeholder is typed for review, an idle shell is reused), asking the agent from ▾ (the exact block sent at once or queued behind the turn, the agent\'s run followed to ✓) and command output (confirm card with script and folder, started in the chosen repository, console opened, outcome on the block, a failure handed to the message box); placeholders must be filled in; read-only warns and still runs; inline commands run from their menu, bare subcommands with their program; palette and ] ] r run the last block; servers: Run asks to start them in the background (by the workspace action when one runs the same command) and follows them there with their port; Run myself never waits, shows Running · port, Open preview and Stop, and starts the matching workspace action instead. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {releaseNotes} from '../packages/surfaces/src/release-notes.ts';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
@@ -104,7 +104,7 @@ try{
   await expect(docs.getByRole('navigation',{name:'Pages'})).toBeVisible();
   await page.screenshot({path:'.cache/onboarding-docs.png'});
   await page.keyboard.press('Escape');await expect(docs).toHaveCount(0);
-  assert.deepEqual(errors,[]);
+  await drainPageErrors(errors);assert.deepEqual(errors,[]);
   await context.close();
  }
  fixture.collections.push(...savedCollections);fixture.sessions.push(...savedSessions);
@@ -150,7 +150,7 @@ try{
   if(releaseNotes.length>1)await expect(card.locator('summary')).toHaveText('Earlier releases');
   await page.keyboard.press('Escape');
   await expect(card).toHaveCount(0);
-  assert.deepEqual(errors,[]);
+  await drainPageErrors(errors);assert.deepEqual(errors,[]);
  }
  await context.close();
  console.log('onboarding: welcome once on a fresh install, never for an existing user, What\'s new once per release, Help reopens both');

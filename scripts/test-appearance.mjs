@@ -15,7 +15,7 @@ import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
 import { seedConversation, visitKeyPages } from './fixtures/appearance-pages.mjs';
 import { TOKENS } from '../packages/surfaces/src/appearance/tokens.ts';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 seedConversation(fixture);
@@ -300,6 +300,6 @@ try {
   }
   fixture.config.setFile('settings', { value: { notifications: {}, appearance: {} } });
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS: dark and light key pages use only theme tokens with body text ≥ 4.5:1; System follows the computer; theme, accent, contrast, chat text, density, motion and text size apply live and persist; user theme files are listed, applied, hot reloaded and their errors shown; New theme from current. Fixture only.');
 } finally { await browser?.close(); await server.close(); await fixture.close(); }

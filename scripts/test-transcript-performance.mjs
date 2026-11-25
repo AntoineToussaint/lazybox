@@ -26,7 +26,7 @@ import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {longConversation} from './fixtures/long-conversation.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const turns=Number(process.env.PERF_TURNS||200),runs=Number(process.env.PERF_RUNS||3),strict=!!process.env.PERF_STRICT;
 // For a quiet machine (PERF_STRICT=1); the unfixed reader took several times
@@ -85,7 +85,7 @@ try{
   assert.ok(mounted>0&&mounted<=40,`a long conversation opens with its latest messages only (${mounted} mounted)`);
   await expect(page.getByRole('button',{name:'Show earlier messages'})).toBeVisible();
   }
-  assert.deepEqual(errors,[]);
+  await drainPageErrors(errors);assert.deepEqual(errors,[]);
   await page.close();
   return measured;
  };

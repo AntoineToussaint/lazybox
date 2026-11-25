@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { readFile, mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const channel = fixture.openEvents('alpha-session');
@@ -123,7 +123,7 @@ try {
 
   // No request ever went out without a bearer, and only the restarts' own gap was refused.
   assert.equal(fixture.runner.refusedBearers.filter(refusal => !refusal.bearer || refusal.bearer === 'Bearer ').length, 0, 'a request was sent without a bearer');
-  assert.equal(errors.length, 0, errors.join('\n'));
+  await drainPageErrors(errors);assert.equal(errors.length, 0, errors.join('\n'));
   console.log(`PASS: hot reload and unarmed restart on a new port followed without a reload (streams resumed from their cursor, ${fixture.runner.refusedBearers.length} stale-bearer requests retried), the workspace list never lost an entry, reconnecting and loading states instead of an empty list, no empty bearer. Fake Runner only.`);
 } catch (error) {
   if (page) { await mkdir('.cache', { recursive: true }); await page.screenshot({ path: '.cache/runner-follow-failure.png', fullPage: true }); }

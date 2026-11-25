@@ -6,12 +6,13 @@ import {chromium,expect} from './fixtures/playwright.mjs';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 fixture.profiles.push(...['Gmail','Work subscription'].map((label,i)=>({id:`claude-${i}`,provider:'claude',label,managed:true,isolation:'environment'})));
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 let browser;
 try{
- await server.listen();browser=await chromium.launch({headless:true});const page=await browser.newPage();
+ await server.listen();browser=await chromium.launch({headless:true});const page=await browser.newPage();const errors=await collectPageErrors(page);
  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`);
  await page.getByRole('button',{name:'Settings',exact:true}).click();
  for(const [i,label] of ['Gmail','Work subscription'].entries()){
@@ -42,5 +43,5 @@ try{
  await page.reload();await expect(page.getByRole('combobox',{name:'Session',exact:true})).toHaveValue(empty[1].id);
  await page.getByRole('combobox',{name:'Session',exact:true}).selectOption(empty[0].id);await expect(page.getByText(`Retained conversation for ${empty[0].id}`,{exact:true})).toBeVisible();
  assert.equal(fixture.calls.filter(c=>c.method==='CloseSession').length,0);
- console.log('PASS: New session from Settings/Work, empty workspace with either saved account, distinct workspaces, retained sessions and native permission defaults. Fixture only.');
+ await drainPageErrors(errors);assert.deepEqual(errors,[],'no page errors');console.log('PASS: New session from Settings/Work, empty workspace with either saved account, distinct workspaces, retained sessions and native permission defaults. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

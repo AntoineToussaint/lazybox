@@ -19,7 +19,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 // Five more workspaces, each with a conversation of its own.
@@ -51,6 +51,7 @@ try{
  browser=await webkit.launch({headless:true});
  const context=await browser.newContext({viewport:{width:1440,height:900}});
  // Each workspace's saved page, under the key the app reads (the browser build's scope: origin and token).
+ const errors=await collectContextPageErrors(context);
  await context.addInitScript(({saved,token})=>{
   if(sessionStorage.getItem('seeded'))return;sessionStorage.setItem('seeded','1');
   void crypto.subtle.digest('SHA-256',new TextEncoder().encode(location.origin+'\0'+token)).then(digest=>{
@@ -59,7 +60,6 @@ try{
   });
  },{saved,token:fixture.token});
  const p=await context.newPage();p.setDefaultTimeout(15000);
- const errors=await collectPageErrors(p);
  const reload=async()=>{await p.reload();await expect(sidebarGroup).toBeVisible();};
  await p.goto(url);
  const sidebarGroup=p.locator('.dv-groupview:has(.dv-tab [data-kind="collections"])');
@@ -142,6 +142,6 @@ try{
  await reload();await expect(folded).toHaveCount(1);await check('Agents folded, after a reload');
  await agentsTab().click();await expect(folded).toHaveCount(0);
  await select('alpha');await shown('Agents unfolded, then alpha');await expect(folded).toHaveCount(0);
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log(`PASS sidebar stability: ${visits.length+16} workspace switches across seven pages (default, empty, floating only, popped out, chat window gone, sidebar on the right, maximized), four window sizes and a drag; the sidebar kept the person's width to the pixel on every frame. Agents closed stayed closed through 8 workspace switches, two page switches and a reload; Panels → Agents brought it back everywhere; folded stayed folded the same way. WebKit, fake Runner.`);
 }finally{await browser?.close();await server.close();await fixture.close();}

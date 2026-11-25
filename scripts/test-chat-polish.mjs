@@ -2,7 +2,7 @@
 // usage, equal workspace cards, the workspace home and the naming flow.
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import {mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const f=await startRunnerFixture();
 const repos=['authority','cli','core','module-datasource','web-console'];
 for(const [i,name] of repos.entries())f.library.push({id:'r'+i,name,path:'/fixture/'+name,gitIdentity:'github:codefly-dev/'+name});
@@ -245,6 +245,6 @@ try{
  await expect.poll(approvals).toEqual(['delta-right-request']);
  await page.waitForTimeout(300);
  assert.deepEqual(approvals(),['delta-right-request'],'the other chat\'s approval is not answered');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS compact header, live status (header, row, inbox; reduced motion), inline rename, prompt recall, snippet usage, equal workspace cards, Name it, workspace home, Ready fresh session, name→branch creation; the box keeps its focus after a send and text quoted while sending; a failure in words; an idle stream that reconnects reads live; a page key answers the approval of the chat in front only. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

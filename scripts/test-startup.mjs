@@ -6,6 +6,7 @@ import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0 } });
 let browser;
@@ -14,6 +15,7 @@ try {
   const url = `http://127.0.0.1:${server.httpServer.address().port}/#token=startup-fixture`;
   browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
+  const errors = await collectPageErrors(page);
   const opens = [];
   // No account policy until the test turns one on (EXTENSIONS.md, "Account policy").
   let runnerSettings = {};
@@ -72,6 +74,8 @@ try {
   assert.equal(opens.at(-1).options.noRotation, true, 'opting out is not transmitted');
   assert.ok(!opens.at(-1).options.rotationProfileIds?.length);
   assert.equal(opens.at(-1).profileId, 'codex-default');
+  await drainPageErrors(errors);
+  assert.deepEqual(errors, [], 'no page errors');
   console.log('PASS: both providers retain current permissions/account/model/route by default; failed startup does not switch profiles; no rotation choice without an account policy; with one, rotation is on by default and its opt-out is transmitted. All RPCs intercepted; no provider started.');
 } finally {
   await browser?.close();

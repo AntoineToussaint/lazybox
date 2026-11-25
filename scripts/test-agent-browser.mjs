@@ -17,7 +17,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const id = 'alpha-session';
@@ -29,6 +29,7 @@ let browser;
 try {
   await server.listen(); browser = await chromium.launch({ headless: true });
   // Frames: little pages rendered to JPEG, as the Runner's screencast sends them.
+  // page-errors-opt-out: paints the fake sites' screenshots from set content; runs no Lazybox code.
   const painter = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const paint = async (title, body, color = '#2b6cb0') => {
     await painter.setContent(`<!doctype html><body style="margin:0;font:18px system-ui;background:#fff"><header style="background:${color};color:#fff;padding:18px 28px;display:flex;justify-content:space-between"><b>${title}</b><span style="border:2px solid #fff;padding:4px 14px;border-radius:6px">Sign in</span></header><main style="padding:28px">${body}</main></body>`);
@@ -340,7 +341,7 @@ try {
   assert.ok(overflow <= 0, `the page scrolls sideways by ${overflow}px`);
   await page.screenshot({ path: '.cache/agent-browser-narrow.png' });
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('agent browser: chip, panel, frames, steps, cards, take over, stop, give the browser, preview and settings (install, off, per workspace) verified');
 } finally {
   await browser?.close();

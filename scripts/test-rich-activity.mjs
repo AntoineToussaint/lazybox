@@ -1,6 +1,6 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import {createServer} from './fixtures/vite-cache.mjs';import react from '@vitejs/plugin-react';import {chromium,webkit,expect} from './fixtures/playwright.mjs';import {fileURLToPath} from 'node:url';import assert from 'node:assert/strict';import {mkdir} from 'node:fs/promises';import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();const session=fixture.sessions[0];session.busy=true;session.agents=[{id:'root',status:'running'}];
 const request={type:'approval',requestId:'approval-1',text:'Bash',providerDataJson:Buffer.from(JSON.stringify({tool:'Bash',input:{command:'ls && git log --oneline -5',description:'List repository contents and recent commits'},toolUseId:'tool-1'})).toString('base64')};session.pending=[request];session.status='waiting_approval';
 const channel=fixture.openEvents(session.id);channel.push(request);
@@ -29,5 +29,5 @@ try{
  await page.getByLabel('Actions for Alpha feature',{exact:true}).click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();
  const deletion=page.getByRole('dialog',{name:'Delete workspace',exact:true});await expect(deletion.getByRole('button',{name:'Delete workspace',exact:true})).toBeDisabled();
  await deletion.getByLabel(/Stop .* active session/).check();await deletion.getByLabel('Discard these workspace files permanently').check();await deletion.getByRole('button',{name:'Delete workspace',exact:true}).click();await expect(deletion).toHaveCount(0);await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).not.toContainText('Alpha feature');assert.equal(fixture.library.length,2);
- assert.deepEqual(errors,[]);console.log('PASS: progressive Connect frames before completion, approval/tool/thinking phases, Markdown tables, highlighted JSON/copy, Mermaid rendering/fallback, inert HTML, focused workspace navigation and explicit cleanup UI. Fixture only.');
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);console.log('PASS: progressive Connect frames before completion, approval/tool/thinking phases, Markdown tables, highlighted JSON/copy, Mermaid rendering/fallback, inert HTML, focused workspace navigation and explicit cleanup UI. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

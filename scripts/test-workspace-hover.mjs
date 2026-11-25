@@ -15,7 +15,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -233,7 +233,7 @@ try {
   await expect(card).toHaveCount(0);
   await expect(navigator).toBeVisible();
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS workspace hover: after a moment beside the row (never over it), the task and age, repositories with branch, ↑↓ against main and +/− lines (read on open, once), pull requests with pills, agents with live status, "2 waiting for you" opening the Inbox, ports, cost and quick actions; the pointer crosses into it, leaving closes it; ⌥↓ and Esc from the keyboard; dark, light, a narrow sidebar and a narrow window. Fake Runner, WebKit.');
 } finally {
   await browser?.close(); await server.close(); await f.close();

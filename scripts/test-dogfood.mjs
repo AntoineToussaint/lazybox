@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 fixture.sessions.push({...fixture.sessions[0],id:'alpha-history',workId:'alpha-history',title:'Earlier investigation',closed:true,status:'stopped'});
 fixture.sessions[0].title='Investigate API contract';fixture.sessions[1].title='Release web';
@@ -40,5 +40,5 @@ await changes.getByRole('button',{name:'MM contract.ts'}).click();await expect(c
  await mkdir('.cache',{recursive:true});await page.screenshot({path:'.cache/dogfood-changes.png'});
  await page.getByRole('button',{name:'Work',exact:true}).click();await expect(message).toHaveValue('Keep this draft through review');
  await page.reload();await expect(page.locator('[data-panel-id="alpha-work-chat"]').getByRole('textbox',{name:'Message',exact:true})).toHaveValue('Keep this draft through review');await expect(page.locator('.conversation-title')).toContainText('Ship API contract');
- assert.deepEqual(errors,[]);assert.deepEqual(fixture.mutations.map(m=>m.method),['RenameConversation']);console.log('PASS: conversation rename/search, multi-repository review, staged diff selection, persisted draft/page, no execution or Git mutation.');
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);assert.deepEqual(fixture.mutations.map(m=>m.method),['RenameConversation']);console.log('PASS: conversation rename/search, multi-repository review, staged diff selection, persisted draft/page, no execution or Git mutation.');
 }finally{await browser?.close();await server.close();await fixture.close();}

@@ -14,7 +14,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { testViteCache } from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const site = `http://127.0.0.1:${fixture.previewPort}`;
@@ -332,7 +332,7 @@ try {
   await expect.poll(placed).toBe('placed');
   await expect.poll(() => host.evaluate(() => Object.values(window.nativeWebViews).every(view => view.url && view.opened === 1))).toBe(true);
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('Web viewer: links routed by click, ⌥-click and menu; address bar, search, history, zoom, copy, fallback, settings, detach and dock, persistence; native views placed over the page area, in a panel window of its own and back, through sidebar, window, notice, text size, split and maximize changes, and hidden under menus and other pages.');
 } catch (error) {
   for (const p of browser?.contexts().flatMap(c => c.pages()) || []) await p.screenshot({ path: '.cache/web-viewer-failure.png', fullPage: true }).catch(() => {});

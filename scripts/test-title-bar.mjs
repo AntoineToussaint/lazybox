@@ -21,7 +21,7 @@ import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { monacoVimCompat } from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error',
@@ -146,6 +146,7 @@ try {
       await expect(page.locator('.workspace-header .runner-indicator')).toHaveText('Connected');
       // The popout's blank document is painted before Dockview installs any panel styles.
       const blank = await context.newPage();
+      await collectPageErrors(blank, errors);
       const openerBackground = await page.evaluate(() => {
         const sample = document.createElement('span');
         sample.style.color = getComputedStyle(document.documentElement).getPropertyValue('--bg');
@@ -153,6 +154,7 @@ try {
       });
       await blank.goto(origin + '/popout.html');
       await expect(blank.locator('body')).toHaveCSS('background-color', openerBackground);
+      await drainPageErrors(errors);
       await blank.close();
       await checkHeader(page, { kind: 'workspace', scheme, selector: '.workspace-header', inset: 89, height: 48 });
       // The page tabs, the pills and the menus are pressed, not dragged: a real click on Settings opens it.
@@ -265,7 +267,7 @@ try {
       assert.ok(px(padding) <= 16, `a browser's header keeps its own padding at ${width}px (${padding})`);
       await page.close();
     }
-    assert.deepEqual(errors, [], `page errors: ${errors.join('\n')}`);
+    await drainPageErrors(errors);assert.deepEqual(errors, [], `page errors: ${errors.join('\n')}`);
     await context.close();
   }
   console.log('title bar: every window kind leaves the buttons their room, moves by its empty header, and drops the room in full screen');

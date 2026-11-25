@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -47,6 +47,6 @@ try {
   await expect(page.getByRole('button', { name: 'Connect with GitHub App', exact: true })).toBeVisible();
   assert.equal(fixture.library.length, 2, 'Disconnect must keep repositories');
   assert.equal(fixture.calls.filter(call => call.method === 'CloseSession').length, 0);
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS: GitHub App connection inside shared repository browser, device-code copy, reload recovery, scoped discovery without clones, expired authorization and non-destructive disconnect.');
 } finally { await browser?.close(); await server.close(); await fixture.close(); }

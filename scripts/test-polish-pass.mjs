@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 Object.assign(fixture.sessions[0], { title: 'Ship the front door with a long conversation title', busy: true, status: 'running' });
@@ -160,7 +160,7 @@ try {
     Object.assign(beta, { busy: true, status: 'waiting_approval', pending: [approval] });
     fixture.openEvents(beta.id).push(approval);
     for (const width of [1440, 800, 390]) {
-      const page = await (await browser.newContext({ viewport: { width, height: 900 } })).newPage(); page.setDefaultTimeout(15000);
+      const page = await (await browser.newContext({ viewport: { width, height: 900 } })).newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors);
       await page.goto(url.replace('collection=alpha&session=alpha-session', 'collection=beta&session=beta-session'));
       const command = page.locator('.request .approval-what pre').first();
       await expect(command).toContainText('production.config.ts');
@@ -172,6 +172,7 @@ try {
       // "Request details" is a control: tall enough to hit.
       assert.ok((await page.locator('.request .request-metadata > summary').first().boundingBox()).height >= 24, 'the details disclosure is at least 24px tall');
       if (width === 390) await page.screenshot({ path: '.cache/polish-pass-approval-phone.png' });
+      await drainPageErrors(errors);
       await page.context().close();
     }
   }
@@ -183,7 +184,7 @@ try {
     const question = { type: 'question', requestId: 'question-tall', text: 'AskUserQuestion', providerDataJson: Buffer.from(JSON.stringify({ tool: 'AskUserQuestion', toolUseId: 'ask-tall', input: { questions: [{ question: 'Which database should the cache use?', header: 'Database', multiSelect: false, options: options('Database') }, { question: 'Which checks should run before merge?', header: 'Checks', multiSelect: true, options: options('Check') }] } })).toString('base64') };
     Object.assign(beta, { busy: true, status: 'waiting_input', pending: [question] });
     fixture.openEvents(beta.id).push(question);
-    const page = await (await browser.newContext({ viewport: { width: 1280, height: 900 } })).newPage(); page.setDefaultTimeout(15000);
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 900 } })).newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors);
     await page.goto(url.replace('collection=alpha&session=alpha-session', 'collection=beta&session=beta-session'));
     const card = page.locator('.request.question-card'), send = card.getByRole('button', { name: 'Send answer' });
     await expect(card).toContainText('Check option 6');
@@ -198,6 +199,7 @@ try {
     }
     await expect(card.getByText('Check option 6', { exact: true })).toBeVisible();
     await page.screenshot({ path: '.cache/polish-pass-question.png' });
+    await drainPageErrors(errors);
     await page.context().close();
   }
 
@@ -221,6 +223,6 @@ try {
     await page.context().close();
   }
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS polish pass: a narrow chat keeps its title and a whole message box; a phone reaches every page tab and keeps the step on one row; a page opened from the header closes with its ×; the header fits half a screen. Fixture only.');
 } finally { await browser?.close(); await server.close(); await fixture.close(); }

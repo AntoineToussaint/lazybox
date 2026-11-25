@@ -16,7 +16,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectContextPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,root:fileURLToPath(new URL('../apps/web',import.meta.url)),logLevel:'warn',plugins:[react(),monacoVimCompat()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
@@ -293,7 +293,7 @@ try{
  // Saved layouts are files (POWER.md, "Config files"): saving, renaming and deleting one writes it.
  assert.deepEqual(fixture.mutations.filter(m=>m.method==='UpdateConfigFile').map(m=>m.body.name),['layouts/my-review','layouts/my-review','layouts/my-review'],'saved, renamed and deleted as a file');
  assert.equal(fixture.mutations.filter(m=>!['OpenTerminal','ResizeTerminal','WriteTerminal','UpdateConfigFile'].includes(m.method)).length,0,'arranging panels never starts or stops an agent');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS docking: drag-to-split and drag-to-tab with live previews, keyboard and mouse resize, maximize (double-click, ⇧⌘M and ] ] m), minimize, presets applied/saved/renamed/deleted/reset, Editor and Files popped out and back with an unsaved edit, no remount of chat or terminal, workspace switch keeps geometry, Agents list, close/reopen, phone. WebKit, fixture Runner.');
 }finally{await browser?.close();await server.close();await fixture.close();}
 

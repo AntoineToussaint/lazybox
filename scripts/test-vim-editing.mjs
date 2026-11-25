@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
 import { monacoVimCompat } from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 // Opt-in Vim editing in the message box and the Monaco file editor, against
 // the fake Runner fixture. WebKit is the desktop shell's engine; Chromium
@@ -195,7 +195,7 @@ try {
     await expect(dialog.getByRole('button', { name: 'Close file preview' })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
-    assert.deepEqual(errors, []);
+    await drainPageErrors(errors);assert.deepEqual(errors, []);
     await page.close();
   }
   console.log('PASS: Vim editing toggles, composer normal/insert/visual editing with counts, undo/redo, draft persistence, ]] leader from both modes, Enter sends in normal mode, Monaco Vim with :w, :q guard, :q!, Esc kept inside the editor. WebKit and Chromium fixtures only.');

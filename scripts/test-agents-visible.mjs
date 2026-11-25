@@ -17,7 +17,7 @@ import {fileURLToPath} from 'node:url';
 import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -48,7 +48,6 @@ try {
   const url = `${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`;
   browser = await webkit.launch();
   const errors = [];
-  const watch = page => collectPageErrors(page, errors);
 
   // A review row needs a turn that ended after the profile's first look: end one once the page is open.
   const endReviewTurn = () => Object.assign(session('review-session'), {agents: [root('done', Date.now(), {turnEndedAtUnixMillis: ms(Date.now()), lastTurnStatus: 'completed'})]});
@@ -56,7 +55,7 @@ try {
   /** What a fresh profile sees, without a click: both lists, in full, nothing clipped or overlapping. */
   const fresh = async (scheme, width, height) => {
     const context = await browser.newContext({viewport: {width, height}, colorScheme: scheme});
-    const page = await context.newPage(); page.setDefaultTimeout(15000); await watch(page);
+    const page = await context.newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors);
     await page.goto(url);
     const workspaces = page.locator('.panel-collections'), agents = page.locator('.panel-agents');
     await expect(workspaces.locator('.workspace-row').first()).toBeVisible();
@@ -99,8 +98,9 @@ try {
   }
 
   const context = await browser.newContext({viewport: {width: 1440, height: 900}, colorScheme: 'dark'});
+  await collectContextPageErrors(context, errors);
   await context.addInitScript(() => { window.__copied = []; Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async text => { window.__copied.push(text); }}}); });
-  const page = await context.newPage(); page.setDefaultTimeout(15000); await watch(page);
+  const page = await context.newPage(); page.setDefaultTimeout(15000);
   await page.goto(url);
   const workspaces = page.locator('.panel-collections'), agents = page.locator('.panel-agents');
   const sessionChoice = page.getByRole('combobox', {name: 'Session', exact: true});
@@ -246,7 +246,7 @@ try {
   // The phone sees the desktop's pin.
   const offer = await fetch(`${f.url}/lazybox.bench.v1.RunnerService/BeginDevicePairing`, {method: 'POST', headers: {authorization: `Bearer ${f.token}`, 'content-type': 'application/json'}, body: JSON.stringify({grants: ['respond']})}).then(r => r.json());
   const phoneContext = await browser.newContext({...devices['iPhone 13']});
-  const phone = await phoneContext.newPage(); await watch(phone);
+  const phone = await phoneContext.newPage(); await collectPageErrors(phone, errors);
   await phone.goto(offer.url);
   await phone.getByRole('textbox', {name: 'Name this phone'}).fill('iPhone');
   await phone.getByRole('button', {name: 'Pair this phone'}).click();
@@ -311,6 +311,6 @@ try {
   await expect(agents.locator('.agent-row').first()).toBeFocused();
 
   assert.equal(f.mutations.filter(m => ['Apply', 'OpenSession', 'CloseSession', 'DeleteConversation'].includes(m.method)).length, 0, 'nothing started, stopped, answered or deleted an agent');
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS agents visible: Workspaces above Agents in dark/light at 1440 and 1024, no scrolling tab strip, no pin over an age, a full-height background; every workspace lists its conversations with status and age, folds and remembers; Priority/By workspace, folded counts, unread dots, nested sub-agents, j/k/Space/Enter, filter as you type; one conversation menu in order with Delete last; rename, mark read, pin kept by the Runner and shown on the phone, open beside, archive confirmed and deletion undone; the Inbox opens the Agents panel. Fake Runner.');
 } finally { await browser?.close(); await server.close(); await f.close(); }

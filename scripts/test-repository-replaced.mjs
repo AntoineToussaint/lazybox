@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 f.completeGitHub();
@@ -125,7 +125,7 @@ try {
   await expect(page.getByRole('status').filter({ hasText: 'Replaced Lazybox’s copy of fixture-team/api. New workspaces start from it.' })).toBeVisible();
   assert.equal(since('RefreshRepositoryIdentity').length, 3);
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('Repository replaced on GitHub: the error card explains, replaces Lazybox’s copy after showing what changes, and retries; Settings offers the same; all by keyboard.');
 } finally {
   await browser?.close(); await server.close(); await f.close();

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture = await startRunnerFixture();
 // This suite enrolls Claude through Lazybox and toggles automatic switching per
 // account: both are opt-in (CLAUDE_COMPLIANCE.md). Claude sign-in in Lazybox
@@ -26,8 +26,9 @@ let browser; let activePage;
 try {
  await server.listen(); browser=await chromium.launch({headless:true});
  const context=await browser.newContext({viewport:{width:1440,height:1050}});
+ const errors=await collectContextPageErrors(context);
  await context.addInitScript(()=>{window.__copiedCodes=[];Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{window.__copiedCodes.push(text);}}});window.__signInLinks=[];window.open=(url)=>{window.__signInLinks.push(String(url));return null;};});
- const page=await context.newPage(), errors=[]; activePage=page;await collectPageErrors(page, errors);
+ const page=await context.newPage(); activePage=page;
  const url=`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace#token=${fixture.token}`;
  await page.goto(url);
  await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('alpha');
@@ -287,7 +288,7 @@ try {
  assert.equal(fixture.calls.filter(c=>['OpenSession','OpenAssistant','Apply','CloseSession','StartCommand'].includes(c.method)).length,0,'settings started/stopped an agent or command');
  assert.equal(fixture.calls.filter(c=>c.method==='AddSubscription').length,10,'reload/lost acknowledgement duplicated account enrollment');
  assert.equal(JSON.stringify(fixture.profiles.filter(profile=>!profile.managed)),localAccounts,'Settings modified a local CLI reference');
- assert.equal(errors.length,0,errors.join('\n'));
+ await drainPageErrors(errors);assert.equal(errors.length,0,errors.join('\n'));
  // Ten accounts remain compact and readable; long identities must not widen the page.
  const saved=fixture.profiles.find(profile=>profile.id==='codex-saved');
  for(let index=fixture.profiles.filter(profile=>profile.managed).length;index<10;index++) fixture.profiles.push({...structuredClone(saved),id:`density-${index}`,label:index===9?'A long subscription name for the engineering team':`Account ${index+1}`,availability:{...structuredClone(saved.availability),email:index===9?'long.account.identity@engineering.example.invalid':`account${index+1}@example.invalid`}});

@@ -7,7 +7,7 @@ import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
@@ -278,7 +278,7 @@ try {
   }
 
   assert.equal(fixture.mutations.length, 0, 'opening the console must not mutate execution');
-  assert.equal(errors.length, 0, errors.join('\n'));
+  await drainPageErrors(errors);assert.equal(errors.length, 0, errors.join('\n'));
   console.log('PASS: the console stays folded for a long run until explicitly opened, labels the run with what its agent received, stays put away (hidden, closed with ×, or from the keyboard) until the user opens it again, offers quick runs instead of cycling through them, takes over only a finished run nobody used, never brings its tab forward, stays put with Follow new runs off, and keeps its header to one row. Explicitly fake RPC fixture.');
 } finally {
   await browser?.close(); await server.close(); await fixture.close();

@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 const session=fixture.sessions[0];
@@ -76,6 +76,6 @@ try{
  events.push({type:'failure',status:'unknown',text:'Another turn failed',turnId:'next'});
  await expect(recover).toBeVisible();
  assert.equal(applies(),refused+1,'a new fault offers recovery without sending automatically');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS: screenshot bytes survive a reload; a provider error does not block the next message; a refused conversation says why.');
 }finally{await browser?.close();await server.close();await fixture.close();}

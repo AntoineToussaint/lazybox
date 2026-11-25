@@ -13,7 +13,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {testViteCache} from './fixtures/vite-cache.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture = await startRunnerFixture();
 const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: {host: '127.0.0.1', port: 0, proxy: {'/lazybox.bench.v1.RunnerService/': {target: fixture.url}}}});
@@ -21,9 +21,9 @@ let browser;
 try {
   await server.listen(); browser = await chromium.launch({headless: true});
   const context = await browser.newContext({viewport: {width: 1440, height: 900}});
+  const errors = await collectContextPageErrors(context);
   await context.addInitScript(() => Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'}));
   const page = await context.newPage(); page.setDefaultTimeout(15000);
-  const errors = []; await collectPageErrors(page, errors);
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   await page.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${fixture.token}`);
   await expect(page.getByRole('combobox', {name: 'Workspace', exact: true})).toHaveValue('alpha');
@@ -210,6 +210,6 @@ try {
   await panel.getByRole('button', {name: 'Add subscription', exact: true}).click();
   await expect(page.getByRole('dialog', {name: 'Connect a subscription'})).toBeVisible();
 
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
   console.log('PASS: Ask Lazybox picks the agent itself (Claude, then Codex at a limit), names it in the header with a switch menu, starts on the first question, explains what is missing with its fixes and the docs, opens from Help, ⌘K, ]] h and ?, and the welcome shows the same check. Fixture only.');
 } finally { await browser?.close(); await server.close(); await fixture.close(); }

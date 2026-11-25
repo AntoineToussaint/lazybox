@@ -13,7 +13,7 @@ import { webkit, chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const f = await startRunnerFixture();
 const now = Date.now(), ms = value => String(value);
@@ -82,6 +82,7 @@ try {
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await (process.env.TEST_CHROMIUM ? chromium : webkit).launch();
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const errors = await collectContextPageErrors(context);
   await context.addInitScript(fakeSpeech);
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: {
@@ -108,7 +109,6 @@ try {
   });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
-  const errors = []; await collectPageErrors(page, errors);
   await page.route('**/WisprStatus', route => route.fulfill({ json: { configured: true } }));
   let wisprAudio;
   await page.route('**/TranscribeWispr', route => {
@@ -555,10 +555,11 @@ try {
   await say('open that', true);
   await release('Space', true);
   await expect(page.getByRole('heading', { name: 'Ship release notes' })).toBeVisible();
-  assert.deepEqual(errors, []);
+  await drainPageErrors(errors);assert.deepEqual(errors, []);
 
   // A browser without speech recognition: no mic button, and Settings says what to use instead.
   const plain = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  await collectContextPageErrors(plain, errors);
   await plain.addInitScript(fakeSpeech, { recognition: false });
   const other = await plain.newPage();
   await other.goto(`${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`);
@@ -572,6 +573,7 @@ try {
   await other.getByRole('textbox', { name: 'Message', exact: true }).click();
   await other.keyboard.press('Alt+Space');
   await expect(other.locator('.voice-pill.is-error')).toContainText('no speech recognition');
+  await drainPageErrors(errors);
   await plain.close();
   // The paired phone uses the same stop-and-review flow, with a separate Send button.
   f.remote.phoneUrl = origin;
@@ -579,6 +581,7 @@ try {
     method: 'POST', headers: { authorization: `Bearer ${f.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ grants: ['respond'] }),
   });
   const phoneContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await collectContextPageErrors(phoneContext, errors);
   await phoneContext.addInitScript(fakeSpeech);
   const phone = await phoneContext.newPage();
   await phone.goto((await offer.json()).url);
@@ -610,6 +613,8 @@ try {
   await phone.locator('.remote-row').filter({ hasText: 'Index the API' }).locator('.remote-row-open').click();
   await expect(phone.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('Keep this with the original conversation');
   assert.equal(applied('Keep this with the original conversation'), false);
+  await drainPageErrors(errors);
+  assert.deepEqual(errors, [], 'no page errors on the speechless browser or the phone');
   await phoneContext.close();
   console.log('voice: dictation, commands, palette, read-aloud and settings passed');
 } finally {

@@ -21,7 +21,7 @@ import {mkdir} from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
 import {monacoVimCompat} from './monaco-vim-compat.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectContextPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 const fixture=await startRunnerFixture();
 // A second conversation in Alpha, so ⌘] has somewhere to go.
@@ -35,9 +35,9 @@ const url=`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&
 async function scenario(browser,scheme){
  const context=await browser.newContext({viewport:{width:1440,height:900},colorScheme:scheme});
  // The default arrangement with one chat (the preview tab): "Open a workspace's conversations as tabs" off; test-conversation-tabs covers it on.
+ const errors=await collectContextPageErrors(context);
  await context.addInitScript(()=>{try{localStorage.setItem('lazybox:workspace.conversation-tabs','off');}catch{/* a popup without storage */}});
  const page=await context.newPage();page.setDefaultTimeout(15000);
- const errors=[];await collectPageErrors(page, errors);
  const shot=name=>page.screenshot({path:`.cache/layout-keyboard-${name}-${scheme}.png`});
  await page.goto(url);
  const tab=kind=>page.locator('.dv-tab').filter({has:page.locator(`[data-kind="${kind}"]`)});
@@ -360,7 +360,7 @@ async function scenario(browser,scheme){
  // Saved keys are keys.yaml (POWER.md, "Config files"): saving them, the reset chord and its Undo write that file, nothing else.
  assert.ok(fixture.mutations.filter(m=>m.method==='UpdateConfigFile').every(m=>m.body.name==='keys'),'only keys.yaml is written');
  assert.equal(fixture.mutations.filter(m=>!['OpenTerminal','ResizeTerminal','WriteTerminal','OpenSession','UpdateConfigFile'].includes(m.method)).length,0,'arranging panels never starts or stops an agent (the one started from a + aside)');
- assert.deepEqual(errors,[]);
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);
  await context.close();
 }
 

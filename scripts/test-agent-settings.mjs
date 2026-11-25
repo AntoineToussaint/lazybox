@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import {mkdir} from 'node:fs/promises';
 import {startRunnerFixture} from './fixtures/runner-ui.mjs';
-import { collectPageErrors } from './fixtures/page-errors.mjs';
+import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 const fixture=await startRunnerFixture();
 fixture.library.splice(0,fixture.library.length,...['api','web'].map((name,i)=>({id:i?'frontend':'backend',name,gitIdentity:`github:team/${name}`,sourceUrl:`https://github.com/team/${name}`,path:`/fixture/${name}`})));
 fixture.profiles.push({id:'saved-codex',provider:'codex',label:'Codex personal',managed:true,isolation:'environment'});
@@ -61,5 +61,5 @@ try{
  await page.reload();await page.getByRole('button',{name:'New conversation',exact:true}).click();await page.getByRole('button',{name:'Start with last settings',exact:true}).click();
  await expect(setup.getByRole('alert')).toContainText('The last account is no longer available');
  assert.equal(fixture.mutations.filter(m=>m.method==='OpenSession').length,before+1,'Missing saved account silently switched to another account');
- assert.deepEqual(errors,[]);console.log('PASS: selection-aware names, custom/generated names, durable settings UI, exact price units, explicit YOLO/context, remembered account and one-click start without replay. Fixture only.');
+ await drainPageErrors(errors);assert.deepEqual(errors,[]);console.log('PASS: selection-aware names, custom/generated names, durable settings UI, exact price units, explicit YOLO/context, remembered account and one-click start without replay. Fixture only.');
 }finally{await browser?.close();await server.close();await fixture.close();}

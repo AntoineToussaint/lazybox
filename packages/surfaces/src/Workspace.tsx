@@ -821,11 +821,21 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     title: titleOf,
     canClose: panel => !panel.detached,
     close: closePanel,
-    // A Web panel opens in a window like any panel where its page moves with it (native views, native-web-view.ts);
-    // a browser's frame would reload there, so it keeps its own Move to a new window.
-    canOpenWindow: panel => panel.kind === 'chat' ? !!chatHost && !!resolveTarget(panel, page.selection).sessionId : (panel.kind !== 'web' || webPopouts) && !narrow,
+    canOpenWindow: panel => {
+      if (panel.kind === 'chat') return !!chatHost && !!resolveTarget(panel, page.selection).sessionId;
+      if (narrow) return false;
+      if (panel.kind === 'web' && !webPopouts) return !!host?.openWebWindow && !!liveTitles[panel.id]?.webUrl;
+      return true;
+    },
     openWindow: (panel, handle) => {
       if (panel.kind === 'chat') { void detach(panel); return; }
+      if (panel.kind === 'web' && !webPopouts) {
+        const url = liveTitles[panel.id]?.webUrl;
+        if (url && host?.openWebWindow) {
+          void host.openWebWindow({ webId: panel.id, collectionId: workspaceID, url }).then(() => closePanel(panel)).catch(error => setError(String(error)));
+        }
+        return;
+      }
       void handle.popout(panel.id).then(opened => { if (!opened) setError('The new window was blocked. Allow pop-ups for Lazybox and try again.'); });
     },
     minimize: setMinimized,
@@ -1011,7 +1021,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     close: closePanel, showSession,
     title: (panel, title) => setLiveTitles(titles => {
       const old = titles[panel.id];
-      if (old?.text === title?.text && old?.icon === title?.icon && old?.tooltip === title?.tooltip &&
+      if (old?.text === title?.text && old?.icon === title?.icon && old?.tooltip === title?.tooltip && old?.webUrl === title?.webUrl &&
           old?.agent?.sessionId === title?.agent?.sessionId && old?.agent?.provider === title?.agent?.provider) return titles;
       return { ...titles, [panel.id]: title };
     }),

@@ -193,6 +193,8 @@ export function GroupActions({ group, handle, commands, keys }: { group: GroupVi
   if (!panel) return null;
   const name = commands.title(panel);
   return <>
+    {group.location !== 'popout' && (panel.kind === 'web' || panel.kind === 'browser') && commands.canOpenWindow(panel) &&
+      <button type="button" className="icon-button" aria-label="Detach browser panel" title="Detach browser panel" onClick={() => commands.openWindow(panel, handle)}><Icon name="external" size={14}/></button>}
     {group.location === 'grid' && <button className="icon-button dock-maximize" aria-label={group.maximized ? 'Restore layout' : `Maximize ${name}`} title={group.maximized ? 'Restore layout' : 'Maximize · double-click a tab'} onClick={() => handle.toggleMaximize(panel.id, 'pointer')}><Icon name={group.maximized ? 'restore' : 'maximize'} size={14}/></button>}
     {group.location === 'floating' && <button className="icon-button dock-back" aria-label={`Dock ${name} into the page`} title="Dock into the page" onClick={() => handle.dockBack(group.id)}><Icon name="back" size={14}/></button>}
     {group.location === 'popout' && <button type="button" className="dock-put-back" title={`Put ${name} back where it was in the main window, and close this window${keys.putBack ? ` (${keys.putBack})` : ''}`} onClick={() => handle.dockBack(group.id)}><Icon name="put-back" size={13}/><span>Put back in main window</span></button>}

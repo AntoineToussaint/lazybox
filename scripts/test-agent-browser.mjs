@@ -67,6 +67,11 @@ try {
   const tab = page.locator('.dv-tab').filter({ has: page.locator('.dock-tab-title', { hasText: 'docs.example.com' }) });
   await expect(tab).toHaveCount(1);
 
+  const [detached] = await Promise.all([context.waitForEvent('page'), page.getByRole('button', { name: 'Detach browser panel' }).click()]);
+  await expect(detached.getByRole('toolbar', { name: 'Agent browser' }).getByRole('status')).toHaveText('Claude is browsing');
+  await detached.getByRole('button', { name: 'Put back in main window' }).click();
+  await expect(toolbar).toBeVisible();
+
   // ── Live frames: drawn on the canvas, each one counted.
   const canvas = panel.locator('canvas.browser-canvas');
   await expect(canvas).toHaveAttribute('data-frames', '1');

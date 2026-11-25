@@ -175,6 +175,10 @@ try {
     .getByRole("navigation", { name: "Pages" })
     .getByRole("button", { name: "Work", exact: true })
     .click();
+  // A second conversation in Alpha, so the sidebar lists Alpha's conversations under it: a workspace
+  // with one conversation is reached from its own row, and a reviewer is not listed (#137).
+  f.sessions.push({ ...structuredClone(f.sessions[0]), id: "alpha-early", workId: "early", conversationId: "early", title: "Second look", status: "done", busy: false, pending: [], agents: [{ id: "root", status: "done" }] });
+  await expect(page.getByRole("navigation", { name: "Workspace conversations" })).toBeVisible();
   await message.focus();
   await message.press("Control+b");
   await expect(alpha.locator(".workspace-link")).toBeFocused();

@@ -37,6 +37,17 @@ func (s *store) attach(a Attachment) error {
 	s.attachment = Attachment{}
 	return json.Unmarshal(data, &s.attachment)
 }
+
+// persisted is the snapshot the store holds once the engine has saved what it
+// received so far. Readers of the journal see an event as soon as it is
+// written, before the receive loop saves the snapshot under the engine's
+// lock; taking that lock (Snapshot) waits for the save.
+func persisted(e *Engine, s *store) Snapshot {
+	e.Snapshot()
+	snapshot, _ := s.saved()
+	return snapshot
+}
+
 func (s *store) saved() (Snapshot, Attachment) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

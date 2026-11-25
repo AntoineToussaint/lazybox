@@ -157,7 +157,7 @@ func TestAdoptionReadsBusyAndPendingFromTheJournal(t *testing.T) {
 	native.Events <- agent.Event{Type: "approval", RequestID: "r1", Cursor: 2}
 	await(t, e, "approval")
 	awaitReceipt(t, e, "first")
-	stale, _ := st.saved()
+	stale := persisted(e, st)
 	if !stale.Busy || len(stale.Pending) != 1 {
 		t.Fatalf("setup: %+v", stale)
 	}
@@ -188,7 +188,7 @@ func TestAdoptionKeepsATurnTheJournalSaysRuns(t *testing.T) {
 	ctx := contextFor(t)
 	native.Events <- agent.Event{Type: "session_ready", Cursor: 1}
 	await(t, e, "session_ready")
-	stale, _ := st.saved()
+	stale := persisted(e, st)
 	if _, err := e.Apply(ctx, agent.Operation{ID: "first", Kind: agent.Message, Text: "build it"}); err != nil {
 		t.Fatal(err)
 	}

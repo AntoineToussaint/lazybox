@@ -330,6 +330,25 @@ try{
    await held.clock.install();
    await heldRow.getByRole('button',{name:'Send now'}).click();
    await expect(heldRow.locator('.queued-working')).toHaveText('Waiting for the current turn to end…');
+   const heldComposer=held.getByRole('textbox',{name:'Message',exact:true});
+   const interruptCount=codex.interrupted;
+   await heldComposer.press(sendNowKey);
+   assert.equal(codex.interrupted,interruptCount,'repeating Send now while the stop is pending does not interrupt twice');
+   // Another window prioritizes the second message; its turn begins while this row is still queued.
+   await held.clock.fastForward('00:25');
+   await expect(heldRow.getByRole('alert')).toContainText('This message is still queued');
+   const [otherMessage]=codex.queuedMessages.splice(1,1);
+   codex.queued=codex.queuedMessages.length;
+   channels[codex.id].push({type:'turn_ended',status:'interrupted'});
+   channels[codex.id].push({type:'receipt',receipt:{operationId:otherMessage.operationId,delivery:'submitted'}});
+   channels[codex.id].push({type:'turn_started'});
+   channels[codex.id].push({type:'message_delta',text:'Processing the other queued request.'});
+   await expect(held.getByText('Processing the other queued request.',{exact:true})).toBeVisible();
+   await held.clock.fastForward('00:25');
+   await expect(heldRow.getByRole('alert')).toHaveCount(0);
+   await expect(heldRow.getByRole('button',{name:'Send now'})).toBeVisible();
+   await heldComposer.press(sendNowKey);
+   await expect(heldRow.locator('.queued-working')).toHaveText('Waiting for the current turn to end…');
    assert.equal(codex.queuedMessages[0].text,'Updated queued message','Send now leaves it queued until the turn ends');
    await heldRow.getByRole('button',{name:'Edit',exact:true}).click();
    await expect(heldRow.getByRole('textbox')).toHaveValue('Updated queued message');

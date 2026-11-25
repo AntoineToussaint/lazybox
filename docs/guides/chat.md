@@ -47,7 +47,7 @@ it did.
 - **Send now from the keyboard:** `⌘↵` (`Ctrl+Enter` on Windows and Linux).
   While the agent works, `↵` queues your message and `⌘↵` sends it now,
   stopping the current step. Pressed `↵` and saw it queued? `⌘↵` with an
-  empty box sends the oldest queued message now. The shortcut is ready as soon as the queue shows **Send now**.
+  empty box sends the oldest queued message now. Pressing it again while that stop is pending leaves the queue in order. Retry feedback clears when the turn changes. The shortcut is ready as soon as the queue shows **Send now**.
   With an empty box and an empty queue, the shortcut does nothing. While the agent is idle,
   `⌘↵` is an ordinary send (also while you dictate). It always stops and
   sends, also for an agent that steers: Steer stays a button. Change the key in Settings →

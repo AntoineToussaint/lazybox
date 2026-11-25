@@ -431,7 +431,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // the oldest queued one, interrupting the turn in progress. Idle, it is a send.
   // What waits behind the turn: the Runner's queue and the transcript's, merged (transcript-model.ts).
   const queued = useMemo(() => queuedMessages(session?.queuedMessages, transcript), [session?.queuedMessages, transcript.pending, transcript.messages, transcript.canceled]);
-  const queuedDelivery = useQueuedDelivery(api, sessionID, queued);
+  const queuedDelivery = useQueuedDelivery(api, sessionID, queued, transcript.turnBoundary);
   const sendNowAt = useRef(0);
   const sendNowBinding = bindings(keymap['chat.send-now'])[0];
   const sendNowKey = sendNowBinding ? displayBinding(sendNowBinding).join(' ') : '';
@@ -446,7 +446,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       return;
     }
     const oldest = workingTurn ? queued[0] : undefined;
-    if (oldest) { jumpToLatest(); void queuedDelivery.deliver(oldest.operationId, 'now'); }
+    if (oldest && !oldest.editing && queuedDelivery.working?.id !== oldest.operationId) { jumpToLatest(); void queuedDelivery.deliver(oldest.operationId, 'now'); }
   };
   useActions({
     'chat.send-now': mode === 'agent' && !!sessionID && {

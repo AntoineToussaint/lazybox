@@ -182,7 +182,10 @@ func TestSwitchSubscriptionContinuesTheSameConversationAndSendsOnce(t *testing.T
 	}
 	second.Events <- agent.Event{Type: "failure", Status: "exhausted", Account: &agent.AccountObservation{State: "exhausted", ResetAt: time.Now().Add(time.Hour).Unix()}}
 	select {
-	case <-adapter.opened:
+	case third := <-adapter.opened:
+		if third.Open.Profile != "a" {
+			t.Fatalf("switched to %q, want back to a, the subscription with room", third.Open.Profile)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("automatic switching was not turned on")
 	}

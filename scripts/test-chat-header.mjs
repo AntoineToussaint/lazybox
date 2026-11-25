@@ -1,6 +1,6 @@
 // Fixture only: the chat header with the conversation from the report — a long
-// first prompt, a branch, a non-default subscription, 26 prompts, 19 background
-// tasks, 40.4% of the context, $13.65 and 276 tool calls of which 22 failed.
+// first prompt, a branch, a non-default subscription, 26 prompts, 19 finished background
+// tasks and one still running, 40.4% of the context, $13.65 and 276 tool calls of which 22 failed.
 // At 1440 the title has the first line and everything shows; in a 560px panel
 // the title keeps two clean lines and what the second line has no room for
 // folds whole into "⋯". Nothing in the header is cut inside a word. A click on
@@ -45,6 +45,8 @@ const push = (event, at) => channel.push(event.data === undefined ? event : { ..
     push({ type: 'message_delta', text: `Step ${p + 1} is done.` }, at += 100);
     push({ type: 'turn_ended', status: 'completed' }, at += 100);
   }
+  // One sub-agent still at work in the background: the header's Background work chip counts only active ones (#126).
+  push({ type: 'agent_status', agentId: 'claude-tool:bg-live', parentAgentId: 'root', nativeId: 'task-live', status: 'running', name: 'Watch the build', data: { toolUseId: 'bg-live', subagentType: 'general-purpose', backgrounded: true } }, at += 100);
 }
 // 26 turns × 10–11 calls: 276 tool calls, 22 of them failed.
 const telemetry = { groups: [{ scope: { execution: session.id, profile: 'claude-0' }, source: 'gateway', model: 'claude-opus-5-5', records: '276', unpriced: '0', incomplete: '0', nanos: '13650000000', tokens: { input: '1200000', output: '90000' } }],

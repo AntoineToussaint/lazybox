@@ -2,7 +2,7 @@ import { create } from '@bufbuild/protobuf';
 import { CollectionSchema, JournalEventSchema, SessionSchema, type JournalEvent, type Session } from '@lazybox/protocol';
 import { test } from 'node:test';
 import { Code, ConnectError } from '@lazybox/client-core';
-import { humanError, streamLabel } from '../packages/surfaces/src/human-error.ts';
+import { humanError, isCancellation, refreshFailure, REFRESH_FAILURE_GRACE_MS, streamLabel } from '../packages/surfaces/src/human-error.ts';
 import assert from 'node:assert/strict';
 import { elapsedLabel, liveStatus, phaseFromEvents } from '../packages/surfaces/src/live-status.ts';
 import { awaitingFirstMessage, sessionStatus } from '../packages/surfaces/src/agent-status.ts';
@@ -182,4 +182,25 @@ test('a Claude child keeps the conversation spinner after the root turn ends', (
   const finished = session({ status: 'ready', agents: [root, { ...child, status: 'done' }] });
   assert.equal(deriveAttention(finished).state, 'review');
   assert.equal(liveStatus(finished, 5000).tone, 'idle');
+});
+
+test('the Runner\'s own Go context errors read in words, never raw', () => {
+  assert.equal(humanError(new ConnectError('context deadline exceeded', Code.Unknown)), 'The Runner did not answer in time. Try again.');
+  assert.equal(humanError(new ConnectError('get session: context deadline exceeded', Code.Internal)), 'The Runner did not answer in time. Try again.');
+  assert.ok(isCancellation(new ConnectError('context canceled', Code.Unknown)));
+  assert.ok(isCancellation(new ConnectError('the operation was aborted', Code.Canceled)));
+  assert.ok(!isCancellation(new ConnectError('no such session', Code.NotFound)));
+  assert.doesNotMatch(humanError(new ConnectError('context canceled', Code.Unknown)), /context/);
+});
+
+test('a refresh that fails only briefly shows nothing; one that keeps failing says so', () => {
+  const slow = new ConnectError('context deadline exceeded', Code.Unknown);
+  let state = refreshFailure(undefined, 1_000, slow);
+  assert.equal(state.shown, '', 'one slow answer under load is no outage');
+  state = refreshFailure(state.failingSince, 1_000 + REFRESH_FAILURE_GRACE_MS - 1, slow);
+  assert.equal(state.shown, '', 'still within the grace period');
+  state = refreshFailure(state.failingSince, 1_000 + REFRESH_FAILURE_GRACE_MS, slow);
+  assert.equal(state.shown, 'The Runner did not answer in time. Try again.');
+  // A cancelled refresh (a reconnect) neither shows nor starts the clock.
+  assert.deepEqual(refreshFailure(undefined, 5_000, new ConnectError('context canceled', Code.Canceled)), { failingSince: undefined, shown: '' });
 });

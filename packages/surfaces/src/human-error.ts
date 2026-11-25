@@ -19,8 +19,35 @@ export function humanError(error: unknown): string {
   // The window could not reach the Runner at all (client-core says "Runner unreachable: …"):
   // what the browser said is no help. When the Runner itself answers Unavailable, its words stand.
   if (failure.code === Code.Unavailable && /^Runner unreachable\b|failed to fetch|load failed|networkerror|fetch failed/i.test(raw)) return 'The Runner is not answering (it may be restarting). Try again in a moment.';
-  if (failure.code === Code.DeadlineExceeded) return 'The Runner did not answer in time. Try again.';
+  // The Runner's own Go context ran out of time ("context deadline exceeded", whatever code carries it).
+  if (failure.code === Code.DeadlineExceeded || /\bcontext deadline exceeded\b/i.test(raw)) return 'The Runner did not answer in time. Try again.';
+  if (isCancellation(error)) return 'The request was cancelled while reconnecting. Try again.';
   return raw || 'Something went wrong.';
+}
+
+/**
+ * A request that ended because it was cancelled (a window reconnecting, a view
+ * moving on, the Runner's own "context canceled"), not because anything failed:
+ * a refresh that ends this way is no error to show.
+ */
+export function isCancellation(error: unknown): boolean {
+  const failure = ConnectError.from(error);
+  const raw = (failure.rawMessage || (error instanceof Error ? error.message : String(error))).trim();
+  return failure.code === Code.Canceled || (error instanceof Error && error.name === 'AbortError') || /\bcontext canceled\b/i.test(raw);
+}
+
+/** How long refreshes may keep failing before the window says so: one slow answer under load is not an outage. */
+export const REFRESH_FAILURE_GRACE_MS = 15_000;
+
+/**
+ * What a polling view shows after a refresh, from when refreshes started
+ * failing: nothing while they recover within the grace period, then the
+ * failure in words. `failingSince` is undefined after a success.
+ */
+export function refreshFailure(failingSince: number | undefined, now: number, error: unknown): { failingSince: number | undefined; shown: string } {
+  if (isCancellation(error)) return { failingSince, shown: '' };
+  const since = failingSince ?? now;
+  return { failingSince: since, shown: now - since >= REFRESH_FAILURE_GRACE_MS ? humanError(error) : '' };
 }
 
 /**

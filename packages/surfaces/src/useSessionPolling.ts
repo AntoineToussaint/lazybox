@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { RunnerClient } from '@lazybox/client-core';
 import type { Collection, CommandStatus, Session } from '@lazybox/protocol';
 import { continueConversation, type ConversationReader } from './transcript-cache';
-import { humanError } from './human-error';
+import { refreshFailure } from './human-error';
 
 /** The workspace a conversation belongs to, for its branch: the header leads with it until the conversation has a title. */
 export function useSessionWorkspace(api: RunnerClient, workspaceId: string, connected: boolean, revision: number) {
@@ -42,7 +42,7 @@ export function useSessionRefresh({ api, sessionID, connected, showCommands, rea
   useEffect(() => {
     if (!sessionID || !connected) return;
     const control = new AbortController(); setSession(reader.session); setCommands([]);
-    let refreshing = false, again = false;
+    let refreshing = false, again = false, failingSince: number | undefined;
     const options = () => ({ signal: control.signal, timeoutMs: REFRESH_TIMEOUT_MS });
     const update = async () => {
       if (control.signal.aborted) return;
@@ -56,9 +56,12 @@ export function useSessionRefresh({ api, sessionID, connected, showCommands, rea
             const next = await api.getSession({ sessionId: state.session.successorExecutionId }, options());
             if (!control.signal.aborted && next.session) { continueConversation(api, sessionID, next.session); onSuccessor(next.session); }
           } else { reader.session = state.session; setSession(state.session); setCommands(output.commands); }
-          setRefreshError('');
+          failingSince = undefined; setRefreshError('');
         }
-      } catch (e) { if (!control.signal.aborted) setRefreshError(humanError(e)); }
+      } catch (e) {
+        // A slow or cancelled refresh under load is retried by the next poll: only refreshes that keep failing are shown.
+        if (!control.signal.aborted) { const next = refreshFailure(failingSince, Date.now(), e); failingSince = next.failingSince; setRefreshError(next.shown); }
+      }
       finally { refreshing = false; if (again) { again = false; void update(); } }
     };
     now.current = () => void update();

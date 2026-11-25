@@ -7,10 +7,39 @@ function elapsed(at) {
   return `${Math.floor(minutes / 1440)} d`;
 }
 
+const stateFilter = document.getElementById('state');
+let blocked;
+
+function render() {
+  if (!blocked) return;
+  const state = stateFilter.value;
+  const visible = state === 'all' ? blocked : blocked.filter(item => item.state === state);
+  workflow.list(visible.map(item => {
+    const failed = item.state === 'failed';
+    const action = workflow.button(failed ? 'Inspect failure' : 'Respond', () => lazybox.conversations.show(item.sessionId));
+    const age = elapsed(item.at);
+    const row = workflow.row(item.sessionId, item.title || 'Conversation',
+      [item.workspaceName, age && age + ' ago'].filter(Boolean).join(' · '), action);
+    const label = document.createElement('span');
+    label.className = 'radar-state';
+    label.textContent = item.reason || (failed ? 'Failed' : 'Needs input');
+    row.dataset.state = item.state;
+    row.querySelector('strong').prepend(label, ' ');
+    if (item.line) {
+      const preview = document.createElement('span');
+      preview.className = 'radar-preview';
+      preview.textContent = item.line;
+      row.querySelector('small').prepend(preview);
+    }
+    return row;
+  }), state === 'all' ? 'No conversations are blocked on this Runner.' :
+    state === 'failed' ? 'No failed conversations.' : 'No conversations need input.');
+}
+
+stateFilter.addEventListener('change', render);
 workflow.poll(5000, async () => {
   const { items } = await lazybox.attention.list();
-  const blocked = items.filter(item => item.state === 'needs-input' || item.state === 'failed').sort((a, b) => a.at - b.at);
-  workflow.list(blocked.map(item => workflow.row(item.sessionId, item.title || 'Conversation',
-    [item.workspaceName, item.reason, elapsed(item.at)].filter(Boolean).join(' · '),
-    workflow.button('Open conversation', () => lazybox.conversations.show(item.sessionId)))), 'No conversations are blocked on this Runner.');
+  blocked = items.filter(item => item.state === 'needs-input' || item.state === 'failed')
+    .sort((a, b) => (a.at || Infinity) - (b.at || Infinity));
+  render();
 });

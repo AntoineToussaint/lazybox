@@ -1,0 +1,14 @@
+.draggable-dialog.clone-profile-dialog { width: min(560px, calc(100vw - 32px)); }
+.clone-profile-dialog .clone-interview { margin-top: 16px; gap: 14px; }
+.clone-profile-dialog textarea {
+  width: 100%; min-height: 3.5em; resize: vertical; padding: 7px 10px;
+  background: var(--surface-sunken); color: var(--text); font: inherit;
+  border: 1px solid var(--line); border-radius: 6px;
+}
+.clone-profile-dialog fieldset { min-width: 0; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.clone-profile-dialog legend { color: var(--text-secondary); font-weight: 600; padding-inline: 4px; }
+.clone-suggestions button { white-space: normal; text-align: start; margin: 2px; }
+.clone-history { display: grid; justify-items: start; gap: 10px; }
+.clone-question { width: 100%; padding: 12px; border-radius: 8px; background: var(--surface-raised); border: 1px solid var(--line-subtle); }
+.clone-question .clone-destination { display: flex; flex-flow: row wrap; align-items: center; gap: 6px; margin-top: 6px; color: var(--text-muted); }
+.clone-destination select { width: auto; max-width: 100%; }

@@ -3,8 +3,8 @@ category: Monitoring & costs
 caption: Release Watch panel with fixture workspace data.
 keywords: [ci, deployments]
 name: Release Watch
-version: 1.0.0
-description: Follow tracked pull request checks and deployments for workspace repositories.
+version: 1.1.0
+description: Review pending deployments and investigate failed checks across your workspace repositories.
 author: Lazybox
 panels:
   - id: main

@@ -1,0 +1,4 @@
+.state-filter { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--text-muted); }
+.radar-state { display: inline-block; font-size: calc(11px * var(--text-scale)); font-weight: 500; border-radius: 4px; padding: 1px 6px; color: var(--warn); background: var(--warn-bg); }
+[data-state="failed"] .radar-state { color: var(--danger); background: var(--danger-bg); }
+.radar-preview { display: block; margin: 3px 0; color: var(--text-secondary); white-space: pre-line; }

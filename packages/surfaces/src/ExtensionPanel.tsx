@@ -125,7 +125,9 @@ function ExtensionHome({ extensions: installed, examples: bundled, missing, onCh
         <span className="extension-row-text"><strong>{ext.name}</strong><small>{ext.description}</small></span>
         <ExtensionPreview entry={ext}/>
         {ext.grants.includes('answer:preferences') && ext.approvedGrants.includes('answer:preferences') && <button onClick={() => setInterview(true)}>Teach Clone Me</button>}
-        <button onClick={() => runAction('settings.open','extensions')}>Manage</button>
+        {ext.accountPolicy?.switchOnLimit
+          ? <button onClick={() => runAction('settings.open', 'subscriptions')}>Manage rotation accounts</button>
+          : <button onClick={() => runAction('settings.open', 'extensions')}>Manage</button>}
       </li>)}</ul>
     </section>}
     {waiting.length > 0 && <section aria-labelledby="extensions-waiting"><h3 id="extensions-waiting">Waiting for you</h3>
@@ -133,7 +135,7 @@ function ExtensionHome({ extensions: installed, examples: bundled, missing, onCh
         <span className="extension-mark" aria-hidden="true"><Icon name={ext.panels[0]?.icon || 'puzzle'} size={16}/></span>
         <span className="extension-row-text"><strong>{ext.name || ext.id}</strong><small>{extensionStateLabel[ext.state]}{ext.grants.length ? ` · ${ext.grants.map(g => describeGrant(g).title.toLowerCase()).slice(0, 2).join(', ')}${ext.grants.length > 2 ? '…' : ''}` : ''}</small></span>
         {ext.state === 'disabled' ? <button type="button" onClick={() => runAction('settings.open', 'extensions')}>Settings…</button>
-          : <button type="button" className="primary" onClick={() => setReviewing(ext)}>{ext.state === 'review' ? 'Review' : 'Review and turn on'}</button>}
+          : <button type="button" className="primary" onClick={() => setReviewing(ext)}>{ext.state === 'review' ? 'Review new access' : 'Enable…'}</button>}
       </li>)}</ul>
     </section>}
     {broken.length > 0 && <section aria-labelledby="extensions-broken"><h3 id="extensions-broken">Do not load</h3>
@@ -142,11 +144,11 @@ function ExtensionHome({ extensions: installed, examples: bundled, missing, onCh
         <span className="extension-row-text"><strong>{ext.name || ext.id}</strong><small>{ext.error || ext.issues.filter(i => i.severity === 'error').map(i => `line ${i.line}: ${i.message}`)[0]}</small></span>
       </li>)}</ul>
     </section>}
-    {examples.some(x => !x.installed) && <section aria-labelledby="extensions-examples"><h3 id="extensions-examples">Examples</h3>
+    {examples.some(x => !x.installed) && <section aria-labelledby="extensions-examples"><h3 id="extensions-examples">Available to install</h3>
       <ul className="extension-rows">{examples.filter(x => !x.installed).map(x => <li key={x.id}>
         <span className="extension-mark" aria-hidden="true"><Icon name="puzzle" size={16}/></span>
         <span className="extension-row-text"><strong>{x.name}</strong><small>{x.description}</small></span><ExtensionPreview entry={x}/>
-        <button type="button" disabled={!!busy} onClick={() => void add(x.id)}>{busy === x.id ? 'Adding…' : 'Add'}</button>
+        <button type="button" disabled={!!busy} onClick={() => void add(x.id)}>{busy === x.id ? 'Installing…' : 'Install'}</button>
       </li>)}</ul>
     </section>}
     {!installed.length && !bundled.length && <div className="extension-state"><Icon name="puzzle" size={22}/><p>No extensions yet.</p></div>}
@@ -368,7 +370,7 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
       <button type="button" className="quiet" aria-label="Reload the extension" title="Reload" disabled={!session} onClick={reload}><Icon name="refresh" size={13}/></button>
     </div>
     {!runs ? <div className="extension-state"><Icon name="lock" size={18}/><p>{extension.name || extension.id}: {extensionStateLabel[extension.state]?.toLowerCase()}.</p>
-        {extension.state === 'new' ? <button type="button" className="primary" onClick={() => setReviewing(true)}>Review and turn on</button> : <button type="button" onClick={() => runAction('settings.open', 'extensions')}>Open Settings → Extensions</button>}</div>
+        {extension.state === 'new' ? <button type="button" className="primary" onClick={() => setReviewing(true)}>Enable…</button> : <button type="button" onClick={() => runAction('settings.open', 'extensions')}>Open Settings → Extensions</button>}</div>
       : stalled ? <div className="extension-state" role="alert"><Icon name="alert" size={18}/><p>{extension.name || extension.id} did not finish loading last time; the window may have frozen.</p>
         <div className="extension-state-actions"><button type="button" className="primary" onClick={() => { storage()?.removeItem(loadingKey(extension.id)); setStalled(false); }}>Load it</button><button type="button" onClick={onClose}>Show something else</button></div></div>
       : opening ? <div className="extension-state" role="alert"><Icon name="alert" size={18}/><p>{opening}</p><button type="button" onClick={() => setReopen(n => n + 1)}>Try again</button></div>

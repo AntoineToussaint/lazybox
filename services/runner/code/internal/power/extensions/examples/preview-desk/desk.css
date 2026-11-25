@@ -1,0 +1,7 @@
+.preview-filter { display: flex; align-items: center; gap: 6px; margin: 10px 0; color: var(--text-secondary); }
+.preview-filter input { accent-color: var(--accent-solid); }
+#ready-count { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.service-state { display: inline-block; margin-inline-start: 4px; padding: 1px 6px; border-radius: 4px; color: var(--text-secondary); background: var(--surface-selected); font-size: .88em; font-weight: 500; }
+[data-state="running"] .service-state { color: var(--ok); background: var(--ok-bg); }
+[data-state="failed"] .service-state { color: var(--danger); background: var(--danger-bg); }
+[data-state="stopping"] .service-state { color: var(--warn); background: var(--warn-bg); }

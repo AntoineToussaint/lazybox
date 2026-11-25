@@ -16,7 +16,7 @@ import './extensions.css';
  * do, and the switch, review and removal; the bundled examples; where the
  * folder is and how to make one. Approving always goes through the sheet.
  */
-export function ExtensionsSettings({ onOpenPanel }: { onOpenPanel?(choice?: ExtensionPanelChoice): void }) {
+export function ExtensionsSettings({ onOpenPanel, onManageAccounts }: { onOpenPanel?(choice?: ExtensionPanelChoice): void; onManageAccounts(): void }) {
   const { value, error, change } = useExtensions();
   const [interview,setInterview] = useState(false);
   const [reviewing, setReviewing] = useState<Extension>();
@@ -73,23 +73,24 @@ export function ExtensionsSettings({ onOpenPanel }: { onOpenPanel?(choice?: Exte
             </div>
             <div className="extension-card-actions">
               {on && ext.grants.includes('answer:preferences') && ext.approvedGrants.includes('answer:preferences') && <button onClick={() => setInterview(true)}>Teach Clone Me</button>}
+              {on && ext.accountPolicy?.switchOnLimit && <button type="button" onClick={onManageAccounts}>Manage rotation accounts</button>}
               {onOpenPanel && on && ext.panels.map(panel => <button type="button" key={panel.id}
                 aria-label={`Open ${panel.title}`} onClick={() => onOpenPanel({ id: ext.id, panel: panel.id })}>
                 {ext.panels.length === 1 ? 'Open panel' : panel.title}
               </button>)}
-              {ext.state !== 'broken' && <span className="settings-switch" title={on ? 'Turn off' : 'Turn on'}><input type="checkbox" role="switch" aria-label={`${ext.name || ext.id} on`} checked={on} disabled={busy === ext.id} onChange={event => toggle(ext, event.target.checked)}/></span>}
-              {(ext.state === 'new' || ext.state === 'review') && <button type="button" className="primary" onClick={() => setReviewing(ext)}>{ext.state === 'new' ? 'Review' : 'Review what’s new'}</button>}
+              {ext.state !== 'broken' && ext.state !== 'new' && <span className="settings-switch" title={on ? 'Turn off' : 'Turn on'}><input type="checkbox" role="switch" aria-label={`${ext.name || ext.id} on`} checked={on} disabled={busy === ext.id} onChange={event => toggle(ext, event.target.checked)}/></span>}
+              {(ext.state === 'new' || ext.state === 'review') && <button type="button" className="primary" onClick={() => setReviewing(ext)}>{ext.state === 'new' ? 'Enable…' : 'Review new access'}</button>}
               {ext.state === 'enabled' && <button type="button" onClick={() => setReviewing(ext)}>Access</button>}
               <button type="button" className="quiet" aria-label={`Remove ${ext.name || ext.id}`} title="Remove" onClick={() => setRemoving(ext)}><Icon name="close" size={13}/></button>
             </div>
           </li>;
         })}</ul> : <p className="settings-empty">No installed extensions to show.</p>}
       </SettingsGroup>
-      {available.length > 0 && <SettingsGroup title="Examples" description="Bundled with Lazybox. Adding one copies its folder into yours; you still approve what it may do.">
-        <ul className="extension-cards" aria-label="Example extensions">{available.map(x => <li key={x.id} className="extension-card">
+      {available.length > 0 && <SettingsGroup title="Available to install" description="These extensions come with Lazybox. Install one, then approve its access to enable it.">
+        <ul className="extension-cards" aria-label="Available extensions">{available.map(x => <li key={x.id} className="extension-card">
           <span className="extension-mark" aria-hidden="true"><Icon name="puzzle" size={18}/></span>
           <div className="extension-card-body"><div className="extension-card-title"><strong>{x.name}</strong></div><ExtensionPreview entry={x}/><p>{x.description}</p></div>
-          <div className="extension-card-actions">{x.installed ? <small className="muted">Added</small> : <button type="button" disabled={!!busy} onClick={() => void add(x.id)}>{busy === x.id ? 'Adding…' : 'Add'}</button>}</div>
+          <div className="extension-card-actions"><button type="button" className="primary" disabled={!!busy} onClick={() => void add(x.id)}>{busy === x.id ? 'Installing…' : 'Install'}</button></div>
         </li>)}</ul>
       </SettingsGroup>}
       <SettingsGroup title="Make your own" description="A folder with an extension.yaml and its pages. Lazybox reloads an open panel when you save a file in it.">

@@ -3,8 +3,8 @@ category: Agents & conversations
 caption: Runner Radar panel with fixture workspace data.
 keywords: [blocked, waiting]
 name: Runner Radar
-version: 1.0.0
-description: Find blocked conversations, ordered by how long they have waited.
+version: 1.1.0
+description: Read pending questions and failure details across workspaces, oldest first. Open the conversation to respond.
 author: Lazybox
 panels:
   - id: main

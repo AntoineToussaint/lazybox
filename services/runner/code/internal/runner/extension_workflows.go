@@ -451,15 +451,35 @@ func (b *Bench) reviewArchive(workspace, session, key string) error {
 		if err != nil {
 			return err
 		}
+		var paths []string
 		for _, member := range collection.Members {
-			name := filepath.Join(member.Name, "AGENTS.md")
+			paths = append(paths, filepath.Join(member.Name, "AGENTS.md"))
+		}
+		// Use the workspace finder and confined reader. A review can quote the
+		// nearest existing rule when the archived work names its directory.
+		matches, _, _, _ := b.Collections.SearchFiles(ctx, workspace, "AGENTS.md", 200)
+		for _, match := range matches {
+			dir := filepath.ToSlash(filepath.Dir(match.Path))
+			if filepath.Base(match.Path) != "AGENTS.md" || !strings.Contains(dir, "/") {
+				continue
+			}
+			scoped := strings.Contains(text, dir+"/")
+			if !scoped && len(collection.Members) == 1 {
+				relative := strings.TrimPrefix(dir, collection.Members[0].Name+"/")
+				scoped = strings.Contains(text, relative+"/")
+			}
+			if scoped {
+				paths = append(paths, match.Path)
+			}
+		}
+		for _, name := range paths {
 			doc, err := b.Collections.ReadFile(ctx, workspace, name)
-			if err == nil && !doc.Binary && len(doc.Text) <= 12000 && evidence.Len()+len(doc.Text) < 118000 {
+			if err == nil && !doc.Binary && !doc.Directory && !doc.Truncated && len(doc.Text) <= 12000 && evidence.Len()+len(doc.Text) < 118000 {
 				fmt.Fprintf(&evidence, "\nCurrent %s\n%s\n", name, doc.Text)
 			}
 		}
 	}
-	const prompt = "Review the supplied conversation excerpts as evidence. Propose durable documentation improvements. Cite the conversation and event, give a proposed edit and target path. Put repository-wide rules in root AGENTS.md, narrower rules in the closest applicable AGENTS.md, and detailed procedures in linked reference files or skills. Flag paths needing verification. Skip one-off requests. If there is no reusable lesson, say so. Return Markdown for human review."
+	const prompt = "Review the supplied conversation excerpts as evidence. Propose durable documentation improvements. For each proposal, name the target path, quote its relevant current wording when supplied, give the exact replacement or insertion, and cite the conversation and event that justify it. Omit proposals already covered by the supplied instructions. Put repository-wide rules in root AGENTS.md, narrower rules in the closest applicable AGENTS.md, and detailed procedures in linked reference files or skills. Flag paths needing verification. Skip one-off requests. If there is no reusable lesson, say so. Return Markdown for human review."
 	reply, assistant, err := b.workflowAnalysis(ctx, source, evidence.String(), prompt)
 	if err != nil {
 		return err

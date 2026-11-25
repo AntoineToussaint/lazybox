@@ -30,7 +30,30 @@ type diskScan struct {
 	Targets []diskCandidate
 }
 
-var diskPage = template.Must(template.New("disk").Funcs(template.FuncMap{"size": func(n int64) string { return fmt.Sprintf("%.2f GiB", float64(n)/(1<<30)) }}).Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Disk Cleanup</title><link rel="stylesheet" href="lazybox.css"><h1>Disk Cleanup</h1><p>Scanned {{.At}} · {{size .Scan.Disk.Free}} free of {{size .Scan.Disk.Total}}</p><ul>{{range .Scan.Targets}}<li>{{.Label}} {{.Path}} · {{if .Bytes}}{{size .Bytes}}{{else}}size unknown{{end}}</li>{{else}}<li>No disk cleanup candidates.</li>{{end}}</ul><a href="disk-report.html">Reload saved report</a></html>`))
+func diskSize(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	value := float64(bytes)
+	for _, unit := range []string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"} {
+		value /= 1024
+		if value < 1024 {
+			return fmt.Sprintf("%.1f %s", value, unit)
+		}
+	}
+	return fmt.Sprintf("%d B", bytes)
+}
+
+var diskPage = template.Must(template.New("disk").Funcs(template.FuncMap{"size": diskSize}).Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Disk Cleanup</title>
+<link rel="stylesheet" href="lazybox.css"><script src="lazybox.js" defer></script></head>
+<body class="workflow"><header><h1>Disk Cleanup</h1><p>Runner storage</p><a href="disk-report.html">Reload saved report</a></header>
+{{if .Message}}<p role="status">{{.Message}}</p>{{else}}
+<section aria-label="Disk space"><h2>{{size .Scan.Disk.Free}} free of {{size .Scan.Disk.Total}}</h2>
+<meter aria-label="Free disk space" value="{{.Scan.Disk.Free}}" min="0" max="{{.Scan.Disk.Total}}"></meter>
+<p class="muted">Scanned <time datetime="{{.At}}">{{.Scanned}}</time></p></section>
+<h2>Cleanup candidates{{if .Scan.Targets}} · {{len .Scan.Targets}}{{end}}</h2>{{if .Scan.Targets}}<ul>{{range .Scan.Targets}}<li><strong>{{.Label}}</strong><small><code>{{.Path}}</code></small><output>{{if .Bytes}}{{size .Bytes}}{{else}}Size unknown{{end}}</output></li>{{end}}</ul>{{else}}<p>No disk cleanup candidates.</p>{{end}}{{end}}
+</body></html>`))
 
 type diskResult struct {
 	At    time.Time
@@ -68,17 +91,17 @@ func runDiskScan(ctx context.Context) diskResult {
 }
 
 func (r diskResult) page() string {
-	if r.Error != "" {
-		return template.HTMLEscapeString(r.Error)
-	}
-	if r.At.IsZero() {
-		return "Waiting for the first scan."
+	message := r.Error
+	if message == "" && r.At.IsZero() {
+		message = "Waiting for the first scan."
 	}
 	var body bytes.Buffer
 	if err := diskPage.Execute(&body, struct {
-		At   string
-		Scan diskScan
-	}{r.At.Format(time.RFC3339), r.Scan}); err != nil {
+		At      string
+		Scanned string
+		Message string
+		Scan    diskScan
+	}{r.At.Format(time.RFC3339), r.At.UTC().Format("Jan 2, 2006 at 15:04 UTC"), message, r.Scan}); err != nil {
 		return "Could not display the disk report."
 	}
 	return body.String()

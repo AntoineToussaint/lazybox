@@ -268,7 +268,7 @@ func (c *client) explain(err error) error {
 	case connect.CodeUnavailable:
 		var op *net.OpError
 		if errors.As(err, &op) || strings.Contains(message, "connection refused") || strings.Contains(message, "dial") {
-			return fail(exitUnavailable, "no Runner answers at %s (from %s); is it running?", c.target.URL, c.target.EndpointPath)
+			return fail(exitUnavailable, "Runner connection failed at %s (from %s): %s", c.target.URL, c.target.EndpointPath, message)
 		}
 		return exitError{exitUnavailable, errors.New(message)}
 	}

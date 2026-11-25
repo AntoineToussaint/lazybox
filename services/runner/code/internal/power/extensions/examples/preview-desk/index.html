@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Preview Desk</title>
 <link rel="stylesheet" href="_lazybox/lazybox.css">
+<link rel="stylesheet" href="desk.css">
 <script src="_lazybox/lazybox.js"></script>
 <script src="_lazybox/workflow.js" defer></script>
 <script src="app.js" defer></script>
@@ -11,6 +13,7 @@
 <body class="workflow">
 <header><h1>Preview Desk</h1><p id="scope">Workspace</p></header>
 <p id="notice" role="status">Loading…</p>
-<ul id="rows"></ul>
+<label class="preview-filter"><input id="ready-only" type="checkbox"> Ready previews only <span id="ready-count"></span></label>
+<ul aria-label="Workspace services" id="rows"></ul>
 </body>
 </html>

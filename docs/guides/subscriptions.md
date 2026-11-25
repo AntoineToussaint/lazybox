@@ -107,8 +107,8 @@ sign-in or billing problem has no **Mark available**: signing in again fixes it.
 ### Switching by itself: the Subscription rotation extension
 
 Lazybox does not move a conversation to another account by itself. If you want
-it to, add the **Subscription rotation** extension: Settings → Extensions →
-Examples → **Add**, read what it asks for, and **Allow and turn on**. From then
+it to, open **Settings → Extensions**. Under **Available to install**, choose
+**Install** for **Subscription rotation**, read its permissions, and choose **Allow and turn on**. From then
 on, a conversation that reaches a limit moves to another signed-in account of
 the same provider with one quiet line in the chat (*Switched to Work Codex ·
 Personal resets at 6:00 PM*), and the limit card, the session menu and new

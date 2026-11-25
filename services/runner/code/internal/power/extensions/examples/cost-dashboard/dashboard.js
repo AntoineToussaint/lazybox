@@ -29,6 +29,7 @@ const state = {
   filter: { workspace: null, model: null },
   expanded: new Set(),
   slots: new Map(), // model → 1…5, or 0 for Other
+  peakStart: null,
   active: -1, // the chart column the pointer or the keyboard is on
   view: null,
 };
@@ -190,13 +191,17 @@ function render() {
     key: w.key, label: w.name || 'Workspace', sub: plural(w.conversations.size, 'conversation', 'conversations'), usd: w.usd, detail: w,
     pressed: state.filter.workspace === w.key, action: () => toggleFilter('workspace', w.key),
   })), view.total.usd, 6, 'Nothing spent in a workspace in this period');
-  renderRank($('by-conversation'), 'conversation', view.conversations.map(c => {
+  const selected = win?.bins.find(bin => bin.start === state.peakStart);
+  const conversationView = selected ? summarize(rows.filter(row => row.at >= selected.start && row.at < selected.end), null) : view;
+  $('conversations-title').textContent = selected ? 'Conversations · ' + selected.long : 'By conversation';
+  $('clear-peak').hidden = !selected;
+  renderRank($('by-conversation'), 'conversation', conversationView.conversations.map(c => {
     const known = state.conversations.get(c.key);
     return {
       key: c.key, label: known?.title || 'Untitled conversation', sub: [c.workspaceName, [...c.models].map(modelName).join(', ')].filter(Boolean).join(' · '), usd: c.usd, detail: c,
       action: state.canShow && known?.sessionId ? () => show(known.sessionId) : null, actionLabel: 'Show',
     };
-  }), view.total.usd, 8, 'No conversation spent anything in this period');
+  }), conversationView.total.usd, 8, 'No conversation spent anything in this period');
 }
 
 function renderPullCosts(view, rows, win) {
@@ -378,6 +383,12 @@ function renderChart() {
   const sums = bins.map(bin => [...bin.values()].reduce((a, b) => a + b, 0));
   const peak = Math.max(...sums, 0), peakAt = sums.indexOf(peak);
   const busiest = peak > 0 ? `${unit === 'hour' ? 'at' : unit === 'week' ? 'in the' : 'on'} ${unit === 'week' ? win.bins[peakAt].long.toLowerCase() : win.bins[peakAt].long}` : '';
+  $('inspect-peak').hidden = peak <= 0;
+  $('inspect-peak').onclick = () => {
+    state.peakStart = win.bins[peakAt].start;
+    render();
+    $('conversations-title').focus();
+  };
   $('chart-hint').textContent = peak > 0 ? `Highest: ${dollars(peak)} ${busiest}` : '';
   $('chart').setAttribute('aria-label', `${$('spend-title').textContent}, ${PERIODS[state.view.period].label}: ${dollars(total.usd)} in all${peak > 0 ? `; highest ${dollars(peak)}, ${busiest}` : ''}. Use the arrow keys to read each ${unit}.`);
   if (state.active >= bins.length) state.active = -1;
@@ -467,6 +478,7 @@ function setActive(i) { state.active = i; showTip(); }
 
 // ---- Acting.
 function toggleFilter(kind, key) {
+  state.peakStart = null;
   state.filter[kind] = state.filter[kind] === key ? null : key;
   state.active = -1;
   render();
@@ -476,6 +488,7 @@ function show(sessionId) {
 }
 function choosePeriod(period, focus) {
   if (state.period === period) return;
+  state.peakStart = null;
   state.period = period;
   state.active = -1;
   render();
@@ -491,6 +504,12 @@ $('period').addEventListener('keydown', e => {
   e.preventDefault();
   choosePeriod(buttons[(to + buttons.length) % buttons.length].dataset.period, true);
 });
+
+$('clear-peak').onclick = () => {
+  state.peakStart = null;
+  render();
+  $('inspect-peak').focus();
+};
 
 const chart = $('chart');
 chart.addEventListener('pointermove', e => {

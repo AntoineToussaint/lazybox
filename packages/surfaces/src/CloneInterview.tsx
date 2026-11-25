@@ -2,12 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import type { CloneProfile } from '@lazybox/protocol';
 import { ConfirmDialog } from './ConfirmDialog';
 import { useRunner } from './RunnerContext';
+import './clone-interview.css';
 
 const fields = [
   ['style', 'How do you like code structured?'],
   ['testing', 'What verification do you expect?'],
   ['askWhen', 'Which decisions should agents bring to you?'],
 ] as const;
+type Field = typeof fields[number][0];
+const sectionNames = { style: 'Code style', testing: 'Verification', askWhen: 'Decisions to ask about' };
 
 export function CloneInterview({ onClose }: { onClose(): void }) {
   const { api } = useRunner();
@@ -15,6 +18,7 @@ export function CloneInterview({ onClose }: { onClose(): void }) {
   const [learning, setLearning] = useState(false);
   const [error, setError] = useState('');
   const [responses, setResponses] = useState<Record<string, string>>({});
+  const [destinations, setDestinations] = useState<Record<string, Field>>({});
   const [forgotten, setForgotten] = useState<string[]>([]);
   const analysis = useRef<AbortController | null>(null);
 
@@ -42,30 +46,44 @@ export function CloneInterview({ onClose }: { onClose(): void }) {
   };
   const save = async () => {
     if (!profile) return;
-    const interview = profile.questions.flatMap(question => {
-      const answer = responses[question]?.trim();
-      return answer ? [question + ' ' + answer] : [];
-    });
-    const style = [profile.style, ...interview].filter(Boolean).join('\n');
-    await api.saveCloneProfile({ profile: { ...profile, style }, forgetAnswerIds: forgotten });
+    const next = { ...profile };
+    for (const [question, response] of Object.entries(responses)) {
+      const answer = response.trim();
+      if (!answer) continue;
+      const field = destinations[question] || 'style';
+      next[field] = [next[field], question + ' ' + answer].filter(Boolean).join('\n');
+    }
+    await api.saveCloneProfile({ profile: next, forgetAnswerIds: forgotten });
     onClose();
   };
-  return <ConfirmDialog title="Teach Clone Me" tone="primary" confirm="Save preferences" working="Saving…"
+  const answered = Object.keys(responses).filter(question => responses[question].trim());
+  const questions = [...new Set([...(profile?.questions || []), ...answered])];
+  return <ConfirmDialog className="clone-profile-dialog" title="Teach Clone Me" tone="primary" confirm="Save preferences" working="Saving…"
     canConfirm={!!profile && !learning} error={error} onClose={onClose} onConfirm={save}
     details={profile ? <div className="clone-interview">
-      <button type="button" disabled={learning} onClick={() => void learn()}>
-        {learning ? 'Reviewing conversations…' : 'Learn from recent conversations'}
-      </button>
-      {profile.questions.map(question => <label key={question}>{question}
-        <textarea value={responses[question] || ''} onChange={event => setResponses({ ...responses, [question]: event.target.value })}/>
-      </label>)}
-      {profile.suggestions.length > 0 && <fieldset><legend>Suggested preferences</legend>
-        {profile.suggestions.map(line => <button type="button" key={line} disabled={profile.style.split('\n').includes(line)}
-          onClick={() => setProfile({ ...profile, style: [profile.style, line].filter(Boolean).join('\n') })}>{line}</button>)}
-      </fieldset>}
       {fields.map(([key, label]) => <label key={key}>{label}
         <textarea value={profile[key]} onChange={event => setProfile({ ...profile, [key]: event.target.value })}/>
       </label>)}
+      {profile.suggestions.length > 0 && <fieldset className="clone-suggestions"><legend>Suggested code preferences</legend>
+        {profile.suggestions.map(line => <button type="button" key={line} disabled={profile.style.split('\n').includes(line)}
+          onClick={() => setProfile({ ...profile, style: [profile.style, line].filter(Boolean).join('\n') })}>{line}</button>)}
+      </fieldset>}
+      <section className="clone-history" aria-label="Conversation history">
+        <button type="button" disabled={learning} onClick={() => void learn()}>
+          {learning ? 'Reviewing conversations…' : 'Learn from recent conversations'}
+        </button>
+        {questions.map(question => <div className="clone-question" key={question}>
+          <label>{question}
+            <textarea value={responses[question] || ''} onChange={event => setResponses({ ...responses, [question]: event.target.value })}/>
+          </label>
+          <label className="clone-destination">Save answer under
+            <select aria-label={'Save answer under for ' + question} value={destinations[question] || 'style'}
+              onChange={event => setDestinations({ ...destinations, [question]: event.target.value as Field })}>
+              {fields.map(([key]) => <option key={key} value={key}>{sectionNames[key]}</option>)}
+            </select>
+          </label>
+        </div>)}
+      </section>
       {profile.rememberedAnswers.length > 0 && <fieldset><legend>Remembered answers</legend>
         {profile.rememberedAnswers.map(item => <label key={item.id}>
           <input type="checkbox" checked={forgotten.includes(item.id)} onChange={ev => setForgotten(ev.target.checked ? [...forgotten, item.id] : forgotten.filter(id => id !== item.id))}/>
@@ -73,6 +91,6 @@ export function CloneInterview({ onClose }: { onClose(): void }) {
         </label>)}
       </fieldset>}
     </div> : 'Loading your profile…'}>
-    Save the preferences you want your coding agents to use.
+    Set how your agents write code, verify changes, and decide when to ask you.
   </ConfirmDialog>;
 }

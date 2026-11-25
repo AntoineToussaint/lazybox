@@ -125,8 +125,8 @@ try{
  await page.getByRole('tab',{name:'Subscriptions'}).click();
  await expect(page.getByRole('switch',{name:'Automatic switching'})).toHaveCount(0);
  await page.getByRole('tab',{name:'Extensions'}).click();
- const examples=page.getByRole('list',{name:'Example extensions'});
- await examples.getByRole('listitem').filter({hasText:'Subscription rotation'}).getByRole('button',{name:'Add'}).click();
+ const examples=page.getByRole('list',{name:'Available extensions'});
+ await examples.getByRole('listitem').filter({hasText:'Subscription rotation'}).getByRole('button',{name:'Install'}).click();
  const sheet=page.getByRole('dialog',{name:'Allow Subscription rotation?'});
  await expect(sheet).toContainText('It has no panel and runs no code: Lazybox follows its account policy.');
  await expect(sheet.getByRole('heading',{name:'At a limit'})).toBeVisible();
@@ -141,9 +141,11 @@ try{
  await expect(card).toContainText('On');
  await expect(card.getByRole('note')).toContainText('Anthropic’s terms may not allow');
  assert.deepEqual(f.mutations.findLast(m=>m.method==='ApproveExtension').body.grants,['switch:codex','switch:claude']);
- await page.getByRole('tab',{name:'Subscriptions'}).click();
- await page.evaluate(()=>window.dispatchEvent(new Event('lazybox-settings-saved')));
- await expect(page.getByRole('article',{name:'Saved Codex subscription'}).getByRole('switch',{name:'Automatic switching'})).toBeChecked();
+ await card.getByRole('button',{name:'Manage rotation accounts'}).click();
+ const savedCodex = page.getByRole('article',{name:'Saved Codex subscription'}).getByRole('switch',{name:'Automatic switching'});
+ await expect(savedCodex).toBeChecked();
+ await savedCodex.uncheck();
+ await expect.poll(()=>saves().at(-1)?.rotationExcludedProfileIds).toContain('codex-saved');
  await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS notices of what the migration kept (shown, dismissed for good, open where to review it), Claude sign-in carried over on and turned off, an imported-token account marked and removed, Claude sign-in line, an API key saved by its last four characters and forgotten (a subscription token refused), Claude sign-in in Lazybox off by default (no Claude sign-in offered, saved Claude subscriptions marked unused) and on with a warning, Install Claude Code in the shell, Subscription rotation allowed with its Claude warning turning automatic switching on. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

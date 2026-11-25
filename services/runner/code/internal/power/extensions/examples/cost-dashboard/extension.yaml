@@ -10,8 +10,8 @@ category: Monitoring & costs
 caption: Cost dashboard panel with fixture workspace data.
 keywords: [usage, tokens]
 name: Cost dashboard
-version: 1.2.0
-description: Estimated spend by pull request, workspace, conversation and model.
+version: 1.3.0
+description: Compare spend by model, workspace and pull request, and find the conversations behind a spending peak.
 author: Lazybox
 panels:
   - id: costs

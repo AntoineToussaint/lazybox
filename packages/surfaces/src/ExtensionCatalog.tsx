@@ -35,8 +35,8 @@ export function ExtensionPreview({entry}: {entry: Entry}) {
   const bytes = entry.listing?.previewJpeg;
   const src = useMemo(() => bytes?.length ? 'data:image/jpeg;base64,' + btoa(String.fromCharCode(...bytes)) : '', [bytes]);
   return <div className="extension-listing">
-    <small>{categoryOf(entry)}</small>
-    {src && <details><summary aria-label={'Preview ' + entry.name}><img src={src} alt={entry.listing?.caption || entry.name}/></summary>
+    {entry.listing?.category && <small>{entry.listing.category}</small>}
+    {src && <details><summary aria-label={'Preview ' + entry.name}>Preview</summary>
       <figure><img src={src} alt={entry.listing?.caption || entry.name}/>{entry.listing?.caption && <figcaption>{entry.listing.caption}</figcaption>}</figure>
     </details>}
   </div>;

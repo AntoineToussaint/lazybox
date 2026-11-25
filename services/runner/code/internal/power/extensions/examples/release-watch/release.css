@@ -1,0 +1,5 @@
+.release-tools { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; margin: 12px 0; }
+.release-tools label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+.release-tools input { accent-color: var(--accent); }
+#rows .approval { border-inline-start: 3px solid var(--warn); }
+#rows .failed { border-inline-start: 3px solid var(--danger); }

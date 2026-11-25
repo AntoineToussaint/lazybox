@@ -3,6 +3,29 @@ const workflow = (() => {
   const scope = document.getElementById('scope');
   const notice = document.getElementById('notice');
   const rows = document.getElementById('rows');
+  const header = scope.closest('header');
+  const filter = document.createElement('input');
+  filter.type = 'search';
+  filter.placeholder = 'Filter list…';
+  filter.setAttribute('aria-label', 'Filter list');
+  const empty = document.createElement('p');
+  empty.className = 'filter-empty';
+  empty.textContent = 'No matching items.';
+  empty.hidden = true;
+  rows.before(filter);
+  rows.after(empty);
+  const applyFilter = () => {
+    const query = filter.value.trim().toLowerCase();
+    const items = [...rows.children];
+    for (const item of items) {
+      const text = [item.querySelector('strong')?.textContent, item.querySelector('small')?.textContent].join(' ');
+      item.hidden = !text.toLowerCase().includes(query);
+    }
+    filter.hidden = !items.length && !filter.value;
+    empty.hidden = !items.length || items.some(item => !item.hidden);
+  };
+  applyFilter();
+  filter.addEventListener('input', applyFilter);
   if (scope.textContent === 'Runner') {
     lazybox.ready.then(hello => { if (hello.runnerLabel) scope.textContent = `Runner · ${hello.runnerLabel}`; }).catch(() => {});
   }
@@ -41,6 +64,7 @@ const workflow = (() => {
     const focused = document.activeElement?.closest('li[data-key]');
     const key = focused?.dataset.key, action = focused ? document.activeElement.textContent : '';
     rows.replaceChildren(...items);
+    applyFilter();
     if (key) [...items.find(item => item.dataset.key === key)?.querySelectorAll('button') || []].find(node => node.textContent === action)?.focus();
     say(items.length ? '' : message);
   };
@@ -50,9 +74,18 @@ const workflow = (() => {
     if (!value) list([], 'Select a workspace to continue.');
     return value;
   };
-  const poll = (ms, load) => lazybox.every(ms, async () => {
-    try { await load(); } catch (error) { say(error.message); }
-  });
+  const loaders = [];
+  const refresh = button('Refresh', () => Promise.all(loaders.map(load => load())));
+  header.append(refresh);
+  const poll = (ms, load) => {
+    let pending;
+    const update = () => {
+      if (!pending) pending = Promise.resolve().then(load).catch(error => say(error.message)).finally(() => { pending = undefined; });
+      return pending;
+    };
+    loaders.push(update);
+    return lazybox.every(ms, update);
+  };
   const openInbox = () => {
     const trigger = document.getElementById('inbox');
     trigger.addEventListener('click', () => lazybox.run('inbox.open').catch(error => say(error.message)));

@@ -20,8 +20,41 @@ echo '{"dry_run":true,"disk":{"free_bytes":1,"total_bytes":2},"targets":[{"label
 		t.Fatal(err)
 	}
 	page := runDiskScan(context.Background()).page()
-	if !strings.Contains(page, "&lt;big&gt;") || strings.Index(page, "small") < strings.Index(page, "&lt;big&gt;") || strings.Contains(page, "memory item") {
+	if !strings.Contains(page, `aria-label="Free disk space"`) || !strings.Contains(page, "&lt;big&gt;") || strings.Index(page, "small") < strings.Index(page, "&lt;big&gt;") || strings.Contains(page, "memory item") {
 		t.Fatal(page)
+	}
+}
+
+// The catalog preview uses this sample HTML to show the actual Runner report.
+func TestDiskReportPreview(t *testing.T) {
+	scan := diskScan{Pressure: "tight", DryRun: true}
+	scan.Disk.Free = 23 << 30
+	scan.Disk.Total = 256 << 30
+	images, builds := int64(10<<30), int64(620<<20)
+	scan.Targets = []diskCandidate{
+		{Label: "Unused container images", Path: "~/Library/Containers", Bytes: &images},
+		{Label: "Build cache", Path: "~/Library/Caches/build", Bytes: &builds},
+		{Label: "Temporary downloads", Path: "~/Downloads/tmp"},
+	}
+	report := diskResult{At: time.Date(2026, 6, 12, 10, 30, 0, 0, time.UTC), Scan: scan}
+	html := report.page()
+	for _, text := range []string{"23.0 GiB free of 256.0 GiB", "Cleanup candidates · 3", "620.0 MiB", "Size unknown"} {
+		if !strings.Contains(html, text) {
+			t.Errorf("missing %q", text)
+		}
+	}
+	path := filepath.Join("testdata", "disk-report.html")
+	if os.Getenv("UPDATE_DISK_REPORT_PREVIEW") == "1" {
+		if err := os.WriteFile(path, []byte(html), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	preview, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(preview) != html {
+		t.Fatal("update the sample report with UPDATE_DISK_REPORT_PREVIEW=1")
 	}
 }
 

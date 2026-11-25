@@ -263,7 +263,7 @@ export class NativeStatus {
         if (!old && !this.room()) continue;
         this.gone.delete(task.task_id);
         const id = old?.id || was?.id || `claude-task:${task.task_id}`;
-        this.tasks.set(task.task_id, { id, run: task.run_id || old?.run, status: 'running', background: true });
+        this.tasks.set(task.task_id, { id, run: task.run_id || old?.run || was?.run, status: 'running', background: true });
         emit({ type: 'agent_status', agentId: id, parentAgentId: this.tasks.get(task.parent_task_id || '')?.id || 'root', nativeId: task.task_id, name: task.description, agentKind: task.task_type, status: 'running', data: { backgrounded: true } });
       }
       this.background = next;

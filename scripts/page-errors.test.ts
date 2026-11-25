@@ -75,14 +75,22 @@ export function uncollectedPages(text: string): number[] {
   if (!/fixtures\/page-errors\.mjs['"]/.test(text)) return [];
   const lines = text.split('\n');
   const allowed = new RegExp(`${optOut}:[ \\t]*\\S`);
-  const opened = [...text.matchAll(/([\w$]+)\s*=\s*(?:await\s+)?([\w$]+)\.newPage\(/g)];
+  const escape = (name: string) => name.replace(/\$/g, '\\$');
+  // Any page assigned to a name, whatever opens it: `ctx.newPage(`, `page.context().newPage(`, `(await browser.newContext()).newPage(`.
+  const opened = [...text.matchAll(/([\w$]+)\s*=\s*(?:await\s+)?(\(\s*await\s+[\w$.]+\.newContext\([^)]*\)\s*\)|[\w$]+(?:\.[\w$]+\(\))*)\.newPage\(/g)];
+  const contexts = [...text.matchAll(/([\w$]+)\s*=\s*(?:await\s+)?[\w$.()]*?\.newContext\(/g)].map(m => ({ name: m[1], index: m.index! }));
   return opened.flatMap((m, k) => {
-    const at = m.index!, line = text.slice(0, at).split('\n').length, page = m[1], from = m[2];
+    const at = m.index!, line = text.slice(0, at).split('\n').length, page = m[1], source = m[2].trim();
     if (allowed.test(lines[line - 1]) || allowed.test(lines[line - 2] ?? '')) return [];
     // Until the same name opens another page.
     const next = opened.slice(k + 1).find(o => o[1] === page)?.index ?? text.length;
-    if (new RegExp(`collectPageErrors\\(\\s*${page.replace(/\$/g, '\\$')}\\s*[,)]`).test(text.slice(at, next))) return [];
-    if (from !== 'browser' && new RegExp(`collectContextPageErrors\\(\\s*${from.replace(/\$/g, '\\$')}\\s*[,)]`).test(text)) return [];
+    if (new RegExp(`collectPageErrors\\(\\s*${escape(page)}\\s*[,)]`).test(text.slice(at, next))) return [];
+    // A context, by plain name, collected since it was last made and before this page opened.
+    if (/^[\w$]+$/.test(source) && source !== 'browser') {
+      const made = contexts.filter(c => c.name === source && c.index < at).at(-1)?.index ?? -1;
+      const collector = new RegExp(`collectContextPageErrors\\(\\s*${escape(source)}\\s*[,)]`, 'g');
+      if ([...text.matchAll(collector)].some(c => c.index! > made && c.index! < at)) return [];
+    }
     return [line];
   });
 }
@@ -166,6 +174,12 @@ test('the page check finds a page opened without a collector', () => {
   // A collector on a later page of the same name does not cover the first.
   assert.deepEqual(uncollectedPages(head + 'let page = await browser.newPage();\npage = await browser.newPage();\nawait collectPageErrors(page, errors);'), [2]);
   assert.deepEqual(uncollectedPages('const page = await browser.newPage();'), [], 'a script without the fixture is the whole-file check\'s');
+  // Through another call: no context collector can cover it.
+  assert.deepEqual(uncollectedPages(head + 'const sibling = await page.context().newPage();\nawait sibling.goto(url);'), [2]);
+  assert.deepEqual(uncollectedPages(head + 'const fresh = await (await browser.newContext()).newPage();'), [2]);
+  // A context collector counts only for the context it was installed on, before the page opened.
+  assert.deepEqual(uncollectedPages(head + 'let context = await browser.newContext();\nawait collectContextPageErrors(context, errors);\ncontext = await browser.newContext();\nconst other = await context.newPage();'), [5]);
+  assert.deepEqual(uncollectedPages(head + 'const context = await browser.newContext();\nconst other = await context.newPage();\nawait collectContextPageErrors(context, errors);'), [3]);
 });
 
 test('the drain check finds an assertion on collected errors that was not drained first', () => {

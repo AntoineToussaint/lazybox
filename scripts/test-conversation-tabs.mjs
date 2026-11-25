@@ -95,12 +95,14 @@ async function sourceAfterResume(){
  const continued=fixture.openEvents(id);
  for(const record of sourceEvents.events) continued.push(record.event);
  const context=await browser.newContext({viewport:{width:1600,height:900}});
+ const resumedErrors=await collectContextPageErrors(context);
  try{
   const page=await context.newPage();
   await page.goto(origin+'/?view=workspace&collection=alpha&session='+recipient.id+'#token='+fixture.token);
   await page.getByRole('link',{name:'source message',exact:true}).click();
   await expect.poll(()=>tabsOf(page).inFront('Resumed source conversation')).toBe(true);
   await expect(page.locator('article.message').filter({hasText:'A cache entry expires after ten minutes.'})).toHaveClass(/message-flash/);
+  await drainPageErrors(resumedErrors);assert.deepEqual(resumedErrors,[]);
  }finally{await context.close();}
 }
 

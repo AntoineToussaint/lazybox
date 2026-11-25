@@ -216,6 +216,7 @@ try{
  assert.equal(handoff.sessionId,f.sessions.at(-1).id);
  assert.equal(f.mutations.filter(m=>m.method==='Apply').length,writes+1,'the handoff sends once');
  const revisit=await page.context().newPage();
+ await collectPageErrors(revisit, errors);
  await revisit.goto(`${base}/?view=workspace&collection=delta&session=delta-session#token=${f.token}`);
  await revisit.getByRole('combobox',{name:'Session',exact:true}).selectOption('delta-session');
  const continued=revisit.getByRole('button',{name:'Open continued Codex conversation'});
@@ -225,6 +226,7 @@ try{
  await continued.click();
  await expect(revisit.getByRole('combobox',{name:'Session',exact:true})).toHaveValue(handoff.sessionId);
  assert.equal(f.mutations.filter(m=>m.method==='OpenSession').length,openedBefore);
+ await drainPageErrors(errors);
  await revisit.close();
  const refreshPage=await browser.newPage({viewport:{width:1440,height:900}});
  await collectPageErrors(refreshPage,errors);

@@ -272,6 +272,7 @@ try {
   // Use the default kept-tab setting. Creating a workspace on its own and
   // starting its first chat must consume the workspace's starter tab.
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const starterErrors = await collectContextPageErrors(context);
   const page = await context.newPage();
   const source = f.collections.find(workspace => workspace.name === 'Add a response cache to the API');
   source.members[0].spec.baseRef = 'refs/remotes/origin/feat/v2-command-output';
@@ -346,6 +347,8 @@ try {
   assert.equal(started.options.workflow, 'execute');
   assert.equal(started.options.permission || '', '');
   assert.ok(!started.resumeReference);
+  await drainPageErrors(starterErrors);
+  assert.deepEqual(starterErrors, [], 'no page errors (starter tab)');
   await context.close();
 
   console.log('PASS: ⌘N sheet — workspace, conversation and message in one step, remembered choices, start-from branch (chip, ⌥B, default reset), background start, kept draft, palette and empty state, empty workspace, ⌘⇧N unchanged. Fixture only.');

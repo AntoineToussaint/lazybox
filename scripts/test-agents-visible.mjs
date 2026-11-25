@@ -48,7 +48,6 @@ try {
   const url = `${origin}/?view=workspace&collection=alpha&session=alpha-session#token=${f.token}`;
   browser = await webkit.launch();
   const errors = [];
-  const watch = page => collectPageErrors(page, errors);
 
   // A review row needs a turn that ended after the profile's first look: end one once the page is open.
   const endReviewTurn = () => Object.assign(session('review-session'), {agents: [root('done', Date.now(), {turnEndedAtUnixMillis: ms(Date.now()), lastTurnStatus: 'completed'})]});
@@ -56,7 +55,7 @@ try {
   /** What a fresh profile sees, without a click: both lists, in full, nothing clipped or overlapping. */
   const fresh = async (scheme, width, height) => {
     const context = await browser.newContext({viewport: {width, height}, colorScheme: scheme});
-    const page = await context.newPage(); page.setDefaultTimeout(15000); await watch(page);
+    const page = await context.newPage(); page.setDefaultTimeout(15000); await collectPageErrors(page, errors);
     await page.goto(url);
     const workspaces = page.locator('.panel-collections'), agents = page.locator('.panel-agents');
     await expect(workspaces.locator('.workspace-row').first()).toBeVisible();

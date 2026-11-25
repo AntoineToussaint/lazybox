@@ -174,6 +174,7 @@ try {
   await expect(pullRows.first()).toContainText('acme/api#812 checks failed · lint, unit-api (2 of 14)');
   await expect(pullRows.first().getByRole('link', {name: 'Open checks'})).toHaveAttribute('href', 'https://github.com/acme/api/actions/runs/42/job/lint');
   const sibling = await page.context().newPage();
+  await collectPageErrors(sibling, errors);
   await sibling.goto(page.url().split('#')[0] + '#token=' + f.token);
   await sibling.locator('.inbox-action').click();
   const siblingFailure = sibling.locator('.pr-inbox-item', {hasText: 'acme/api#812'});
@@ -191,6 +192,7 @@ try {
   await expect(siblingFailure).toContainText('Auto-dismiss in');
   assert.equal(f.tracked.sent.filter(item => item.method === 'SendPullRequestFailures').length, 2, 'a lost acknowledgement recovers the original dispatch');
   await expect(siblingSend).toHaveCount(0);
+  await drainPageErrors(errors);
   await sibling.close();
   await expect(pullRows.first().locator('.pr-inbox-note')).toContainText('Sent 2 failing checks');
   await expect(pullRows.first().getByRole('button', {name: 'Send the failures to Claude'})).toHaveCount(0);

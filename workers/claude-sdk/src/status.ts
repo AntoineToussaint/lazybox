@@ -23,6 +23,10 @@ const TERMINAL=['done','failed','stopped'];
 const SPAWN_TOOLS=new Set(['Task','Agent']);
 // Tool calls remembered for naming a forked run, and forked runs at once: the newest.
 const CALL_LIMIT=512, FORK_LIMIT=256;
+// Tasks (sub-agents and background commands) remembered at once. Past it the
+// oldest that ended makes room: a conversation used all day starts far more.
+const TASK_LIMIT=256;
+const LIVE=['running','starting'];
 // A sign-in Claude cannot use or renew: only signing in again helps.
 const AUTH_CODES = ['authentication_failed', 'oauth_org_not_allowed', 'cloud_credential_error', 'gateway_signin_required', 'gateway_session_expired', 'org_config_refused'];
 // Typed causes that are no account state, yet say what the person can fix on
@@ -206,7 +210,7 @@ export class NativeStatus {
           && (!m.run_id || m.run_id === old.run)) return out;
       const id = old?.id || (m.tool_use_id ? `claude-tool:${m.tool_use_id}` : `claude-task:${m.task_id}`);
       const status = m.subtype === 'task_notification' ? ({ completed: 'done', failed: 'failed', stopped: 'stopped' }[m.status]) : 'running';
-      if (this.tasks.size >= 256 && !old) return out;
+      if (!old && !this.room()) return out;
       if (m.tool_use_id) this.tools.set(m.tool_use_id, id);
       const background = m.subtype === 'task_started' && typeof m.is_backgrounded === 'boolean' ? m.is_backgrounded : old?.background;
       this.tasks.set(m.task_id, { id, run: m.run_id || old?.run, status, background });
@@ -241,7 +245,7 @@ export class NativeStatus {
         if (task?.status === 'running') { task.status = 'unknown'; emit({ type: 'agent_status', agentId: task.id, status: 'unknown' }); }
       }
       for (const task of m.tasks) {
-        if (task.ambient || (this.tasks.size >= 256 && !this.tasks.has(task.task_id))) continue;
+        if (task.ambient || (!this.tasks.has(task.task_id) && !this.room())) continue;
         const old = this.tasks.get(task.task_id);
         if (old && ['done', 'failed', 'stopped'].includes(old.status) && (!task.run_id || task.run_id === old.run)) continue;
         if (task.run_id && old?.run && task.run_id < old.run) continue;
@@ -252,6 +256,25 @@ export class NativeStatus {
       this.background = next;
     }
     return out;
+  }
+
+  /**
+   * Room for one more task. Past the bound the oldest task that ended is
+   * forgotten, with the call that named it; one that still runs never is.
+   * False only when every task remembered still runs. A bound that kept the
+   * first tasks for good would drop every later task's whole lifecycle, its
+   * end included: the client, which knows the sub-agent from its spawning
+   * call, would show it running forever.
+   */
+  private room(): boolean {
+    if (this.tasks.size < TASK_LIMIT) return true;
+    for (const [taskId, task] of this.tasks) {
+      if (LIVE.includes(task.status)) continue;
+      this.tasks.delete(taskId);
+      for (const [call, id] of this.tools) if (id === task.id) this.tools.delete(call);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -280,7 +303,7 @@ export class NativeStatus {
     for (const [call, id] of this.forks) emit({ type: 'agent_status', agentId: id, status: 'unknown', data: { toolUseId: call, reason: 'turn_ended' } });
     this.forks.clear();
     for (const [taskId, task] of this.tasks) {
-      if (task.background !== false || this.background.has(taskId) || !['running', 'starting'].includes(task.status)) continue;
+      if (task.background !== false || this.background.has(taskId) || !LIVE.includes(task.status)) continue;
       task.status = 'unknown';
       emit({ type: 'agent_status', agentId: task.id, nativeId: taskId, status: 'unknown', data: { reason: 'turn_ended' } });
     }

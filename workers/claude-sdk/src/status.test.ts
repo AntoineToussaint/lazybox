@@ -286,3 +286,40 @@ test('later results refresh context only for agents still running', () => {
   const result = status.normalize(message({ type: 'result', subtype: 'success', modelUsage: {fixture: {contextWindow: 100}} }));
   assert.deepEqual(result.filter(event => event.type === 'context').map(event => event.agentId), ['claude-tool:active']);
 });
+
+test('a conversation past 256 tasks still reports the start and end of each later one', () => {
+  // A conversation used all day: hundreds of background commands and
+  // sub-agents, every one finished, then more background sub-agents.
+  const status = new NativeStatus();
+  const sys = (value: object) => status.normalize(message({ type: 'system', session_id: 's', uuid: 'u', ...value }));
+  const run = (n: number, task_type: string) => {
+    sys({ subtype: 'task_started', task_id: `t${n}`, tool_use_id: `call-${n}`, run_id: '001', description: `Task ${n}`, task_type, is_backgrounded: true });
+    sys({ subtype: 'task_notification', task_id: `t${n}`, tool_use_id: `call-${n}`, run_id: '001', status: 'completed', output_file: '', summary: '' });
+  };
+  for (let n = 0; n < 300; n++) run(n, n % 3 ? 'local_bash' : 'local_agent');
+  const started = sys({ subtype: 'task_started', task_id: 'audit', tool_use_id: 'call-audit', run_id: '001', description: 'Audit Runner workspaces and git', task_type: 'local_agent', is_backgrounded: true });
+  assert.deepEqual(started.map(e => [e.agentId, e.status]), [['claude-tool:call-audit', 'running']]);
+  // Its own words are attributed to it.
+  const words = status.normalize(message({ type: 'assistant', parent_tool_use_id: 'call-audit', message: { id: 'm', model: 'm', content: [{ type: 'text', text: 'Reading.' }] } }));
+  assert.equal(words.find(e => e.type === 'message_delta')?.agentId, 'claude-tool:call-audit');
+  // A resume with SendMessage is a new run of the same task, and it ends too.
+  sys({ subtype: 'task_notification', task_id: 'audit', tool_use_id: 'call-audit', run_id: '001', status: 'completed', output_file: '', summary: 'First pass' });
+  assert.equal(sys({ subtype: 'task_started', task_id: 'audit', tool_use_id: 'call-audit', run_id: '002', description: 'Audit Runner workspaces and git', task_type: 'local_agent', is_backgrounded: true })[0]?.status, 'running');
+  const ended = sys({ subtype: 'task_notification', task_id: 'audit', tool_use_id: 'call-audit', run_id: '002', status: 'completed', output_file: '', summary: 'Done' });
+  assert.deepEqual(ended.map(e => [e.agentId, e.status]), [['claude-tool:call-audit', 'done']]);
+  // A background listing finds a later task too.
+  const listed = sys({ subtype: 'background_tasks_changed', tasks: [{ task_id: 'late', task_type: 'local_agent', description: 'Late', run_id: '001' }] });
+  assert.deepEqual(listed.map(e => [e.agentId, e.status]), [['claude-task:late', 'running']]);
+});
+
+test('past the bound only finished tasks make room; a running one is never forgotten', () => {
+  const status = new NativeStatus();
+  const sys = (value: object) => status.normalize(message({ type: 'system', session_id: 's', uuid: 'u', ...value }));
+  for (let n = 0; n < 256; n++) sys({ subtype: 'task_started', task_id: `t${n}`, tool_use_id: `call-${n}`, description: `Task ${n}`, task_type: 'local_agent', is_backgrounded: true });
+  // Every remembered task still runs: the bound holds, and a new one is left out.
+  assert.deepEqual(sys({ subtype: 'task_started', task_id: 'extra', description: 'Extra', task_type: 'local_agent' }), []);
+  // The first one ends and the next task takes its place; the others still end when they do.
+  sys({ subtype: 'task_notification', task_id: 't0', status: 'completed', output_file: '', summary: '' });
+  assert.equal(sys({ subtype: 'task_started', task_id: 'next', description: 'Next', task_type: 'local_agent' })[0]?.status, 'running');
+  assert.deepEqual(sys({ subtype: 'task_notification', task_id: 't1', status: 'completed', output_file: '', summary: '' }).map(e => [e.agentId, e.status]), [['claude-tool:call-1', 'done']]);
+});

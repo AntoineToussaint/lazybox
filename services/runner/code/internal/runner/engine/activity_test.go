@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent/agenttest"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/journal"
@@ -40,6 +41,36 @@ func TestChildEventsDoNotReplaceRootOrResolveItsTurn(t *testing.T) {
 		t.Fatal("snapshot is mutable")
 	}
 }
+
+// A conversation used all day starts more than 256 sub-agents and commands.
+// The ones that ended make room, so a later one is known: it can be stopped,
+// and its end is recorded.
+func TestActivityBoundForgetsFinishedForLaterSubagents(t *testing.T) {
+	e, _ := bench(t, true)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.observe(agent.Event{Type: "turn_started"})
+	for i := 0; i < 300; i++ {
+		id := fmt.Sprintf("claude-tool:call-%d", i)
+		e.observe(agent.Event{Type: "agent_status", AgentID: id, NativeID: fmt.Sprintf("t%d", i), Status: "running"})
+		e.observe(agent.Event{Type: "agent_status", AgentID: id, Status: "done"})
+	}
+	e.observe(agent.Event{Type: "agent_status", AgentID: "claude-tool:audit", NativeID: "audit", Status: "running"})
+	if len(e.state.Agents) != 256 || !e.state.ActivityTruncated {
+		t.Fatalf("activity tree not bounded: %d agents, truncated=%v", len(e.state.Agents), e.state.ActivityTruncated)
+	}
+	if _, ok := e.state.Agents["root"]; !ok {
+		t.Fatal("the main agent made room")
+	}
+	if a, ok := e.state.Agents["claude-tool:audit"]; !ok || a.Status != agent.Running || a.NativeID != "audit" {
+		t.Fatalf("a later sub-agent is unknown to the Runner: %+v", a)
+	}
+	e.observe(agent.Event{Type: "agent_status", AgentID: "claude-tool:audit", Status: "done"})
+	if e.state.Agents["claude-tool:audit"].Status != agent.Done {
+		t.Fatal("a later sub-agent's end was lost")
+	}
+}
+
 func TestActivityBoundAndLostStreamRemainUnknown(t *testing.T) {
 	e, _ := bench(t, true)
 	e.mu.Lock()

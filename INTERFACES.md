@@ -195,7 +195,10 @@ updates and YOLO are unchanged: the first always asks, the second never does.
 `done` means a completed turn; `closed` means the conversation was ended.
 Root completion does not finish active children or clear their questions.
 Lost streams yield `unknown`. Activity is bounded to 256 nodes with explicit
-truncation. Child text stays out of the main conversation and child native IDs
+truncation: past it the sub-agent that ended longest ago makes room (never
+the root, never one still at work), so a conversation that starts more than
+256 sub-agents and commands still tracks every later one. The Claude worker
+bounds the tasks it remembers the same way. Child text stays out of the main conversation and child native IDs
 cannot replace the root resume reference. Claude task/bookend/membership
 signals and Codex collaboration/thread signals are normalized in their adapters.
 Not every native child relationship is exposed by every provider version;

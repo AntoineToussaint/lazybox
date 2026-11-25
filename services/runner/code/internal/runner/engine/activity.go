@@ -20,9 +20,11 @@ func (e *Engine) observe(ev agent.Event) {
 		default:
 			return
 		}
-		if len(e.state.Agents) >= 256 {
+		if len(e.state.Agents) >= activityLimit {
 			e.state.ActivityTruncated = true
-			return
+			if !e.forgetFinished() {
+				return
+			}
 		}
 		a = agent.Activity{ID: id, Name: "Agent", Kind: "agent", Status: agent.Unknown}
 		if id != "root" {
@@ -143,6 +145,35 @@ func (e *Engine) observe(ev agent.Event) {
 		observation := *ev.Account
 		e.state.Account = &observation
 	}
+}
+
+// activityLimit bounds the agents a session's activity tree keeps.
+const activityLimit = 256
+
+// forgetFinished makes room for a new sub-agent past activityLimit: the
+// sub-agent that ended longest ago leaves. One still at work never does, nor
+// the main agent. A bound that kept the first sub-agents for good would leave
+// every later one, in a conversation used all day, unknown to the Runner:
+// impossible to stop and absent from the session's status.
+func (e *Engine) forgetFinished() bool {
+	oldest := ""
+	for id, a := range e.state.Agents {
+		if id == "root" || liveStatus(a.Status) {
+			continue
+		}
+		if oldest == "" || a.UpdatedAt.Before(e.state.Agents[oldest].UpdatedAt) || (a.UpdatedAt.Equal(e.state.Agents[oldest].UpdatedAt) && id < oldest) {
+			oldest = id
+		}
+	}
+	if oldest == "" {
+		return false
+	}
+	delete(e.state.Agents, oldest)
+	return true
+}
+
+func liveStatus(s agent.Status) bool {
+	return s == agent.Running || s == agent.Starting || s == agent.WaitingInput || s == agent.WaitingApproval
 }
 
 // lastMessageLimit bounds the retained tail of the main agent's latest message.

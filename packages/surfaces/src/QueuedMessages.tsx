@@ -40,7 +40,7 @@ const clip = (text: string, length = 140) => { const line = text.replace(/\s+/g,
  */
 type QueueAction = 'now' | 'steer' | 'delete' | 'delegate';
 const queueFeedback = {
-  now: { pending: 'Stopping the current step…', failure: 'Could not send it now', timeout: 'The current step has not stopped yet. Send now again to retry.' },
+  now: { pending: 'Stopping the current step…', failure: 'Could not send it now', timeout: 'This message is still queued. You can retry Send now.' },
   steer: { pending: 'Steering…', failure: 'Could not steer', timeout: 'The agent has not taken it yet. Steer again, or Send now.' },
   delete: { pending: 'Deleting…', failure: 'Could not delete', timeout: 'Deletion was not confirmed. Try again.' },
   delegate: { pending: 'Requesting a sub-agent…', failure: 'Could not request a sub-agent', timeout: 'Delegation was not confirmed. Check the conversation.' },
@@ -58,9 +58,13 @@ export type QueuedDelivery = {
 };
 /** How long Send now or Steer may say it is at work before the strip gives the buttons back to try again. */
 export const DELIVERY_TIMEOUT_MS = 20_000;
-export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: readonly { operationId: string; editing?: boolean }[] | undefined): QueuedDelivery {
-  const [working, setWorking] = useState<QueuedDelivery['working']>();
-  const [error, setError] = useState<{ id: string; text: string }>();
+export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: readonly { operationId: string; editing?: boolean }[] | undefined, turnBoundary?: bigint): QueuedDelivery {
+  // An interrupt belongs to the turn it targeted. Its message may still be in
+  // the queue when a different message starts the next turn.
+  const [attempt, setWorking] = useState<(NonNullable<QueuedDelivery['working']> & { turn?: bigint })>();
+  const working = attempt?.how === 'now' && attempt.turn !== turnBoundary ? undefined : attempt;
+  const [failure, setError] = useState<{ id: string; text: string; how: QueueAction; turn?: bigint }>();
+  const error = failure?.how === 'now' && failure.turn !== turnBoundary ? undefined : failure;
   // A message that left the queue takes its confirmation, progress and error with it.
   const ids = (queued || []).map(message => message.operationId).join('\0');
   useEffect(() => {
@@ -86,12 +90,12 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
     if (!working) return;
     const timer = setTimeout(() => {
       setWorking(current => current === working ? undefined : current);
-      setError({ id: working.id, text: queueFeedback[working.how].timeout });
+      setError({ id: working.id, how: working.how, turn: working.turn, text: queueFeedback[working.how].timeout });
     }, DELIVERY_TIMEOUT_MS);
     return () => clearTimeout(timer);
   }, [working]);
   const deliver = async (operationId: string, how: QueueAction, justSent = false) => {
-    const attempt = { id: operationId, how };
+    const attempt = { id: operationId, how, turn: turnBoundary };
     setError(undefined); setWorking(attempt);
     try {
       await api.apply({ sessionId: sessionID, operationId: crypto.randomUUID(), operation: { case: 'deliverQueued', value: { operationId, how } } }, { timeoutMs: DELIVERY_TIMEOUT_MS });
@@ -100,7 +104,7 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
       setWorking(current => current === attempt ? undefined : current);
       const why = humanError(e);
       if (justSent && /no longer queued/.test(why)) return;
-      setError({ id: operationId, text: `${queueFeedback[how].failure}: ${why}` });
+      setError({ id: operationId, how, turn: turnBoundary, text: `${queueFeedback[how].failure}: ${why}` });
     }
   };
   const edit: QueuedDelivery['edit'] = async (operationId, how, editId, text = '') => {

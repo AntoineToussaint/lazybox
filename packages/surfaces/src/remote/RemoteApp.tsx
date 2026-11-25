@@ -272,7 +272,7 @@ function PhoneConversation({ sessionId, commandId, device, collections, go }: { 
   const workspace = collections.find(value => value.id === session?.collectionId)?.name || '';
   const status = useLiveStatus(session, transcript.recent);
   const queued = queuedMessages(session?.queuedMessages, transcript);
-  const queueDelivery = useQueuedDelivery(api, sessionId, queued);
+  const queueDelivery = useQueuedDelivery(api, sessionId, queued, transcript.turnBoundary);
   // The phone asks before allowing what the computer flags; the computer shows the same flags.
   const confirmAllow = useCallback((approval: Approval) => new Promise<boolean>(resolve => setConfirming({ approval, resolve })), []);
   const voice = useVoiceState();

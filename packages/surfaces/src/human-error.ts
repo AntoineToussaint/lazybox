@@ -62,7 +62,8 @@ export function refreshFailure(failingSince: number | undefined, sentAt: number,
   if (isCancellation(error)) return { failingSince, shown: undefined };
   const since = failingSince ?? sentAt;
   if (!isTransient(error)) return { failingSince: since, shown: humanError(error) };
-  return { failingSince: since, shown: now - since >= REFRESH_FAILURE_GRACE_MS ? humanError(error) : '' };
+  // Within the grace period nothing changes: no new alert, and a lasting failure already shown stays.
+  return { failingSince: since, shown: now - since >= REFRESH_FAILURE_GRACE_MS ? humanError(error) : undefined };
 }
 
 /**

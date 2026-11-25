@@ -197,9 +197,9 @@ test('a refresh that fails only briefly shows nothing; one that keeps failing sa
   const slow = new ConnectError('context deadline exceeded', Code.Unknown);
   // The clock starts when the first failing refresh was sent (10 s before it timed out).
   let state = refreshFailure(undefined, 1_000, 11_000, slow);
-  assert.equal(state.shown, '', 'one slow answer under load is no outage');
+  assert.equal(state.shown, undefined, 'one slow answer under load is no outage, and changes nothing shown');
   state = refreshFailure(state.failingSince, 12_500, 1_000 + REFRESH_FAILURE_GRACE_MS - 1, slow);
-  assert.equal(state.shown, '', 'still within the grace period');
+  assert.equal(state.shown, undefined, 'still within the grace period');
   state = refreshFailure(state.failingSince, 14_000, 1_000 + REFRESH_FAILURE_GRACE_MS, slow);
   assert.equal(state.shown, 'The Runner did not answer in time. Try again.');
   // A cancellation (a Runner restarting cancels its handlers) leaves what is shown alone and keeps the clock.

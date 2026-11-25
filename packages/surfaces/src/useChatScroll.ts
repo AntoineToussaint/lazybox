@@ -62,14 +62,14 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  // diagram rendering in an earlier message, or a tool group folding.
  const anchor=useRef<{node:Element;offset:number}|undefined>(undefined);
  const capture=(pane:HTMLDivElement)=>{
-  anchor.current=undefined;const top=pane.getBoundingClientRect().top;
-  const rect=pane.getBoundingClientRect();
+  anchor.current=undefined;
+  const rect=pane.getBoundingClientRect(),top=rect.top;
   const hit=pane.ownerDocument.elementFromPoint(rect.left+pane.clientWidth/2,top+1);
   const row=hit?.closest<HTMLElement>('[data-message-id]');
-  if(row&&contentRef.current?.contains(row)){
+  if(hit&&row&&contentRef.current?.contains(row)){
    reader.view.anchorId=row.dataset.messageId||'';
    reader.view.anchorOffset=row.getBoundingClientRect().top-top;
-   anchor.current={node:hit!,offset:hit!.getBoundingClientRect().top-top};
+   anchor.current={node:hit,offset:hit.getBoundingClientRect().top-top};
    return;
   }
   reader.view.anchorId='';
@@ -112,8 +112,10 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   prependHeight.current=pane?.scrollHeight;
   if(pane)capture(pane);
   const nextEnd=Math.min(end,start+limit);
-  setEndId(messages[nextEnd-1]?.id||'');setVisibleMessages(nextEnd-start);
- },[reader]);
+  // A short tail may auto-fill the viewport while still following live output.
+  if(nextEnd<messages.length)setFollowing(false);
+  setEndId(following.current?'':messages[nextEnd-1]?.id||'');setVisibleMessages(nextEnd-start);
+ },[reader,setFollowing]);
  // Within a screen of the top, the next step of history is mounted before the reader reaches it.
  const nearTop=(pane:HTMLDivElement)=>hidden.current>0&&pane.scrollTop<Math.max(400,pane.clientHeight);
  useLayoutEffect(()=>{

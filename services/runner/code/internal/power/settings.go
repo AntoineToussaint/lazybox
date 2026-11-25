@@ -93,6 +93,8 @@ var builtinThemes = map[string]string{
 	"dark": "dark", "dark-high-contrast": "dark", "midnight-blue": "dark", "pine": "dark",
 	"ember": "dark", "aubergine": "dark", "graphite": "dark", "deep-ocean": "dark",
 	"rosewood": "dark", "ink": "dark",
+	"dracula": "dark", "one-dark-pro": "dark", "tokyo-night": "dark", "catppuccin-mocha": "dark", "github-dark-default": "dark",
+	"catppuccin-latte": "light", "github-light-default": "light",
 	"light": "light", "solarized-light": "light", "paper": "light", "glacier": "light",
 	"sage": "light", "rose-quartz": "light", "lavender-mist": "light", "sand": "light",
 	"sea-glass": "light", "light-high-contrast": "light",

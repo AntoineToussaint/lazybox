@@ -12,7 +12,7 @@ motion. Appearance settings apply across windows and are kept.
 | Setting | What it does | Kept where |
 |---|---|---|
 | Appearance | *System* follows the computer's light or dark mode; *Light* and *Dark* fix it. | settings.yaml |
-| Dark / light theme | The theme used for each mode: 20 built-in palettes across both modes, and your own (below). | settings.yaml |
+| Dark / light theme | The theme used for each mode: built-in palettes including Dracula, One Dark Pro, Tokyo Night, Catppuccin Mocha and Latte, and GitHub Dark and Light, and your own (below). | settings.yaml |
 | Accent colour | Buttons, selection, focus, links. The whole accent family (tints, borders, solid fills) follows it. | settings.yaml |
 | Minimum contrast | Off, 3:1, 4.5:1 (default, WCAG AA) or 7:1. Text too faint against its background is moved just far enough in lightness to reach it, keeping its hue. Surfaces and fills never change. | settings.yaml |
 | Colour overrides | Any token, on top of every theme. | This device |
@@ -137,3 +137,5 @@ themes load, hot reload and report errors; the appearance section of
 settings.yaml written from Settings, applied from an editor save, its mistakes
 by line, a change just before a reload kept), against the fake Runner. The
 Runner's parser of the section is `internal/power` (`TestSettingsAppearance*`).
+
+The editor presets map published workbench, syntax and terminal colors onto Lazybox tokens using the palettes bundled by Shiki. Palette sources are [Dracula](https://github.com/dracula/visual-studio-code), [One Dark Pro](https://github.com/Binaryify/OneDark-Pro), [Tokyo Night](https://github.com/enkia/tokyo-night-vscode-theme), [Catppuccin](https://github.com/catppuccin/vscode) and [GitHub](https://github.com/primer/github-vscode-theme).

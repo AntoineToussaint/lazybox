@@ -234,7 +234,7 @@ chatLineHeight = 1.4
 | --- | --- |
 | `name` | What Settings shows. |
 | `appearance` | `dark` or `light`. |
-| `extends` | Optional built-in theme to start from: `dark`, `light`, `dark-high-contrast` or `solarized-light`. |
+| `extends` | Optional built-in theme ID to start from, such as `dracula`, `one-dark-pro`, `tokyo-night`, `catppuccin-mocha`, `catppuccin-latte`, `github-dark-default` or `github-light-default`. |
 | `[tokens]` | Colour tokens by name. Set the base ones (marked in Settings → Appearance → **Token reference**, which lists every token with its meaning and current value); the others derive from them. |
 | `[typography]` | Optional suggestions such as `density` and `chatLineHeight`. |
 

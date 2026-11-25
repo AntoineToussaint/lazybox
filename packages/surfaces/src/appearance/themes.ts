@@ -3,6 +3,7 @@
  * applies: the theme's own values, then derivations for whatever it left
  * out, then the person's overrides, then the minimum contrast.
  */
+import { editorThemes } from './editor-themes';
 import { contrast, ensureContrast, normalizeColor, parseColor } from './color';
 import { TOKENS, TOKEN_BY_NAME, type Scheme } from './tokens';
 import type { Typography } from './preferences';
@@ -84,6 +85,7 @@ export const BUILTIN_THEMES: ThemeDefinition[] = [
       'code-bg': '#f5efdc', 'syntax-keyword': '#5c6f00', 'syntax-string': '#1b7d75', 'syntax-number': '#b02a6d', 'syntax-comment': '#7a8b8c', 'syntax-type': '#8a6800', 'syntax-attr': '#1e6fa8', 'syntax-function': '#5b5fb8',
     },
   },
+  ...editorThemes,
   palette('midnight-blue', 'Midnight blue', 'dark', '#0e1524', '#18253a', '#e4edf9', '#85b9ff'),
   palette('pine', 'Pine', 'dark', '#0f1916', '#182823', '#e2efe8', '#7cd9b2'),
   palette('ember', 'Ember', 'dark', '#1c1311', '#2c1f1c', '#f7e9e1', '#f5ad84'),

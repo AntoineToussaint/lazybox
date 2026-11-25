@@ -114,6 +114,14 @@ try {
   const panel = page.locator('.appearance-settings');
   await panel.getByRole('radiogroup', { name: 'Appearance', exact: true }).getByRole('radio', { name: 'Dark', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-scheme', 'dark');
+  await panel.getByRole('radio', { name: /^Dracula/ }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dracula');
+  assert.equal(await css('surface'), '#282a36');
+  await page.getByRole('button', { name: 'Work', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Parser fix' })).toBeVisible();
+  await page.screenshot({ path: '.cache/appearance-dracula-conversation.png' });
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('tab', { name: 'Appearance', exact: true }).click();
   await panel.getByRole('radio', { name: /^Dark high contrast/ }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark-high-contrast');
   assert.equal(await css('surface'), '#08080a');

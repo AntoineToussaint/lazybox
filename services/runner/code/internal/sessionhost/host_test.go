@@ -976,6 +976,45 @@ func TestOversizedHelloIsRefusedAtOnce(t *testing.T) {
 	}
 }
 
+// A superseded client reads "superseded" before its connection ends, even when
+// it sends a frame (an acknowledgement in flight) before reading the notice.
+// That frame used to make the host drop the stale connection at once, closing
+// it ahead of the notice: the Runner read a bare end of connection, took the
+// host for lost, re-attached, and superseded the Runner that had adopted it.
+// net.Pipe is synchronous, so the order here is exact: nothing waits on time.
+func TestASupersededClientIsToldBeforeItsConnectionEnds(t *testing.T) {
+	h := &host{cfg: launch{Token: strings.Repeat("t", 32)}, open: map[string]entry{}, answered: map[string]bool{}, stderr: &redact.Tail{}, inputReady: make(chan struct{}, 1)}
+	h.cond = sync.NewCond(&h.mu)
+	attach := func() (*json.Encoder, *json.Decoder) {
+		client, server := net.Pipe()
+		t.Cleanup(func() { _ = client.Close() })
+		go h.handle(server)
+		_ = client.SetDeadline(time.Now().Add(30 * time.Second)) // A hang fails the test; it never decides it.
+		enc, dec := json.NewEncoder(client), json.NewDecoder(client)
+		if err := enc.Encode(frame{Op: "hello", Token: h.cfg.Token, Protocol: Protocol}); err != nil {
+			t.Fatal(err)
+		}
+		var welcome frame
+		if err := dec.Decode(&welcome); err != nil || welcome.Op != "welcome" {
+			t.Fatalf("welcome: %+v %v", welcome, err)
+		}
+		return enc, dec
+	}
+	oldEnc, oldDec := attach()
+	attach() // A newer Runner supersedes the first.
+	// The first Runner, not yet reading, acknowledges a line it recorded.
+	if err := oldEnc.Encode(frame{Op: "ack", Seq: 1}); err != nil {
+		t.Fatal(err)
+	}
+	var notice frame
+	if err := oldDec.Decode(&notice); err != nil || notice.Op != "superseded" {
+		t.Fatalf("the superseded client read %+v, %v instead of the notice", notice, err)
+	}
+	if err := oldDec.Decode(&notice); err == nil {
+		t.Fatalf("the superseded connection stayed open: %+v", notice)
+	}
+}
+
 // A client speaking another protocol version is refused without displacing
 // the Runner that is attached.
 func TestIncompatibleHelloDoesNotSupersede(t *testing.T) {

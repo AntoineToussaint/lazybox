@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -153,6 +154,22 @@ type conn struct {
 	enc     *json.Encoder
 	done    chan struct{}
 	once    sync.Once
+	// superseded is set once a newer client attached: whichever path then
+	// closes this connection (the notice below, this client's next frame
+	// read as stale, a failed send, the handler returning) writes the
+	// "superseded" notice before closing, so the client never reads a bare
+	// end of connection and mistakes it for a lost host.
+	superseded atomic.Bool
+}
+
+// noticeWait bounds the "superseded" notice: a Runner too busy to read it for
+// that long loses its connection without it.
+const noticeWait = 2 * time.Second
+
+// supersede tells the client a newer one attached, and ends its connection.
+func (c *conn) supersede() {
+	c.superseded.Store(true)
+	go c.close()
 }
 
 // send blocks while the Runner is not reading: that is backpressure, not a
@@ -163,7 +180,18 @@ func (c *conn) send(f frame) error {
 	defer c.writeMu.Unlock()
 	return c.enc.Encode(f)
 }
-func (c *conn) close() { c.once.Do(func() { close(c.done); _ = c.c.Close() }) }
+func (c *conn) close() {
+	c.once.Do(func() {
+		if c.superseded.Load() {
+			// The deadline also ends a send blocked on a client that is not
+			// reading, so the notice can take the write lock.
+			_ = c.c.SetWriteDeadline(time.Now().Add(noticeWait))
+			_ = c.send(frame{Op: "superseded"})
+		}
+		close(c.done)
+		_ = c.c.Close()
+	})
+}
 
 func serve() int {
 	signal.Ignore(syscall.SIGHUP, syscall.SIGINT, syscall.SIGPIPE)
@@ -370,16 +398,8 @@ func (h *host) handle(raw net.Conn) {
 	if old := h.client; old != nil {
 		// A newer Runner supersedes an old or half-open one. Tell the old one,
 		// so it stands down rather than reporting a lost host; a Runner too busy
-		// to read the notice loses its connection anyway.
-		go func() {
-			told := make(chan struct{})
-			go func() { _ = old.send(frame{Op: "superseded"}); close(told) }()
-			select {
-			case <-told:
-			case <-time.After(2 * time.Second):
-			}
-			old.close()
-		}()
+		// to read the notice loses its connection anyway (conn.supersede).
+		old.supersede()
 	}
 	h.client = c
 	h.console.status("Runner attached")

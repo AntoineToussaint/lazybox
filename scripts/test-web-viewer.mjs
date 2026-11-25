@@ -194,9 +194,21 @@ try {
   // The search before it (the stalled page after it was dropped by opening a new one from there).
   await expect(page.getByRole('region', { name: 'Web page' }).getByRole('textbox', { name: 'Address', exact: true })).toHaveValue('https://duckduckgo.com/?q=lazybox%20web%20viewer');
 
-  // A page moves to a window of its own, and back to the workspace.
+  // A blocked popup leaves the loaded panel available for retry.
+  await page.evaluate(() => { window.realOpen = window.open; window.open = () => null; });
+  await page.getByRole('button', { name: 'Detach browser panel' }).click();
+  const blocked = page.getByRole('alert').filter({ hasText: 'The web window was blocked' });
+  await expect(blocked).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Web page' })).toBeVisible();
+  await blocked.getByRole('button', { name: 'Dismiss' }).click();
   await page.getByRole('region', { name: 'Web page' }).getByLabel('Web page actions', { exact: true }).click();
-  const [windowed] = await Promise.all([context.waitForEvent('page'), page.getByRole('group', { name: 'Web page actions menu' }).getByRole('button', { name: 'Move to a new window' }).click()]);
+  await page.getByRole('group', { name: 'Web page actions menu' }).getByRole('button', { name: 'Move to a new window' }).click();
+  await expect(blocked).toBeVisible();
+  await blocked.getByRole('button', { name: 'Dismiss' }).click();
+  await page.evaluate(() => { window.open = window.realOpen; });
+
+  // A page moves to a window of its own, and back to the workspace.
+  const [windowed] = await Promise.all([context.waitForEvent('page'), page.getByRole('button', { name: 'Detach browser panel' }).click()]);
   await expect(page.getByRole('region', { name: 'Web page' })).toHaveCount(0);
   await expect(windowed.getByRole('textbox', { name: 'Address', exact: true })).toHaveValue('https://duckduckgo.com/?q=lazybox%20web%20viewer');
   await windowed.getByRole('textbox', { name: 'Address', exact: true }).fill(`${site}/about`);

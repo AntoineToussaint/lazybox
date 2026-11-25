@@ -58,6 +58,7 @@ export function WebPanel({ panelId = '', workspaceId, viewState, onPanelTitle, o
   // An empty panel is for typing an address, unless a page is already on its way.
   const [focusAddress, setFocusAddress] = useState(() => saved.history.entries.length || webPage(pending.get(panelId) || '') ? 0 : 1);
   const openWindow = useContext(WebWindowContext);
+  const [detachError, setDetachError] = useState('');
   useSavedPage(viewState, key, history, zoom);
   useEffect(() => {
     const take = () => {
@@ -74,16 +75,19 @@ export function WebPanel({ panelId = '', workspaceId, viewState, onPanelTitle, o
   const entry = current(history);
   const page = history.expect !== undefined ? history.entries[history.expect]?.url : entry?.url;
   useEffect(() => {
-    onPanelTitle?.(entry ? { text: pageLabel(entry), icon: icon || undefined, tooltip: entry.title ? `${entry.title}\n${entry.url}` : entry.url } : undefined);
-  }, [entry?.url, entry?.title, icon]);
+    onPanelTitle?.(entry ? { text: pageLabel(entry), webUrl: page, icon: icon || undefined, tooltip: entry.title ? `${entry.title}\n${entry.url}` : entry.url } : undefined);
+  }, [entry?.url, entry?.title, icon, page]);
   const detach = async () => {
     if (!openWindow || !page) return;
-    await openWindow({ webId: panelId || crypto.randomUUID(), url: page, collectionId: workspaceId });
-    onClosePanel?.();
+    try {
+      await openWindow({ webId: panelId || crypto.randomUUID(), url: page, collectionId: workspaceId });
+      onClosePanel?.();
+    } catch (error) { setDetachError(String(error)); }
   };
   // The panel header's right-click menu moves the page too.
   useContextMenuContribution<{ id?: string }>('panel', context => context.detail?.id === panelId && openWindow ? [{ label: 'Move to a new window', icon: 'external', disabled: !page && 'Open a page first', run: () => void detach() }] : []);
   return <div className="web-panel" style={{ display: 'contents' }} onPointerDownCapture={() => { lastActive = panelId; }} onFocusCapture={() => { lastActive = panelId; }}>
+    {detachError && <div className="error" role="alert">{detachError}<button type="button" onClick={() => setDetachError('')}>Dismiss</button></div>}
     <WebViewer id={`web-${panelId}`} label="Web page" frameTitle={entry?.title || 'Web page'} history={history} setHistory={setHistory} zoom={zoom} onZoom={setZoom}
       engine={engine} focusAddress={focusAddress} onIcon={setIcon}
       start={<RunningPreviews workspaceId={workspaceId} onOpen={url => setHistory(h => visit(h, url))}/>}

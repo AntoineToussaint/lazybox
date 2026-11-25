@@ -138,7 +138,7 @@ import { failureExcerpt } from '../packages/surfaces/src/terminal-excerpt';
 
 test('a failed home command reports its output without the prompt or later commands', () => {
   const start = '\x1b]133;C\x07', end = '\x1b]133;D;1\x07';
-  const snapshot = 'prompt $ pnpm run platform' + start + '\x1b[31mport busy\x1b[0m\r\n' + end + 'another prompt';
+  const snapshot = 'prompt $ pnpm run platform' + start + '\x1b[31m' + 'port busy\x1b[0m\r\n' + end + 'another prompt';
   assert.equal(failureExcerpt(snapshot, false, 1), 'Terminal output (last lines)\n> port busy');
   assert.equal(failureExcerpt(snapshot, false, 2), '');
   assert.equal(failureExcerpt('unfinished', true, 1), '');

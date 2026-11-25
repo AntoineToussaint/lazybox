@@ -430,12 +430,14 @@ Use `lazybox artifact template pr-walkthrough`, `incident-timeline`, or `release
 ## Agents and other workspaces
 
 An agent reads any of the person's artifacts: `lazybox artifact get ID` finds
-one by its ID in whichever workspace holds it (IDs are unique across
-workspaces), and `lazybox artifact list --collection WORKSPACE` lists another
+one by its ID in whichever workspace holds it, and `lazybox artifact list --collection WORKSPACE` lists another
 workspace's. It publishes and retires only in its own workspace: a new version
 of, or retiring, another workspace's artifact is refused with the workspace
-that holds it, so the agent publishes its own and links it instead. An ID no
-workspace holds is reported as `no artifact "ID"`.
+that holds it, so the agent publishes its own and cites the other's ID (links
+stay within one workspace). An ID no workspace holds is reported as
+`no artifact "ID"`. Most IDs are in one workspace; a derived one (a workflow
+review's) can be in several, and reading it then asks for `--collection`. An
+agent reads only live workspaces, not one being deleted.
 
 ## Known limits
 

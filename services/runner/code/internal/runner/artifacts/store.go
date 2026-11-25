@@ -274,23 +274,33 @@ func (s *Store) List(ws string) ([]Artifact, error) {
 	return out, nil
 }
 
-// Get returns one version (0 is the latest) with its content.
-// Locate is the workspace that holds artifact id, if any: ids are unique
-// across workspaces, so an artifact can be read by its id alone.
-func (s *Store) Locate(id string) (string, bool) {
+// Locate is every workspace that holds an artifact with this id, in a stable
+// order. An id is usually in one workspace, but not always: a derived id (a
+// workflow review's, a keyed creation's) does not include its workspace.
+func (s *Store) Locate(id string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !segment.MatchString(id) {
-		return "", false
+		return nil
 	}
+	var holders []string
 	for ws, items := range s.items {
 		if items[id] != nil {
-			return ws, true
+			holders = append(holders, ws)
 		}
 	}
-	return "", false
+	sort.Strings(holders)
+	return holders
 }
 
+// Holds reports whether workspace ws has an artifact with this id.
+func (s *Store) Holds(ws, id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.items[ws][id] != nil
+}
+
+// Get returns one version (0 is the latest) with its content.
 func (s *Store) Get(ws, id string, version uint32) (Document, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -306,9 +316,13 @@ func (s *Store) document(a *Artifact, version uint32) (Document, error) {
 		version = a.Latest()
 	}
 	if version > a.Latest() {
-		return Document{}, fmt.Errorf("version %d of %q: %w", version, a.ID, fs.ErrNotExist)
+		return Document{}, notFound{fmt.Sprintf("%s version %d", a.ID, version)}
 	}
 	raw, err := os.ReadFile(s.versionPath(a, version))
+	if errors.Is(err, fs.ErrNotExist) {
+		// Its file is gone from the state folder: say which version, never the path.
+		return Document{}, notFound{fmt.Sprintf("%s version %d", a.ID, version)}
+	}
 	if err != nil {
 		return Document{}, err
 	}

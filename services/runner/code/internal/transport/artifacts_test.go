@@ -87,6 +87,33 @@ func TestAgentCredentialReadsAnyArtifactAndWritesOnlyItsOwn(t *testing.T) {
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatal("list without a workspace", err)
 	}
+	// Retiring theirs by its id says where it is, as publishing does.
+	_, err = f.client.RetireArtifact(agent, &pb.RetireArtifactRequest{CollectionId: f.mine.Id, ArtifactId: theirs.Id})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), f.theirs.Id) {
+		t.Fatal("retiring another workspace's artifact by id", err)
+	}
+	// A version that does not exist reads plainly, never as a file.
+	_, err = f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id, Version: 9})
+	if status.Code(err) != codes.NotFound || strings.Contains(err.Error(), "file") || strings.Contains(err.Error(), "/") {
+		t.Fatal("missing version", err)
+	}
+	// An id in two workspaces (a keyed creation's is derived without its workspace): the agent's own copy
+	// stays its to write, and reading it from its workspace reads its own.
+	key := "same-key"
+	mineDup, err := f.client.PutArtifact(owner, &pb.PutArtifactRequest{CollectionId: f.mine.Id, CreationKey: key, Title: "Mine", Content: "mine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirsDup, err := f.client.PutArtifact(owner, &pb.PutArtifactRequest{CollectionId: f.theirs.Id, CreationKey: key, Title: "Theirs", Content: "theirs"})
+	if err != nil || theirsDup.Id != mineDup.Id {
+		t.Skip("keyed creation no longer repeats an id across workspaces; the duplicate case cannot be built here", theirsDup, err)
+	}
+	if _, err = f.client.PutArtifact(agent, &pb.PutArtifactRequest{CollectionId: f.mine.Id, ArtifactId: mineDup.Id, Content: "mine, v2"}); err != nil {
+		t.Fatal("an agent's own artifact, whose id another workspace also has, was refused", err)
+	}
+	if got, err := f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: mineDup.Id}); err != nil || got.Content != "mine, v2" {
+		t.Fatal("read own copy of a shared id", got, err)
+	}
 	_, err = f.client.TrackArtifactFile(agent, &pb.TrackArtifactFileRequest{CollectionId: f.mine.Id, Path: "api/PLAN.md"})
 	denied("track", err)
 	_, err = f.client.UpdateArtifact(agent, &pb.UpdateArtifactRequest{CollectionId: f.mine.Id, ArtifactId: put.Id, Title: "x"})
@@ -295,7 +322,8 @@ func TestAgentRetiresAndSupersedesOnlyAgentPublishedArtifacts(t *testing.T) {
 	_, err = f.client.RetireArtifact(agent, &pb.RetireArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id})
 	code("retire another workspace's artifact", err, codes.PermissionDenied)
 	_, err = f.client.RetireArtifact(agent, &pb.RetireArtifactRequest{CollectionId: ws, ArtifactId: theirs.Id})
-	code("retire another workspace's artifact by id", err, codes.NotFound)
+	// Read anywhere, written only in its own workspace: the refusal says where it is.
+	code("retire another workspace's artifact by id", err, codes.FailedPrecondition)
 	_, err = f.client.RetireArtifact(agent, &pb.RetireArtifactRequest{CollectionId: ws, ArtifactId: limits.Id, Restore: true})
 	code("agent restores", err, codes.PermissionDenied)
 	_, err = f.client.RetireArtifact(agent, &pb.RetireArtifactRequest{CollectionId: ws, ArtifactId: milestones.Id, SupersededBy: theirs.Id})

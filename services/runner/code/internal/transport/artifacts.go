@@ -71,10 +71,16 @@ func wireDocument(d artifacts.Document) *pb.Artifact {
 	return out
 }
 
-func (s *Service) ListArtifacts(_ context.Context, r *pb.ListArtifactsRequest) (*pb.ListArtifactsResponse, error) {
+func (s *Service) ListArtifacts(ctx context.Context, r *pb.ListArtifactsRequest) (*pb.ListArtifactsResponse, error) {
 	store, err := s.artifactStore()
 	if err != nil {
 		return nil, err
+	}
+	if session := callerSession(ctx); session != "" && r.CollectionId != "" {
+		// An agent lists the live workspaces only, not one being deleted.
+		if err = s.liveWorkspace(r.CollectionId); err != nil {
+			return nil, err
+		}
 	}
 	list, err := store.List(r.CollectionId)
 	if err != nil {
@@ -90,18 +96,29 @@ func (s *Service) ListArtifacts(_ context.Context, r *pb.ListArtifactsRequest) (
 	return out, nil
 }
 
-func (s *Service) GetArtifact(_ context.Context, r *pb.GetArtifactRequest) (*pb.Artifact, error) {
+func (s *Service) GetArtifact(ctx context.Context, r *pb.GetArtifactRequest) (*pb.Artifact, error) {
 	store, err := s.artifactStore()
 	if err != nil {
 		return nil, err
 	}
-	doc, err := store.Get(r.CollectionId, r.ArtifactId, r.Version)
-	if errors.Is(err, fs.ErrNotExist) {
+	ws := r.CollectionId
+	if !store.Holds(ws, r.ArtifactId) {
 		// Read by its id wherever it is: an agent in one workspace reads an artifact another published.
-		if ws, ok := store.Locate(r.ArtifactId); ok && ws != r.CollectionId {
-			doc, err = store.Get(ws, r.ArtifactId, r.Version)
+		switch holders := store.Locate(r.ArtifactId); len(holders) {
+		case 0:
+		case 1:
+			ws = holders[0]
+		default:
+			return nil, grpcError(codes.FailedPrecondition, fmt.Errorf("several workspaces have an artifact %q (%s): name one with --collection", r.ArtifactId, strings.Join(holders, ", ")))
 		}
 	}
+	if session := callerSession(ctx); session != "" && ws != r.CollectionId {
+		// An agent reads the live workspaces only, not one being deleted.
+		if err := s.liveWorkspace(ws); err != nil {
+			return nil, err
+		}
+	}
+	doc, err := store.Get(ws, r.ArtifactId, r.Version)
 	if err != nil {
 		return nil, artifactError(err)
 	}
@@ -112,11 +129,11 @@ func (s *Service) GetArtifact(_ context.Context, r *pb.GetArtifactRequest) (*pb.
 // where it is and that it can still be read: versions are published, and
 // artifacts retired, only in their own workspace.
 func elsewhere(store *artifacts.Store, ws, id string) error {
-	if id == "" {
+	if id == "" || store.Holds(ws, id) {
 		return nil
 	}
-	if owner, ok := store.Locate(id); ok && owner != ws {
-		return grpcError(codes.FailedPrecondition, fmt.Errorf("artifact %q belongs to workspace %q: new versions are published only there. It can still be read (lazybox artifact get %s)", id, owner, id))
+	if holders := store.Locate(id); len(holders) > 0 {
+		return grpcError(codes.FailedPrecondition, fmt.Errorf("artifact %q belongs to workspace %s: it is written only there. It can still be read (lazybox artifact get %s)", id, strings.Join(holders, ", "), id))
 	}
 	return nil
 }
@@ -237,6 +254,9 @@ func (s *Service) RetireArtifact(ctx context.Context, r *pb.RetireArtifactReques
 			return nil, artifactError(err)
 		}
 	} else {
+		if err = elsewhere(store, r.CollectionId, r.ArtifactId); err != nil {
+			return nil, err
+		}
 		if err = retirableBy(ctx, store, r.CollectionId, r.ArtifactId); err != nil {
 			return nil, err
 		}

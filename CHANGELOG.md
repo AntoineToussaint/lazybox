@@ -64,7 +64,7 @@ leave out.
 
 ### Workspaces and tabs
 
-- **Check all in the delete dialog** When deleting a workspace asks you to confirm both stopping its sessions and discarding its files, Check all ticks both and moves the focus to Delete workspace, so Enter deletes. It never deletes by itself, and whether to delete the artifacts stays your choice.
+- **Check all in the delete dialog** Check all selects artifact deletion, stopping active sessions and discarding workspace files together. Review your selections, then choose Delete workspace.
 - **Deleting a workspace keeps commits on no branch** A repository with commits only a detached HEAD reaches, or a rebase, merge, cherry-pick or bisect stopped part-way, counts as changed: deleting the workspace asks you to discard first instead of losing them.
 - **Reverting files keeps what the checkpoint could not save** A file the safety checkpoint skipped (ignored, too large, past the untracked limit, in a nested repository) is left as it is and named, instead of being overwritten where undo could not bring it back. Ignored files in a folder the revert would replace with a file stay too.
 - **A deleted workspace stays deleted** Retrying an add-repositories request no longer brings back a workspace that is being deleted or was deleted.

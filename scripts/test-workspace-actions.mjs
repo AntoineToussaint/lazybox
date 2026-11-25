@@ -46,12 +46,12 @@ try{
  await expect(dialog.getByRole('alert')).toContainText('Member is not the expected worktree root');
  await expect(confirmDelete).toBeEnabled();
  assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,0);
- // Deleting the artifacts is a choice, not a consent: unticking it does not bring Check all back.
- await removeArtifacts.uncheck();await expect(dialog).toContainText('Keep artifacts and their version history');await expect(checkAll).toHaveCount(0);
- // Check all, by keyboard, ticks the consents only and hands the focus to Delete; Check all itself never deletes.
+ // Each option can still be changed independently.
+ await removeArtifacts.uncheck();await expect(dialog).toContainText('Keep artifacts and their version history');await expect(checkAll).toBeVisible();
+ // Check all, by keyboard, ticks every option and hands the focus to Delete; Check all itself never deletes.
  await stopSessions.uncheck();await discardFiles.uncheck();await expect(confirmDelete).toBeDisabled();
  await checkAll.focus();await page.keyboard.down('Enter');
- await expect(stopSessions).toBeChecked();await expect(discardFiles).toBeChecked();await expect(removeArtifacts).not.toBeChecked();
+ await expect(stopSessions).toBeChecked();await expect(discardFiles).toBeChecked();await expect(removeArtifacts).toBeChecked();
  await expect(checkAll).toHaveCount(0);await expect(confirmDelete).toBeFocused();
  // Enter still held: its auto-repeat reaches Delete and must not confirm (confirming shows Deleting… in the same event).
  await page.keyboard.down('Enter');
@@ -64,7 +64,7 @@ try{
  await page.keyboard.press('Enter');await expect(dialog).toHaveCount(0);await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).not.toContainText('Beta release');await expect(page.locator('.workspace-row button[aria-current=page]')).toContainText('Alpha feature');
  assert.equal(fixture.mutations.filter(m=>m.method==='ScheduleDeletion').length,1);
  const scheduled=fixture.mutations.find(m=>m.method==='ScheduleDeletion').body.workspace;
- assert.equal(scheduled.keepArtifacts,true);assert.equal(scheduled.stopSessions,true);assert.equal(scheduled.discardChanges,true);
+ assert.equal(!!scheduled.keepArtifacts,false);assert.equal(scheduled.stopSessions,true);assert.equal(scheduled.discardChanges,true);
  const undoNotice=page.getByText('Workspace moved to Recently deleted',{exact:true});
  await expect(undoNotice).toBeVisible();
  await page.clock.fastForward(30_000);
@@ -83,10 +83,10 @@ try{
  await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).toContainText('Beta release');
  await expect(trash).toHaveCount(0);
  assert.equal(fixture.mutations.filter(m=>m.method==='UndoDeletion').length,1);
- // One consent (discard) beside the artifacts choice needs no Check all.
+ // Discard and artifact deletion can be selected together.
  await page.route('**/PreviewWorkspaceDeletion',route=>route.fulfill({json:{supportsKeepArtifacts:true,activeSessionIds:[],dirtyRepositories:['api'],filesOutsideRepositories:false,blocked:''}}));
  await page.getByLabel('Actions for Alpha feature',{exact:true}).click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();await expect(dialog).toBeVisible();
- await expect(dialog.getByRole('checkbox')).toHaveCount(2);await expect(dialog.getByRole('button',{name:'Check all',exact:true})).toHaveCount(0);
+ await expect(dialog.getByRole('checkbox')).toHaveCount(2);await expect(dialog.getByRole('button',{name:'Check all',exact:true})).toBeVisible();
  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await expect(dialog).toHaveCount(0);
  // Still blocked once the ownership panel settles: Check all ticks both consents, Delete stays off, and the focus goes to Cancel.
  await page.route('**/PreviewWorkspaceDeletion',route=>route.fulfill({json:{supportsKeepArtifacts:true,activeSessionIds:['alpha-session'],dirtyRepositories:['api'],filesOutsideRepositories:false,blocked:'Previous process ownership is unconfirmed; reconcile the workspace before deleting it.'}}));

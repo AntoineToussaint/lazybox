@@ -175,13 +175,17 @@ func TestSwitchSubscriptionContinuesTheSameConversationAndSendsOnce(t *testing.T
 	if _, err = service.SwitchSubscription(ctx, &pb.SwitchSubscriptionRequest{SessionId: id, ProfileId: "b"}); err == nil || len(second.Applied) != 0 {
 		t.Fatal("a healthy conversation was asked to retry on its own subscription")
 	}
-	// Now automatic: the next limit switches back without anyone asking.
-	second.Events <- agent.Event{Type: "failure", Status: "exhausted", Account: &agent.AccountObservation{State: "exhausted", ResetAt: time.Now().Add(time.Hour).Unix()}}
+	// Now automatic: once a has room again, the next limit on b switches back without anyone asking.
+	// a recovers first: the switch is decided when b's limit is handled, from what is known then.
 	if err = b.Accounts.Observe("a", agent.AccountObservation{State: "available"}); err != nil {
 		t.Fatal(err)
 	}
+	second.Events <- agent.Event{Type: "failure", Status: "exhausted", Account: &agent.AccountObservation{State: "exhausted", ResetAt: time.Now().Add(time.Hour).Unix()}}
 	select {
-	case <-adapter.opened:
+	case third := <-adapter.opened:
+		if third.Open.Profile != "a" {
+			t.Fatalf("switched to %q, want back to a, the subscription with room", third.Open.Profile)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("automatic switching was not turned on")
 	}

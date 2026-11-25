@@ -58,7 +58,7 @@ export function TerminalHandoffCard({ handoff, messageId }: { handoff: TerminalH
       } else setDecision('declined');
     } catch (error) {
       const failure = ConnectError.from(error);
-      if (failure.code === Code.NotFound) setDecision('expired');
+      if (failure.code === Code.NotFound) setDecision('unavailable');
       else setError(failure.rawMessage);
     } finally {
       setBusy(false);
@@ -74,7 +74,9 @@ export function TerminalHandoffCard({ handoff, messageId }: { handoff: TerminalH
     <header><Icon name="terminal" size={16}/><strong>{pending ? (handoff.agentInput ? 'Allow the agent to read and type in this terminal?' : 'Review interactive command') :
       status === 'running' ? 'Interactive command running' :
       status === 'finished' ? 'Interactive command finished' :
+      status === 'unavailable' ? 'Interactive command request unavailable' :
       status === 'declined' ? 'Interactive command declined' : 'Interactive command request expired'}</strong></header>
+    {status === 'unavailable' && <p>Check the terminal and conversation history for the outcome.</p>}
     {status === 'expired' && <p>The command did not run. Ask the agent to request approval again.</p>}
     {pending ? command : <details className="terminal-handoff-details"><summary>View command</summary>{command}</details>}
     {status === 'pending' && <>

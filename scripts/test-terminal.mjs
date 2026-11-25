@@ -244,6 +244,12 @@ try {
  await reviewTerminal.click();
  await expect(declined.getByRole('button',{name:'Decline',exact:true})).toBeInViewport();
  await page.getByRole('button',{name:'Jump to latest'}).click();
+ // Following the newest reply can leave a pending approval outside the mounted tail.
+ for(let i=0;i<45;i++)chatEvents.push({type:'operation_accepted',text:'Later prompt '+i});
+ await expect(declined).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Jump to latest'})).toHaveCount(0);
+ await reviewTerminal.click();
+ await expect(declined.getByRole('button',{name:'Decline',exact:true})).toBeInViewport();
  const directory=declined.getByText('Working directory · api/scripts');
  await expect(declined.getByText(reviewed.text,{exact:true})).toBeHidden();
  await directory.click();
@@ -251,6 +257,7 @@ try {
  await declined.getByRole('button',{name:'Decline',exact:true}).click();
  await expect(declined).toContainText('Interactive command declined');
  fixture.sessions[0].pending=[];
+ await page.getByRole('button',{name:'Jump to latest'}).click();
  await expect(panel).toHaveCount(0);
  const longArgv=['fixture-tool',...Array.from({length:80},(_,i)=>'argument-with-a-long-value-'+i)];
  chatEvents.push({...reviewed,requestId:'expired',providerDataJson:Buffer.from(JSON.stringify(longArgv)).toString('base64')});
@@ -275,6 +282,12 @@ try {
  await expect.poll(()=>fixture.terminals.get('interactive-accepted')?.input.join('')).toBe('fixture');
  chatEvents.push({...handoff,requestId:'accepted',status:'finished',text:'interactive-accepted'});
  await expect(accepted).toContainText('Interactive command finished');
+ chatEvents.push({...handoff,requestId:'stale'});
+ const stale=page.getByRole('article',{name:'Interactive command'}).last();
+ await page.route('**/DecideTerminalHandoff', route=>route.fulfill({status:404,contentType:'application/json',body:JSON.stringify({code:'not_found',message:'Handoff missing'})}),{times:1});
+ await stale.getByRole('button',{name:'Run and take over'}).click();
+ await expect(stale).toContainText('Check the terminal and conversation history');
+ await expect(stale).not.toContainText('did not run');
  chatEvents.push({...handoff,requestId:'agent-input',terminalAgentInput:true,providerDataJson:Buffer.from(JSON.stringify(['example','deploy'])).toString('base64')});
  const shared=page.getByRole('article',{name:'Interactive command'}).last();
  await expect(shared.locator('pre')).toHaveText('example deploy');

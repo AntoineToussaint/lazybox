@@ -80,7 +80,11 @@ export class NativeStatus {
   // The SDK may report child frames and task updates after the tool result.
   private managedCalls = new Set<string>();
   private managedTasks = new Set<string>();
+  private isManagedCall(id: string) {
+    return this.managedCalls.has(id) || MANAGED_COMMANDS.has(this.calls.get(id)?.name || '');
+  }
   private rememberManaged(ids: Set<string>, id: string) {
+    ids.delete(id);
     ids.add(id);
     if (ids.size > CALL_LIMIT) ids.delete(ids.values().next().value!);
   }
@@ -107,7 +111,7 @@ export class NativeStatus {
     const parentCall = 'parent_tool_use_id' in m ? m.parent_tool_use_id : undefined;
     // The SDK can attach lifecycle events to an MCP invocation. The managed
     // command has its own tool result and console, never a forked agent.
-    if (parentCall && this.managedCalls.has(parentCall)) {
+    if (parentCall && this.isManagedCall(parentCall)) {
       if (m.type === 'system' && 'task_id' in m && typeof m.task_id === 'string') this.rememberManaged(this.managedTasks, m.task_id);
       return out;
     }
@@ -196,6 +200,7 @@ export class NativeStatus {
         // A forked run ends with the call that ran it.
         const fork = this.forks.get(content.tool_use_id);
         if (fork) { this.forks.delete(content.tool_use_id); emit({ type: 'agent_status', agentId: fork, status: content.is_error ? 'failed' : 'done', data: { toolUseId: content.tool_use_id } }); }
+        if (this.isManagedCall(content.tool_use_id)) this.rememberManaged(this.managedCalls, content.tool_use_id);
         this.calls.delete(content.tool_use_id);
       }
     } else if (m.type === 'result') {
@@ -216,7 +221,7 @@ export class NativeStatus {
       }
     } else if (m.type === 'system' && (m.subtype === 'task_started' || m.subtype === 'task_progress' || m.subtype === 'task_notification')) {
       if ('ambient' in m && m.ambient) return out;
-      if ((m.tool_use_id && this.managedCalls.has(m.tool_use_id)) || ('task_type' in m && MANAGED_COMMANDS.has(m.task_type || ''))) {
+      if ((m.tool_use_id && this.isManagedCall(m.tool_use_id)) || ('task_type' in m && MANAGED_COMMANDS.has(m.task_type || ''))) {
         this.rememberManaged(this.managedTasks, m.task_id);
       }
       if (this.managedTasks.has(m.task_id)) return out;

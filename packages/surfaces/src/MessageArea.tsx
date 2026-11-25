@@ -1,4 +1,4 @@
-import { useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { RunnerClient } from '@lazybox/client-core';
 import type { Session } from '@lazybox/protocol';
 import type { OpenModifiers } from './file-links';
@@ -57,9 +57,21 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
 }) {
   const conversation = transcript.messages;
   const terminalRequest = session?.pending.find(request => request.type === 'terminal_handoff');
-  const approvalMessage = terminalRequest && !scroll.followingLatest
+  const approvalMessage = terminalRequest
     ? conversation.findLast(message => message.terminalHandoff?.id === terminalRequest.requestId)
     : undefined;
+  const approvalId = approvalMessage?.id;
+  const [visibleApproval, setVisibleApproval] = useState('');
+  useEffect(() => {
+    setVisibleApproval('');
+    const pane = scroll.paneRef.current;
+    const card = approvalId && pane?.querySelector(`[data-message-id="${CSS.escape(approvalId)}"]`);
+    if (!card) return;
+    const observer = new IntersectionObserver(([entry]) => setVisibleApproval(entry.isIntersecting ? approvalId : ''), { root: pane });
+    observer.observe(card);
+    return () => observer.disconnect();
+  }, [approvalId, scroll.paneRef, scroll.end, scroll.visibleMessages]);
+  const offerReview = !!terminalRequest && (!approvalId || visibleApproval !== approvalId);
   // Artifact actions on agent messages, and "Open source message" from an artifact.
   const artifactScope = useMemo(() => session?.collectionId ? { collectionId: session.collectionId, sessionId: sessionID, conversationId: session.conversationId } : undefined, [session?.collectionId, session?.conversationId, sessionID]);
   // A file an agent named is tracked from its link, as from the Files tree.
@@ -104,9 +116,9 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
           {subscription}
         </div>
       </div>
-      {!scroll.followingLatest && conversation.length > 0 && <div className="chat-scroll-actions">
-        {approvalMessage && <button onClick={() => scroll.revealMessage(approvalMessage.id)}>Review terminal request</button>}
-        <button className="jump-to-latest" onClick={scroll.jumpToLatest}>Jump to latest</button>
+      {(offerReview || (!scroll.followingLatest && conversation.length > 0)) && <div className="chat-scroll-actions">
+        {offerReview && <button disabled={!approvalId} onClick={() => approvalId && scroll.revealMessage(approvalId)}>{approvalId ? 'Review terminal request' : 'Loading terminal request…'}</button>}
+        {!scroll.followingLatest && <button className="jump-to-latest" onClick={scroll.jumpToLatest}>Jump to latest</button>}
       </div>}
     </div>
     {fileTracking.element}

@@ -23,6 +23,13 @@ const TERMINAL=['done','failed','stopped'];
 const SPAWN_TOOLS=new Set(['Task','Agent']);
 // Tool calls remembered for naming a forked run, and forked runs at once: the newest.
 const CALL_LIMIT=512, FORK_LIMIT=256;
+// Tasks (sub-agents and background commands) remembered at once. Past it the
+// oldest that ended makes room: a conversation used all day starts far more.
+const TASK_LIMIT=256;
+const LIVE=['running','starting'];
+// Tasks forgotten to make room, remembered by id, run and status only, so a
+// late event of a finished run is still recognised as one: the newest.
+const GONE_LIMIT=1024;
 // A sign-in Claude cannot use or renew: only signing in again helps.
 const AUTH_CODES = ['authentication_failed', 'oauth_org_not_allowed', 'cloud_credential_error', 'gateway_signin_required', 'gateway_session_expired', 'org_config_refused'];
 // Typed causes that are no account state, yet say what the person can fix on
@@ -64,6 +71,7 @@ export class NativeStatus {
   // tool call that started it, false for one that call blocks on, undefined
   // when it did not say.
   private tasks = new Map<string, { id: string; run?: string; status: string; background?: boolean }>();
+  private gone = new Map<string, { id: string; run?: string; status: string }>();
   private background = new Set<string>();
   private tools = new Map<string, string>();
   // Every tool call by id, until its result: who made it, with what.
@@ -204,12 +212,17 @@ export class NativeStatus {
       // Delayed activity for a finished run must not reopen its timer or tray entry.
       if (old && TERMINAL.includes(old.status) && m.subtype !== 'task_notification'
           && (!m.run_id || m.run_id === old.run)) return out;
-      const id = old?.id || (m.tool_use_id ? `claude-tool:${m.tool_use_id}` : `claude-task:${m.task_id}`);
+      // The same for a run forgotten to make room: it ended, and its late events stay late.
+      const was = old ? undefined : this.gone.get(m.task_id);
+      if (was && (m.run_id && was.run && m.run_id < was.run)) return out;
+      if (was && TERMINAL.includes(was.status) && (!m.run_id || m.run_id === was.run)) return out;
+      const id = old?.id || was?.id || (m.tool_use_id ? `claude-tool:${m.tool_use_id}` : `claude-task:${m.task_id}`);
       const status = m.subtype === 'task_notification' ? ({ completed: 'done', failed: 'failed', stopped: 'stopped' }[m.status]) : 'running';
-      if (this.tasks.size >= 256 && !old) return out;
+      if (!old && !this.room()) return out;
+      this.gone.delete(m.task_id);
       if (m.tool_use_id) this.tools.set(m.tool_use_id, id);
       const background = m.subtype === 'task_started' && typeof m.is_backgrounded === 'boolean' ? m.is_backgrounded : old?.background;
-      this.tasks.set(m.task_id, { id, run: m.run_id || old?.run, status, background });
+      this.remember(m.task_id, { id, run: m.run_id || old?.run || was?.run, status, background });
       // A task is not also a forked run.
       if (m.tool_use_id) this.forks.delete(m.tool_use_id);
       const parent = 'parent_task_id' in m && m.parent_task_id ? this.tasks.get(m.parent_task_id)?.id : undefined;
@@ -232,7 +245,7 @@ export class NativeStatus {
       // A finished run is not restarted by a late patch of the same run.
       if (status && TERMINAL.includes(old.status) && !TERMINAL.includes(status) && (!m.run_id || m.run_id === old.run)) return out;
       const next = status || old.status;
-      this.tasks.set(m.task_id, { ...old, run: m.run_id || old.run, status: next });
+      this.remember(m.task_id, { ...old, run: m.run_id || old.run, status: next });
       emit({ type: 'agent_status', agentId: old.id, nativeId: m.task_id, status: next, data: error || backgrounded ? compact({ error, backgrounded: backgrounded || undefined }) : undefined });
     } else if (m.type === 'system' && m.subtype === 'background_tasks_changed') {
       const next = new Set(m.tasks.filter(t => !t.ambient).map(t => t.task_id));
@@ -241,17 +254,50 @@ export class NativeStatus {
         if (task?.status === 'running') { task.status = 'unknown'; emit({ type: 'agent_status', agentId: task.id, status: 'unknown' }); }
       }
       for (const task of m.tasks) {
-        if (task.ambient || (this.tasks.size >= 256 && !this.tasks.has(task.task_id))) continue;
+        if (task.ambient) continue;
         const old = this.tasks.get(task.task_id);
-        if (old && ['done', 'failed', 'stopped'].includes(old.status) && (!task.run_id || task.run_id === old.run)) continue;
-        if (task.run_id && old?.run && task.run_id < old.run) continue;
-        const id = old?.id || `claude-task:${task.task_id}`;
-        this.tasks.set(task.task_id, { id, run: task.run_id || old?.run, status: 'running', background: true });
+        const was = old ? undefined : this.gone.get(task.task_id);
+        const ended = old || was;
+        if (ended && TERMINAL.includes(ended.status) && (!task.run_id || task.run_id === ended.run)) continue;
+        if (task.run_id && ended?.run && task.run_id < ended.run) continue;
+        if (!old && !this.room()) continue;
+        this.gone.delete(task.task_id);
+        const id = old?.id || was?.id || `claude-task:${task.task_id}`;
+        this.tasks.set(task.task_id, { id, run: task.run_id || old?.run || was?.run, status: 'running', background: true });
         emit({ type: 'agent_status', agentId: id, parentAgentId: this.tasks.get(task.parent_task_id || '')?.id || 'root', nativeId: task.task_id, name: task.description, agentKind: task.task_type, status: 'running', data: { backgrounded: true } });
       }
       this.background = next;
     }
     return out;
+  }
+
+  /**
+   * Room for one more task. Past the bound the oldest task that ended is
+   * forgotten, with the call that named it; one that still runs never is.
+   * False only when every task remembered still runs. A bound that kept the
+   * first tasks for good would drop every later task's whole lifecycle, its
+   * end included: the client, which knows the sub-agent from its spawning
+   * call, would show it running forever.
+   */
+  private room(): boolean {
+    if (this.tasks.size < TASK_LIMIT) return true;
+    // In the order they ended: remember() moves an ending task last.
+    for (const [taskId, task] of this.tasks) {
+      if (LIVE.includes(task.status)) continue;
+      this.tasks.delete(taskId);
+      this.gone.set(taskId, { id: task.id, run: task.run, status: task.status });
+      if (this.gone.size > GONE_LIMIT) this.gone.delete(this.gone.keys().next().value!);
+      for (const [call, id] of this.tools) if (id === task.id) this.tools.delete(call);
+      return true;
+    }
+    return false;
+  }
+
+  /** Records a task; one that just ended moves last, so room() forgets the longest-ended first. */
+  private remember(taskId: string, task: { id: string; run?: string; status: string; background?: boolean }) {
+    const old = this.tasks.get(taskId);
+    if (old && !TERMINAL.includes(old.status) && TERMINAL.includes(task.status)) this.tasks.delete(taskId);
+    this.tasks.set(taskId, task);
   }
 
   /**
@@ -280,7 +326,7 @@ export class NativeStatus {
     for (const [call, id] of this.forks) emit({ type: 'agent_status', agentId: id, status: 'unknown', data: { toolUseId: call, reason: 'turn_ended' } });
     this.forks.clear();
     for (const [taskId, task] of this.tasks) {
-      if (task.background !== false || this.background.has(taskId) || !['running', 'starting'].includes(task.status)) continue;
+      if (task.background !== false || this.background.has(taskId) || !LIVE.includes(task.status)) continue;
       task.status = 'unknown';
       emit({ type: 'agent_status', agentId: task.id, nativeId: taskId, status: 'unknown', data: { reason: 'turn_ended' } });
     }

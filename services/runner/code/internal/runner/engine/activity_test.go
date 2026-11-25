@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent/agenttest"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/journal"
@@ -40,6 +41,60 @@ func TestChildEventsDoNotReplaceRootOrResolveItsTurn(t *testing.T) {
 		t.Fatal("snapshot is mutable")
 	}
 }
+
+// A conversation used all day starts more than 256 sub-agents and commands.
+// The ones that ended make room, so a later one is known: it can be stopped,
+// and its end is recorded.
+func TestActivityBoundForgetsFinishedForLaterSubagents(t *testing.T) {
+	e, _ := bench(t, true)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.observe(agent.Event{Type: "turn_started"})
+	for i := 0; i < 300; i++ {
+		id := fmt.Sprintf("claude-tool:call-%d", i)
+		e.observe(agent.Event{Type: "agent_status", AgentID: id, NativeID: fmt.Sprintf("t%d", i), Status: "running"})
+		e.observe(agent.Event{Type: "agent_status", AgentID: id, Status: "done"})
+	}
+	e.observe(agent.Event{Type: "agent_status", AgentID: "claude-tool:audit", NativeID: "audit", Status: "running"})
+	if len(e.state.Agents) != 256 || !e.state.ActivityTruncated {
+		t.Fatalf("activity tree not bounded: %d agents, truncated=%v", len(e.state.Agents), e.state.ActivityTruncated)
+	}
+	if _, ok := e.state.Agents["root"]; !ok {
+		t.Fatal("the main agent made room")
+	}
+	if a, ok := e.state.Agents["claude-tool:audit"]; !ok || a.Status != agent.Running || a.NativeID != "audit" {
+		t.Fatalf("a later sub-agent is unknown to the Runner: %+v", a)
+	}
+	e.observe(agent.Event{Type: "agent_status", AgentID: "claude-tool:audit", Status: "done"})
+	if e.state.Agents["claude-tool:audit"].Status != agent.Done {
+		t.Fatal("a later sub-agent's end was lost")
+	}
+}
+
+// A sub-agent the Runner only lost track of (Unknown) may still be reported
+// by an adopted host: every sub-agent that truly ended makes room before it.
+func TestActivityBoundForgetsALostSubagentLast(t *testing.T) {
+	e, _ := bench(t, true)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.observe(agent.Event{Type: "turn_started"})
+	// The lost one is the oldest: the plain oldest-first rule would forget it first.
+	e.observe(agent.Event{Type: "agent_status", AgentID: "claude-tool:lost", NativeID: "lost", Status: "running"})
+	e.observe(agent.Event{Type: "agent_status", AgentID: "claude-tool:lost", Status: "unknown"})
+	for i := 0; i < 254; i++ {
+		id := fmt.Sprintf("claude-tool:call-%d", i)
+		e.observe(agent.Event{Type: "agent_status", AgentID: id, NativeID: fmt.Sprintf("t%d", i), Status: "running"})
+		e.observe(agent.Event{Type: "agent_status", AgentID: id, Status: "done"})
+	}
+	e.observe(agent.Event{Type: "agent_status", AgentID: "claude-tool:new", NativeID: "new", Status: "running"})
+	if a, ok := e.state.Agents["claude-tool:lost"]; !ok || a.NativeID != "lost" {
+		t.Fatalf("a lost sub-agent made room before finished ones: %+v ok=%v", a, ok)
+	}
+	if _, ok := e.state.Agents["claude-tool:new"]; !ok {
+		t.Fatal("the new sub-agent found no room")
+	}
+}
+
 func TestActivityBoundAndLostStreamRemainUnknown(t *testing.T) {
 	e, _ := bench(t, true)
 	e.mu.Lock()

@@ -128,7 +128,7 @@ func (c *cli) linkItem(args []string) error {
 func (c *cli) items(args []string) error {
 	f := c.flags("items")
 	workspace := f.String("workspace", "", "the workspace (default: the one this agent works in)")
-	all := f.Bool("all", false, "every workspace's tracked pull requests (the person's credential)")
+	all := f.Bool("all", false, "all visible tracked items (inside an agent: its current workspace)")
 	positional, err := c.parse(f, args)
 	if err != nil {
 		return err
@@ -137,12 +137,16 @@ func (c *cli) items(args []string) error {
 		fmt.Fprintln(c.stderr, itemsUsage)
 		return fail(exitUsage, "unexpected %q", strings.Join(positional, " "))
 	}
+	if *all && *workspace != "" {
+		return fail(exitUsage, "choose either --all or --workspace")
+	}
 	cl, err := c.dial()
 	if err != nil {
 		return err
 	}
-	request := &pb.ListLinksRequest{All: *all}
-	if !*all {
+	scopedAll := *all && c.insideLazybox()
+	request := &pb.ListLinksRequest{All: *all && !scopedAll}
+	if !request.All {
 		if request.SessionId, request.CollectionId, err = c.itemScope(cl, *workspace); err != nil {
 			return err
 		}
@@ -150,6 +154,9 @@ func (c *cli) items(args []string) error {
 	links, err := got(cl.ListLinks(c.ctx, connect.NewRequest(request)))
 	if err != nil {
 		return err
+	}
+	if scopedAll {
+		fmt.Fprintln(c.stderr, "Showing all items visible to this agent in its current workspace.")
 	}
 	if c.json {
 		return c.printProtoJSON(links)
@@ -176,7 +183,7 @@ func (c *cli) items(args []string) error {
 			fmt.Fprintf(c.stdout, "    ✕ %s %s\n", printable(check.Name), printable(check.Url))
 		}
 		where := l.Source
-		if *all && l.CollectionName != "" {
+		if request.All && l.CollectionName != "" {
 			where = l.CollectionName + " · " + where
 		}
 		fmt.Fprintf(c.stdout, "    %s  (%s)\n", printable(l.Item.GetUrl()), printable(where))

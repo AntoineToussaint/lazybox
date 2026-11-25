@@ -209,7 +209,7 @@ export class SubagentFold {
   private commandCalls?: Record<string, CommandCall>;
   private skillCalls?: Record<string, string>;
   private managedCalls?: Set<string>;
-  private truncated: boolean;
+  truncated: boolean;
   private owned = new Set<object>();
   private cards: string[] = [];
   constructor(private state: Subagents) { this.truncated = state.truncated; }

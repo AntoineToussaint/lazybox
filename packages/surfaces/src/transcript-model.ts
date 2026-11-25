@@ -133,6 +133,8 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
   const replaceLast = (message: TranscriptMessage) => { const m = list(); m[m.length - 1] = message; owned.add(message); };
   const add = (message: TranscriptMessage) => { list().push(message); owned.add(message); };
   let subagents: SubagentFold | undefined;
+  // Only eviction can make the index announce a previously mounted card again.
+  let existingCards: Set<string> | undefined;
   const replaceAt = (index: number, message: TranscriptMessage) => { list()[index] = message; owned.add(message); };
   let requests: Record<string, RequestNote> | undefined;
   let pending: Record<string, TranscriptMessage> | undefined;
@@ -168,7 +170,15 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
     if (subagentRelevant(event)) {
       const fold = subagents ??= new SubagentFold(state.subagents ?? emptySubagents());
       fold.record(record);
-      for (const agentId of fold.takeCards()) { add({ id: `subagent:${agentId}`, type: 'subagent', text: '', turnId: event!.turnId, agentId }); next.appendToLast = false; }
+      for (const agentId of fold.takeCards()) {
+        if (fold.truncated) {
+          existingCards ??= new Set((messages ?? state.messages).filter(m => m.type === 'subagent').map(m => m.id));
+          if (existingCards.has(`subagent:${agentId}`)) continue;
+          existingCards.add(`subagent:${agentId}`);
+        }
+        add({ id: `subagent:${agentId}`, type: 'subagent', text: '', turnId: event!.turnId, agentId });
+        next.appendToLast = false;
+      }
     }
     if (!event || (event.agentId && event.agentId !== 'root')) continue;
     // While a turn runs (as the Runner counts it), a message waits in the queue.

@@ -89,6 +89,13 @@ try{
   await expect(prompts).toHaveCount(count);
   await prompts.first().evaluate(button=>button.click());
   await expect.poll(()=>pane.locator('.message').count()).toBeGreaterThan(mounted);
+  assert.ok(await pane.locator('.message').count()<=180,'an early prompt must not mount the whole conversation');
+  await expect(pane).toContainText('Question 0:');
+  await composer.pressSequentially(' while reading');
+  await expect(composer).toHaveValue('ok while reading');
+  await expect(pane).toContainText('Question 0:');
+  await pane.getByRole('button',{name:'Show later messages'}).evaluate(button=>button.click());
+  await expect(pane).toContainText('Question 30:');
   // A reveal of an already mounted prompt runs on the next animation frame.
   // The newer jump must win even if that frame hasn't run yet.
   await page.getByRole('button',{name:'Jump to latest'}).evaluate(async button=>{

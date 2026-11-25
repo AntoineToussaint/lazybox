@@ -1,4 +1,4 @@
-import {useEffect,useMemo,useRef,useState} from 'react';
+import {memo,useEffect,useMemo,useRef,useState} from 'react';
 import type {JournalEvent} from '@lazybox/protocol';
 import {DraggableDialog,DialogHeader} from './DraggableDialog';
 import {Icon} from './Icons';
@@ -37,7 +37,7 @@ export function CallRow({call,now,nested=false,focused=false}:{call:ToolCall;now
  </details>;
 }
 
-export function ToolActivity({events,truncated=false,sessionId}:{events:JournalEvent[];truncated?:boolean;sessionId?:string}){
+export const ToolActivity=memo(function ToolActivity({events,truncated=false,sessionId}:{events:JournalEvent[];truncated?:boolean;sessionId?:string}){
  const {calls,available}=useMemo(()=>toolActivity(events),[events]);
  const [open,setOpen]=useState(false),[query,setQuery]=useState(''),[limit,setLimit]=useState(100),[filter,setFilter]=useState('all'),[now,setNow]=useState(Date.now);
  const dialog=useRef<HTMLDialogElement>(null);
@@ -48,7 +48,7 @@ export function ToolActivity({events,truncated=false,sessionId}:{events:JournalE
  const running=calls.filter(c=>c.status==='Running').length,failed=calls.filter(c=>c.status==='Failed').length,unknown=calls.filter(c=>c.status==='Result not reported').length;
  useEffect(()=>{if(open){setNow(Date.now());dialog.current?.showModal();dialog.current?.querySelector<HTMLInputElement>('input')?.focus();}},[open]);
  useEffect(()=>{if(!open||!running)return;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[open,running]);
- const filtered=calls.filter(c=>(filter==='all'||(filter==='running'?c.status==='Running':c.status==='Failed'))&&`${toolTitle(c)} ${c.name} ${c.agent} ${c.status}`.toLowerCase().includes(query.toLowerCase())).reverse();
+ const filtered=open?calls.filter(c=>(filter==='all'||(filter==='running'?c.status==='Running':c.status==='Failed'))&&`${toolTitle(c)} ${c.name} ${c.agent} ${c.status}`.toLowerCase().includes(query.toLowerCase())).reverse():[];
  return <div className="tool-activity-toolbar"><button type="button" onClick={()=>setOpen(true)} aria-label="View tools and activity" title={calls.length?`Activity · ${calls.length} tool ${calls.length===1?"call":"calls"}${running?`, ${running} running`:""}${failed?`, ${failed} failed`:""}`:"Activity · no tool calls yet"} data-empty={calls.length?undefined:true} data-running={running?true:undefined} data-failed={failed?true:undefined}><Icon name="activity" size={14}/>{calls.length>0&&<span className="tool-activity-count">{calls.length.toLocaleString()}<span className="tool-activity-noun"> tool {calls.length===1?'call':'calls'}</span></span>}{failed>0&&<span className="tool-activity-failed">{failed.toLocaleString()} failed</span>}</button>{open&&<DraggableDialog ref={dialog} className="tool-activity-dialog" aria-label="Tools and activity" onCancel={()=>{setOpen(false);setFocus('');}}>
   <DialogHeader><div><h2>Activity</h2><p>Tool calls · newest first</p></div><button aria-label="Close tools" onClick={()=>{setOpen(false);setFocus('');}}>×</button></DialogHeader>
   <div className="activity-controls"><input type="search" aria-label="Filter tool activity" placeholder="Search actions or tools…" value={query} onChange={e=>{setQuery(e.target.value);setLimit(100);}}/><div className="activity-filters" role="group" aria-label="Activity status">{[['all',`All ${calls.length}`],['running',`Running ${running}`],['failed',`Failed ${failed}`]].map(([value,label])=><button key={value} aria-pressed={filter===value} onClick={()=>{setFilter(value);setLimit(100);}}>{label}</button>)}</div></div>
@@ -57,4 +57,4 @@ export function ToolActivity({events,truncated=false,sessionId}:{events:JournalE
   <div className="tool-call-list">{truncated&&<p className="tool-empty">Showing the latest 1,024 retained activity events.</p>}{!filtered.length&&<p className="tool-empty">{calls.length?'No matching actions.':'No tool calls reported yet.'}</p>}{filtered.slice(0,limit).map(call=><CallRow key={call.id} call={call} now={now} focused={open&&call.id===focus}/>)}{filtered.length>limit&&<button className="activity-more" onClick={()=>setLimit(n=>n+100)}>Show earlier calls ({filtered.length-limit})</button>}</div>
   <footer><span>Timing uses Runner observations.</span><details className="available-tools"><summary>Tool inventory{available.length?` · ${available.length}`:''}</summary>{available.length?<ul>{available.map(t=><li key={t} title={t}>{t}</li>)}</ul>:<p>No inventory reported for this execution.</p>}</details></footer>
  </DraggableDialog>}</div>;
-}
+});

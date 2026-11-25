@@ -547,4 +547,4 @@ access.
 
 In the sub-agent panel, the timer shows elapsed run time. After a minute without a reported event, **Last update** shows how long it has been since Lazybox heard from that sub-agent. Hover over it for the timestamp.
 
-If the provider stops responding during a turn, the chat reports any background work still running. With an empty composer, choose **Continue from here** to ask the agent to check existing commands and results before finishing the task. You can also send your own follow-up.
+If the provider stops responding during a turn, the chat reports any background work still running. With an empty composer, choose **Continue from here** to ask the agent to check existing commands and results before finishing the task. Once the Runner accepts the continuation, the button shows a delivery confirmation while the chat waits for updated turn status. You can also send your own follow-up.

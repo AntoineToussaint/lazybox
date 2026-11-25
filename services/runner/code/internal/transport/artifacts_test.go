@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestAgentCredentialUsesOnlyItsOwnWorkspacesArtifacts(t *testing.T) {
+func TestAgentCredentialReadsAnyArtifactAndWritesOnlyItsOwn(t *testing.T) {
 	f := newTerminalFixture(t)
 	ctx := timeout(t)
 	agent := bearer(ctx, f.agentToken)
@@ -53,18 +53,51 @@ func TestAgentCredentialUsesOnlyItsOwnWorkspacesArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.client.ListArtifacts(agent, &pb.ListArtifactsRequest{CollectionId: f.theirs.Id})
-	denied("list another workspace", err)
-	_, err = f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id})
-	denied("get another workspace", err)
+	// Reading crosses workspaces: an agent lists and reads another workspace's artifacts.
+	if list, err := f.client.ListArtifacts(agent, &pb.ListArtifactsRequest{CollectionId: f.theirs.Id}); err != nil || len(list.Artifacts) != 1 || list.Artifacts[0].Id != theirs.Id {
+		t.Fatal("list another workspace", list, err)
+	}
+	if got, err := f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id}); err != nil || got.Content != "notes" {
+		t.Fatal("get another workspace", got, err)
+	}
+	// By its id alone, from the agent's own workspace (what `lazybox artifact get <id>` asks): read where it is.
+	if got, err := f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: theirs.Id}); err != nil || got.Content != "notes" || got.CollectionId != f.theirs.Id {
+		t.Fatal("read another workspace's artifact by id", got, err)
+	}
+	// Writing does not: not in their workspace, and not a version of their artifact from this one.
 	_, err = f.client.PutArtifact(agent, &pb.PutArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id, Content: "spoof"})
 	denied("put another workspace", err)
-	_, err = f.client.ListArtifacts(agent, &pb.ListArtifactsRequest{})
-	denied("list without a workspace", err)
-	// The artifact id alone never crosses workspaces.
-	if _, err = f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: theirs.Id}); status.Code(err) != codes.NotFound {
-		t.Fatal("read another workspace's artifact by id", err)
+	_, err = f.client.PutArtifact(agent, &pb.PutArtifactRequest{CollectionId: f.mine.Id, ArtifactId: theirs.Id, Content: "spoof"})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), f.theirs.Id) || !strings.Contains(err.Error(), "lazybox artifact get") {
+		t.Fatal("a version of another workspace's artifact says where it is", err)
 	}
+	_, err = f.client.PutArtifact(agent, &pb.PutArtifactRequest{CollectionId: f.mine.Id, Title: "Merged", Content: "x", Supersedes: []string{theirs.Id}})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatal("retiring another workspace's artifact", err)
+	}
+	if got, _ := f.client.GetArtifact(owner, &pb.GetArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id}); got.Content != "notes" || got.Retired != nil {
+		t.Fatal("their artifact changed", got)
+	}
+	// One that does not exist says so, not "file does not exist".
+	_, err = f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: "nosuchartifact"})
+	if status.Code(err) != codes.NotFound || !strings.Contains(err.Error(), `no artifact "nosuchartifact"`) || strings.Contains(err.Error(), "file does not exist") {
+		t.Fatal("missing artifact", err)
+	}
+	_, err = f.client.ListArtifacts(agent, &pb.ListArtifactsRequest{})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatal("list without a workspace", err)
+	}
+	// Retiring theirs by its id says where it is, as publishing does.
+	_, err = f.client.RetireArtifact(agent, &pb.RetireArtifactRequest{CollectionId: f.mine.Id, ArtifactId: theirs.Id})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), f.theirs.Id) {
+		t.Fatal("retiring another workspace's artifact by id", err)
+	}
+	// A version that does not exist reads plainly, never as a file.
+	_, err = f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id, Version: 9})
+	if status.Code(err) != codes.NotFound || strings.Contains(err.Error(), "file") || strings.Contains(err.Error(), "/") {
+		t.Fatal("missing version", err)
+	}
+
 	_, err = f.client.TrackArtifactFile(agent, &pb.TrackArtifactFileRequest{CollectionId: f.mine.Id, Path: "api/PLAN.md"})
 	denied("track", err)
 	_, err = f.client.UpdateArtifact(agent, &pb.UpdateArtifactRequest{CollectionId: f.mine.Id, ArtifactId: put.Id, Title: "x"})
@@ -273,7 +306,8 @@ func TestAgentRetiresAndSupersedesOnlyAgentPublishedArtifacts(t *testing.T) {
 	_, err = f.client.RetireArtifact(agent, &pb.RetireArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: theirs.Id})
 	code("retire another workspace's artifact", err, codes.PermissionDenied)
 	_, err = f.client.RetireArtifact(agent, &pb.RetireArtifactRequest{CollectionId: ws, ArtifactId: theirs.Id})
-	code("retire another workspace's artifact by id", err, codes.NotFound)
+	// Read anywhere, written only in its own workspace: the refusal says where it is.
+	code("retire another workspace's artifact by id", err, codes.FailedPrecondition)
 	_, err = f.client.RetireArtifact(agent, &pb.RetireArtifactRequest{CollectionId: ws, ArtifactId: limits.Id, Restore: true})
 	code("agent restores", err, codes.PermissionDenied)
 	_, err = f.client.RetireArtifact(agent, &pb.RetireArtifactRequest{CollectionId: ws, ArtifactId: milestones.Id, SupersededBy: theirs.Id})
@@ -354,5 +388,62 @@ func TestKeptArtifactsRemainDiscoverableAfterWorkspaceDeletion(t *testing.T) {
 		if found != include {
 			t.Fatalf("include retained=%t, found=%t", include, found)
 		}
+	}
+}
+
+// An artifact id can be in two workspaces (a keyed creation's, or a workflow
+// review's, is derived without its workspace): an agent's own copy stays its
+// to write and read, and reading it from nowhere in particular asks which.
+func TestAnArtifactIDInTwoWorkspaces(t *testing.T) {
+	f := newTerminalFixture(t)
+	ctx := timeout(t)
+	agent, owner := bearer(ctx, f.agentToken), bearer(ctx, ownerToken)
+	mine, err := f.client.PutArtifact(owner, &pb.PutArtifactRequest{CollectionId: f.mine.Id, CreationKey: "same-key", Title: "Mine", Content: "mine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := f.client.PutArtifact(owner, &pb.PutArtifactRequest{CollectionId: f.theirs.Id, CreationKey: "same-key", Title: "Theirs", Content: "theirs"})
+	if err != nil || theirs.Id != mine.Id {
+		t.Fatal("keyed creation no longer repeats an id across workspaces: build the duplicate another way", theirs, err)
+	}
+	if _, err = f.client.PutArtifact(agent, &pb.PutArtifactRequest{CollectionId: f.mine.Id, ArtifactId: mine.Id, Content: "mine, v2"}); err != nil {
+		t.Fatal("an agent's own artifact, whose id another workspace also has, was refused", err)
+	}
+	if got, err := f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.mine.Id, ArtifactId: mine.Id}); err != nil || got.Content != "mine, v2" {
+		t.Fatal("read own copy of a shared id", got, err)
+	}
+	if got, err := f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: f.theirs.Id, ArtifactId: mine.Id}); err != nil || got.Content != "theirs" {
+		t.Fatal("read their copy by naming their workspace", got, err)
+	}
+	// From no workspace that holds it: which one is ambiguous, so it asks.
+	_, err = f.client.GetArtifact(agent, &pb.GetArtifactRequest{CollectionId: "", ArtifactId: mine.Id})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "--collection") {
+		t.Fatal("an id several workspaces hold", err)
+	}
+}
+
+// An agent reads only live workspaces: not one being deleted, or kept after it,
+// whether it names the workspace or reads by id.
+func TestAgentDoesNotReadAWorkspaceBeingDeleted(t *testing.T) {
+	f := newTerminalFixture(t)
+	ctx := timeout(t)
+	agent, owner := bearer(ctx, f.agentToken), bearer(ctx, ownerToken)
+	theirs, err := f.client.PutArtifact(owner, &pb.PutArtifactRequest{CollectionId: f.theirs.Id, Title: "Release notes", Content: "notes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.service.DeleteWorkspace(context.Background(), &pb.DeleteWorkspaceRequest{CollectionId: f.theirs.Id, ConfirmName: f.theirs.Name, DiscardChanges: true, StopSessions: true, KeepArtifacts: true}); err != nil {
+		t.Fatal(err)
+	}
+	for name, req := range map[string]*pb.GetArtifactRequest{
+		"naming the workspace": {CollectionId: f.theirs.Id, ArtifactId: theirs.Id},
+		"by id alone":          {CollectionId: f.mine.Id, ArtifactId: theirs.Id},
+	} {
+		if got, err := f.client.GetArtifact(agent, req); status.Code(err) != codes.NotFound {
+			t.Fatalf("%s: an agent read a workspace being deleted: %v %v", name, got, err)
+		}
+	}
+	if _, err = f.client.ListArtifacts(agent, &pb.ListArtifactsRequest{CollectionId: f.theirs.Id}); status.Code(err) != codes.NotFound {
+		t.Fatal("an agent listed a workspace being deleted", err)
 	}
 }

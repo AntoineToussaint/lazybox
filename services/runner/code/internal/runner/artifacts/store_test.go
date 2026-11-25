@@ -536,3 +536,25 @@ func TestRoadmapCreateReplayAfterLostResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A version whose file is gone from the state folder reads as missing, by its
+// id and number, never with the Runner's path.
+func TestAMissingVersionFileReadsWithoutAPath(t *testing.T) {
+	root := t.TempDir()
+	s, _ := open(t, root)
+	doc, err := s.Put("alpha", Put{Title: "Plan", Content: "# Plan", Author: person, Source: Source{Kind: "edit"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.find("alpha", doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(s.versionPath(a, 1)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Get("alpha", doc.ID, 1)
+	if !errors.Is(err, fs.ErrNotExist) || strings.Contains(err.Error(), root) || !strings.Contains(err.Error(), doc.ID+" version 1") {
+		t.Fatalf("missing version file: %v", err)
+	}
+}

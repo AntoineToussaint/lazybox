@@ -173,6 +173,7 @@ leave out.
 
 ### Artifacts
 
+- **Agents read artifacts across workspaces** An agent reads any of your artifacts by its ID, wherever it lives, and can list another workspace's; it still publishes only in its own workspace, and a version of another workspace's artifact is refused with where it lives. A missing artifact says "no artifact" instead of "file does not exist".
 - **Start an artifact companion** The companion receives the pinned version and selection at startup. Its message box opens empty, and you can return to it from the artifact.
 - **Work beside an artifact** Open Agent companion from the reader, inspect structured documents by type, or edit the latest source and save a new version.
 

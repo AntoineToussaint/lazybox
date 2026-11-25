@@ -237,8 +237,15 @@ func (s *Store) find(ws, id string) (*Artifact, error) {
 	if a := s.items[ws][id]; a != nil && segment.MatchString(id) {
 		return a, nil
 	}
-	return nil, fmt.Errorf("artifact %q: %w", id, fs.ErrNotExist)
+	return nil, notFound{id}
 }
+
+// notFound is an artifact no workspace asked about holds: it reads as such,
+// and is fs.ErrNotExist to callers that test for it.
+type notFound struct{ id string }
+
+func (e notFound) Error() string { return fmt.Sprintf("no artifact %q", e.id) }
+func (e notFound) Unwrap() error { return fs.ErrNotExist }
 
 // HasWorkspace reports whether a deleted workspace still has documents to list.
 func (s *Store) HasWorkspace(ws string) bool {
@@ -267,6 +274,32 @@ func (s *Store) List(ws string) ([]Artifact, error) {
 	return out, nil
 }
 
+// Locate is every workspace that holds an artifact with this id, in a stable
+// order. An id is usually in one workspace, but not always: a derived id (a
+// workflow review's, a keyed creation's) does not include its workspace.
+func (s *Store) Locate(id string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !segment.MatchString(id) {
+		return nil
+	}
+	var holders []string
+	for ws, items := range s.items {
+		if items[id] != nil {
+			holders = append(holders, ws)
+		}
+	}
+	sort.Strings(holders)
+	return holders
+}
+
+// Holds reports whether workspace ws has an artifact with this id.
+func (s *Store) Holds(ws, id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.items[ws][id] != nil
+}
+
 // Get returns one version (0 is the latest) with its content.
 func (s *Store) Get(ws, id string, version uint32) (Document, error) {
 	s.mu.Lock()
@@ -283,9 +316,13 @@ func (s *Store) document(a *Artifact, version uint32) (Document, error) {
 		version = a.Latest()
 	}
 	if version > a.Latest() {
-		return Document{}, fmt.Errorf("version %d of %q: %w", version, a.ID, fs.ErrNotExist)
+		return Document{}, notFound{fmt.Sprintf("%s version %d", a.ID, version)}
 	}
 	raw, err := os.ReadFile(s.versionPath(a, version))
+	if errors.Is(err, fs.ErrNotExist) {
+		// Its file is gone from the state folder: say which version, never the path.
+		return Document{}, notFound{fmt.Sprintf("%s version %d", a.ID, version)}
+	}
 	if err != nil {
 		return Document{}, err
 	}

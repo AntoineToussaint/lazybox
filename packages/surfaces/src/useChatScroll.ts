@@ -1,4 +1,4 @@
-import {useCallback,useLayoutEffect,useRef,useState,type UIEvent} from 'react';
+import {useCallback,useLayoutEffect,useMemo,useRef,useState,type UIEvent} from 'react';
 import {EARLIER_MESSAGES,INITIAL_MESSAGES,type ConversationReader} from './transcript-cache';
 /** How close to the bottom a reader scrolling down picks up following again. */
 const FOLLOW_THRESHOLD=48;
@@ -33,10 +33,21 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  const following=useRef(reader.view.following);
  const [followingLatest,setFollowingLatest]=useState(reader.view.following);
  const [visibleMessages,setVisibleMessages]=useState(reader.view.visibleMessages);
+ // A detached reader keeps a window ending at a particular message. New
+ // activity and the completion of older history cannot shift that window.
+ const [endId,setEndId]=useState(reader.view.endId);
+ const end=useMemo(()=>{
+  if(!endId)return messages.length;
+  const index=messages.findIndex(message=>message.id===endId);
+  return index<0?messages.length:index+1;
+ },[endId,messages]);
+ const range=useRef({messages,end,visibleMessages});range.current={messages,end,visibleMessages};
+ const moreBelow=end<messages.length;
+ const limit=EARLIER_MESSAGES*3;
  const pinAfterTrim=useRef(false);
  const prependHeight=useRef<number|undefined>(undefined);
  const dimensions=useRef({height:0,width:0,content:0});
- const hidden=useRef(0);hidden.current=Math.max(0,messages.length-visibleMessages);
+ const hidden=useRef(0);hidden.current=Math.max(0,end-visibleMessages);
  const measure=(pane:HTMLDivElement)=>{dimensions.current={height:pane.clientHeight,width:pane.clientWidth,content:pane.scrollHeight};};
  const resized=(pane:HTMLDivElement)=>dimensions.current.height!==pane.clientHeight||dimensions.current.width!==pane.clientWidth;
  // Where the pane was last left, by the reader or by us: a scroll event's
@@ -51,7 +62,17 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  // diagram rendering in an earlier message, or a tool group folding.
  const anchor=useRef<{node:Element;offset:number}|undefined>(undefined);
  const capture=(pane:HTMLDivElement)=>{
-  anchor.current=undefined;const top=pane.getBoundingClientRect().top;
+  anchor.current=undefined;
+  const rect=pane.getBoundingClientRect(),top=rect.top;
+  const hit=pane.ownerDocument.elementFromPoint(rect.left+pane.clientWidth/2,top+1);
+  const row=hit?.closest<HTMLElement>('[data-message-id]');
+  if(hit&&row&&contentRef.current?.contains(row)){
+   reader.view.anchorId=row.dataset.messageId||'';
+   reader.view.anchorOffset=row.getBoundingClientRect().top-top;
+   anchor.current={node:hit,offset:hit.getBoundingClientRect().top-top};
+   return;
+  }
+  reader.view.anchorId='';
   // Descend into the row across the top edge, so a change above the viewport
   // inside one long message is caught too.
   let parent:Element|null|undefined=contentRef.current;
@@ -77,18 +98,35 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   if(readerMovedUp(pane)){setFollowing(false);capture(pane);measure(pane);}
   else pin(pane);
  };
- const setFollowing=useCallback((value:boolean)=>{following.current=value;reader.view.following=value;setFollowingLatest(value);},[reader]);
+ const setFollowing=useCallback((value:boolean)=>{
+  if(following.current!==value){
+   if(value){setEndId('');reader.view.anchorId='';}
+   else {const {messages,end}=range.current;setEndId(messages[end-1]?.id||'');}
+  }
+  following.current=value;reader.view.following=value;setFollowingLatest(value);
+ },[reader]);
  const loadEarlier=useCallback((pane:HTMLDivElement|null)=>{
   if(!hidden.current||prependHeight.current!==undefined)return;
-  prependHeight.current=pane?.scrollHeight;setVisibleMessages(count=>count+EARLIER_MESSAGES);
- },[]);
+  const {messages,end,visibleMessages}=range.current;
+  const start=Math.max(0,end-visibleMessages-EARLIER_MESSAGES);
+  prependHeight.current=pane?.scrollHeight;
+  if(pane)capture(pane);
+  const nextEnd=Math.min(end,start+limit);
+  // A short tail may auto-fill the viewport while still following live output.
+  if(nextEnd<messages.length)setFollowing(false);
+  setEndId(following.current?'':messages[nextEnd-1]?.id||'');setVisibleMessages(nextEnd-start);
+ },[reader,setFollowing]);
  // Within a screen of the top, the next step of history is mounted before the reader reaches it.
  const nearTop=(pane:HTMLDivElement)=>hidden.current>0&&pane.scrollTop<Math.max(400,pane.clientHeight);
  useLayoutEffect(()=>{
-  following.current=reader.view.following;setFollowingLatest(reader.view.following);setVisibleMessages(reader.view.visibleMessages);
+  following.current=reader.view.following;setFollowingLatest(reader.view.following);setVisibleMessages(reader.view.visibleMessages);setEndId(reader.view.endId);
   const pane=paneRef.current,content=contentRef.current;if(!pane||!content)return;
   place(pane,reader.view.following?pane.scrollHeight:reader.view.scrollTop);measure(pane);
-  if(!reader.view.following)capture(pane);
+  if(!reader.view.following){
+   const row=reader.view.anchorId&&content.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(reader.view.anchorId)}"]`);
+   if(row)place(pane,pane.scrollTop+row.getBoundingClientRect().top-pane.getBoundingClientRect().top-reader.view.anchorOffset);
+   capture(pane);
+  }
   const resize=new ResizeObserver(()=>{
    // A compositor scroll can land before its scroll event. Keep the new
    // reading position when a streamed delta resizes the content in between.
@@ -116,7 +154,7 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
    // End is an explicit request to follow the latest output. Do not wait
    // for native smooth scrolling: streaming can move its target meanwhile.
    if(event.key==='End'&&!innerScroller(event.target,pane,false)){
-    event.preventDefault();intent.current=undefined;setFollowing(true);pin(pane);return;
+    event.preventDefault();jumpRef.current();return;
    }
    const up=UP_KEYS.has(event.key)||(event.key===' '&&event.shiftKey);
    if((up||DOWN_KEYS.has(event.key))&&!innerScroller(event.target,pane,up))intend(up?'up':'down',800,event.key==='End'?Infinity:event.key==='ArrowDown'?40:pane.clientHeight*.85);
@@ -143,15 +181,33 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  useLayoutEffect(()=>{
   const pane=paneRef.current;if(!pane)return;
   if(pinAfterTrim.current){pinAfterTrim.current=false;if(following.current)pin(pane);}
-  else if(prependHeight.current!==undefined){place(pane,pane.scrollTop+pane.scrollHeight-prependHeight.current);prependHeight.current=undefined;measure(pane);capture(pane);}
+  else if(prependHeight.current!==undefined){if(anchor.current?.node.isConnected)restore(pane);else place(pane,pane.scrollTop+pane.scrollHeight-prependHeight.current);prependHeight.current=undefined;measure(pane);capture(pane);}
   else if(following.current)follow(pane);
-  reader.view.visibleMessages=visibleMessages;
+  reader.view.visibleMessages=visibleMessages;reader.view.endId=endId;
   if(reveal.current&&revealNow())return;
-  if(nearTop(pane))loadEarlier(pane);
- },[reader,messages,visibleMessages,pendingCount,loadEarlier]);
+  if(nearTop(pane)){
+   // Many hidden rows can leave successive pages shorter than the viewport.
+   // Let layout and input settle between pages.
+   const frame=requestAnimationFrame(()=>{if(nearTop(pane))loadEarlier(pane);});
+   return()=>cancelAnimationFrame(frame);
+  }
+ },[reader,messages,visibleMessages,endId,pendingCount,loadEarlier]);
+ const showLater=useCallback(()=>{
+  const pane=paneRef.current;
+  const {messages,end,visibleMessages}=range.current;
+  if(!pane||end>=messages.length||prependHeight.current!==undefined)return;
+  capture(pane);prependHeight.current=pane.scrollHeight;
+  const nextEnd=Math.min(messages.length,end+EARLIER_MESSAGES);
+  setVisibleMessages(Math.min(limit,visibleMessages+nextEnd-end));
+  setEndId(messages[nextEnd-1].id);
+ },[reader]);
  const onScroll=(event:UIEvent<HTMLDivElement>)=>{
   const pane=event.currentTarget,top=pane.scrollTop,moved=top-lastTop.current,movedUp=readerMovedUp(pane);lastTop.current=top;
   const gap=pane.scrollHeight-top-pane.clientHeight;
+  if(moreBelow&&moved>0&&gap<Math.max(400,pane.clientHeight)&&prependHeight.current===undefined){
+   showLater();
+   return;
+  }
   if(readerScrolling()){
    // Up by any amount stops following, even within the threshold; down to near the bottom resumes it.
    // A pane clamped to its new bottom (content folding below), or moved by its
@@ -159,14 +215,14 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
    if(moved<0&&gap>1&&!resized(pane))setFollowing(false);
    // A compositor/anchor correction during an upward gesture is not a
    // request to follow. Only downward intent gets the near-bottom tolerance.
-   else if(moved>0&&intent.current?.direction!=='up'&&(gap<=1||(intent.current?.direction==='down'&&(gap<FOLLOW_THRESHOLD||intent.current.bottom))))setFollowing(true);
+   else if(!moreBelow&&moved>0&&intent.current?.direction!=='up'&&(gap<=1||(intent.current?.direction==='down'&&(gap<FOLLOW_THRESHOLD||intent.current.bottom))))setFollowing(true);
   }else if(following.current){
    if(movedUp)setFollowing(false);
    // Browser layout scrolls are not evidence that the user stopped following.
    else if(resized(pane)||dimensions.current.content!==pane.scrollHeight){pin(pane);return;}
    // A scroll nobody pressed for (find in page) that leaves the bottom.
    else if(gap>=FOLLOW_THRESHOLD)setFollowing(false);
-  }else if(moved>0&&gap<=1)setFollowing(true);
+  }else if(!moreBelow&&moved>0&&gap<=1)setFollowing(true);
   measure(pane);reader.view.scrollTop=top;
   if(following.current)anchor.current=undefined;else capture(pane);
   if(nearTop(pane))loadEarlier(pane);
@@ -175,13 +231,15 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   intent.current=undefined;pressed.current=false;anchor.current=undefined;
   reveal.current=undefined;prependHeight.current=undefined;
   setFollowing(true);
-  if(visibleMessages!==INITIAL_MESSAGES){
+  if(paneRef.current)pin(paneRef.current);
+  if(endId||visibleMessages!==INITIAL_MESSAGES){
    // Dropping earlier rows changes the scroll range. Pin after React commits
    // the short tail, before a resize observer can interpret the clamp as input.
    pinAfterTrim.current=true;
-   setVisibleMessages(INITIAL_MESSAGES);
-  }else if(paneRef.current)pin(paneRef.current);
+   setEndId('');setVisibleMessages(INITIAL_MESSAGES);
+  }
  };
+ const jumpRef=useRef(jumpToLatest);jumpRef.current=jumpToLatest;
  // Jumping to a message (a prompt) may need earlier history mounted first:
  // widen the window, then scroll it to the top once it is rendered.
  const reveal=useRef<string|undefined>(undefined);
@@ -196,9 +254,11 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  const revealMessage=useCallback((id:string)=>{
   const index=messages.findIndex(m=>m.id===id);if(index<0)return;
   setFollowing(false);reveal.current=id;prependHeight.current=undefined;
-  const need=messages.length-index+1;
-  if(need>visibleMessages)setVisibleMessages(need);else requestAnimationFrame(()=>{revealNow();});
- },[messages,visibleMessages,setFollowing]);
+  if(index<end-visibleMessages||index>=end){
+   const nextEnd=Math.min(messages.length,index+EARLIER_MESSAGES);
+   setEndId(messages[nextEnd-1].id);setVisibleMessages(Math.min(nextEnd,limit));
+  }else requestAnimationFrame(()=>{revealNow();});
+ },[messages,end,visibleMessages,setFollowing]);
  const showEarlier=useCallback(()=>{setFollowing(false);loadEarlier(paneRef.current);},[setFollowing,loadEarlier]);
- return{paneRef,contentRef,followingLatest,visibleMessages,onScroll,jumpToLatest,showEarlier,revealMessage};
+ return{paneRef,contentRef,followingLatest,visibleMessages,end,onScroll,jumpToLatest,showEarlier,showLater,revealMessage};
 }

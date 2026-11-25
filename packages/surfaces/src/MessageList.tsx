@@ -120,8 +120,9 @@ const MessageRow = memo(function MessageRow({ message: m, agentName, onOpenFile,
  * is added as the reader scrolls toward it. A render of the window that hosts
  * it (a keystroke in the composer) does not touch the rows.
  */
-export const MessageList = memo(function MessageList({ messages, visible, agentName, onOpenFile, onShowEarlier, nameFor, checkpoints, sessionId, conversationId, onReveal, onHandoff, onBranch, detail = 'verbose', loadingEarlier = false, alwaysShowTime }: { messages: TranscriptMessage[]; visible: number; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; onShowEarlier(): void; /** A subscription's name by profile ID, for switch lines. */ nameFor?(id: string): string; checkpoints?: CheckpointScope; /** The conversation, for Quote in reply. */ sessionId?: string; conversationId: string; /** Scroll a message into view, mounting earlier history when needed. */ onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; onBranch?(message: TranscriptMessage, sideQuestion?: boolean): void; /** How much tool activity to show. */ detail?: ActivityDetail; /** Only the latest turns are in: the earlier history is being read (transcript `partial`). */ loadingEarlier?: boolean; alwaysShowTime?: boolean }) {
-  const hidden = Math.max(0, messages.length - visible);
+export const MessageList = memo(function MessageList({ messages, visible, end: requestedEnd = messages.length, agentName, onOpenFile, onShowEarlier, nameFor, checkpoints, sessionId, conversationId, onReveal, onHandoff, onBranch, detail = 'verbose', loadingEarlier = false, alwaysShowTime }: { messages: TranscriptMessage[]; visible: number; end?: number; agentName: string; onOpenFile?(reference: FileLink, how: OpenModifiers): void; onShowEarlier(): void; /** A subscription's name by profile ID, for switch lines. */ nameFor?(id: string): string; checkpoints?: CheckpointScope; /** The conversation, for Quote in reply. */ sessionId?: string; conversationId: string; /** Scroll a message into view, mounting earlier history when needed. */ onReveal?(id: string): void; onHandoff?(message: HandoffMessage): void; onBranch?(message: TranscriptMessage, sideQuestion?: boolean): void; /** How much tool activity to show. */ detail?: ActivityDetail; /** Only the latest turns are in: the earlier history is being read (transcript `partial`). */ loadingEarlier?: boolean; alwaysShowTime?: boolean }) {
+  const end = Math.min(requestedEnd, messages.length);
+  const hidden = Math.max(0, end - visible);
   const checkpoint = useCheckpointUI(messages, checkpoints);
   // One stable menu for every row, so a new message does not re-render the others.
   const latest = useRef({ messages, checkpoint, onReveal, onHandoff, onBranch });
@@ -148,7 +149,10 @@ export const MessageList = memo(function MessageList({ messages, visible, agentN
     const result = new Map<string, ActivityDetail | 'hidden'>();
     let mode: ActivityDetail | 'hidden' | undefined;
     let turnId = '';
-    for (const m of messages) {
+    let start = hidden;
+    while (start > 0 && (messages[start].type !== 'operation_accepted' || messages[start].steered)) start--;
+    for (let i = start; i < end; i++) {
+      const m = messages[i];
       if (m.type === 'operation_accepted' && !m.steered) {
         mode = overrides.read(m.operationId || m.id) || undefined;
         turnId = m.turnId;
@@ -159,11 +163,11 @@ export const MessageList = memo(function MessageList({ messages, visible, agentN
       result.set(m.id, mode);
     }
     return result;
-  }, [messages, overrides]);
+  }, [messages, overrides, hidden, end]);
   const hasQuietResponse = useMemo(() => Array.from(responseModes.values()).includes('quiet'), [responseModes]);
   const quiet = detail === 'quiet' || hasQuietResponse;
   const turns = useMemo(() => quiet ? turnActivity(messages, turnCache.current, hidden) : undefined, [messages, quiet, hidden]);
-  const days = useMemo(() => messageDays(messages, hidden), [messages, hidden]);
+  const days = useMemo(() => messageDays(messages, hidden, end), [messages, hidden, end]);
   const row = (m: TranscriptMessage) => {
     const mode = responseModes.get(m.id);
     const control = m.type === 'operation_accepted' && !m.steered && !m.command && !m.origin && <select aria-label="Response detail for this prompt" value={overrides.read(m.operationId || m.id)} onChange={e => {
@@ -175,7 +179,7 @@ export const MessageList = memo(function MessageList({ messages, visible, agentN
       <option value="hidden">Hide response</option>
     </select>;
     if (mode === 'hidden') return <Fragment key={m.id}>{checkpoint.marker(m.id)}</Fragment>;
-    const content = <MessageRow turnControl={<>{control}{onBranch && canRestartPrompt(m) && <button type="button" className="text-button" onClick={() => onBranch(m)}>Restart from here…</button>}</>} message={m} agentName={agentName} onOpenFile={onOpenFile} nameFor={nameFor} sessionId={sessionId} menu={menu} turn={turns?.get(m.id)} alwaysShowTime={alwaysShowTime}/>;
+    const content = <MessageRow turnControl={m.type === 'operation_accepted' && <>{control}{onBranch && canRestartPrompt(m) && <button type="button" className="text-button" onClick={() => onBranch(m)}>Restart from here…</button>}</>} message={m} agentName={agentName} onOpenFile={onOpenFile} nameFor={nameFor} sessionId={sessionId} menu={menu} turn={turns?.get(m.id)} alwaysShowTime={alwaysShowTime}/>;
     return <Fragment key={m.id}>{mode && m.type === 'tools'
       ? <ToolLineContext.Provider value={{ ...scope, detail: mode }}>{content}</ToolLineContext.Provider>
       : content}{checkpoint.marker(m.id)}</Fragment>;
@@ -198,13 +202,13 @@ export const MessageList = memo(function MessageList({ messages, visible, agentN
 });
 
 /** Local calendar days, with consecutive Lazybox events grouped within each day. */
-function messageDays(messages: readonly TranscriptMessage[], from: number) {
+function messageDays(messages: readonly TranscriptMessage[], from: number, end: number) {
   type Run = TranscriptMessage | TranscriptMessage[];
   const out: { day: string; runs: Run[] }[] = [];
   let current = { day: '', runs: [] as Run[] };
   let run: TranscriptMessage[] = [];
   const flush = () => { if (run.length > 1) current.runs.push(run); else if (run.length) current.runs.push(run[0]); run = []; };
-  for (let i = from; i < messages.length; i++) {
+  for (let i = from; i < end; i++) {
     const message = messages[i];
     const day = validActivityTime(message.at) ? localDay(message.at) : current.day;
     if (current.day !== day) {

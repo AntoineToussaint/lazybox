@@ -25,13 +25,13 @@ type Snapshot = Transcript & { status: string; error: string; loading: boolean; 
 /** A page's records are its cursors from `start`, one after another, as the live stream checks (client-core `follow`). */
 const contiguous=(events:readonly JournalEvent[],start:bigint)=>events.every((event,i)=>event.cursor===start+BigInt(i));
 const GAP='Replay gap: retained cursor is not contiguous';
-const pause=(ms:number,signal:AbortSignal)=>new Promise<void>(resolve=>{const done=()=>{clearTimeout(timer);resolve();};const timer=setTimeout(done,ms);signal.addEventListener('abort',done,{once:true});});
+const pause=(ms:number,signal:AbortSignal)=>new Promise<void>(resolve=>{const done=()=>{clearTimeout(timer);signal.removeEventListener('abort',done);resolve();};const timer=setTimeout(done,ms);signal.addEventListener('abort',done,{once:true});});
 
 /** Per-client readers survive navigation, without holding provider execution alive. */
 export class ConversationReader {
  snapshot: Snapshot = {...emptyTranscript(),status:'Connecting',error:'',loading:true};
  session?: Session;
- view = {scrollTop:0,following:true,visibleMessages:INITIAL_MESSAGES};
+ view = {scrollTop:0,following:true,visibleMessages:INITIAL_MESSAGES,endId:"",anchorId:"",anchorOffset:0};
  private listeners = new Set<()=>void>();
  private controller?: AbortController;
  identity:string;
@@ -68,8 +68,8 @@ export class ConversationReader {
  // since the tail's start folded again on top of it.
  /** Records from the tail's first on, while the earlier history is read; then folded again onto it. */
  private since?:JournalEvent[];
- /** The earlier history read so far (pages, oldest first), back to `before`. */
- private earlier?:{before:bigint;pages:JournalEvent[][]};
+ /** The earlier history read so far (pages, newest first), back to `before`. */
+ private earlier?:{before:bigint;pages:JournalEvent[][];folded:Transcript};
  private async open(controller:AbortController){
   let tail:{events:JournalEvent[];start:bigint}|undefined;
   try{tail=await this.api.readSessionTail({sessionId:this.id,turns:TAIL_TURNS,maxBytes:TAIL_BYTES},{signal:controller.signal});}
@@ -80,7 +80,7 @@ export class ConversationReader {
   if(tail&&!contiguous(tail.events,tail.start)){this.publish({error:humanError(GAP),loading:false});return;}
   if(tail&&tail.events.length&&tail.start>1n){
    this.since=[...tail.events];
-   this.earlier={before:tail.start,pages:[]};
+   this.earlier={before:tail.start,pages:[],folded:emptyTranscript()};
    this.publish({...foldTranscript(this.snapshot,tail.events),partial:true});
    this.follow(controller);
    void this.complete(controller);
@@ -106,17 +106,16 @@ export class ConversationReader {
    if(signal.aborted)return;
    const events=page.events;
    if(!events.length||page.start>=earlier.before||!contiguous(events,page.start)||events.at(-1)!.cursor!==earlier.before-1n){this.flush();this.publish({error:humanError(GAP),loading:false});return;}
-   earlier.pages.unshift(events);earlier.before=page.start;
+   earlier.pages.push(events);earlier.before=page.start;
   }
   // Fold from the first record a page at a time, yielding between pages so
   // the window keeps answering; live records go on arriving meanwhile.
-  let state=emptyTranscript();
-  for(const page of earlier.pages){
-   state=foldTranscript(state,page);
+  while(earlier.pages.length){
+   earlier.folded=foldTranscript(earlier.folded,earlier.pages.pop()!);
    await pause(0,signal);if(signal.aborted)return;
   }
   this.flush();
-  const exact=foldTranscript(state,this.since!);
+  const exact=foldTranscript(earlier.folded,this.since!);
   this.since=undefined;this.earlier=undefined;
   this.publish({...exact,loading:false,partial:undefined});
  }

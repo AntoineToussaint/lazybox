@@ -34,6 +34,7 @@ export class WindowErrorBoundary extends Component<{ children: ReactNode; develo
     <button className="primary" onClick={() => window.location.reload()}>Reload window</button>
     <button onClick={() => this.setState({ error: undefined })}>Try to continue</button>
    </div>
+   <p>{error.message || String(error)}</p>
    <details><summary>Details</summary><pre>{String(error.stack || error.message)}</pre></details>
   </div></>;
  }

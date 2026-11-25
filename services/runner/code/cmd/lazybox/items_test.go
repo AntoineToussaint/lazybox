@@ -63,6 +63,11 @@ func TestAgentLinksAndListsItsPullRequests(t *testing.T) {
 		t.Fatalf("items without GitHub: %+v", out)
 	}
 
+	out = r.cli(env, "", "items", "--all")
+	if out.code != 0 || !strings.Contains(out.stdout, "acme/platform#1121") || !strings.Contains(out.stderr, "current workspace") {
+		t.Fatalf("all items visible to the agent: %+v", out)
+	}
+
 	// `lazybox link` alone, in an agent, asks for the URL.
 	out = r.cli(env, "", "link")
 	if out.code != exitUsage || strings.Contains(out.err.Error(), "development build") || !strings.Contains(out.err.Error(), "URL") {

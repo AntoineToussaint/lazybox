@@ -126,7 +126,7 @@ export function useSlashCommands(o: Options) {
   // The launcher is the chat's (ReviewFromChat.tsx), which reports its errors.
   const { reviewLauncher } = o;
   const live = !!session && !session.closed;
-  const lastAgentMessage = useMemo(() => [...o.conversation].reverse().find(trackable), [o.conversation]);
+  const lastAgentMessage = useMemo(() => o.conversation.findLast(trackable), [o.conversation]);
   // The Runner's models for this provider: what its program lists, else built in.
   // An agent started by an older Lazybox lists none of its own; these stand in.
   const availability = useProviderAvailability(o.enabled);

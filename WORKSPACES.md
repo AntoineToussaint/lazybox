@@ -1003,7 +1003,9 @@ resuming delivery.
 
 Chat folds streaming deltas into complete messages independently of the diagnostic
 event buffer. It renders the latest 40 messages initially; **Show earlier messages**
-reveals retained messages while preserving the reading position. Incoming output
+reveals retained messages while preserving the reading position. Scrolling through
+history moves a bounded window of rows in either direction. A jump to an old
+prompt mounts the rows around that prompt. Incoming output
 only scrolls when already following the bottom; **Jump to latest** resumes following.
 Replay gaps and terminal stream errors appear in the chat with **Retry conversation**.
 They never masquerade as a new, empty conversation.

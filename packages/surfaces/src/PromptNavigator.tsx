@@ -35,11 +35,16 @@ export const PromptNavigator = memo(function PromptNavigator({ messages, paneRef
  // The prompt at or above the top of the view. Unmounted earlier history is above it.
  const current = () => {
   const pane = paneRef.current; if (!pane) return -1;
-  const top = pane.getBoundingClientRect().top + 48; let found = -1;
-  latest.current.prompts.forEach(({ message }, k) => {
-   const node = pane.querySelector(`[data-message-id="${CSS.escape(message.id)}"]`);
-   if (!node || node.getBoundingClientRect().top <= top) found = k;
-  });
+  const top = pane.getBoundingClientRect().top + 48;
+  let found = -1;
+  const list = latest.current.prompts;
+  const rows = pane.querySelectorAll<HTMLElement>('.message.operation_accepted[data-message-id]');
+  for (const row of rows) {
+   const index = list.findIndex(p => p.message.id === row.dataset.messageId);
+   if (index < 0) continue;
+   if (row.getBoundingClientRect().top > top) return index - 1;
+   found = index;
+  }
   return found;
  };
  const step = (direction: -1 | 1) => {
@@ -70,9 +75,10 @@ export const PromptNavigator = memo(function PromptNavigator({ messages, paneRef
  }, [paneRef]);
 
  const filtered = useMemo(() => {
+  if (!open) return [];
   const needle = query.trim().toLowerCase();
   return prompts.map((p, k) => ({ ...p, k })).reverse().filter(({ message }) => !needle || message.text.toLowerCase().includes(needle));
- }, [prompts, query]);
+ }, [open, prompts, query]);
  useEffect(() => { if (open) { setActive(0); requestAnimationFrame(() => search.current?.focus()); } }, [open]);
  useEffect(() => setActive(0), [query]);
  useEffect(() => {

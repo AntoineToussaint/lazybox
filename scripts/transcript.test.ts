@@ -443,3 +443,15 @@ test('the composer can distinguish a reported native permission from the selecte
   assert.equal(state.reportedPermission, 'YOLO');
   assert.equal(state.messages.length, 0);
 });
+
+test('late status after agent eviction reuses its original transcript card',()=>{
+ const done=(agentId:string)=>({type:'agent_status',status:'done',name:'Same name',agentId,parentAgentId:'root'});
+ const records=journalOf([done('first'),...Array.from({length:256},(_,i)=>done('other-'+i)),done('first')]);
+ const prior=foldTranscript(emptyTranscript(),records.slice(0,-1));
+ assert.equal(prior.subagents.byId.first,undefined);
+ const replay=foldTranscript(prior,records.slice(-1));
+ assert.equal(replay.subagents.byId.first.name,'Same name');
+ assert.equal(replay.messages.length,257);
+ assert.deepEqual(replay.messages,prior.messages);
+ assert.deepEqual(foldTranscript(emptyTranscript(),records).messages,replay.messages);
+});

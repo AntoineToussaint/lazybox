@@ -92,8 +92,6 @@ puts it in a shell of this panel (`home-shell.ts`, rules in `shell-input.ts`):
   review and press Return*. **Paste in terminal (don't run)** types any
   command that way.
 
-When a command launched with **Run in … home** fails, its completion message includes up to 40 lines (4,000 characters) from the end of its retained terminal output. Commands pasted for review and recognized sign-in commands report only their status. If scrollback is unavailable, the status still reaches the conversation.
-
 ### Send a command's output to the console, and to an agent
 
 ```sh

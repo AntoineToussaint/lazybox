@@ -20,8 +20,6 @@
  */
 import type { RunnerClient } from '@lazybox/client-core';
 import type { TerminalStatus } from '@lazybox/protocol';
-import { needsTerminal } from './home-run';
-import { failureExcerpt } from './terminal-excerpt';
 import { runAction } from './actions';
 import { showMenuNotice } from './ContextMenu';
 import { requestTerminal } from './TerminalPanel';
@@ -74,31 +72,9 @@ export type ShellCommand = {
   /** The command is in the shell: running, or waiting at the prompt. */
   onTyped?(how: ShellTyped): void;
   /** The command line the person or Run started there ended, with its status, when the shell says. */
-  includeFailureOutput?: boolean;
-  onEnd?(status: number, output?: string): void;
+  onEnd?(status: number): void;
   onLost?(): void;
 };
-
-/** Replay only the retained tail of this command, stopping at the observed snapshot. */
-async function failedOutput(api: RunnerClient, terminalId: string, before: TerminalStatus, after: TerminalStatus) {
-  const end = after.offset;
-  const start = [before.offset, end - after.retained, end - 16384n].reduce((a, b) => a > b ? a : b);
-  if (start >= end || after.commandEnds !== before.commandEnds + 1n) return '';
-  const bytes = new Uint8Array(Number(end - start));
-  let cursor = start;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2000);
-  try {
-    for await (const event of api.watchTerminal({ terminalId, after: start }, { signal: controller.signal })) {
-      if (event.offset !== cursor || !event.data.length) break;
-      const chunk = event.data.subarray(0, Number(end - cursor));
-      bytes.set(chunk, Number(cursor - start));
-      cursor += BigInt(chunk.length);
-      if (cursor === end) return failureExcerpt(new TextDecoder().decode(bytes), start > before.offset, after.lastCommandStatus);
-    }
-  } finally { clearTimeout(timeout); controller.abort(); }
-  return '';
-}
 
 /**
  * Writes `command` into the shell once it can take it, then waits for the
@@ -123,12 +99,7 @@ async function typeAndWatch(api: RunnerClient, workspaceId: string, terminalId: 
       await pause(elapsed < 10_000 ? 250 : elapsed < 10 * 60_000 ? 1000 : 10_000);
       const now = await statusOf(api, workspaceId, terminalId).catch(() => undefined);
       if (!now || now.done) { how.onLost?.(); return; }
-      if (now.commandEnds > base) {
-        const output = run && how.includeFailureOutput && now.lastCommandStatus !== 0 && !needsTerminal(command)
-          ? await failedOutput(api, terminalId, status, now).catch(() => '') : '';
-        how.onEnd?.(now.lastCommandStatus, output);
-        return;
-      }
+      if (now.commandEnds > base) { how.onEnd?.(now.lastCommandStatus); return; }
     }
     how.onLost?.();
   } catch { how.onLost?.(); } finally { taken.delete(terminalId); }

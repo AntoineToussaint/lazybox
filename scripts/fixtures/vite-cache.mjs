@@ -1,4 +1,5 @@
-import { basename } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
 
@@ -34,8 +35,45 @@ export function testViteCache(scriptUrl) {
  * Every `scripts/test-*.mjs` takes `createServer` from here, and imports only
  * `build` and `preview` from Vite (scripts/vite-server.test.ts checks it).
  */
-export function createServer(config = {}) {
-  return createViteServer(gateServerConfig(config));
+export async function createServer(config = {}) {
+  const server = await createViteServer(gateServerConfig(config));
+  // Listening also warms the app: a gate's first page then loads from transformed modules (warmApp).
+  const listen = server.listen.bind(server);
+  server.listen = async (...args) => {
+    const listening = await listen(...args);
+    await warmApp(server);
+    return listening;
+  };
+  return server;
+}
+
+/**
+ * Transforms the app before a gate's first page asks for it: every module the
+ * root's index.html loads, and everything those import, and Vite's
+ * pre-bundled dependencies with them. On a loaded machine a cold first load
+ * took 6–13 s, past the 10 s a gate gives a page's first step, and failed it
+ * for nothing the page did; warmed, it is under a second. The work moves to
+ * the server's start, which no page timeout covers. Best effort: a module
+ * that cannot be transformed on its own (an asset imported raw) is left to
+ * the browser to request as the app does.
+ */
+export async function warmApp(server) {
+  const root = server.config.root;
+  let html;
+  try { html = readFileSync(join(root, 'index.html'), 'utf8'); } catch { return 0; }
+  const env = server.environments.client, seen = new Set();
+  let next = [...html.matchAll(/<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/g)].map(m => m[1]);
+  while (next.length) {
+    const batch = [...new Set(next)].filter(url => !seen.has(url));
+    next = [];
+    for (const url of batch) seen.add(url);
+    await Promise.all(batch.map(async url => {
+      try { await env.transformRequest(url); } catch { return; }
+      const mod = await env.moduleGraph.getModuleByUrl(url);
+      for (const imported of mod?.importedModules ?? []) if (imported.url && !seen.has(imported.url)) next.push(imported.url);
+    }));
+  }
+  return seen.size;
 }
 
 /** `config` with watching and hot reload off, whatever the test set for its server. */

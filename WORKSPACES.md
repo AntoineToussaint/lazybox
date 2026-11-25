@@ -1002,7 +1002,7 @@ without creating another execution. Drafts and send identities are retained befo
 resuming delivery.
 
 Chat folds streaming deltas into complete messages independently of the diagnostic
-event buffer. It renders the latest 100 messages initially; **Show earlier messages**
+event buffer. It renders the latest 40 messages initially; **Show earlier messages**
 reveals retained messages while preserving the reading position. Incoming output
 only scrolls when already following the bottom; **Jump to latest** resumes following.
 Replay gaps and terminal stream errors appear in the chat with **Retry conversation**.
@@ -1239,7 +1239,8 @@ conversation history; **Delete workspace** has its own file/resource check.
 The chat follows its rendered content height, including delayed diagrams and
 viewport changes, while the reader is at the bottom. Scrolling up suspends follow;
 returning to the conversation restores that reading position. **Jump to latest**
-and sending a new message resume follow. The header shows the provider-reported
+and sending a new message return to the latest rows, release earlier rows from the view,
+and resume following incoming output. Earlier history stays available by scrolling up. The header shows the provider-reported
 main-agent model, captured from startup/context/usage events as well as the saved
 session metadata. Internal account IDs such as `claude-default` are presented as
 “Local CLI sign-in,” separately from the model.

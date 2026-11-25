@@ -112,8 +112,9 @@ func (s *Service) GetArtifact(ctx context.Context, r *pb.GetArtifactRequest) (*p
 			return nil, grpcError(codes.FailedPrecondition, fmt.Errorf("several workspaces have an artifact %q (%s): name one with --collection", r.ArtifactId, strings.Join(holders, ", ")))
 		}
 	}
-	if session := callerSession(ctx); session != "" && ws != r.CollectionId {
-		// An agent reads the live workspaces only, not one being deleted.
+	if session := callerSession(ctx); session != "" {
+		// An agent reads the live workspaces only, not one being deleted or kept after deletion,
+		// whether it names the workspace or reads by id.
 		if err := s.liveWorkspace(ws); err != nil {
 			return nil, err
 		}

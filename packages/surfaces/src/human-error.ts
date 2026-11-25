@@ -21,7 +21,7 @@ export function humanError(error: unknown): string {
   if (failure.code === Code.Unavailable && /^Runner unreachable\b|failed to fetch|load failed|networkerror|fetch failed/i.test(raw)) return 'The Runner is not answering (it may be restarting). Try again in a moment.';
   // The Runner's own Go context ran out of time ("context deadline exceeded", whatever code carries it).
   if (failure.code === Code.DeadlineExceeded || /\bcontext deadline exceeded\b/i.test(raw)) return 'The Runner did not answer in time. Try again.';
-  if (isCancellation(error)) return 'The request was cancelled while reconnecting. Try again.';
+  if (isCancellation(error)) return 'The request was cancelled. Try again.';
   return raw || 'Something went wrong.';
 }
 
@@ -39,14 +39,29 @@ export function isCancellation(error: unknown): boolean {
 /** How long refreshes may keep failing before the window says so: one slow answer under load is not an outage. */
 export const REFRESH_FAILURE_GRACE_MS = 15_000;
 
+/** A failure the next attempt may not hit: the Runner slow, restarting or briefly out of reach. */
+export function isTransient(error: unknown): boolean {
+  const failure = ConnectError.from(error);
+  const raw = (failure.rawMessage || (error instanceof Error ? error.message : String(error))).trim();
+  switch (failure.code) {
+    case Code.Unavailable: case Code.DeadlineExceeded: case Code.ResourceExhausted: case Code.Aborted: return true;
+    case Code.Unknown: case Code.Internal: return /\bcontext deadline exceeded\b/i.test(raw);
+    default: return false;
+  }
+}
+
 /**
- * What a polling view shows after a refresh, from when refreshes started
- * failing: nothing while they recover within the grace period, then the
- * failure in words. `failingSince` is undefined after a success.
+ * What a polling view shows after a failed refresh. `failingSince` is when
+ * the first failing refresh in a row was sent (undefined after a success),
+ * `sentAt` when this one was. A cancellation changes nothing (`shown` is
+ * undefined: keep what is shown); a lasting failure (a deleted session, a
+ * refused credential) shows at once; a transient one only once refreshes have
+ * kept failing for the grace period.
  */
-export function refreshFailure(failingSince: number | undefined, now: number, error: unknown): { failingSince: number | undefined; shown: string } {
-  if (isCancellation(error)) return { failingSince, shown: '' };
-  const since = failingSince ?? now;
+export function refreshFailure(failingSince: number | undefined, sentAt: number, now: number, error: unknown): { failingSince: number | undefined; shown: string | undefined } {
+  if (isCancellation(error)) return { failingSince, shown: undefined };
+  const since = failingSince ?? sentAt;
+  if (!isTransient(error)) return { failingSince: since, shown: humanError(error) };
   return { failingSince: since, shown: now - since >= REFRESH_FAILURE_GRACE_MS ? humanError(error) : '' };
 }
 

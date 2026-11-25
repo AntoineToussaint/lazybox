@@ -2,7 +2,7 @@ import { create } from '@bufbuild/protobuf';
 import { CollectionSchema, JournalEventSchema, SessionSchema, type JournalEvent, type Session } from '@lazybox/protocol';
 import { test } from 'node:test';
 import { Code, ConnectError } from '@lazybox/client-core';
-import { humanError, isCancellation, refreshFailure, REFRESH_FAILURE_GRACE_MS, streamLabel } from '../packages/surfaces/src/human-error.ts';
+import { humanError, isCancellation, isTransient, refreshFailure, REFRESH_FAILURE_GRACE_MS, streamLabel } from '../packages/surfaces/src/human-error.ts';
 import assert from 'node:assert/strict';
 import { elapsedLabel, liveStatus, phaseFromEvents } from '../packages/surfaces/src/live-status.ts';
 import { awaitingFirstMessage, sessionStatus } from '../packages/surfaces/src/agent-status.ts';
@@ -195,12 +195,23 @@ test('the Runner\'s own Go context errors read in words, never raw', () => {
 
 test('a refresh that fails only briefly shows nothing; one that keeps failing says so', () => {
   const slow = new ConnectError('context deadline exceeded', Code.Unknown);
-  let state = refreshFailure(undefined, 1_000, slow);
+  // The clock starts when the first failing refresh was sent (10 s before it timed out).
+  let state = refreshFailure(undefined, 1_000, 11_000, slow);
   assert.equal(state.shown, '', 'one slow answer under load is no outage');
-  state = refreshFailure(state.failingSince, 1_000 + REFRESH_FAILURE_GRACE_MS - 1, slow);
+  state = refreshFailure(state.failingSince, 12_500, 1_000 + REFRESH_FAILURE_GRACE_MS - 1, slow);
   assert.equal(state.shown, '', 'still within the grace period');
-  state = refreshFailure(state.failingSince, 1_000 + REFRESH_FAILURE_GRACE_MS, slow);
+  state = refreshFailure(state.failingSince, 14_000, 1_000 + REFRESH_FAILURE_GRACE_MS, slow);
   assert.equal(state.shown, 'The Runner did not answer in time. Try again.');
-  // A cancelled refresh (a reconnect) neither shows nor starts the clock.
-  assert.deepEqual(refreshFailure(undefined, 5_000, new ConnectError('context canceled', Code.Canceled)), { failingSince: undefined, shown: '' });
+  // A cancellation (a Runner restarting cancels its handlers) leaves what is shown alone and keeps the clock.
+  assert.deepEqual(refreshFailure(state.failingSince, 20_000, 20_000, new ConnectError('context canceled', Code.Canceled)), { failingSince: state.failingSince, shown: undefined });
+  assert.deepEqual(refreshFailure(undefined, 5_000, 5_000, new ConnectError('context canceled', Code.Unknown)), { failingSince: undefined, shown: undefined });
+});
+
+test('a lasting failure shows at once: no grace for a deleted session or a refused credential', () => {
+  for (const code of [Code.NotFound, Code.PermissionDenied, Code.Unauthenticated, Code.FailedPrecondition]) {
+    const state = refreshFailure(undefined, 1_000, 1_100, new ConnectError('no such session', code));
+    assert.ok(state.shown, `code ${Code[code]} shows at once`);
+  }
+  assert.ok(isTransient(new ConnectError('slow', Code.Unavailable)) && !isTransient(new ConnectError('get: boom', Code.Internal)));
+  assert.equal(humanError(new ConnectError('context canceled', Code.Canceled)), 'The request was cancelled. Try again.');
 });

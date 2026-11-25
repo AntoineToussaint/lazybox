@@ -49,6 +49,7 @@ export function useSessionRefresh({ api, sessionID, connected, showCommands, rea
       // Asked while a refresh is out: one more right after it, so what was just sent is in it.
       if (refreshing) { again = true; return; }
       refreshing = true;
+      const sentAt = Date.now();
       try {
         const [state, output] = await Promise.all([api.getSession({ sessionId: sessionID }, options()), showCommands ? api.listCommands({ sessionId: sessionID }, options()) : Promise.resolve({ commands: [] })]);
         if (!control.signal.aborted) {
@@ -60,7 +61,11 @@ export function useSessionRefresh({ api, sessionID, connected, showCommands, rea
         }
       } catch (e) {
         // A slow or cancelled refresh under load is retried by the next poll: only refreshes that keep failing are shown.
-        if (!control.signal.aborted) { const next = refreshFailure(failingSince, Date.now(), e); failingSince = next.failingSince; setRefreshError(next.shown); }
+        if (!control.signal.aborted) {
+          const next = refreshFailure(failingSince, sentAt, Date.now(), e);
+          failingSince = next.failingSince;
+          if (next.shown !== undefined) setRefreshError(next.shown);
+        }
       }
       finally { refreshing = false; if (again) { again = false; void update(); } }
     };

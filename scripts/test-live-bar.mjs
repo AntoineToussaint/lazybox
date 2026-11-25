@@ -22,7 +22,7 @@ push(-400000,{type:'operation_accepted',text:'Run the checks in the front door a
 push(-399000,{type:'turn_started'});
 push(-390000,{type:'message_delta',text:'Running the checks first.'});
 push(-321000,{type:'activity',status:'tool',name:'Bash'});
-push(-321000,{type:'tool_activity',data:{type:'tool_call',id:'toolu_check',name:'Bash',status:'running',input:{command:'cd services/front-door && lazybox run pnpm run check',description:'Run the checks'}}});
+push(-321000,{type:'tool_activity',data:{type:'tool_call',id:'toolu_check',name:'Bash',status:'running',input:{command:"/bin/zsh -lc 'cd services/front-door && lazybox run --wait -- pnpm run check'",description:'Run the checks'}}});
 push(-300000,{type:'tool_activity',data:{type:'tool_call',id:'toolu_sa',name:'Task',status:'running',input:{description:'Review the API',prompt:'Review it.',subagent_type:'Explore'}}});
 push(-299000,{type:'agent_status',agentId:'claude-tool:toolu_sa',parentAgentId:'root',nativeId:'task-sa',status:'running',name:'Review the API',data:{toolUseId:'toolu_sa',subagentType:'Explore'}});
 
@@ -38,7 +38,8 @@ try{
  // Its clock counts from the step's start, 321 s before the fixture was made: however long the page took to load.
  {const [,m,sec]=(await bar.locator('.live-activity').textContent()).match(/(\d+)m (\d+)s/),shown=Number(m)*60+Number(sec),since=(Date.now()-now)/1000;
   assert.ok(shown>=320&&shown<=322+since,`elapsed ${shown}s, ${Math.round(since)}s after the fixture`);}
- await expect(bar.locator('.live-bar-code')).toHaveText('lazybox run pnpm run check');
+ await expect(bar.locator('.live-bar-code')).toHaveText('pnpm run check');
+ await expect(bar.locator('.live-bar-code')).toHaveAttribute('title', "/bin/zsh -lc 'cd services/front-door && lazybox run --wait -- pnpm run check'");
  await expect(bar.locator('.live-bar-where')).toHaveText('in services/front-door');
  // A managed command streams: its last lines, without colour codes.
  const out=bar.locator('.live-bar-output');
@@ -75,7 +76,7 @@ try{
  await expect(bar.getByRole('button',{name:'More output'})).toHaveCount(0);
  await expect(bar.getByRole('button',{name:'Stop command'})).toBeVisible();
  await page.reload();
- await expect(bar.locator('.live-bar-code')).toHaveText('lazybox run pnpm run check');
+ await expect(bar.locator('.live-bar-code')).toHaveText('pnpm run check');
  await expect(out).toHaveCount(0);
  await page.screenshot({path:'.cache/subagents-live-bar-hidden.png'});
  // And brought back, from the bar.
@@ -136,8 +137,12 @@ try{
  await page.screenshot({path:'.cache/live-bar-moved.png'});
  // A shell step that is not a lazybox run and looks like a server may never end: the bar says how to get out.
  live({type:'tool_activity',data:{type:'tool_call',id:'toolu_dev',status:'completed',output:'[lazybox] npm run dev → running in the background as command cmd-dev'}});
+ push(-120000,{type:'tool_activity',data:{type:'tool_call',id:'toolu_test',name:'Bash',status:'running',input:{command:'node --test suite.js'}}});
+ await expect(bar.locator('.live-bar-code')).toHaveText('node --test suite.js');
+ await expect(bar.getByRole('note')).toHaveCount(0);
+ live({type:'tool_activity',data:{type:'tool_call',id:'toolu_test',status:'completed'}});
  live({type:'tool_activity',data:{type:'tool_call',id:'toolu_tail',name:'Bash',status:'running',input:{command:'tail -f log/development.log'}}});
- await expect(bar.getByRole('note')).toHaveText('This command may never end. Interrupt the turn and ask Claude to start it with lazybox run — it moves servers to the background.');
+ await expect(bar.getByRole('note')).toHaveText('This looks like a server or watcher. To keep it running while Claude continues, start it with lazybox run.');
  await bar.getByRole('button',{name:/View command output:/}).click();
  const activity=page.getByRole('dialog',{name:'Tools and activity'});
  await expect(activity.getByText('Waiting for the result…',{exact:true})).toBeVisible();

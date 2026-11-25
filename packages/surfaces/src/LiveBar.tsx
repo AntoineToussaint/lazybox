@@ -147,7 +147,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
   if (!rootBusy) return withNotice(<div className="live-bar" data-only="background"><SubagentTray live={live} rootBusy={false}/></div>);
 
   const detail = managed && (!step || isManagedCommandTool(step.name) || !stepDetail(step).code)
-    ? { ...commandParts(managed.argv.length ? managed.argv.join(' ') : managed.title), full: managed.argv.join(' ') || managed.title }
+    ? { ...commandParts(managed.argv.length ? managed.argv : managed.title), full: managed.argv.join(' ') || managed.title }
     : step ? stepDetail(step) : {};
   const openOutput = managed && onOpenCommand ? () => openInConsole(managed.id) : step ? () => openToolDetails(step.id, sessionID) : undefined;
   const startedAt = step?.startedAt ?? (managed ? seen.current.get(managed.id) : undefined);
@@ -170,7 +170,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
     } catch (e) { setError(`Could not move it to the background: ${humanError(e)}`); setMoving(''); }
   };
   // The agent's own shell step (not `lazybox run`) that may never end: only interrupting the turn ends the wait.
-  const neverEnds = !managed && !!step && !isManagedCommandTool(step.name) && mayNeverEnd(detail.full, startedAt !== undefined ? now - startedAt : 0);
+  const neverEnds = !managed && !!step && !isManagedCommandTool(step.name) && mayNeverEnd(detail.full);
   // The bar's buttons, and copying what runs, on a right-click.
   const menu = contextMenu('live-bar', () => [
     canMove && { label: 'Move to background', icon: 'collapse', disabled: moving === managed!.id && 'Moving…', run: () => moveToBackground() },
@@ -220,7 +220,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
         onKeyDown={event => { if (event.key === 'Escape' && expanded) { event.stopPropagation(); expand(false); } }}>{lines.length ? <LogTail text={tail} count={expanded ? 40 : 3} actions={tailActions}/> : <span className="live-bar-quiet">No output yet.</span>}</pre>
       <button type="button" className="icon-button live-bar-hide" aria-label="Hide output" title="Hide the output here. The command keeps running; Show output brings it back." onClick={() => showOutput(false)}><Icon name="close" size={12}/></button>
     </div>}
-    {neverEnds && <p className="live-bar-hint" role="note"><Icon name="alert" size={12}/><span>This command may never end. Interrupt the turn and ask {agentLabel(session)} to start it with <code>lazybox run</code> — it moves servers to the background.</span></p>}
+    {neverEnds && <p className="live-bar-hint" role="note"><Icon name="alert" size={12}/><span>This looks like a server or watcher. To keep it running while {agentLabel(session)} continues, start it with <code>lazybox run</code>.</span></p>}
     {movedNotice}
     {error && <p className="live-bar-error" role="alert">{error}</p>}
     {background > 0 && <SubagentTray live={live} rootBusy={false}/>}

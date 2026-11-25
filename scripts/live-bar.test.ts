@@ -2,7 +2,7 @@ import { create } from '@bufbuild/protobuf';
 import { CommandStatusSchema, JournalEventSchema, type JournalEvent } from '@lazybox/protocol';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { commandParts, LONG_STEP_MS, mayNeverEnd, offersBackground, outputLines, QUIET_MS, rootStep, runningCommand, stepDetail } from '../packages/surfaces/src/live-step.ts';
+import { commandParts, mayNeverEnd, offersBackground, outputLines, QUIET_MS, rootStep, runningCommand, stepDetail } from '../packages/surfaces/src/live-step.ts';
 
 let cursor = 0n;
 const record = (type: string, data?: unknown, extra: Record<string, string> = {}): JournalEvent => create(JournalEventSchema, {
@@ -50,15 +50,18 @@ test('Move to background: a following lazybox run that listens, looks like a ser
   assert.equal(offersBackground(run({}), QUIET_MS), true, 'and output quiet for a while');
   assert.equal(offersBackground(run({ canBackground: false, ports: [3000] }), QUIET_MS), false, 'only a run whose CLI follows the Runner can move');
   assert.equal(offersBackground(run({ background: true, ports: [3000] }), QUIET_MS), false);
-  // The agent's own shell step: a server, or a step that has run long, may never end; a lazybox run has its own bar.
-  assert.equal(mayNeverEnd('npm run dev', 0), true);
-  assert.equal(mayNeverEnd('go test ./...', 5000), false);
-  assert.equal(mayNeverEnd('go test ./...', LONG_STEP_MS), true);
-  assert.equal(mayNeverEnd('lazybox run -- npm run dev', LONG_STEP_MS), false);
+  // The agent's own shell step: a server may never end; a lazybox run has its own bar.
+  assert.equal(mayNeverEnd('npm run dev'), true);
+  assert.equal(mayNeverEnd('go test ./...'), false);
+  const wrapped = "/bin/zsh -lc 'lazybox run --wait -- /tmp/heavy/slot.sh env FLAG=true node --test suite'";
+  assert.deepEqual(commandParts(wrapped), { code: '/tmp/heavy/slot.sh env FLAG=true node --test suite', where: undefined });
+  assert.equal(mayNeverEnd(wrapped), false);
+  assert.equal(mayNeverEnd('lazybox run -- npm run dev'), false);
   // However the agent calls the CLI: by its full path, or through $LAZYBOX_V2_CLI when another lazybox shadows it.
   for (const cli of ['/Applications/Lazybox.app/Contents/Resources/runtime/bin/lazybox', '"$LAZYBOX_V2_CLI"', '${LAZYBOX_V2_CLI}', '"/Users/me/Library/Application Support/Lazybox/bin/lazybox"'])
-    assert.equal(mayNeverEnd(`${cli} run -- npm run dev`, LONG_STEP_MS), false, cli);
-  assert.equal(mayNeverEnd('/usr/local/bin/notlazybox run -- go test', LONG_STEP_MS), true, 'only lazybox itself has its own bar');
+    assert.equal(mayNeverEnd(`${cli} run -- npm run dev`), false, cli);
+  assert.equal(commandParts('/usr/local/bin/notlazybox run -- npm run dev').code, '/usr/local/bin/notlazybox run -- npm run dev');
+  assert.equal(commandParts(['/bin/zsh', '-lc', 'lazybox run --title "test suite" -- node --test']).code, 'node --test');
 });
 
 test('output reads as lines: colour codes gone, redraws resolved', () => {

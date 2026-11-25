@@ -283,8 +283,10 @@ the agent goes on.
   like a server, or has been quiet for 20 seconds) offers **Move to
   background**: the agent's turn goes on and the command keeps running, in
   Command output and Processes. Agents' `lazybox run` does this by itself after
-  20 seconds. For the agent's own shell step that may never end, the bar
-  suggests interrupting and asking it to use `lazybox run`.
+  20 seconds by default. A bare `--wait` keeps the command in the foreground until it exits.
+  The live bar shows the inner command and keeps the full
+  invocation in its tooltip. It suggests `lazybox run` for recognizable foreground
+  servers and watchers. Long builds and tests can continue quietly.
 - **What Lazybox tells the agent** is an event, never a message from you: one
   line with an icon — *Added authority to this workspace* `feature/revenge`
   (its path on hover and behind the copy button), *Codex review · 3 findings

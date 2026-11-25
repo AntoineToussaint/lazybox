@@ -1,6 +1,7 @@
-# Pull requests run the fast Linux profile. Main, release gates and manual
-# full runs retain native macOS, the complete Go suites, race checks and
-# the full Playwright matrix. See RELEASE_GATES.md for coverage by profile.
+# Pull requests run the fast Linux profile: every unit suite, including the
+# Go tests, and the smoke UI gates. Main, release gates and manual full runs
+# add native macOS, race checks and the full Playwright matrix. See
+# RELEASE_GATES.md for coverage by profile.
 
 name: CI
 
@@ -132,7 +133,6 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - name: Install verification isolation
-        if: needs.plan.outputs.profile == 'full'
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap apparmor-profiles
@@ -142,12 +142,10 @@ jobs:
           sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
           bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev -- true
       - name: Install tmux
-        if: needs.plan.outputs.profile == 'full'
         run: command -v tmux || { sudo apt-get update && sudo apt-get install -y tmux; }
       # A user manager for this account, as a Linux host running the Runner
       # as a service has (lingering), so systemd-run --user --scope works.
       - name: Start a systemd user manager
-        if: needs.plan.outputs.profile == 'full'
         run: |
           sudo loginctl enable-linger "$USER"
           uid="$(id -u)"
@@ -161,8 +159,10 @@ jobs:
         run: echo "GO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
       - name: Format and vet
         run: make fmt-check check-go GOMAXPROCS="$GO_BUILD_JOBS"
+      # Both profiles, with the sandbox, tmux and user manager the tests need:
+      # a pull request whose Go tests never ran once merged a broken briefing
+      # pin (#154), and main was red until the next fix.
       - name: Test (GOMAXPROCS = cores)
-        if: needs.plan.outputs.profile == 'full'
         run: make test GOMAXPROCS="$GO_BUILD_JOBS"
       - name: Race-check the restart packages (GOMAXPROCS=1)
         if: needs.plan.outputs.profile == 'full'

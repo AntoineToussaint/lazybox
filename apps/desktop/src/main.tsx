@@ -1,3 +1,4 @@
+import { installDesktopWindowOpen } from './window-open';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { invoke } from '@tauri-apps/api/core';
@@ -327,7 +328,7 @@ function DesktopApp() {
 // in a Web panel), never inside the app's own page: chat messages, artifacts,
 // PR and check links, Markdown anywhere. See web-links.ts.
 installLinkRouting(openLink);
-window.open = ((url?: string | URL) => { const href = String(url || ''); if (/^(https?:|mailto:)/i.test(href)) void invoke('open_link', { url: href }).catch(error => console.error('Could not open link', error)); return null; }) as typeof window.open;
+installDesktopWindowOpen(url => invoke<void>('open_link', { url }));
 // Context menus reveal workspace files in Finder; a development build opens
 // the inspector from them (Alt+right-click also shows WebKit's own menu).
 configureContextMenus({

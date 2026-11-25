@@ -4,6 +4,7 @@
 // where the panel's page area is, under every layout, and checks that the view
 // is hidden whenever something of the app's own is over it.
 import React from 'react';
+import { installDesktopWindowOpen } from '../../../apps/desktop/src/window-open';
 import { createRoot } from 'react-dom/client';
 import type { NativeWebViews, WebViewEvent, WebViewFrame } from '@lazybox/platform';
 import { WindowErrorBoundary, Workspace, installLinkRouting } from '@lazybox/surfaces';
@@ -34,6 +35,7 @@ const reclaimed: string[] = [];
 (window as unknown as { reclaimedPopouts: string[] }).reclaimedPopouts = reclaimed;
 
 installLinkRouting();
+installDesktopWindowOpen(async () => {});
 const token = new URLSearchParams(location.hash.slice(1)).get('token') || '';
 const initial = new URLSearchParams(location.search);
 const viewState = { key: 'fixture:main', scope: 'fixture', root: 'fixture', getItem: (key: string) => localStorage.getItem(key), setItem: (key: string, value: string) => localStorage.setItem(key, value) };

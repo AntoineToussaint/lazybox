@@ -85,3 +85,21 @@ test('a gate server neither watches nor hot reloads', async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('listening warms the app: every module index.html loads is transformed before a page asks', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'lazybox-warm-'));
+  try {
+    await writeFile(join(root, 'index.html'), '<!doctype html><script type="module" src="/main.js"></script>');
+    await writeFile(join(root, 'main.js'), "import { two } from './two.js';\nconsole.log(two);\n");
+    await writeFile(join(root, 'two.js'), "import { three } from './three.js';\nexport const two = three + 1;\n");
+    await writeFile(join(root, 'three.js'), 'export const three = 3;\n');
+    const server = await createServer({ root, configFile: false, logLevel: 'silent', cacheDir: join(root, '.vite'), server: { host: '127.0.0.1', port: 0 } });
+    try {
+      await server.listen();
+      const graph = server.environments.client.moduleGraph;
+      for (const url of ['/main.js', '/two.js', '/three.js']) {
+        assert.ok((await graph.getModuleByUrl(url))?.transformResult, `${url} transformed before any page asked for it`);
+      }
+    } finally { await server.close(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

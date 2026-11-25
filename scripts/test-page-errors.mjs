@@ -146,8 +146,9 @@ try {
       // loads. A verdict and a drain still come: a channel the blank document made never
       // delivered in WebKit, so a drain over a popup waited forever and a handled error there
       // was never withdrawn (the reattach gate hung at its drain).
-      await popup.evaluate(()=>{window.addEventListener('error',event=>{if(String(event.error).includes('handled in the popup'))event.preventDefault();});setTimeout(()=>{throw new Error('handled in the popup');},0);});
-      const drained=await Promise.race([drainPageErrors(pooled).then(()=>'drained'),new Promise(resolve=>setTimeout(()=>resolve('still waiting after 5 s'),5000))]);
+      // The throw has happened before the drain starts: the drain cannot overtake it.
+      await popup.evaluate(()=>{window.addEventListener('error',event=>{if(String(event.error).includes('handled in the popup'))event.preventDefault();});setTimeout(()=>{throw new Error('handled in the popup');},0);return new Promise(resolve=>setTimeout(resolve,0));});
+      let timer;const drained=await Promise.race([drainPageErrors(pooled).then(()=>'drained'),new Promise(resolve=>{timer=setTimeout(()=>resolve('still waiting after 5 s'),5000);})]).finally(()=>clearTimeout(timer));
       assert.equal(drained,'drained','a drain over a popup finishes');
       assert.deepEqual([...pooled].sort(),['ctx: Error: main error','ctx: Error: popup error'],'an error the popup handled is withdrawn');
       await assert.rejects(collectContextPageErrors(context),/already has pages/);

@@ -57,7 +57,7 @@ type AgentRecord = { messageId: string; script: string; inline: boolean; queued:
 type SelfRecord = { messageId: string; script: string; inline: boolean; commandId: string; cwd: string; action?: string };
 /** A command in a shell of the Terminal panel: waiting for the shell, then running (or typed, waiting for Return), then finished (the shell's mark), then told to the agent. */
 type TerminalState = 'starting' | 'running' | 'typed' | 'finished';
-type TerminalRecord = { output?: string; reportId?: string; reporting?: boolean; messageId: string; script: string; typed: string; where: string; state: TerminalState; exitCode?: number; told?: boolean };
+type TerminalRecord = { reportId?: string; reporting?: boolean; messageId: string; script: string; typed: string; where: string; state: TerminalState; exitCode?: number; told?: boolean };
 type Memory = { agent: AgentRecord[]; self: SelfRecord[]; terminal: TerminalRecord[] };
 /** What was run from each conversation, kept while the app runs so a remounted chat still shows it. */
 const memory = new Map<string, Memory>();
@@ -350,9 +350,7 @@ export class CodeRuns {
         this.emit();
       },
       onLost: () => { this.memory.terminal = this.memory.terminal.filter(run => run !== record); this.emit(); ended?.(); },
-      includeFailureOutput: true,
-      onEnd: (status, output) => {
-        record.output = output;
+      onEnd: status => {
         record.state = 'finished'; record.exitCode = status;
         if (record.reportId) void this.reportTerminalRun(record);
         else this.emit();
@@ -374,7 +372,7 @@ export class CodeRuns {
     if (run.state !== 'finished' || run.told || run.reporting || !this.actions) return;
     run.reporting = true; this.emit();
     try {
-      const how = await this.actions.send([doneMessage(run.typed, run.exitCode), run.output].filter(Boolean).join('\n\n'), run.reportId);
+      const how = await this.actions.send(doneMessage(run.typed, run.exitCode), run.reportId);
       if (how === 'sent') { run.told = true; showMenuNotice(`Told ${this.agentName}`); }
     } catch (error) { showMenuNotice(`Could not send: ${String(error instanceof Error ? error.message : error)}`); }
     finally { run.reporting = false; this.emit(); }

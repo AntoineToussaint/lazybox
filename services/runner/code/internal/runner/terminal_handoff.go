@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 )
 
 type terminalHandoff struct {
+	executionID       string
 	mu                sync.Mutex
 	decided           chan struct{}
 	ctx               context.Context
@@ -50,7 +52,7 @@ func (b *Bench) requestTerminalHandoff(ctx context.Context, e *Execution, argv [
 	defer cancel()
 	id := rand.Text()
 	h := &terminalHandoff{
-		decided: make(chan struct{}), ctx: approval, collectionID: e.CollectionID,
+		executionID: e.ID, decided: make(chan struct{}), ctx: approval, collectionID: e.CollectionID,
 		cwd: dir, argv: argv, env: terminals.Environment(env, e.CollectionID),
 	}
 	if agentInput {
@@ -109,6 +111,25 @@ func (b *Bench) requestTerminalHandoff(ctx context.Context, e *Execution, argv [
 		Signal   string `json:"signal,omitempty"`
 		Error    string `json:"error,omitempty"`
 	}{result.ExitCode, result.Signal, result.Error}, nil
+}
+
+// PendingTerminalHandoffs supplies live approval IDs for inbox and notification
+// snapshots. The command and its arguments stay in the conversation.
+func (b *Bench) PendingTerminalHandoffs(e *Execution) []string {
+	var ids []string
+	b.terminalHandoffs.Range(func(key, value any) bool {
+		h := value.(*terminalHandoff)
+		if h.executionID == e.ID {
+			h.mu.Lock()
+			if h.terminal == nil && !h.rejected && h.ctx.Err() == nil {
+				ids = append(ids, key.(string))
+			}
+			h.mu.Unlock()
+		}
+		return true
+	})
+	sort.Strings(ids)
+	return ids
 }
 
 // DecideTerminalHandoff is called by the owner after reviewing the proposed

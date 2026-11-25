@@ -95,6 +95,7 @@ const settingsTool = (tool: string) => tool === 'mcp__lazybox_settings__update_s
 /** Pure: the card a pending request shows in the conversation. */
 export function requestView(request: AgentEvent): RequestView {
   const requestId = request.requestId;
+  if (request.type === 'terminal_handoff') return { kind: 'elsewhere', requestId, text: 'Review and run the interactive command on your computer.' };
   if (request.type === 'repository_request') return { kind: 'elsewhere', requestId, text: 'The agent asks to add a repository. Add it or decline on your computer.' };
   if (request.type === 'browser_request') return { kind: 'elsewhere', requestId, text: 'The agent’s browser waits for you. Answer on your computer.' };
   if (request.type === 'conversation_request') return { kind: 'elsewhere', requestId, text: 'The agent asks to start another conversation. Answer on your computer.' };

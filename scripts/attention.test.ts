@@ -174,3 +174,15 @@ test('rows read well: last line and age', () => {
   assert.equal(ageLabel(1, 3 * 3_600_000), '3h');
   assert.equal(ageLabel(1, 2 * 86_400_000), '2d');
 });
+
+test('a live terminal handoff raises an approval notice once, and clears on expiry', () => {
+  const idle = deriveAttention(session('s', { busy: true }));
+  const pending = create(AgentEventSchema, { type: 'terminal_handoff', requestId: 'tty-1' });
+  const waiting = deriveAttention(session('s', { busy: true, pending: [pending] }));
+  assert.equal(waiting.state, 'needs-input');
+  const notice = noticeFor(idle, waiting, defaultNotificationPreferences, false);
+  assert.equal(notice?.speech?.requestId, 'tty-1');
+  assert.equal(notice?.body, 'Review the interactive command in the conversation.');
+  assert.equal(noticeFor(waiting, waiting, defaultNotificationPreferences, false), undefined);
+  assert.equal(noticeFor(waiting, idle, defaultNotificationPreferences, false), undefined);
+});

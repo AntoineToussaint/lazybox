@@ -167,5 +167,17 @@ test('panels are never crushed: too narrow, the rightmost side-by-side panels be
   assert.ok(minimumWidth(narrow, 280) <= 700);
   assert.equal(narrow?.type === 'split' && narrow.children.length, 2);
   assert.equal(panels(narrow).length, panels(layout).length);
+  assert.equal(fitWidth(narrow, 400, 280), narrow, 'an irreducible layout is already settled');
   assert.doesNotThrow(() => parseLayout(JSON.stringify({ version: 2, selectedPage: 'work', pages: [{ ...work(), layout: narrow }] })));
+});
+
+test('fitting Web beside Artifacts keeps the requested tab across successive merges', () => {
+  let layout = work().layout;
+  for (const kind of ['artifacts', 'web']) {
+    layout = insertDocked(layout, { id: kind, kind, binding: { mode: 'follow' }, detached: false }, kind === 'web' ? 'left' : 'right');
+  }
+  const fitted = fitWidth(layout, 700, 280, 'web');
+  const group = groups(fitted).find(group => group.panels.some(panel => panel.id === 'web'));
+  assert.ok(group?.panels.some(panel => panel.id === 'artifacts'));
+  assert.equal(group.active, 'web');
 });

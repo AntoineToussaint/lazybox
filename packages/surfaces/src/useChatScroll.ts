@@ -108,7 +108,7 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  const loadEarlier=useCallback((pane:HTMLDivElement|null)=>{
   if(!hidden.current||prependHeight.current!==undefined)return;
   const {messages,end,visibleMessages}=range.current;
-  const start=Math.max(0,end-visibleMessages-EARLIER_MESSAGES);
+  const start=Math.max(0,end-(following.current?Math.min(limit,visibleMessages+EARLIER_MESSAGES):visibleMessages+EARLIER_MESSAGES));
   prependHeight.current=pane?.scrollHeight;
   if(pane)capture(pane);
   const nextEnd=Math.min(end,start+limit);
@@ -117,7 +117,9 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   setEndId(following.current?'':messages[nextEnd-1]?.id||'');setVisibleMessages(nextEnd-start);
  },[reader,setFollowing]);
  // Within a screen of the top, the next step of history is mounted before the reader reaches it.
- const nearTop=(pane:HTMLDivElement)=>hidden.current>0&&pane.scrollTop<Math.max(400,pane.clientHeight);
+ const nearTop=(pane:HTMLDivElement)=>hidden.current>0&&(following.current
+  ? pane.scrollHeight<=pane.clientHeight+1&&range.current.visibleMessages<limit
+  : pane.scrollTop<Math.max(400,pane.clientHeight));
  useLayoutEffect(()=>{
   following.current=reader.view.following;setFollowingLatest(reader.view.following);setVisibleMessages(reader.view.visibleMessages);setEndId(reader.view.endId);
   const pane=paneRef.current,content=contentRef.current;if(!pane||!content)return;
@@ -181,7 +183,7 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  useLayoutEffect(()=>{
   const pane=paneRef.current;if(!pane)return;
   if(pinAfterTrim.current){pinAfterTrim.current=false;if(following.current)pin(pane);}
-  else if(prependHeight.current!==undefined){if(anchor.current?.node.isConnected)restore(pane);else place(pane,pane.scrollTop+pane.scrollHeight-prependHeight.current);prependHeight.current=undefined;measure(pane);capture(pane);}
+  else if(prependHeight.current!==undefined){if(following.current)pin(pane);else if(anchor.current?.node.isConnected)restore(pane);else place(pane,pane.scrollTop+pane.scrollHeight-prependHeight.current);prependHeight.current=undefined;measure(pane);capture(pane);}
   else if(following.current)follow(pane);
   reader.view.visibleMessages=visibleMessages;reader.view.endId=endId;
   if(reveal.current&&revealNow())return;

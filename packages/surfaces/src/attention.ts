@@ -90,6 +90,7 @@ export function lastLine(text: string, limit = 160): string {
 }
 
 export function requestSummary(request: AgentEvent): string {
+  if (request.type === 'terminal_handoff') return 'Review the interactive command in the conversation.';
   if (request.type === 'repository_request') return lastLine(repositoryRequestSummary(request));
   if (request.type === 'browser_request') return lastLine(browserRequestSummary(request));
   if (request.type === 'conversation_request') return lastLine(startRequestSummary(request));

@@ -72,6 +72,10 @@ test('showing a panel docks it once where its kind goes, and brings it forward w
   const again = showPanel(tabbed, 'terminal', 'left', id);
   assert.equal(again.added, false); assert.equal(again.id, opened.id);
   assert.equal(shownPanels(again.page).filter(panel => panel.kind === 'terminal').length, 1);
+  const extension = showPanel(page, 'extension', 'right', id);
+  const second = showPanel(extension.page, 'extension', 'right', id, true);
+  assert.notEqual(second.id, extension.id);
+  assert.equal(shownPanels(second.page).filter(panel => panel.kind === 'extension').length, 2);
   // A minimized group is restored.
   const output = panels(page.layout).find(panel => panel.kind === 'console')!;
   assert.equal(groups(showPanel(page, 'console', 'bottom', id).page.layout).find(group => group.panels.includes(output))!.minimized, false);

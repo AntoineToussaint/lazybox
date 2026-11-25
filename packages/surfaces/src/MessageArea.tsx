@@ -56,6 +56,10 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
   detail?: ActivityDetail;
 }) {
   const conversation = transcript.messages;
+  const terminalRequest = session?.pending.find(request => request.type === 'terminal_handoff');
+  const approvalMessage = terminalRequest && !scroll.followingLatest
+    ? conversation.findLast(message => message.terminalHandoff?.id === terminalRequest.requestId)
+    : undefined;
   // Artifact actions on agent messages, and "Open source message" from an artifact.
   const artifactScope = useMemo(() => session?.collectionId ? { collectionId: session.collectionId, sessionId: sessionID, conversationId: session.conversationId } : undefined, [session?.collectionId, session?.conversationId, sessionID]);
   // A file an agent named is tracked from its link, as from the Files tree.
@@ -100,9 +104,12 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
           {subscription}
         </div>
       </div>
+      {!scroll.followingLatest && conversation.length > 0 && <div className="chat-scroll-actions">
+        {approvalMessage && <button onClick={() => scroll.revealMessage(approvalMessage.id)}>Review terminal request</button>}
+        <button className="jump-to-latest" onClick={scroll.jumpToLatest}>Jump to latest</button>
+      </div>}
     </div>
     {fileTracking.element}
-    {!scroll.followingLatest && conversation.length > 0 && <button className="jump-to-latest" onClick={scroll.jumpToLatest}>Jump to latest</button>}
   </>;
 }
 
@@ -137,7 +144,9 @@ function EmptyConversation({ agentName }: { agentName: string }) {
 
 /** Questions and approvals the agent waits on, answered in place. */
 function PendingRequests({ api, session, sessionID, agentName, onError, enableFullAccess }: { api: RunnerClient; enableFullAccess?(exitPlanRequestId?: string): Promise<boolean>; session?: Session; sessionID: string; agentName: string; onError(message: string): void }) {
-  const count = session?.pending.length || 0;
-  return <>{session?.pending.map((p, index) => <RequestCard workspace={session.collectionId} enableFullAccess={session.workflow !== 'plan' ? enableFullAccess :
+  // Terminal handoffs have a dedicated transcript card and decision RPC.
+  const pending = session?.pending.filter(request => request.type !== 'terminal_handoff');
+  const count = pending?.length || 0;
+  return <>{session && pending?.map((p, index) => <RequestCard workspace={session.collectionId} enableFullAccess={session.workflow !== 'plan' ? enableFullAccess :
     enableFullAccess && session.provider === 'claude' && p.type === 'approval' && p.text === 'ExitPlanMode' && (!p.agentId || p.agentId === 'root') ? () => enableFullAccess(p.requestId) : undefined} key={p.requestId} request={p} api={api} session={sessionID} onError={onError} root={session.workingDirectory} agentName={agentName} position={{ index, count }}/>)}</>;
 }

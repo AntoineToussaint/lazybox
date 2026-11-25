@@ -1215,6 +1215,9 @@ func (s *Service) sessionView(ctx context.Context, e *runner.Execution) (*pb.Ses
 	// An agent's request for a repository waits for the person like an
 	// approval does: in the conversation and in the inbox.
 	if !view.Closed {
+		for _, id := range s.Bench.PendingTerminalHandoffs(e) {
+			view.Pending = append(view.Pending, &pb.AgentEvent{Type: "terminal_handoff", RequestId: id, Text: "Run an interactive command"})
+		}
 		for _, r := range s.Bench.PendingRepositoryRequests(e) {
 			view.Pending = append(view.Pending, repositoryRequestEvent(r))
 		}

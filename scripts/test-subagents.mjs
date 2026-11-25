@@ -26,6 +26,13 @@ const spawn=(offset,id,toolUse,description,type,prompt,parent='root',extra={})=>
 push(-300000,{type:'operation_accepted',text:'Why are sub-agents invisible in the chat? Investigate end to end.'});
 push(-299000,{type:'turn_started'});
 push(-298000,{type:'message_delta',text:'I will split this: one agent maps the transcript, one audits the worker, and I will rerun the flaky test.'});
+// A retained command child can arrive without its original tool call.
+for(const id of ['one','two','three']){
+ const agentId='attempt-1:claude-tool:managed-'+id;
+ push(-297000,{type:'agent_status',agentId,status:'running',agentKind:'command',name:'command'});
+ push(-296000,{type:'activity',agentId,status:'working'});
+ push(-295000,{type:'agent_status',agentId,status:'unknown'});
+}
 // A long run that already finished, with hundreds of steps and a result.
 spawn(-290000,E,'toolu_long','Survey every adapter','general-purpose','Read every adapter under internal/runner/adapters and list what each forwards.');
 for(let i=0;i<160;i++){push(-289000+i*500,{type:'tool_activity',agentId:E,data:call('e'+i,i%3?'Read':'Bash','running',{input:i%3?{file_path:`services/runner/code/internal/runner/adapters/file${i}.go`}:{command:`rg -n parent_tool_use_id adapters/file${i}.go`}})});push(-288800+i*500,{type:'tool_activity',agentId:E,data:call('e'+i,undefined,'completed',{output:`line ${i}\n`.repeat(40)})});if(i%20===0)push(-288700+i*500,{type:'message_delta',agentId:E,text:`Step ${i}: the adapter forwards tool calls but drops sub-agent prose.`});}
@@ -195,6 +202,7 @@ try{
  const bgChip=tray.locator('.subagent-chip.command');
  await expect(bgChip).toHaveText(/^pytest tests\/test_mcp\.py\d/);
  await expect(tray).not.toContainText('source .venv');
+ await expect(messages.locator('.subagent-card[data-agent-id*="claude-tool:managed-"]')).toHaveCount(0);
  await expect(messages.locator('.subagent-card[data-agent-id="claude-tool:toolu_bg"]')).toHaveCount(0);
  await expect(tray.locator('.subagent-chip').nth(1)).toContainText('Audit worker events');
  await expect(tray.locator('.subagent-chip').nth(1).locator('.subagent-chip-nested')).toHaveText('+1');
@@ -318,6 +326,8 @@ try{
  assert.equal(f.mutations.findLast(m=>m.method==='Apply'&&m.body.stopAgent).body.stopAgent.agentId,B);
  await expect(card(B).getByRole('button',{name:/^Stopping sub-agent/})).toBeVisible();
  // A stop the Runner answers "not running": the card ends at once, quietly; no raw error anywhere.
+ const latest=chat.getByRole('button',{name:'Jump to latest',exact:true});
+ if(await latest.isVisible())await latest.click();
  const G='claude-tool:toolu_gone';
  push(40,{type:'tool_activity',data:call('toolu_gone','Task','running',{input:{description:'Count the call sites',prompt:'Count them.'}})});
  push(50,{type:'tool_activity',agentId:G,data:call('g1','Grep','running',{input:{pattern:'stopAgent'}})});
@@ -347,6 +357,7 @@ try{
  // The turn ends under work nobody reported the end of. A foreground sub-agent left "running" ends
  // without a report: no spinner, its clock frozen at its last step. A forked skill whose call was
  // stopped (Claude's "doesn't want to proceed") is stopped, and its line says so quietly.
+ if(await latest.isVisible())await latest.click();
  const F='claude-tool:toolu_fg',SK='attempt-0:claude-tool:toolu_fork';
  const REJECTED="The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
  push(60,{type:'tool_activity',data:call('toolu_fg','Task','running',{input:{description:'Trace the stale timer',prompt:'Find why the clock grows.'}})});
@@ -368,6 +379,8 @@ try{
  const fork=messages.locator('.subagent-card').filter({hasText:'code-review'});
  await expect(fork).toHaveAttribute('data-status','stopped');
  await expect(fork.locator('.subagent-who')).toHaveText('skill · code-review');
+ // Inspect the individual call behind the quiet turn summary.
+ await messages.getByLabel('Response detail for this prompt').first().selectOption('verbose');
  const skillLine=chat.locator('.tool-line[data-tool-id="toolu_fork"]');
  await expect(skillLine).toHaveAttribute('data-state','stopped');
  await expect(skillLine.locator('.tool-line-stopped')).toHaveText('Stopped');

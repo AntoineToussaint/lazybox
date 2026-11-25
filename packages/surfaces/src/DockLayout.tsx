@@ -90,6 +90,8 @@ type Props = {
   /** What closing it does, for its × ("Close Changes page" when it is the last panel of a page that goes with it). */
   closeLabel?(panel: Panel, title: string): string;
   sidebarWidth: number;
+  /** An explicit navigation still being applied when panels must fit as tabs. */
+  requestedPanel: React.RefObject<string>;
   onSidebarWidth(width: number): void;
   /** The person rearranged the dock: drag, drop, resize, tab switch, float, pop out. */
   onArrange(next: Arranged): void;
@@ -287,7 +289,7 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
   /** Brings dockview to the saved arrangement, in place where it can. */
   /** Panels that would be crushed below their minimum width become tabs instead (reported, then drawn). */
   const fits = () => {
-    const page = latest.current.page, fitted = fitWidth(page.layout, size.current.width, latest.current.sidebarWidth);
+    const page = latest.current.page, fitted = fitWidth(page.layout, size.current.width, latest.current.sidebarWidth, latest.current.requestedPanel.current);
     if (fitted === page.layout || latest.current.locked) return true;
     latest.current.onArrange({ layout: fitted, floating: page.floating, popouts: page.popouts });
     return false;

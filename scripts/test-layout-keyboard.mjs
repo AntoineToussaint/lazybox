@@ -297,6 +297,10 @@ async function scenario(browser,scheme){
  await composer.click();
  await key('Meta+\\');
  await expect(page.locator('.panels-menu .action-menu-heading')).toHaveText('Open beside Agent chat');
+ await page.getByRole('button',{name:'Focus Agent chat'}).click();
+ await expect(page.locator('.dock-tab[data-kind="chat"]')).toHaveCount(1);
+ await composer.click();
+ await key('Meta+\\');
  await page.getByRole('button',{name:'Show Files'}).click();
  await expect.poll(async()=>{const c=await content('chat').boundingBox(),f=await content('files').boundingBox();return !!c&&!!f&&f.x>=c.x+c.width-4&&Math.abs(f.y-c.y)<4;},{message:'Files opened beside the chat'}).toBe(true);
  const filesGroup=page.locator('.dv-groupview').filter({has:tab('files')});

@@ -549,6 +549,8 @@ how you arrange it:
   the preview tab, or make a regular tab the preview tab), Dock left / right / top / bottom (the keyboard way to move a
   panel to an edge of the content area), Close other tabs, Close tabs to the
   right, Close.
+- Opening a panel brings its tab forward, including when the window is too narrow
+  to show it beside existing panels or another group is maximized.
 - **×** on a tab closes the panel. Every panel can be closed; **Panels** in the
   workspace header lists every kind, focuses one that is shown and reopens a
   closed one where its kind was last docked. ⌘\ splits the active panel: a
@@ -1006,7 +1008,9 @@ event buffer. It renders the latest 40 messages initially; **Show earlier messag
 reveals retained messages while preserving the reading position. Scrolling through
 history moves a bounded window of rows in either direction. A jump to an old
 prompt mounts the rows around that prompt. Incoming output
-only scrolls when already following the bottom; **Jump to latest** resumes following.
+only scrolls when already following the bottom. **Jump to latest** floats over the
+transcript. Sending a message or choosing **Jump to latest** keeps the newest
+turn visible as the reply arrives.
 Replay gaps and terminal stream errors appear in the chat with **Retry conversation**.
 They never masquerade as a new, empty conversation.
 

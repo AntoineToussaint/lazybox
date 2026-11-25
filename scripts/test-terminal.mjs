@@ -229,16 +229,41 @@ try {
  const handoff={type:'terminal_handoff',status:'pending',name:'alpha',text:'/fixture/collections/alpha',providerDataJson:Buffer.from(JSON.stringify(['acme','login','team blue',''])).toString('base64')};
  // Reviewed before it runs: every character visible (an ESC is \e), the folder named from the workspace.
  const reviewed={...handoff,text:'/fixture/collections/alpha/api/scripts',providerDataJson:Buffer.from(JSON.stringify(['acme','login','team blue','','safe\u001b[2Kgone'])).toString('base64')};
+ for(let i=0;i<25;i++){
+  chatEvents.push({type:'operation_accepted',text:'Earlier question '+i});
+  chatEvents.push({type:'message_delta',text:'Earlier answer '+i});
+ }
+ fixture.sessions[0].pending=[{type:'terminal_handoff',requestId:'declined',text:'Run an interactive command'}];
  chatEvents.push({...reviewed,requestId:'declined'});
  const declined=page.getByRole('article',{name:'Interactive command'}).last();
  await expect(declined.locator('pre')).toHaveText("acme login 'team blue' '' $'safe\\e[2Kgone'");
+ const messages=page.locator('.messages:visible');
+ await messages.evaluate(node=>{node.scrollTop=0;node.dispatchEvent(new Event('scroll'));});
+ const reviewTerminal=page.getByRole('button',{name:'Review terminal request'});
+ await expect(reviewTerminal).toBeVisible({timeout:15000});
+ await reviewTerminal.click();
+ await expect(declined.getByRole('button',{name:'Decline',exact:true})).toBeInViewport();
+ await page.getByRole('button',{name:'Jump to latest'}).click();
  const directory=declined.getByText('Working directory · api/scripts');
  await expect(declined.getByText(reviewed.text,{exact:true})).toBeHidden();
  await directory.click();
  await expect(declined.getByText(reviewed.text,{exact:true})).toBeVisible();
  await declined.getByRole('button',{name:'Decline',exact:true}).click();
  await expect(declined).toContainText('Interactive command declined');
+ fixture.sessions[0].pending=[];
  await expect(panel).toHaveCount(0);
+ const longArgv=['fixture-tool',...Array.from({length:80},(_,i)=>'argument-with-a-long-value-'+i)];
+ chatEvents.push({...reviewed,requestId:'expired',providerDataJson:Buffer.from(JSON.stringify(longArgv)).toString('base64')});
+ chatEvents.push({...reviewed,requestId:'expired',status:'expired'});
+ const expired=page.getByRole('article',{name:'Interactive command'}).filter({hasText:'Interactive command request expired'});
+ await expect(expired).toContainText('The command did not run');
+ await expect(expired.locator('pre')).toBeHidden();
+ await expect(expired.getByRole('button',{name:'Show terminal'})).toHaveCount(0);
+ await expired.screenshot({path:'.cache/terminal-request-expired.png'});
+ await expired.getByText('View command',{exact:true}).click();
+ await expect(expired.locator('pre')).toBeVisible();
+ await expect(expired.locator('pre')).toHaveText(longArgv.join(' '));
+ await expect(expired.getByRole('button',{name:'Run and take over'})).toHaveCount(0);
  chatEvents.push({...handoff,requestId:'accepted'});
  const accepted=page.getByRole('article',{name:'Interactive command'}).last();
  await expect(accepted.getByRole('button',{name:'Run and take over'})).toBeVisible();

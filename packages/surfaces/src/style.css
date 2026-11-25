@@ -165,7 +165,7 @@ small{color:var(--text-muted);font-size:calc(11px * var(--text-scale));overflow-
 .file-unsaved span{margin-right:auto}
 .file-preview-dialog>.error{flex:none;margin:8px 16px;font-size:calc(13px * var(--text-scale));max-height:25%;overflow:auto}
 @media(max-width:600px){.file-preview-dialog>[data-dialog-drag-handle]{padding:10px}.file-preview-dialog .file-preview-content{padding:12px}.file-preview-dialog .file-preview-toolbar{padding:6px 10px}}
-.messages{overflow-anchor:none}
+.messages{overflow-anchor:none;overscroll-behavior-y:none}
 .messages-content{display:flow-root;min-width:0;max-width:var(--chat-max-width,none);margin-inline:auto}
 
 .console-state{display:flex;align-items:center;gap:8px}

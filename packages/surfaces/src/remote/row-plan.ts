@@ -45,6 +45,7 @@ const maxChips = 6, maxChipLength = 40;
 export function rowPlan(row: Attention, respond: boolean): RowPlan {
   const request = row.state === 'needs-input' && !row.session.closed ? row.session.pending[0] : undefined;
   if (!request || !respond) return { kind: 'none' };
+  if (request.type === 'terminal_handoff') return { kind: 'elsewhere', request, text: 'Review and run the interactive command on your computer.' };
   if (request.type === 'repository_request') return { kind: 'elsewhere', request, text: 'Add the repository or decline on your computer.' };
   if (request.type === 'browser_request') return { kind: 'elsewhere', request, text: 'The agent’s browser waits for you on your computer.' };
   if (request.type === 'conversation_request') return { kind: 'elsewhere', request, text: 'Open it to start the conversation or deny it.' };

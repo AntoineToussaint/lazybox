@@ -258,6 +258,9 @@ try{
  await expect(fromBeta).toHaveCount(0);
 
  // A Markdown file an agent names is tracked from its link: the artifact follows the file, not the line of chat.
+ // Earlier steps revisit the original reply. Return to live output before opening the new reply's link.
+ const latest=page.getByRole('button',{name:'Jump to latest'});
+ if(await latest.isVisible())await latest.click();
  fixture.artifacts.fileChanged('alpha','docs/PLAN.md','# Rollout plan\n\nShip it in three phases.\n');
  channel.push({type:'operation_accepted',text:'Write the rollout plan to a file'});
  channel.push({type:'message_delta',text:'Wrote `docs/PLAN.md`; the old draft in `src/main.go` and `/elsewhere/missing/NOTES.md` stays.',turnId:'t3'});

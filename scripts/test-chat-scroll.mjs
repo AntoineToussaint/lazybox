@@ -36,8 +36,10 @@ async function run(name,engine){
   const diagram=page.getByRole('img',{name:'Mermaid diagram'});await expect.poll(()=>diagram.evaluate(img=>img.complete&&img.naturalHeight>0)).toBe(true);
   await expect.poll(gap,{message:'Delayed Mermaid layout must reach the actual chat end'}).toBeLessThan(3);
   await expect(page.locator('.chat-heading')).toContainText('claude-reported-model');await expect(page.locator('.chat-heading')).not.toContainText('claude-default');
+  const followedHeight=await pane.evaluate(node=>node.clientHeight);
   // Deliberately read earlier messages, then stream and resize without snapping back.
   await pane.evaluate(node=>{node.scrollTop=200;node.dispatchEvent(new Event('scroll'));});await expect(latest).toBeVisible();
+  assert.equal(await pane.evaluate(node=>node.clientHeight),followedHeight,'Showing Jump to latest must preserve the scroll range');
   const reading=await top();channel.push({type:'message_delta',text:'\n\nMore text while reading earlier.'});await expect(pane).toContainText('More text while reading earlier.');await page.setViewportSize({width:1100,height:750});
   assert.ok(Math.abs((await top())-reading)<3,'stream and layout must preserve intentional reading position');
   await page.locator('.workspace-row').filter({hasText:'Beta release'}).locator('button').first().click();await page.locator('.workspace-row').filter({hasText:'Alpha feature'}).locator('button').first().click();await expect.poll(top).toBe(reading);
@@ -185,6 +187,17 @@ async function run(name,engine){
   await page.getByRole('textbox',{name:'Message',exact:true}).fill('One more thing');await page.getByRole('button',{name:'Send message',exact:true}).click();
   await follows('Sending a message');
   streaming();await streamDone;streaming=undefined;
+  // Quiet activity can leave even a full transcript window shorter than the pane.
+  for(let i=0;i<100;i++){channel.push({type:'operation_accepted',text:'Short prompt '+i});channel.push({type:'message_delta',text:'Short reply '+i});}
+  await expect(pane).toContainText('Short reply 99');
+  const compact=await page.addStyleTag({content:'.messages-content .message:not(:last-of-type){display:none}'});
+  channel.push({type:'operation_accepted',text:'Latest prompt after compact activity'});
+  channel.push({type:'message_delta',text:'FINAL_VISIBLE_LINE'});
+  await expect(pane).toContainText('FINAL_VISIBLE_LINE');
+  await pane.evaluate(async()=>{for(let i=0;i<10;i++)await new Promise(requestAnimationFrame);});
+  await expect(pane).toContainText('FINAL_VISIBLE_LINE');
+  await expect(latest).toBeHidden();
+  await compact.evaluate(node=>node.remove());
   await page.screenshot({path:`/tmp/lazybox-chat-scroll-${name}.png`});
   await drainPageErrors(errors);assert.deepEqual(errors,[]);
   console.log(`PASS ${name}: true bottom after late header, resize and Mermaid; reading held mid-stream against wheel, PageUp, Home, ArrowUp and a scrollbar drag; Latest pill, End, wheel to bottom and send resume following; layout shifts above the viewport keep the reading position.`);

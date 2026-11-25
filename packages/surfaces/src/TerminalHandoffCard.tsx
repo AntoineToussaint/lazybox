@@ -81,8 +81,8 @@ export function TerminalHandoffCard({ handoff, messageId }: { handoff: TerminalH
     {pending ? command : <details className="terminal-handoff-details"><summary>View command</summary>{command}</details>}
     {status === 'pending' && <>
       {handoff.agentInput && <p>The agent can read output and type freely until this command exits. In a shell or interpreter it can run additional commands without asking again.</p>}
-      <button data-terminal-decision={messageId} className="primary" disabled={busy} onClick={() => void decide(true)}>{handoff.agentInput ? 'Run with agent input' : 'Run and take over'}</button>{' '}
-      <button disabled={busy} onClick={() => void decide(false)}>Decline</button>
+      <div data-terminal-decision={messageId}><button className="primary" disabled={busy} onClick={() => void decide(true)}>{handoff.agentInput ? 'Run with agent input' : 'Run and take over'}</button>{' '}
+      <button disabled={busy} onClick={() => void decide(false)}>Decline</button></div>
     </>}
     {terminal && (status === 'running' || status === 'finished') && <button onClick={() => showTerminal(terminal)}>Show terminal</button>}
     {error && <p role="alert">{error}</p>}

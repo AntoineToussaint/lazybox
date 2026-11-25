@@ -252,7 +252,10 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   const decision=node.querySelector('[data-terminal-decision]');
   const header=node.getBoundingClientRect().top-12;
   // Keep the command in view. For a taller card, move just far enough to reach its controls.
-  const top=decision?Math.max(header,decision.getBoundingClientRect().bottom-pane.clientHeight+12):header;
+  const actions=decision && pane.parentElement?.querySelector('.chat-scroll-actions');
+  const paneTop=pane.getBoundingClientRect().top;
+  const available=actions?Math.min(pane.clientHeight,actions.getBoundingClientRect().top-paneTop):pane.clientHeight;
+  const top=decision?Math.max(header,decision.getBoundingClientRect().bottom-available+12):header;
   place(pane,pane.scrollTop+top-pane.getBoundingClientRect().top);measure(pane);capture(pane);reader.view.scrollTop=pane.scrollTop;
   node.classList.remove('message-flash');void node.offsetWidth;node.classList.add('message-flash');
   return true;

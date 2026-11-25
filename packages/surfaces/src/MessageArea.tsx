@@ -70,10 +70,10 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
     const observer = new IntersectionObserver(entries => {
       for (const entry of entries) {
         const id = (entry.target as HTMLElement).dataset.terminalDecision!;
-        if (entry.isIntersecting) visible.add(id); else visible.delete(id);
+        if (entry.intersectionRatio >= 1) visible.add(id); else visible.delete(id);
       }
       setVisibleApprovals([...visible]);
-    }, { root: pane });
+    }, { root: pane, threshold: 1 });
     for (const id of JSON.parse(approvalIds) as (string | null)[]) {
       const control = id && pane.querySelector(`[data-terminal-decision="${CSS.escape(id)}"]`);
       if (control) observer.observe(control);

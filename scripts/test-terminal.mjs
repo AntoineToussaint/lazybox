@@ -255,6 +255,12 @@ try {
  await expect(earlierReview).toBeVisible({timeout:15000});
  await earlierReview.click();
  await expect(declined.locator('pre')).toBeInViewport();
+ for(const button of await declined.locator('[data-terminal-decision] button').all()){
+  await expect.poll(()=>button.evaluate(node=>{
+   const box=node.getBoundingClientRect();
+   return node.contains(document.elementFromPoint(box.x+box.width/2,box.y+box.height/2));
+  })).toBe(true);
+ }
  await expect(declined.getByRole('button',{name:'Decline',exact:true})).toBeInViewport();
  const directory=declined.getByText('Working directory · api/scripts');
  await expect(declined.getByText(reviewed.text,{exact:true})).toBeHidden();

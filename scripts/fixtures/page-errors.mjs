@@ -40,10 +40,13 @@ function installer(binding) {
     // loads (same origin), so the script can run twice on one window.
     const installed = ${JSON.stringify(binding + 'Installed')};
     if (typeof send !== 'function' || window[installed]) return;
-    const later = [];
-    const channel = new MessageChannel();
-    channel.port1.onmessage = () => later.shift()?.();
-    const afterListeners = run => { later.push(run); channel.port2.postMessage(0); };
+    // A channel per task. A popup's blank document hands its window, and so
+    // this script's state, to the document it loads; a channel the blank
+    // document made never delivers in WebKit once that document is gone, so
+    // a verdict read through it never came and a drain waited forever (the
+    // reattach gate hung at its drain, after #130). The binding survives the
+    // hand-over; only the channel does not.
+    const afterListeners = run => { const channel = new MessageChannel(); channel.port1.onmessage = () => { channel.port1.close(); run(); }; channel.port2.postMessage(0); };
     // Ids restart with each document: a random prefix keeps them apart.
     const doc = crypto.getRandomValues(new Uint32Array(2)).join('');
     let ids = 0;

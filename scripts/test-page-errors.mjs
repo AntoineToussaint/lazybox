@@ -142,6 +142,14 @@ try {
       await expect.poll(()=>[...pooled].sort()).toEqual(['ctx: Error: main error','ctx: Error: popup error']);
       assert.deepEqual(own,['main: Error: main error'],'a page collector hears only its page, beside the context collector');
       assert.deepEqual(seen.map(({message})=>message).sort(),[...pooled].sort());assert.ok(seen.every(({stack})=>typeof stack==='string'),JSON.stringify(seen));
+      // A popup's blank document hands its window, and the collector's state, to the page it
+      // loads. A verdict and a drain still come: a channel the blank document made never
+      // delivered in WebKit, so a drain over a popup waited forever and a handled error there
+      // was never withdrawn (the reattach gate hung at its drain).
+      await popup.evaluate(()=>{window.addEventListener('error',event=>{if(String(event.error).includes('handled in the popup'))event.preventDefault();});setTimeout(()=>{throw new Error('handled in the popup');},0);});
+      const drained=await Promise.race([drainPageErrors(pooled).then(()=>'drained'),new Promise(resolve=>setTimeout(()=>resolve('still waiting after 5 s'),5000))]);
+      assert.equal(drained,'drained','a drain over a popup finishes');
+      assert.deepEqual([...pooled].sort(),['ctx: Error: main error','ctx: Error: popup error'],'an error the popup handled is withdrawn');
       await assert.rejects(collectContextPageErrors(context),/already has pages/);
       await context.close();
     } finally {await browser.close();}

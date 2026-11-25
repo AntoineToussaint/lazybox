@@ -62,7 +62,8 @@ export async function warmApp(server) {
   let html;
   try { html = readFileSync(join(root, 'index.html'), 'utf8'); } catch { return 0; }
   const env = server.environments.client, seen = new Set();
-  let next = [...html.matchAll(/<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/g)].map(m => m[1]);
+  // The browser asks for `/main.tsx` whatever the attribute says (`./main.tsx` in the fixture roots).
+  let next = [...html.matchAll(/<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/g)].map(m => new URL(m[1], 'http://root/').pathname);
   while (next.length) {
     const batch = [...new Set(next)].filter(url => !seen.has(url));
     next = [];

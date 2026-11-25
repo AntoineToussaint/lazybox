@@ -249,7 +249,8 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   const id=reveal.current,pane=paneRef.current;if(!id||!pane)return false;
   const node=contentRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`);if(!node)return false;
   reveal.current=undefined;
-  place(pane,pane.scrollTop+node.getBoundingClientRect().top-pane.getBoundingClientRect().top-12);measure(pane);capture(pane);reader.view.scrollTop=pane.scrollTop;
+  const target=node.querySelector('[data-terminal-decision]') ?? node;
+  place(pane,pane.scrollTop+target.getBoundingClientRect().top-pane.getBoundingClientRect().top-12);measure(pane);capture(pane);reader.view.scrollTop=pane.scrollTop;
   node.classList.remove('message-flash');void node.offsetWidth;node.classList.add('message-flash');
   return true;
  };

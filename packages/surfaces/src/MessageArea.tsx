@@ -56,22 +56,31 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
   detail?: ActivityDetail;
 }) {
   const conversation = transcript.messages;
-  const terminalRequest = session?.pending.find(request => request.type === 'terminal_handoff');
-  const approvalMessage = terminalRequest
-    ? conversation.findLast(message => message.terminalHandoff?.id === terminalRequest.requestId)
-    : undefined;
-  const approvalId = approvalMessage?.id;
-  const [visibleApproval, setVisibleApproval] = useState('');
+  const approvals = (session?.pending ?? []).filter(request => request.type === 'terminal_handoff').map(request => ({
+    requestId: request.requestId,
+    messageId: conversation.findLast(message => message.terminalHandoff?.id === request.requestId)?.id,
+  }));
+  const approvalIds = JSON.stringify(approvals.map(request => request.messageId));
+  const [visibleApprovals, setVisibleApprovals] = useState<string[]>([]);
   useEffect(() => {
-    setVisibleApproval('');
     const pane = scroll.paneRef.current;
-    const card = approvalId && pane?.querySelector(`[data-message-id="${CSS.escape(approvalId)}"]`);
-    if (!card) return;
-    const observer = new IntersectionObserver(([entry]) => setVisibleApproval(entry.isIntersecting ? approvalId : ''), { root: pane });
-    observer.observe(card);
+    const visible = new Set<string>();
+    setVisibleApprovals([]);
+    if (!pane) return;
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        const id = (entry.target as HTMLElement).dataset.terminalDecision!;
+        if (entry.isIntersecting) visible.add(id); else visible.delete(id);
+      }
+      setVisibleApprovals([...visible]);
+    }, { root: pane });
+    for (const id of JSON.parse(approvalIds) as (string | null)[]) {
+      const control = id && pane.querySelector(`[data-terminal-decision="${CSS.escape(id)}"]`);
+      if (control) observer.observe(control);
+    }
     return () => observer.disconnect();
-  }, [approvalId, scroll.paneRef, scroll.end, scroll.visibleMessages]);
-  const offerReview = !!terminalRequest && (!approvalId || visibleApproval !== approvalId);
+  }, [approvalIds, scroll.paneRef, scroll.end, scroll.visibleMessages]);
+  const offscreen = approvals.filter(request => !request.messageId || !visibleApprovals.includes(request.messageId));
   // Artifact actions on agent messages, and "Open source message" from an artifact.
   const artifactScope = useMemo(() => session?.collectionId ? { collectionId: session.collectionId, sessionId: sessionID, conversationId: session.conversationId } : undefined, [session?.collectionId, session?.conversationId, sessionID]);
   // A file an agent named is tracked from its link, as from the Files tree.
@@ -116,8 +125,8 @@ export function MessageArea({ api, session, sessionID, transcript, scroll, spoke
           {subscription}
         </div>
       </div>
-      {(offerReview || (!scroll.followingLatest && conversation.length > 0)) && <div className="chat-scroll-actions">
-        {offerReview && <button disabled={!approvalId} onClick={() => approvalId && scroll.revealMessage(approvalId)}>{approvalId ? 'Review terminal request' : 'Loading terminal request…'}</button>}
+      {(offscreen.length > 0 || (!scroll.followingLatest && conversation.length > 0)) && <div className="chat-scroll-actions">
+        {offscreen.map(({ requestId, messageId }) => <button key={requestId} disabled={!messageId} onClick={() => messageId && scroll.revealMessage(messageId)}>{messageId ? 'Review terminal request' : 'Loading terminal request…'}{approvals.length > 1 && ` ${approvals.findIndex(request => request.requestId === requestId) + 1}`}</button>)}
         {!scroll.followingLatest && <button className="jump-to-latest" onClick={scroll.jumpToLatest}>Jump to latest</button>}
       </div>}
     </div>

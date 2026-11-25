@@ -235,7 +235,7 @@ try {
  }
  fixture.sessions[0].pending=[{type:'terminal_handoff',requestId:'declined',text:'Run an interactive command'}];
  chatEvents.push({...reviewed,requestId:'declined'});
- const declined=page.getByRole('article',{name:'Interactive command'}).last();
+ const declined=page.getByRole('article',{name:'Interactive command'}).filter({hasText:'safe'});
  await expect(declined.locator('pre')).toHaveText("acme login 'team blue' '' $'safe\\e[2Kgone'");
  const messages=page.locator('.messages:visible');
  await messages.evaluate(node=>{node.scrollTop=0;node.dispatchEvent(new Event('scroll'));});
@@ -248,7 +248,12 @@ try {
  for(let i=0;i<45;i++)chatEvents.push({type:'operation_accepted',text:'Later prompt '+i});
  await expect(declined).toHaveCount(0);
  await expect(page.getByRole('button',{name:'Jump to latest'})).toHaveCount(0);
- await reviewTerminal.click();
+ // A newer handoff stays actionable while the earlier one is outside the mounted tail.
+ fixture.sessions[0].pending.unshift({type:'terminal_handoff',requestId:'concurrent',text:'Another terminal'});
+ chatEvents.push({...handoff,requestId:'concurrent'});
+ const earlierReview=page.getByRole('button',{name:'Review terminal request 2',exact:true});
+ await expect(earlierReview).toBeVisible({timeout:15000});
+ await earlierReview.click();
  await expect(declined.getByRole('button',{name:'Decline',exact:true})).toBeInViewport();
  const directory=declined.getByText('Working directory · api/scripts');
  await expect(declined.getByText(reviewed.text,{exact:true})).toBeHidden();
@@ -256,6 +261,7 @@ try {
  await expect(declined.getByText(reviewed.text,{exact:true})).toBeVisible();
  await declined.getByRole('button',{name:'Decline',exact:true}).click();
  await expect(declined).toContainText('Interactive command declined');
+ chatEvents.push({...handoff,requestId:'concurrent',status:'declined'});
  fixture.sessions[0].pending=[];
  await page.getByRole('button',{name:'Jump to latest'}).click();
  await expect(panel).toHaveCount(0);

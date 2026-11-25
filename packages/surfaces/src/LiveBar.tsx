@@ -138,6 +138,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
   const now = useNow(rootBusy);
   // Fast tool calls stay in history. Only sustained work needs to change the live row.
   const step = candidate?.startedAt !== undefined && now - candidate.startedAt < 250 ? undefined : candidate;
+  const label = live.toolPhase && live.since !== undefined && now - live.since < 250 && !managed ? 'Working' : live.label;
   useEffect(() => { setStopping(''); setMoving(''); setError(''); }, [managed?.id]);
   useEffect(() => { if (!moved) return; const timer = setTimeout(() => setMoved(''), 8000); return () => clearTimeout(timer); }, [moved]);
   // What moving to the background did is said even when the turn ended right after (the bar itself is gone then).
@@ -195,7 +196,7 @@ export function LiveBar({ api, session, sessionID, live, disconnected, activity,
     }}>
       <LiveIndicator tone="busy"/>
       {/* The step and its time, as the status line says them. */}
-      <span className="live-activity" data-tone="busy" aria-hidden="true">{detail.code ? live.label : detail.words || live.label}{startedAt !== undefined && now >= startedAt ? ` · ${elapsedLabel(now - startedAt)}` : live.text.slice(live.label.length) || '…'}</span>
+      <span className="live-activity" data-tone="busy" aria-hidden="true">{detail.code ? label : detail.words || label}{startedAt !== undefined && now >= startedAt ? ` · ${elapsedLabel(now - startedAt)}` : live.text.slice(live.label.length) || '…'}</span>
       {detail.code && (openOutput
         ? <button type="button" className="live-bar-code live-bar-command" aria-label={`View command output: ${detail.code}`} title={detail.full} onClick={openOutput}>{detail.code}</button>
         : <code className="live-bar-code" title={detail.full}>{detail.code}</code>)}

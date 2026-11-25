@@ -207,6 +207,7 @@ leave out.
 ### Runner reliability
 
 - **No red flashes while the Runner is busy** A conversation's refresh that is slow or cancelled while reconnecting no longer flashes a red error; only refreshes that keep failing for 15 seconds say so, in words. The Runner's own "context deadline exceeded" and "context canceled" are never shown raw.
+- **A command adopted by another Runner stays there** When a second Runner takes over a command, the first is always told before its connection ends, instead of sometimes reconnecting and taking the command back. Session hosts started by an earlier release keep the old behaviour until they are next started.
 - **A command stays with the Runner that took it over** When a new Runner takes over a running command or agent, the previous one is always told and lets go, instead of sometimes taking it for lost and taking it back.
 - **Gentler reconnecting** While the Runner is away, live conversations and command output try again after about a second, then less often, up to every 30 seconds, so windows do not all knock at once; once it answers, the next drop starts again at a second.
 - **Dev opens past the white screen** The desktop launcher allows React’s startup script under Dev’s content security policy.

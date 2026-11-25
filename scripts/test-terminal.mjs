@@ -260,8 +260,17 @@ try {
  await expect.poll(()=>calls('DecideTerminalHandoff').length).toBe(decided+1);
  assert.equal(calls('DecideTerminalHandoff').at(-1).body.allowAgentInput,true);
  await expect(shared).toContainText('Interactive command running');
- fixture.terminals.get('interactive-agent-input').done=true;
+ // The shell exits on the Runner before its final status reaches the terminal view.
+ await expect(screen).toHaveAttribute('data-terminal-id','interactive-agent-input');
+ const lateResize=page.waitForResponse(response=>response.url().endsWith('/ResizeTerminal') && response.request().postDataJSON().terminalId==='interactive-agent-input');
+ await page.route('**/ResizeTerminal',async route=>{
+   if(route.request().postDataJSON().terminalId==='interactive-agent-input')fixture.terminals.get('interactive-agent-input').done=true;
+   await route.continue();
+ });
+ await page.setViewportSize({width:1440,height:1000});
+ await lateResize;
  await expect(shared).toContainText('Interactive command finished',{timeout:12000});
+ await expect(panel.getByRole('alert')).toHaveCount(0);
  assert.equal(calls('OpenTerminal').length,openedBeforeHandoff,'handoff reused the PTY started by the owner decision');
  await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS terminal: an agent handoff requires approval, focuses the PTY and receives owner input; a wrapped sign-in URL is one link (pointer and underline on hover, a click opens the whole address, a drag does not, the right-click menu offers it), exit closes the tab and panel, header opens a shell docked right, focuses rather than duplicates, fitted size, ordered input, member directory, close, re-attach after reload, × close and reopen, dock via menu and keyboard, layout survives reload, remembered dock side, drag a tab below the chat with a drop preview, neighbours stay mounted, reopen from Panels, phone close.');

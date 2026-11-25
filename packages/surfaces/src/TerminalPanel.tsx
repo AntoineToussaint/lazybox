@@ -200,18 +200,21 @@ export function TerminalPanel({ workspaceId, collections, viewState, onClosePane
           <button aria-label="New terminal" title="New terminal" disabled={!ready || opening} onClick={() => void open()}><Icon name="plus" size={14}/><span>New terminal</span></button>
         </span>
       </div>
-      {current ? <TerminalView key={current.id} api={api} terminal={current} initialCommand={current.id === initialTerminalId ? initialCommand : undefined} focusRef={focusView} workspaceId={workspaceId} canSend={!!conversation} onSendToAgent={sendToAgent} onNewTerminal={ready ? () => void open() : undefined} onCloseTerminal={() => void close(current.id)} onCleanExit={current.place === 'interactive-command' ? undefined : () => void close(current.id, true)} onSize={value => { size.current = value; }} onError={setError}/>
+      {current ? <TerminalView key={current.id} api={api} terminal={current} initialCommand={current.id === initialTerminalId ? initialCommand : undefined} focusRef={focusView} workspaceId={workspaceId} canSend={!!conversation} onSendToAgent={sendToAgent} onNewTerminal={ready ? () => void open() : undefined} onCloseTerminal={() => void close(current.id)} onCleanExit={current.place === 'interactive-command' ? undefined : () => void close(current.id, true)} onSize={value => { size.current = value; }}/>
         : <p className="module-empty">{ready ? 'No terminal is open in this workspace. A terminal runs your login shell on the Runner, in the directory you choose, and keeps running when the Runner restarts.' : 'The workspace is not ready for a terminal.'}{ready && <><br/><button className="primary" disabled={opening} onClick={() => void open()}>Start terminal</button></>}</p>}
     </>}
   </section>;
 }
 
-function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError, onCleanExit, workspaceId, canSend, onSendToAgent, onNewTerminal, onCloseTerminal }: { api: RunnerClient; terminal: TerminalStatus; initialCommand?: { current: string | undefined }; focusRef: { current: (() => void) | null }; onSize(size: { cols: number; rows: number }): void; onError(error: string): void; onCleanExit?(): void; workspaceId: string; canSend: boolean; onSendToAgent(text: string): void; onNewTerminal?(): void; onCloseTerminal(): void }) {
+function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onCleanExit, workspaceId, canSend, onSendToAgent, onNewTerminal, onCloseTerminal }: { api: RunnerClient; terminal: TerminalStatus; initialCommand?: { current: string | undefined }; focusRef: { current: (() => void) | null }; onSize(size: { cols: number; rows: number }): void; onCleanExit?(): void; workspaceId: string; canSend: boolean; onSendToAgent(text: string): void; onNewTerminal?(): void; onCloseTerminal(): void }) {
   const xterm = useRef<Terminal | null>(null);
   const [hasSelection, setHasSelection] = useState(false);
   /** The web link under the pointer, for the right-click menu. */
   const hovered = useRef('');
   const cleanExit = useRef(onCleanExit); cleanExit.current = onCleanExit;
+  const [error, onError] = useState('');
+  const exited = useRef(terminal.done);
+  if (terminal.done) exited.current = true;
   const startedLive = useRef(!terminal.done);
   const host = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<TerminalStatus>(terminal);
@@ -284,9 +287,18 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
     let sized = '';
     const resize = () => {
       try { fit.fit(); } catch { return; }
-      const value = `${view.cols}x${view.rows}`; if (value === sized || done) return; sized = value;
+      const value = `${view.cols}x${view.rows}`; if (value === sized || exited.current) return; sized = value;
       onSize({ cols: view.cols, rows: view.rows });
-      void client.current.resizeTerminal({ terminalId: id, cols: view.cols, rows: view.rows }, { signal }).catch(error => { if (!signal.aborted && !done) onError(`Terminal resize failed: ${String(error)}`); });
+      void client.current.resizeTerminal({ terminalId: id, cols: view.cols, rows: view.rows }, { signal }).catch(error => {
+        if (signal.aborted || exited.current) return;
+        const failure = ConnectError.from(error);
+        // The PTY can exit before either the list or the output stream reports it.
+        if (failure.code === Code.FailedPrecondition && failure.rawMessage === 'terminal has exited') {
+          exited.current = true;
+          return;
+        }
+        onError(`Terminal resize failed: ${failure.rawMessage}`);
+      });
     };
     const observer = new ResizeObserver(() => resize()); observer.observe(element);
     requestAnimationFrame(() => { resize(); view.focus(); });
@@ -318,6 +330,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
             if (event.data.length) view.write(event.data, () => stageAtPrompt(event.status));
             else stageAtPrompt(event.status);
             offset = event.offset + BigInt(event.data.length);
+            if (event.status?.done) exited.current = true;
             if (event.status) setStatus(event.status);
             setConnection('Live');
             if (event.status?.done && !event.data.length) {
@@ -340,6 +353,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onError
     return () => { unfollow(); if (focusRef.current === focus) focusRef.current = null; control.abort(); clearTimeout(stageTimeout); observer.disconnect(); selectionListener.dispose(); input.dispose(); binary.dispose(); links.dispose(); element.removeEventListener('mousedown', press, true); hovered.current = ''; view.dispose(); };
   }, [id]);
   return <div className="terminal-view">
+    {error && <div className="error" role="alert">{error}</div>}
     <div ref={host} className="terminal-host" data-testid="terminal" data-terminal-id={id} onContextMenu={contextMenu('terminal', (): MenuItem[] => {
       const view = xterm.current, selection = view?.getSelection() || '';
       const live = !status.done;

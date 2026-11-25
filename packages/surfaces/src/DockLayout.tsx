@@ -1,3 +1,4 @@
+import { selectPanelText } from './panel-selection';
 import { recordMaximize } from './training-wheels';
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
@@ -601,7 +602,15 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     const lifted = () => { endDrag?.(); if (document.documentElement.classList.contains('dock-dragging')) { document.documentElement.classList.remove('dock-dragging'); refreshNativeWebViews(); } if (dividerDrag) { clearTimeout(released); released = window.setTimeout(() => { dividerDrag = false; }, 450); } };
     element.addEventListener('pointerdown', pressed, true);
     // Enter or Space on a minimized group's tab opens it, as a click does.
+    const selectFromHeader = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const header = target?.closest?.('.dv-tabs-and-actions-container');
+      const id = header?.querySelector<HTMLElement>('.dv-active-tab [data-panel-tab]')?.dataset.panelTab;
+      const panel = id && contents.current.get(id)?.querySelector<HTMLElement>('.workspace-panel');
+      if (panel) selectPanelText(event, panel);
+    };
     const tabKey = (event: KeyboardEvent) => {
+      selectFromHeader(event);
       if (event.key !== 'Enter' && event.key !== ' ') return;
       const group = event.target instanceof Element && event.target.matches('.dv-tab') ? event.target.closest<HTMLElement>('.dock-group-minimized') : null;
       if (group?.dataset.groupId) { event.preventDefault(); latest.current.onRestore(group.dataset.groupId); }
@@ -645,6 +654,7 @@ export const DockLayout = forwardRef<DockHandle, Props>(function DockLayout(prop
     // Keys pressed in a popped-out window go to `onPopoutKey`, with the group that window holds.
     function listenInPopout(popout: Window | undefined) {
       popout?.addEventListener('keydown', event => {
+        selectFromHeader(event);
         const group = dock.getPopouts().find(value => value.window === popout)?.group;
         if (group) latest.current.onPopoutKey?.(event, group.id);
       });

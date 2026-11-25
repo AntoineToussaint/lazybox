@@ -62,6 +62,28 @@ async function scenario(browser,scheme){
  await expect(titles()).toHaveText(['Workspaces','Agents','Agent chat','Command output']);
  await expect(ring).toHaveCount(0);
 
+ // Native Select All must stay inside the pane the reader clicked.
+ const chat=page.locator('.workspace-panel.panel-chat:visible').first();
+ await chat.locator('.messages').click({position:{x:5,y:5}});
+ for(const modifier of ['Control','Meta']){
+  await key(modifier+'+a');
+  assert.ok(await chat.evaluate(panel=>{
+   const selection=panel.ownerDocument.getSelection();
+   return selection.toString().trim().length>0 && panel.contains(selection.anchorNode) && panel.contains(selection.focusNode);
+  }),modifier+'+A should select only chat text');
+ }
+ const sidebar=page.locator('.workspace-panel.panel-collections:visible');
+ await tab('collections').focus();
+ await key('Control+a');
+ assert.ok(await sidebar.evaluate(panel=>{
+  const selection=panel.ownerDocument.getSelection();
+  return selection.toString().trim().length>0 && panel.contains(selection.anchorNode) && panel.contains(selection.focusNode);
+ }),'Select All from a dock tab should use its panel');
+ await composer.fill('select this draft');
+ await composer.press('Meta+a');
+ assert.deepEqual(await composer.evaluate(node=>[node.selectionStart,node.selectionEnd]),[0,17]);
+ await composer.fill('');
+
  // ---- Focus: ⌥⌘ arrows, a ring, a voice, a nudge at the edge.
  await composer.click();await composer.fill('draft kept through the keyboard');
  await key('Meta+Alt+ArrowLeft');

@@ -549,6 +549,7 @@ how you arrange it:
   the preview tab, or make a regular tab the preview tab), Dock left / right / top / bottom (the keyboard way to move a
   panel to an edge of the content area), Close other tabs, Close tabs to the
   right, Close.
+- **Select all** (Ctrl+A or ⌘A) selects text within the focused panel. Text fields, editors and terminals keep their own keyboard behavior.
 - Opening a panel brings its tab forward, including when the window is too narrow
   to show it beside existing panels or another group is maximized.
 - **×** on a tab closes the panel. Every panel can be closed; **Panels** in the

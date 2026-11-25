@@ -156,4 +156,5 @@ test('review permissions settle file reads and escalations without waiting', () 
   assert.equal(reviewToolDecision('mcp__lazybox__command', 'start'), 'deny');
   assert.equal(reviewToolDecision('mcp__lazybox__command', 'read'), 'allow');
   assert.equal(reviewToolDecision('mcp__lazybox__command', 'verify'), 'ask');
+  assert.equal(reviewToolDecision('mcp__lazybox__command', 'test'), 'ask');
 });

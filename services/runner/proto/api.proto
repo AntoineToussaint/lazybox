@@ -55,6 +55,10 @@ service RunnerService {
   rpc CancelSubscriptionEnrollment(SubscriptionEnrollmentRequest) returns (SubscriptionEnrollment);
   rpc RenameSubscription(RenameSubscriptionRequest) returns (Profile);
   rpc RefreshSubscription(RefreshSubscriptionRequest) returns (Profile);
+  // Forget a subscription's recorded usage limit at the owner's word: it reads
+  // available until the provider reports otherwise. FAILED_PRECONDITION when no
+  // limit is recorded (sign-in and billing problems are not limits).
+  rpc ClearSubscriptionLimit(ClearSubscriptionLimitRequest) returns (Profile);
   // Owner only. Forgets a subscription saved in Lazybox: its registry entry and
   // its private folder (an imported token among them). Refused while a running
   // conversation uses it. The person's own CLI sign-ins are never touched.
@@ -732,6 +736,7 @@ message RenameSubscriptionRequest {
   string label = 2;
 }
 message RefreshSubscriptionRequest { string profile_id = 1; }
+message ClearSubscriptionLimitRequest { string profile_id = 1; }
 message SubscriptionEnrollment {
   string id = 1;
   string state = 2;

@@ -104,6 +104,9 @@ const (
 	// RunnerServiceRefreshSubscriptionProcedure is the fully-qualified name of the RunnerService's
 	// RefreshSubscription RPC.
 	RunnerServiceRefreshSubscriptionProcedure = "/lazybox.bench.v1.RunnerService/RefreshSubscription"
+	// RunnerServiceClearSubscriptionLimitProcedure is the fully-qualified name of the RunnerService's
+	// ClearSubscriptionLimit RPC.
+	RunnerServiceClearSubscriptionLimitProcedure = "/lazybox.bench.v1.RunnerService/ClearSubscriptionLimit"
 	// RunnerServiceRemoveSubscriptionProcedure is the fully-qualified name of the RunnerService's
 	// RemoveSubscription RPC.
 	RunnerServiceRemoveSubscriptionProcedure = "/lazybox.bench.v1.RunnerService/RemoveSubscription"
@@ -782,6 +785,10 @@ type RunnerServiceClient interface {
 	CancelSubscriptionEnrollment(context.Context, *connect.Request[gen.SubscriptionEnrollmentRequest]) (*connect.Response[gen.SubscriptionEnrollment], error)
 	RenameSubscription(context.Context, *connect.Request[gen.RenameSubscriptionRequest]) (*connect.Response[gen.Profile], error)
 	RefreshSubscription(context.Context, *connect.Request[gen.RefreshSubscriptionRequest]) (*connect.Response[gen.Profile], error)
+	// Forget a subscription's recorded usage limit at the owner's word: it reads
+	// available until the provider reports otherwise. FAILED_PRECONDITION when no
+	// limit is recorded (sign-in and billing problems are not limits).
+	ClearSubscriptionLimit(context.Context, *connect.Request[gen.ClearSubscriptionLimitRequest]) (*connect.Response[gen.Profile], error)
 	// Owner only. Forgets a subscription saved in Lazybox: its registry entry and
 	// its private folder (an imported token among them). Refused while a running
 	// conversation uses it. The person's own CLI sign-ins are never touched.
@@ -1433,6 +1440,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceRefreshSubscriptionProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("RefreshSubscription")),
+			connect.WithClientOptions(opts...),
+		),
+		clearSubscriptionLimit: connect.NewClient[gen.ClearSubscriptionLimitRequest, gen.Profile](
+			httpClient,
+			baseURL+RunnerServiceClearSubscriptionLimitProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("ClearSubscriptionLimit")),
 			connect.WithClientOptions(opts...),
 		),
 		removeSubscription: connect.NewClient[gen.RemoveSubscriptionRequest, gen.InfoResponse](
@@ -2724,6 +2737,7 @@ type runnerServiceClient struct {
 	cancelSubscriptionEnrollment *connect.Client[gen.SubscriptionEnrollmentRequest, gen.SubscriptionEnrollment]
 	renameSubscription           *connect.Client[gen.RenameSubscriptionRequest, gen.Profile]
 	refreshSubscription          *connect.Client[gen.RefreshSubscriptionRequest, gen.Profile]
+	clearSubscriptionLimit       *connect.Client[gen.ClearSubscriptionLimitRequest, gen.Profile]
 	removeSubscription           *connect.Client[gen.RemoveSubscriptionRequest, gen.InfoResponse]
 	getGitHubConnection          *connect.Client[gen.GetGitHubConnectionRequest, gen.GitHubConnection]
 	configureGitHubApp           *connect.Client[gen.ConfigureGitHubAppRequest, gen.GitHubConnection]
@@ -3054,6 +3068,11 @@ func (c *runnerServiceClient) RenameSubscription(ctx context.Context, req *conne
 // RefreshSubscription calls lazybox.bench.v1.RunnerService.RefreshSubscription.
 func (c *runnerServiceClient) RefreshSubscription(ctx context.Context, req *connect.Request[gen.RefreshSubscriptionRequest]) (*connect.Response[gen.Profile], error) {
 	return c.refreshSubscription.CallUnary(ctx, req)
+}
+
+// ClearSubscriptionLimit calls lazybox.bench.v1.RunnerService.ClearSubscriptionLimit.
+func (c *runnerServiceClient) ClearSubscriptionLimit(ctx context.Context, req *connect.Request[gen.ClearSubscriptionLimitRequest]) (*connect.Response[gen.Profile], error) {
+	return c.clearSubscriptionLimit.CallUnary(ctx, req)
 }
 
 // RemoveSubscription calls lazybox.bench.v1.RunnerService.RemoveSubscription.
@@ -4159,6 +4178,10 @@ type RunnerServiceHandler interface {
 	CancelSubscriptionEnrollment(context.Context, *connect.Request[gen.SubscriptionEnrollmentRequest]) (*connect.Response[gen.SubscriptionEnrollment], error)
 	RenameSubscription(context.Context, *connect.Request[gen.RenameSubscriptionRequest]) (*connect.Response[gen.Profile], error)
 	RefreshSubscription(context.Context, *connect.Request[gen.RefreshSubscriptionRequest]) (*connect.Response[gen.Profile], error)
+	// Forget a subscription's recorded usage limit at the owner's word: it reads
+	// available until the provider reports otherwise. FAILED_PRECONDITION when no
+	// limit is recorded (sign-in and billing problems are not limits).
+	ClearSubscriptionLimit(context.Context, *connect.Request[gen.ClearSubscriptionLimitRequest]) (*connect.Response[gen.Profile], error)
 	// Owner only. Forgets a subscription saved in Lazybox: its registry entry and
 	// its private folder (an imported token among them). Refused while a running
 	// conversation uses it. The person's own CLI sign-ins are never touched.
@@ -4806,6 +4829,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceRefreshSubscriptionProcedure,
 		svc.RefreshSubscription,
 		connect.WithSchema(runnerServiceMethods.ByName("RefreshSubscription")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceClearSubscriptionLimitHandler := connect.NewUnaryHandler(
+		RunnerServiceClearSubscriptionLimitProcedure,
+		svc.ClearSubscriptionLimit,
+		connect.WithSchema(runnerServiceMethods.ByName("ClearSubscriptionLimit")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServiceRemoveSubscriptionHandler := connect.NewUnaryHandler(
@@ -6118,6 +6147,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceRenameSubscriptionHandler.ServeHTTP(w, r)
 		case RunnerServiceRefreshSubscriptionProcedure:
 			runnerServiceRefreshSubscriptionHandler.ServeHTTP(w, r)
+		case RunnerServiceClearSubscriptionLimitProcedure:
+			runnerServiceClearSubscriptionLimitHandler.ServeHTTP(w, r)
 		case RunnerServiceRemoveSubscriptionProcedure:
 			runnerServiceRemoveSubscriptionHandler.ServeHTTP(w, r)
 		case RunnerServiceGetGitHubConnectionProcedure:
@@ -6641,6 +6672,10 @@ func (UnimplementedRunnerServiceHandler) RenameSubscription(context.Context, *co
 
 func (UnimplementedRunnerServiceHandler) RefreshSubscription(context.Context, *connect.Request[gen.RefreshSubscriptionRequest]) (*connect.Response[gen.Profile], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.RefreshSubscription is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) ClearSubscriptionLimit(context.Context, *connect.Request[gen.ClearSubscriptionLimitRequest]) (*connect.Response[gen.Profile], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.ClearSubscriptionLimit is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) RemoveSubscription(context.Context, *connect.Request[gen.RemoveSubscriptionRequest]) (*connect.Response[gen.InfoResponse], error) {

@@ -23,6 +23,14 @@
 .subscription-choice-name small{font-weight:400;color:var(--text-muted)}
 .subscription-choice-detail{font-size:calc(11.5px * var(--text-scale));color:var(--text-muted)}
 .subscription-choice[data-ready=true] .subscription-choice-detail{color:var(--ok)}
+/* A row with its own quiet action ("Mark available") beside the radio. */
+.subscription-choice-row{position:relative;display:grid;gap:6px}
+.subscription-choice-row>.subscription-choice{padding-right:120px}
+.subscription-choice-action{position:absolute;top:8px;right:8px;padding:3px 8px;border:0;border-radius:5px;background:transparent;font-size:calc(11.5px * var(--text-scale));color:var(--text-muted)}
+.subscription-choice-action:hover:not(:disabled),.subscription-choice-action:focus-visible{background:var(--surface-hover);color:var(--text)}
+.subscription-choice-confirm{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-raised)}
+.subscription-choice-confirm p{flex-basis:100%;margin:0;font-size:calc(12px * var(--text-scale));line-height:1.5;color:var(--text-tertiary)}
+.subscription-choice-confirm button{padding:5px 10px;font-size:calc(12px * var(--text-scale));border-radius:6px}
 
 .subscription-switched{display:flex;align-items:center;gap:10px;margin:6px 0 14px;font-size:calc(11.5px * var(--text-scale));color:var(--text-muted)}
 .subscription-switched:before,.subscription-switched:after{content:"";flex:1;border-top:1px solid var(--line)}
@@ -31,7 +39,12 @@
 .switch-subscription-dialog{width:min(460px,calc(100vw - 32px));padding:22px;border:1px solid var(--line-strong);border-radius:12px;background:var(--surface-raised);color:var(--text,var(--text))}
 .switch-subscription-dialog>[data-dialog-drag-handle]{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
 .switch-subscription-dialog h2{margin:0;font-size:calc(17px * var(--text-scale));font-weight:600;letter-spacing:-.3px}
-.switch-subscription-dialog>[data-dialog-drag-handle]>button{width:28px;height:28px;padding:0;border:0;background:transparent;color:var(--text-muted)}
+.switch-subscription-tools{display:flex;align-items:center;gap:2px}
+.switch-subscription-tools button{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text-muted)}
+.switch-subscription-tools button:hover:not(:disabled){background:var(--surface-hover);color:var(--text)}
+.switch-subscription-tools .is-refreshing svg{animation:switch-subscription-spin .9s linear infinite}
+@keyframes switch-subscription-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.switch-subscription-tools .is-refreshing svg{animation:none}}
 .switch-subscription-dialog>p{margin:0 0 12px;font-size:calc(12.5px * var(--text-scale));line-height:1.55;color:var(--text-tertiary)}
 .switch-subscription-dialog footer{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 .switch-subscription-dialog footer button{padding:8px 12px;font-size:calc(12.5px * var(--text-scale));border-radius:6px;line-height:calc(18px * var(--text-scale))}

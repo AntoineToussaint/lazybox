@@ -65,6 +65,20 @@ func (s *Service) RefreshSubscription(ctx context.Context, p *pb.RefreshSubscrip
 	return s.wireProfile(profile), nil
 }
 
+func (s *Service) ClearSubscriptionLimit(_ context.Context, p *pb.ClearSubscriptionLimitRequest) (*pb.Profile, error) {
+	profile, err := s.Bench.ClearSubscriptionLimit(p.ProfileId)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, grpcError(codes.NotFound, errors.New("saved subscription not found"))
+	}
+	if errors.Is(err, accounts.ErrNotLimited) {
+		return nil, grpcError(codes.FailedPrecondition, err)
+	}
+	if err != nil {
+		return nil, rpcError(err)
+	}
+	return s.wireProfile(profile), nil
+}
+
 func (s *Service) RenameSubscription(_ context.Context, r *pb.RenameSubscriptionRequest) (*pb.Profile, error) {
 	profile, err := s.Bench.RenameSubscription(r.ProfileId, r.Label)
 	if errors.Is(err, os.ErrNotExist) {

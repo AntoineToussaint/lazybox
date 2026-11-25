@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Profile, Session } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
 import { useRunner } from './RunnerContext';
 import { DraggableDialog, DialogHeader } from './DraggableDialog';
 import { readPreference, writePreference } from './view-state';
 import { useRunnerSettings } from './RunnerSettings';
-import { backWhen, comeback, bestChoice, isLimitState, limitHeadline, resetTime, sessionLimit, subscriptionChoices, subscriptionDetail, subscriptionName, subscriptionReady, switchesItself, switchLabel, type SubscriptionChoice } from './subscription-model';
+import { backAt, backWhen, comeback, bestChoice, isLimitState, limitHeadline, resetTime, sessionLimit, subscriptionChoices, subscriptionDetail, subscriptionName, subscriptionReady, switchesItself, switchLabel, usageRefreshable, type SubscriptionChoice } from './subscription-model';
+import { Icon } from './Icons';
 import { cardStatus, groupByProvider, subscriptionGroups } from './subscription-groups';
 import { ProviderGroups } from './SubscriptionGroups';
 import './subscription-switch.css';
@@ -69,14 +70,49 @@ export function SubscriptionControls({ session, profiles, viewState, dialogOpen,
  * provider under a small header when there is more than one, the current one
  * first. Arrow keys move through every choice, across groups.
  */
-function ChoiceList({ choices, value, onChange, name, disabled }: { choices: SubscriptionChoice[]; value: string; onChange(id: string): void; name: string; disabled?: boolean }) {
+function ChoiceList({ choices, value, onChange, name, disabled, action }: { choices: SubscriptionChoice[]; value: string; onChange(id: string): void; name: string; disabled?: boolean; action?(choice: SubscriptionChoice): ReactNode }) {
   return <div className="subscription-choices" role="radiogroup" aria-label="Subscriptions">
-    <ProviderGroups groups={groupByProvider(choices, choice => choice.provider)} className="subscription-choice-group">{items => items.map(choice => <label key={choice.id} className="subscription-choice" data-ready={choice.ready} data-current={choice.current || undefined}>
-      <input type="radio" name={name} value={choice.id} checked={value === choice.id} disabled={disabled || choice.current || !choice.ready} onChange={() => onChange(choice.id)}/>
-      <span className="subscription-choice-name">{choice.name}{choice.current && <small> · current</small>}</span>
-      <small className="subscription-choice-detail">{choice.detail}</small>
-    </label>)}</ProviderGroups>
+    <ProviderGroups groups={groupByProvider(choices, choice => choice.provider)} className="subscription-choice-group">{items => items.map(choice => {
+      const extra = action?.(choice);
+      const row = <label key={choice.id} className="subscription-choice" data-ready={choice.ready} data-current={choice.current || undefined}>
+        <input type="radio" name={name} value={choice.id} checked={value === choice.id} disabled={disabled || choice.current || !choice.ready} onChange={() => onChange(choice.id)}/>
+        <span className="subscription-choice-name">{choice.name}{choice.current && <small> · current</small>}</span>
+        <small className="subscription-choice-detail">{choice.detail}</small>
+      </label>;
+      // A row's own action sits beside its radio, never inside the label (it would join the radio's name).
+      return extra ? <div key={choice.id} className="subscription-choice-row">{row}{extra}</div> : row;
+    })}</ProviderGroups>
   </div>;
+}
+
+/**
+ * Usage as the provider reports it now (RefreshSubscription), two
+ * subscriptions at a time; a newer report replaces what the list shows.
+ */
+function useUsageCheck(profiles: readonly Profile[]) {
+  const { api, refresh } = useRunner();
+  const [updated, setUpdated] = useState<Record<string, Profile>>({});
+  const current = useMemo(() => profiles.map(profile => {
+    const fresh = updated[profile.id];
+    return fresh && (fresh.availability?.observedAtUnixMillis ?? 0n) >= (profile.availability?.observedAtUnixMillis ?? 0n) ? fresh : profile;
+  }), [profiles, updated]);
+  const adopt = (fresh: readonly Profile[]) => setUpdated(previous => {
+    const next = { ...previous };
+    for (const profile of fresh) next[profile.id] = profile;
+    return next;
+  });
+  const check = async (targets: readonly Profile[]) => {
+    let failures = 0;
+    for (let index = 0; index < targets.length; index += 2) {
+      const results = await Promise.allSettled(targets.slice(index, index + 2).map(profile =>
+        api.refreshSubscription({ profileId: profile.id }, { timeoutMs: 30_000 })));
+      adopt(results.flatMap(result => result.status === 'fulfilled' ? [result.value] : []));
+      failures += results.filter(result => result.status === 'rejected').length;
+    }
+    refresh();
+    if (failures) throw new Error('Some subscription usage could not be refreshed. The last reports are still shown.');
+  };
+  return { profiles: current, updated, adopt, check };
 }
 
 function SubscriptionStatusDialog({ profiles, currentId, currentLimit, now, onClose }: { profiles: readonly Profile[]; currentId: string; currentLimit?: string; now: number; onClose(): void }) {
@@ -94,17 +130,13 @@ function SubscriptionStatusDialog({ profiles, currentId, currentLimit, now, onCl
 }
 
 function LimitCard({ session, profiles, provider, automatic, viewState, switchTo, onError, onContinueInCodex }: Pick<Props, 'session' | 'profiles' | 'viewState' | 'onError' | 'onContinueInCodex'> & { provider: string; automatic: boolean; switchTo(id: string, always: boolean): Promise<void> }) {
-  const { api, refresh } = useRunner();
-  const [updated, setUpdated] = useState<Record<string, Profile>>({});
-  const currentProfiles = useMemo(() => profiles.map(profile => {
-    const fresh = updated[profile.id];
-    return fresh && (fresh.availability?.observedAtUnixMillis ?? 0n) >= (profile.availability?.observedAtUnixMillis ?? 0n) ? fresh : profile;
-  }), [profiles, updated]);
+  const usage = useUsageCheck(profiles);
+  const { profiles: currentProfiles, updated } = usage;
   const [showStatus, setShowStatus] = useState(false);
   const currentProfile = currentProfiles.find(profile => profile.id === session.profileId);
   const checkedCurrent = updated[session.profileId] && currentProfile;
   const currentReady = !!checkedCurrent && checkedCurrent.availability?.state === 'available' && subscriptionReady(checkedCurrent, Date.now());
-  const targets = profiles.filter(profile => profile.provider === provider && profile.managed && profile.isolation === 'environment');
+  const targets = profiles.filter(profile => profile.provider === provider && usageRefreshable(profile));
   const limit = sessionLimit(session) as Exclude<ReturnType<typeof sessionLimit>, ''>;
   const [now, setNow] = useState(Date.now);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(timer); }, []);
@@ -129,21 +161,7 @@ function LimitCard({ session, profiles, provider, automatic, viewState, switchTo
     try { await work(); } catch (error) { onError(String(error)); } finally { setBusy(''); }
   };
   const forgetWait = () => { try { writePreference(viewState, waitKey(session.id), ''); } catch { /* nothing kept */ } };
-  const checkUsage = async () => {
-    let failures = 0;
-    for (let index = 0; index < targets.length; index += 2) {
-      const results = await Promise.allSettled(targets.slice(index, index + 2).map(profile =>
-        api.refreshSubscription({ profileId: profile.id }, { timeoutMs: 30_000 })));
-      setUpdated(previous => {
-        const next = { ...previous };
-        for (const result of results) if (result.status === 'fulfilled') next[result.value.id] = result.value;
-        return next;
-      });
-      failures += results.filter(result => result.status === 'rejected').length;
-    }
-    refresh();
-    if (failures) throw new Error('Some subscription usage could not be refreshed. The last reports are still shown.');
-  };
+  const checkUsage = () => usage.check(targets);
   const refreshButton = targets.length > 0 && <button type="button" disabled={!!busy} onClick={() => void act('refresh', checkUsage)}>
     {busy === 'refresh' ? 'Refreshing…' : 'Refresh'}
   </button>;
@@ -206,12 +224,28 @@ function SwitchDialog({ session, profiles, provider, automatic, onClose, onSessi
   const { api, refresh } = useRunner();
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { dialog.current?.showModal(); }, []);
+  const usage = useUsageCheck(profiles);
   // Where the conversation is now comes first, then where it can go (subscriptionChoices).
-  const choices = useMemo(() => subscriptionChoices(profiles, provider, session.profileId), [profiles, provider, session.profileId]);
+  const now = Date.now();
+  const choices = subscriptionChoices(usage.profiles, provider, session.profileId, now);
   const others = choices.filter(c => !c.current);
   const [choice, setChoice] = useState(() => bestChoice(choices)?.id || '');
   const target = others.find(c => c.id === choice && c.ready) || bestChoice(choices);
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  // A usage check or a cleared limit in flight: 'refresh', or the subscription being marked.
+  const [pending, setPending] = useState('');
+  const [confirming, setConfirming] = useState('');
+  const targets = usage.profiles.filter(profile => profile.provider === provider && usageRefreshable(profile));
+  const work = async (label: string, task: () => Promise<void>) => {
+    if (pending) return;
+    setPending(label); setError('');
+    try { await task(); } catch (e) { setError(String(e)); } finally { setPending(''); }
+  };
+  const markAvailable = (row: SubscriptionChoice) => work(row.id, async () => {
+    setConfirming('');
+    usage.adopt([await api.clearSubscriptionLimit({ profileId: row.id })]);
+    refresh();
+  });
   // Shown at once; put back if the Runner refuses.
   const [rotating, setRotating] = useState(switchesItself(session, automatic ? [provider] : [], provider));
   const toggle = async (enabled: boolean) => {
@@ -219,10 +253,32 @@ function SwitchDialog({ session, profiles, provider, automatic, onClose, onSessi
     try { const result = await api.setSessionRotation({ sessionId: session.id, enabled }); if (result.session) onSession(result.session); refresh(); }
     catch (e) { setRotating(!enabled); setError(String(e)); } finally { setBusy(false); }
   };
+  // "Mark available" clears a recorded limit: at once when its reset has passed, after a word when it has not.
+  const rowAction = (row: SubscriptionChoice) => {
+    if (!row.clear) return null;
+    const label = `Mark ${row.name} available`;
+    if (confirming === row.id) {
+      const back = backAt(row.resetAt, now);
+      return <div className="subscription-choice-confirm" role="group" aria-label={`Confirm: ${label}`}
+        onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setConfirming(''); } }}>
+        <p>Its last report says it is limited{back ? `, ${back}` : ''}. Lazybox will offer it until the provider says otherwise.</p>
+        <button type="button" className="primary" autoFocus disabled={!!pending} onClick={() => void markAvailable(row)}>Mark available</button>
+        <button type="button" onClick={() => setConfirming('')}>Keep limit</button>
+      </div>;
+    }
+    return <button type="button" className="subscription-choice-action" aria-label={row.clear === 'confirm' ? `${label}…` : label} title={row.clear === 'confirm' ? 'Clear this limit before its reset' : 'Its reset has passed: clear the stale limit'}
+      disabled={busy || !!pending} onClick={() => row.clear === 'direct' ? void markAvailable(row) : setConfirming(row.id)}>
+      {pending === row.id ? 'Marking…' : row.clear === 'confirm' ? 'Mark available…' : 'Mark available'}
+    </button>;
+  };
   return <DraggableDialog ref={dialog} className="switch-subscription-dialog" aria-labelledby="switch-subscription-title" onCancel={event => { if (busy) event.preventDefault(); else onClose(); }}>
-    <DialogHeader><h2 id="switch-subscription-title">Switch subscription</h2><button disabled={busy} aria-label="Close switch subscription" onClick={onClose}>×</button></DialogHeader>
+    <DialogHeader><h2 id="switch-subscription-title">Switch subscription</h2><span className="switch-subscription-tools">
+      {targets.length > 0 && <button type="button" className={pending === 'refresh' ? 'is-refreshing' : undefined} aria-label="Refresh usage" title="Refresh usage" aria-busy={pending === 'refresh' || undefined} disabled={busy || !!pending} onClick={() => void work('refresh', () => usage.check(targets))}><Icon name="refresh" size={15}/></button>}
+      <button type="button" disabled={busy} aria-label="Close switch subscription" onClick={onClose}>×</button>
+    </span></DialogHeader>
     <p>The conversation continues on the subscription you choose, with everything so far. {session.busy ? 'The current turn moves with it.' : 'Your next message goes to the new subscription.'}</p>
-    {choices.length > 1 ? <ChoiceList choices={choices} value={target?.id || ''} onChange={setChoice} name={`switch-${session.id}`} disabled={busy}/> : <p className="limit-card-detail">No other {providerName(provider)} subscription is signed in. Add one in Settings → Subscriptions.</p>}
+    {(choices.length > 1 || choices.some(c => c.clear)) && <ChoiceList choices={choices} value={target?.id || ''} onChange={setChoice} name={`switch-${session.id}`} disabled={busy} action={rowAction}/>}
+    {choices.length <= 1 && <p className="limit-card-detail">No other {providerName(provider)} subscription is signed in. Add one in Settings → Subscriptions.</p>}
     {automatic ? <label className="limit-card-auto"><input type="checkbox" checked={rotating} disabled={busy || (!rotating && others.every(c => profiles.find(p => p.id === c.id)?.isolation !== 'environment'))} onChange={event => void toggle(event.target.checked)}/>Switch automatically when a subscription reaches its limit</label>
       : others.length > 0 && <p className="limit-card-note">Lazybox switches only when you ask. Switching by itself at a limit is an extension: Settings → Extensions.</p>}
     {error && <p className="settings-error" role="alert">{error}</p>}

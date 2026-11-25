@@ -403,6 +403,18 @@ func (b *Bench) RefreshSubscription(ctx context.Context, id string) (accounts.Pr
 	return profile, nil
 }
 
+// ClearSubscriptionLimit forgets an account's recorded limit at its owner's
+// word, without asking the provider: any saved subscription, CLI sign-ins
+// included. The next provider report replaces it either way.
+func (b *Bench) ClearSubscriptionLimit(id string) (accounts.Profile, error) {
+	for _, p := range b.Profiles() {
+		if p.ID == id {
+			return p, b.Accounts.Clear(id)
+		}
+	}
+	return accounts.Profile{}, os.ErrNotExist
+}
+
 // PendingEnrollments exposes resumable view references, never one-time codes or URLs.
 func (b *Bench) PendingEnrollments() []Enrollment {
 	b.mu.Lock()

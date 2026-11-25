@@ -44,6 +44,7 @@ const (
 	RunnerService_CancelSubscriptionEnrollment_FullMethodName = "/lazybox.bench.v1.RunnerService/CancelSubscriptionEnrollment"
 	RunnerService_RenameSubscription_FullMethodName           = "/lazybox.bench.v1.RunnerService/RenameSubscription"
 	RunnerService_RefreshSubscription_FullMethodName          = "/lazybox.bench.v1.RunnerService/RefreshSubscription"
+	RunnerService_ClearSubscriptionLimit_FullMethodName       = "/lazybox.bench.v1.RunnerService/ClearSubscriptionLimit"
 	RunnerService_RemoveSubscription_FullMethodName           = "/lazybox.bench.v1.RunnerService/RemoveSubscription"
 	RunnerService_GetGitHubConnection_FullMethodName          = "/lazybox.bench.v1.RunnerService/GetGitHubConnection"
 	RunnerService_ConfigureGitHubApp_FullMethodName           = "/lazybox.bench.v1.RunnerService/ConfigureGitHubApp"
@@ -311,6 +312,10 @@ type RunnerServiceClient interface {
 	CancelSubscriptionEnrollment(ctx context.Context, in *SubscriptionEnrollmentRequest, opts ...grpc.CallOption) (*SubscriptionEnrollment, error)
 	RenameSubscription(ctx context.Context, in *RenameSubscriptionRequest, opts ...grpc.CallOption) (*Profile, error)
 	RefreshSubscription(ctx context.Context, in *RefreshSubscriptionRequest, opts ...grpc.CallOption) (*Profile, error)
+	// Forget a subscription's recorded usage limit at the owner's word: it reads
+	// available until the provider reports otherwise. FAILED_PRECONDITION when no
+	// limit is recorded (sign-in and billing problems are not limits).
+	ClearSubscriptionLimit(ctx context.Context, in *ClearSubscriptionLimitRequest, opts ...grpc.CallOption) (*Profile, error)
 	// Owner only. Forgets a subscription saved in Lazybox: its registry entry and
 	// its private folder (an imported token among them). Refused while a running
 	// conversation uses it. The person's own CLI sign-ins are never touched.
@@ -1060,6 +1065,16 @@ func (c *runnerServiceClient) RefreshSubscription(ctx context.Context, in *Refre
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Profile)
 	err := c.cc.Invoke(ctx, RunnerService_RefreshSubscription_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) ClearSubscriptionLimit(ctx context.Context, in *ClearSubscriptionLimitRequest, opts ...grpc.CallOption) (*Profile, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Profile)
+	err := c.cc.Invoke(ctx, RunnerService_ClearSubscriptionLimit_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3266,6 +3281,10 @@ type RunnerServiceServer interface {
 	CancelSubscriptionEnrollment(context.Context, *SubscriptionEnrollmentRequest) (*SubscriptionEnrollment, error)
 	RenameSubscription(context.Context, *RenameSubscriptionRequest) (*Profile, error)
 	RefreshSubscription(context.Context, *RefreshSubscriptionRequest) (*Profile, error)
+	// Forget a subscription's recorded usage limit at the owner's word: it reads
+	// available until the provider reports otherwise. FAILED_PRECONDITION when no
+	// limit is recorded (sign-in and billing problems are not limits).
+	ClearSubscriptionLimit(context.Context, *ClearSubscriptionLimitRequest) (*Profile, error)
 	// Owner only. Forgets a subscription saved in Lazybox: its registry entry and
 	// its private folder (an imported token among them). Refused while a running
 	// conversation uses it. The person's own CLI sign-ins are never touched.
@@ -3843,6 +3862,9 @@ func (UnimplementedRunnerServiceServer) RenameSubscription(context.Context, *Ren
 }
 func (UnimplementedRunnerServiceServer) RefreshSubscription(context.Context, *RefreshSubscriptionRequest) (*Profile, error) {
 	return nil, status.Error(codes.Unimplemented, "method RefreshSubscription not implemented")
+}
+func (UnimplementedRunnerServiceServer) ClearSubscriptionLimit(context.Context, *ClearSubscriptionLimitRequest) (*Profile, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClearSubscriptionLimit not implemented")
 }
 func (UnimplementedRunnerServiceServer) RemoveSubscription(context.Context, *RemoveSubscriptionRequest) (*InfoResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RemoveSubscription not implemented")
@@ -4916,6 +4938,24 @@ func _RunnerService_RefreshSubscription_Handler(srv interface{}, ctx context.Con
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).RefreshSubscription(ctx, req.(*RefreshSubscriptionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_ClearSubscriptionLimit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClearSubscriptionLimitRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ClearSubscriptionLimit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ClearSubscriptionLimit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ClearSubscriptionLimit(ctx, req.(*ClearSubscriptionLimitRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -8763,6 +8803,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RefreshSubscription",
 			Handler:    _RunnerService_RefreshSubscription_Handler,
+		},
+		{
+			MethodName: "ClearSubscriptionLimit",
+			Handler:    _RunnerService_ClearSubscriptionLimit_Handler,
 		},
 		{
 			MethodName: "RemoveSubscription",

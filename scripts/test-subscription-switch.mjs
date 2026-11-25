@@ -240,6 +240,59 @@ try{
  const checked=f.calls.filter(call=>call.method==='RefreshSubscription').slice(checkedBefore);
  assert.equal(checked.length,3);
  assert.equal(f.mutations.filter(m=>m.method==='SwitchSubscription').length,switchesBefore,'refresh does not switch or resume the execution');
+ await refreshPage.close();
+
+ // ⋯ → Switch subscription…: a stale limit is cleared in one click, a current
+ // one after a word, and the header's refresh icon asks the provider again.
+ const past=Math.floor(Date.now()/1000)-600;
+ const byId=id=>f.profiles.find(p=>p.id===id);
+ byId('work-1').availability={state:'available',windows:[{name:'five_hour',usedPercent:20,durationMinutes:'300'}]};
+ byId('work-2').availability={state:'exhausted',resetAt:String(past)};
+ byId('work-3').availability={state:'exhausted',resetAt:String(reset)};
+ const markPage=await browser.newPage({viewport:{width:1440,height:900},locale:'en-US'});
+ await collectPageErrors(markPage,errors);
+ await markPage.goto(`${base}/?view=workspace&collection=delta&session=delta-session#token=${f.token}`);
+ await markPage.locator('.embedded-chat:visible').first().locator('summary[aria-label="Session actions"]').click();
+ await markPage.getByRole('button',{name:'Switch subscription…'}).click();
+ const switchDialog=markPage.getByRole('dialog',{name:'Switch subscription'});
+ const row=name=>switchDialog.locator('.subscription-choice-row,.subscription-choice:not(.subscription-choice-row>*)').filter({hasText:name});
+ await expect(row('Work subscription 2')).toContainText('Reset elapsed · usage unconfirmed');
+ await expect(row('Work subscription 3')).toContainText(/Limit reached · back/);
+ // Only limited rows offer it (the CLI sign-in too, still limited from above); it never joins the radio's name.
+ await expect(switchDialog.getByRole('button',{name:/^Mark .* available/})).toHaveText(['Mark available','Mark available…','Mark available…']);
+ await expect(switchDialog.getByRole('button',{name:'Mark Claude CLI sign-in available…'})).toBeVisible();
+ await expect(switchDialog.getByRole('radio',{name:/Work subscription 2/})).not.toHaveAccessibleName(/Mark/);
+ await markPage.screenshot({path:'.cache/subscription-switch-mark.png'});
+ // Reset elapsed: one click, no question.
+ await switchDialog.getByRole('button',{name:'Mark Work subscription 2 available'}).click();
+ await expect.poll(()=>f.mutations.findLast(m=>m.method==='ClearSubscriptionLimit')?.body).toEqual({profileId:'work-2'});
+ await expect(row('Work subscription 2')).not.toContainText('Reset elapsed');
+ await expect(switchDialog.getByRole('button',{name:'Mark Work subscription 2 available'})).toHaveCount(0);
+ // Reset still ahead: a confirm first; Escape keeps the limit and the dialog.
+ const cleared=f.mutations.filter(m=>m.method==='ClearSubscriptionLimit').length;
+ await expect(switchDialog.getByRole('radio',{name:/Work subscription 3/})).toBeDisabled();
+ await switchDialog.getByRole('button',{name:'Mark Work subscription 3 available…'}).click();
+ const confirm=switchDialog.getByRole('group',{name:'Confirm: Mark Work subscription 3 available'});
+ await expect(confirm).toContainText(/limited, back (tomorrow )?at/);
+ await expect(confirm.getByRole('button',{name:'Mark available'})).toBeFocused();
+ await markPage.screenshot({path:'.cache/subscription-switch-mark-confirm.png'});
+ await markPage.keyboard.press('Escape');
+ await expect(confirm).toHaveCount(0);
+ await expect(switchDialog).toBeVisible();
+ assert.equal(f.mutations.filter(m=>m.method==='ClearSubscriptionLimit').length,cleared,'Escape clears nothing');
+ await switchDialog.getByRole('button',{name:'Mark Work subscription 3 available…'}).click();
+ await confirm.getByRole('button',{name:'Mark available'}).press('Enter');
+ await expect.poll(()=>f.mutations.findLast(m=>m.method==='ClearSubscriptionLimit')?.body).toEqual({profileId:'work-3'});
+ await expect(switchDialog.getByRole('radio',{name:/Work subscription 3/})).toBeEnabled();
+ // Refresh usage: every private sign-in of the provider, never the CLI sign-in or another provider.
+ const askedBefore=f.calls.filter(call=>call.method==='RefreshSubscription').length;
+ await switchDialog.getByRole('button',{name:'Refresh usage'}).click();
+ await expect(row('Work subscription 1')).toContainText('% used');
+ await expect(switchDialog.getByRole('button',{name:'Refresh usage'})).toBeEnabled();
+ assert.deepEqual(f.calls.filter(call=>call.method==='RefreshSubscription').slice(askedBefore).map(call=>call.body.profileId).sort(),['work-1','work-2','work-3']);
+ await markPage.keyboard.press('Escape');
+ await expect(switchDialog).toHaveCount(0);
+ await markPage.close();
  await drainPageErrors(errors);assert.deepEqual(errors,[]);
- console.log('PASS automatic switch line, one limit card in words (Switch to the best subscription, picker of the same provider in order, wait), the header chip opens Switch subscription, nothing switches by itself without an account policy, a message sent while limited goes once, wait-for-reset resumes once, ⋯ Switch subscription; with Subscription rotation allowed: Always switch automatically and the everywhere question. Fixture only.');
+ console.log('PASS automatic switch line, one limit card in words (Switch to the best subscription, picker of the same provider in order, wait), the header chip opens Switch subscription, nothing switches by itself without an account policy, a message sent while limited goes once, wait-for-reset resumes once, ⋯ Switch subscription; with Subscription rotation allowed: Always switch automatically and the everywhere question; Switch subscription refreshes usage and marks a limited subscription available. Fixture only.');
 }finally{await browser?.close();await server.close();await f.close();}

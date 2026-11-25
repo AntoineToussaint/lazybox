@@ -118,6 +118,7 @@ try{
  const alpha=fixture.sessions.find(s=>s.id==='alpha-session');
  fixture.sessions.push({...structuredClone(alpha),id:'fork-session',conversationId:'fork-conversation',title:'Forked',forkedFromSessionId:'alpha-session',forkedFromCursor:'0'});
  const forkWindow=await browser.newPage({viewport:{width:1200,height:900}});
+ await collectPageErrors(forkWindow, errors);
  await forkWindow.route('**/GetTelemetry',route=>{const scope=route.request().postDataJSON();return route.fulfill({json:usageReport(scope.conversation==='fork-conversation'?'100000':'237500')});});
  // Opening the linked conversation reads its session once; the window's own reads of it wait.
  let alphaReads=0,releaseAlpha;const alphaHeld=new Promise(resolve=>{releaseAlpha=resolve;});

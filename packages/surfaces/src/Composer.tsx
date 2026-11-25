@@ -21,7 +21,8 @@ import type { FileReference } from './view-state';
  * (with Vim editing and prompt recall), and the send, attach, snippet and
  * interrupt controls. The draft itself is owned by the chat.
  */
-export function Composer({ textarea, fileInput, agentName, embedded, session, sessionID, viewState, keymap, limited, message, files, attachments, missingFiles, uncertainSend, handedOver, sending, canCompose, canAttach, canSend, permissionPrompt, onSubmit, onChange, onDictate, onRecallKey, onOpenPromptHistory, onRemoveMissingFile, onDropMissingFiles, onDismissHandover, onOpenSnippets, onSelectFiles, onInterrupt, interruptInBar = false, onError, slash, info }: {
+export function Composer({ workingTurn, textarea, fileInput, agentName, embedded, session, sessionID, viewState, keymap, limited, message, files, attachments, missingFiles, uncertainSend, handedOver, sending, canCompose, canAttach, canSend, permissionPrompt, onSubmit, onChange, onDictate, onRecallKey, onOpenPromptHistory, onRemoveMissingFile, onDropMissingFiles, onDismissHandover, onOpenSnippets, onSelectFiles, onInterrupt, interruptInBar = false, onError, slash, info }: {
+  workingTurn: boolean;
   textarea: RefObject<HTMLTextAreaElement | null>;
   fileInput: RefObject<HTMLInputElement | null>;
   agentName: string;
@@ -127,7 +128,7 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
       if (Number.isInteger(from) && from !== index) attachments.move(from, index);
     },
   });
-  const sendLabel = sending ? 'Sending…' : session?.busy ? 'Queue follow-up' : 'Send message';
+  const sendLabel = sending ? 'Sending…' : workingTurn ? 'Queue follow-up' : 'Send message';
 
   const sendKeys = bindings(keymap['chat.send']);
   const sendKey = sendKeys[0] || 'Enter';
@@ -135,7 +136,7 @@ export function Composer({ textarea, fileInput, agentName, embedded, session, se
     ? '' : ' · Shift+Enter for a new line';
   // While the agent works, a message queues behind its turn; Send now's key (⌘↵) stops the turn for it.
   const sendNowKey = bindings(keymap['chat.send-now'])[0];
-  const busyHint = session?.busy && !session.closed && sendNowKey ? `${displayBinding(sendKey).join(' ')} queues · ${displayBinding(sendNowKey).join(' ')} sends now` : '';
+  const busyHint = workingTurn && sendNowKey ? `${displayBinding(sendKey).join(' ')} queues · ${displayBinding(sendNowKey).join(' ')} sends now` : '';
   const dictateKey = bindings(keymap['voice.dictate'])[0];
   const dictateHint = dictateKey ? `Dictate · hold ${displayBinding(dictateKey).join(' ')} to talk, tap it ${isLoneModifier(dictateKey) ? 'twice ' : ''}to keep listening` : 'Dictate';
   // Sending while listening (↵, ⌘↵, Send) waits for the last words, then sends through this same form.

@@ -110,6 +110,13 @@ func TestStartReviewBriefsAReadOnlyReviewerWhoseFindingsLandInTheTray(t *testing
 		t.Fatal(err)
 	}
 	run, session := started.Run, started.Session
+	parent := f.conversation.Saved.ConversationID
+	if parent == "" {
+		parent = f.conversation.ID
+	}
+	if session.GetLineage().GetParentConversationId() != parent || session.GetLineage().GetRole() != "reviewer" {
+		t.Fatalf("reviewer lineage: %+v", session.Lineage)
+	}
 	if run.ReviewerLabel != "Codex" || run.SourceLabel != "Claude" || run.ScopeLabel != "Turn 1" || run.State != "running" || run.SourceTitle != "Fix the parser" || run.ReviewerSessionId != session.Id || run.SourceSessionId != f.conversation.ID {
 		t.Fatalf("run: %+v", run)
 	}

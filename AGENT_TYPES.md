@@ -30,7 +30,7 @@ including their requests in the inbox. Help, planning and summary stay in their 
   hands work to.
 - **Listed**: a conversation of its own in the sidebar, tabs and workspace
   lists. A companion is reached from its artifact, and a reviewer from its
-  review card and the review tray.
+  review card, the review tray, and a sidebar row nested under the conversation that requested it.
 - **Reaches the inbox**: its questions, approvals, interactive commands and
   failures reach the inbox and notifications. An agent that can act always
   does, listed or not. Hiding a companion from the sidebar must never hide

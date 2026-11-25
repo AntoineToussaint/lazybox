@@ -219,6 +219,12 @@ try {
  await last.click();await page.keyboard.type('exit');await page.keyboard.press('Enter');
  await expect(page.locator('.panel-terminal')).toHaveCount(0);
  await expect(page.locator('.panel-chat')).toBeVisible();
+ // Closing the only tab by hand also dismisses its panel and returns focus to chat.
+ await page.getByRole('button',{name:'Open terminal',exact:true}).click();
+ await panel.getByRole('button',{name:'Close terminal Workspace root',exact:true}).click();
+ await expect(panel).toHaveCount(0);
+ await expect(page.locator('.panel-chat').getByRole('textbox',{name:'Message',exact:true})).toBeFocused();
+ const openedBeforeHandoff=calls('OpenTerminal').length;
  // A handoff in chat opens a PTY only after the owner reviews and accepts.
  const handoff={type:'terminal_handoff',status:'pending',name:'alpha',text:'/fixture/collections/alpha',providerDataJson:Buffer.from(JSON.stringify(['acme','login','team blue',''])).toString('base64')};
  // Reviewed before it runs: every character visible (an ESC is \e), the folder named from the workspace.
@@ -256,7 +262,7 @@ try {
  await expect(shared).toContainText('Interactive command running');
  fixture.terminals.get('interactive-agent-input').done=true;
  await expect(shared).toContainText('Interactive command finished',{timeout:12000});
- assert.equal(calls('OpenTerminal').length,opened,'handoff reused the PTY started by the owner decision');
+ assert.equal(calls('OpenTerminal').length,openedBeforeHandoff,'handoff reused the PTY started by the owner decision');
  await drainPageErrors(errors);assert.deepEqual(errors,[]);
  console.log('PASS terminal: an agent handoff requires approval, focuses the PTY and receives owner input; a wrapped sign-in URL is one link (pointer and underline on hover, a click opens the whole address, a drag does not, the right-click menu offers it), exit closes the tab and panel, header opens a shell docked right, focuses rather than duplicates, fitted size, ordered input, member directory, close, re-attach after reload, × close and reopen, dock via menu and keyboard, layout survives reload, remembered dock side, drag a tab below the chat with a drop preview, neighbours stay mounted, reopen from Panels, phone close.');
 } finally {await browser?.close();await server.close();await fixture.close();}

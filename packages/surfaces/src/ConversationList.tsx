@@ -31,7 +31,7 @@ import './inbox.css';
  * are the tooltip. Selecting a conversation attaches a reader; it never
  * starts execution. The row's menu is every conversation's (ConversationActions).
  */
-export function ConversationList({ collectionId = '', target, onTarget, compact = false, hideWhenEmpty = false, heading, allWorkspaces = false, sessions: supplied, workspaceName, order, arrange }: { order?: readonly string[]; arrange?(ids: string[]): Promise<void>; sessions?: Session[]; allWorkspaces?: boolean; compact?: boolean; hideWhenEmpty?: boolean; heading?: string; collectionId?: string; target: ViewTarget; onTarget(target: ViewTarget): void; workspaceName?(id: string): string }) {
+export function ConversationList({ collectionId = '', target, onTarget, compact = false, hideWhenEmpty = false, heading, allWorkspaces = false, sessions: supplied, workspaceName, order, arrange, reviewsOf }: { reviewsOf?(author: Session): Session[]; order?: readonly string[]; arrange?(ids: string[]): Promise<void>; sessions?: Session[]; allWorkspaces?: boolean; compact?: boolean; hideWhenEmpty?: boolean; heading?: string; collectionId?: string; target: ViewTarget; onTarget(target: ViewTarget): void; workspaceName?(id: string): string }) {
   const { api, info, revision, error:connectionError } = useRunner();
   const [search, setSearch] = useState('');
   const [deleted,setDeleted]=useState<Set<string>>(()=>new Set());
@@ -98,12 +98,15 @@ export function ConversationList({ collectionId = '', target, onTarget, compact 
     {allWorkspaces && <input autoFocus type="search" className="conversation-filter" aria-label="Search all conversation titles" placeholder="Search all conversation titles…" maxLength={120} value={search} onChange={event => { setSearch(event.target.value); setPageCount(1); }}/> }
     <nav {...(arrange ? reorder.listProps : {})} aria-keyshortcuts={arrange ? "Alt+Shift+ArrowUp Alt+Shift+ArrowDown" : undefined} aria-label={allWorkspaces ? 'All conversations' : collectionId ? 'Workspace conversations' : 'Conversations'}>
       {arrange && <span className="sr-only" role="status" aria-live="polite">{reorder.announcement}</span>}
-      {reorder.items.map(({id, session}) => {
-      const dragProps = arrange ? reorder.itemProps(id) : undefined;
+      {reorder.items.flatMap(({session}) => [
+        { session, nested: false },
+        ...(reviewsOf?.(session) || []).filter(child => !deleted.has(child.id)).map(session => ({ session, nested: true })),
+      ]).map(({session, nested}) => {
+      const dragProps = arrange && !nested ? reorder.itemProps(session.conversationId || session.id) : undefined;
       const marker = unread(session), title = conversationName(session), status = sessionStatus(session), archived = archivedAt(session) > 0, pinned = isPinned(session);
       const items = actions.items(session, { rename: () => setRenaming(session.id) }), at = activityAt(session);
       const details = [allWorkspaces || !compact ? workspaceName?.(session.collectionId) : '', conversationDetails(session, info?.profiles || [])].filter(Boolean).join(' · ');
-      return <div {...dragProps} className="conversation-row" data-unread={marker || undefined} data-pinned={pinned || undefined} data-archived={archived || undefined} key={session.id}
+      return <div {...dragProps} className="conversation-row" style={nested ? { marginInlineStart: "1rem" } : undefined} data-unread={marker || undefined} data-pinned={pinned || undefined} data-archived={archived || undefined} key={session.id}
         onContextMenu={contextMenu('conversation', () => items, { sessionId: session.id, workspaceId: session.collectionId }, `Conversation ${title}`)}
         onKeyDown={event => { dragProps?.onKeyDown(event); if (event.key === 'F2' && renaming !== session.id) { event.preventDefault(); setRenaming(session.id); } }}>
         {renaming === session.id

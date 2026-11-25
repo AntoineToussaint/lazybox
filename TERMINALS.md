@@ -20,7 +20,7 @@ interactive commands handed off by an agent.
   shell there starts outside the workspace (`OpenTerminal` with
   `repository_home` or `user_home`, resolved by the Runner from its own
   records) but is still this workspace's terminal, with its credential. Tabs switch between them; a tab's **×**
-  closes that shell (it hangs up the shell, as closing a terminal window does).
+  closes that shell. Closing the last tab also closes the Terminal panel.
 - **Panels → Terminal** in the workspace header also adds it. It docks like
   any other panel (see [Arrange panels](WORKSPACES.md#arrange-panels)). Opening or restoring the panel never starts a shell; it
   shows the workspace's running terminals.

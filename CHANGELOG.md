@@ -60,6 +60,8 @@ leave out.
 
 ### Workspaces and tabs
 
+- **Go back** Return to the preceding conversation, workspace, or Settings tab from the header. Alt+Left and Command+[ also step back through Documentation.
+
 - **Follow the latest reply** Sending a message or choosing Jump to latest keeps the last line visible as replies arrive.
 - **Open the intended panel** The panel you select stays in front when a crowded layout combines tabs.
 - **Review terminal requests** Interactive commands appear in the approval inbox. Expired requests collapse the command and explain how to request it again.
@@ -127,6 +129,8 @@ leave out.
 - **Agents know where it is** Agents are told each repository's home, that it is yours, to use it rather than a temporary clone, and to hand logins back to you in so many words. lazybox repos and lazybox repo home api print the paths.
 
 ### Chat and Send now
+
+- **Follow the newest reply** Scrolling to the bottom resumes following when new turns arrived while you were reading earlier messages.
 
 - **Finished sub-agents stop showing as running** In a conversation used all day, with hundreds of sub-agents and background commands, the ones started later show as done when they finish, instead of running with a clock that never stops, and they can still be stopped while they run.
 - **Edit sits with a queued message's actions** A queued message's Edit is in its row of buttons, right before Send now, instead of alone on a line below it; Tab reaches the buttons in the order you see them, and in a narrow chat or on a phone the row wraps under the message. Editing a message you just sent with Send now no longer says, 20 seconds later, that the current step has not stopped.
@@ -212,6 +216,8 @@ leave out.
 - **Pairing offers what the phone can do** Pairing no longer offers Start conversations, which the phone has no screen for yet; a phone already paired with it keeps it.
 
 ### Extensions
+
+- **Browse every extension in one catalog** Open Extensions to see installed and available plugins, preview their interfaces, review access, and open an enabled panel.
 
 - **Panels you add** An extension is a panel you write in HTML, JavaScript and CSS. It runs in a sandbox and does only what you allow, which Lazybox shows you in words first; the Agent board and the Cost dashboard are examples.
 - **Hooks for pull requests** pr.opened, pr.checks-passed, pr.approved and pr.merged join the events your hooks can react to.

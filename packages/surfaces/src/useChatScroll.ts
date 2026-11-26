@@ -6,7 +6,7 @@ const FOLLOW_THRESHOLD=48;
 /** The reader's own scrolling: which way, until when a scroll is theirs, and
  * whether it aims at the bottom (measured when they asked, as a reply streaming
  * in can grow the content before the scroll lands). */
-type Intent={direction:'up'|'down'|'any';until:number;bottom?:boolean};
+type Intent={direction:'up'|'down'|'any';until:number;bottom?:boolean;touch?:boolean};
 const UP_KEYS=new Set(['PageUp','ArrowUp','Home']),DOWN_KEYS=new Set(['PageDown','ArrowDown','End',' ']);
 
 /** A scroller between the event target and the pane that takes this scroll itself (a code block, a console). */
@@ -54,8 +54,14 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  // movement is measured from it, so our own scrolling never reads as theirs.
  const lastTop=useRef(0);
  const place=(pane:HTMLDivElement,top:number)=>{pane.scrollTop=top;lastTop.current=pane.scrollTop;};
- const intent=useRef<Intent|undefined>(undefined),pressed=useRef(false);
- const readerScrolling=()=>pressed.current||(!!intent.current&&performance.now()<intent.current.until);
+ const intent=useRef<Intent|undefined>(undefined),pressed=useRef<'pointer'|'touch'|undefined>(undefined);
+ const readerScrolling=()=>!!pressed.current||(!!intent.current&&performance.now()<intent.current.until);
+ // Wheel, key and touch gestures can page ahead. A scrollbar drag cannot:
+ // the browser maps the thumb to the content height it had at the start.
+ // Some engines never send pointer events for a native scrollbar; an
+ // unclassified scroll should therefore keep its range until the edge.
+ const canPageAhead=(direction:'up'|'down')=>pressed.current==='touch'||(!pressed.current&&readerScrolling()&&
+  (intent.current?.direction===direction||!!intent.current?.touch));
  // WebKit has no scroll anchoring (and Chromium's is off on the pane). While
  // the reader is not following, the element at the top of the viewport keeps
  // its place when content above it changes height, such as an image or a
@@ -119,7 +125,7 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  // Within a screen of the top, the next step of history is mounted before the reader reaches it.
  const nearTop=(pane:HTMLDivElement)=>hidden.current>0&&(following.current
   ? pane.scrollHeight<=pane.clientHeight+1&&range.current.visibleMessages<limit
-  : pane.scrollTop<Math.max(400,pane.clientHeight));
+  : pane.scrollTop<=1||(canPageAhead('up')&&pane.scrollTop<Math.max(400,pane.clientHeight)));
  useLayoutEffect(()=>{
   following.current=reader.view.following;setFollowingLatest(reader.view.following);setVisibleMessages(reader.view.visibleMessages);setEndId(reader.view.endId);
   const pane=paneRef.current,content=contentRef.current;if(!pane||!content)return;
@@ -146,8 +152,16 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
    intent.current={direction,until:performance.now()+ms,bottom:direction==='down'&&pane.scrollTop+distance>=pane.scrollHeight-pane.clientHeight-FOLLOW_THRESHOLD};
    if(direction==='up'&&following.current&&pane.scrollTop>0){setFollowing(false);capture(pane);}
   };
+  // A compact history window can end without any room left to scroll.
+  // In that case the user's input is the only signal: no scroll event fires.
+  const resumeAtEdge=()=>{
+   if(range.current.end>=range.current.messages.length||pane.scrollHeight-pane.clientHeight-pane.scrollTop>1)return false;
+   jumpRef.current(range.current.visibleMessages);
+   return true;
+  };
   const wheel=(event:WheelEvent)=>{
    if(!event.deltaY||event.ctrlKey||innerScroller(event.target,pane,event.deltaY<0))return;
+   if(event.deltaY>0&&resumeAtEdge())return;
    intend(event.deltaY<0?'up':'down',300,event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?pane.clientHeight:1));
   };
   // On the window, after the app's own handlers: a key one of them used is not a scroll.
@@ -159,14 +173,17 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
     event.preventDefault();jumpRef.current();return;
    }
    const up=UP_KEYS.has(event.key)||(event.key===' '&&event.shiftKey);
-   if((up||DOWN_KEYS.has(event.key))&&!innerScroller(event.target,pane,up))intend(up?'up':'down',800,event.key==='End'?Infinity:event.key==='ArrowDown'?40:pane.clientHeight*.85);
+   if(!(up||DOWN_KEYS.has(event.key))||innerScroller(event.target,pane,up))return;
+   if(event.key===' '&&(event.target as Element)?.closest?.('button, a[href], summary, [role="button"]'))return;
+   if(!up&&resumeAtEdge()){event.preventDefault();return;}
+   intend(up?'up':'down',800,event.key==='ArrowDown'?40:pane.clientHeight*.85);
   };
   // A held pointer or finger (the scrollbar, a selection, a swipe) makes every
   // scroll the reader's, and so does the momentum after it. Touch is followed
   // by its own events: the browser cancels the pointer once a finger pans.
-  const press=(event:PointerEvent)=>{if(event.pointerType!=='touch'&&event.button===0)pressed.current=true;};
-  const touch=()=>{pressed.current=true;};
-  const release=(ms:number)=>{if(!pressed.current)return;pressed.current=false;intent.current={direction:'any',until:performance.now()+ms};};
+  const press=(event:PointerEvent)=>{if(event.pointerType!=='touch'&&event.button===0){pressed.current='pointer';intent.current=undefined;}};
+  const touch=()=>{pressed.current='touch';};
+  const release=(ms:number)=>{if(!pressed.current)return;intent.current={direction:'any',until:performance.now()+ms,touch:pressed.current==='touch'};pressed.current=undefined;};
   const releasePointer=(event:PointerEvent)=>{if(event.pointerType!=='touch')release(150);},releaseTouch=()=>release(1500);
   // A scrollbar drag may end without a pointerup reaching the page.
   const hover=(event:PointerEvent)=>{if(event.pointerType!=='touch'&&!event.buttons)release(150);};
@@ -194,22 +211,41 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
    return()=>cancelAnimationFrame(frame);
   }
  },[reader,messages,visibleMessages,endId,pendingCount,loadEarlier]);
- const showLater=useCallback(()=>{
+ const loadLater=useCallback((scrolling:boolean)=>{
   const pane=paneRef.current;
   const {messages,end,visibleMessages}=range.current;
-  if(!pane||end>=messages.length||prependHeight.current!==undefined)return;
+  if(!pane||end>=messages.length||prependHeight.current!==undefined)return false;
+  let step=EARLIER_MESSAGES,drop=0;
+  if(scrolling){
+   // Slide a full window forward instead of doubling the scrollbar range
+   // when paging near the bottom. Keep the visible rows and some history
+   // above the viewport so that reversing direction can still scroll.
+   const paneTop=pane.getBoundingClientRect().top;
+   const first=Array.from(pane.querySelectorAll<HTMLElement>('[data-message-id]')).find(row=>row.getBoundingClientRect().bottom>paneTop);
+   const start=Math.max(0,end-visibleMessages);
+   const above=messages.slice(start,end).findIndex(message=>message.id===first?.dataset.messageId);
+   if(above<2&&visibleMessages>=limit)return false;
+   if(above>1){
+    step=Math.min(step,Math.floor(above/2));
+    drop=Math.min(step,messages.length-end);
+   }
+  }
   capture(pane);prependHeight.current=pane.scrollHeight;
-  const nextEnd=Math.min(messages.length,end+EARLIER_MESSAGES);
-  setVisibleMessages(Math.min(limit,visibleMessages+nextEnd-end));
+  const nextEnd=Math.min(messages.length,end+step);
+  setVisibleMessages(Math.min(limit,Math.min(end,visibleMessages)+nextEnd-end-drop));
   setEndId(messages[nextEnd-1].id);
+  return true;
  },[reader]);
+ const showLater=()=>loadLater(false);
  const onScroll=(event:UIEvent<HTMLDivElement>)=>{
   const pane=event.currentTarget,top=pane.scrollTop,moved=top-lastTop.current,movedUp=readerMovedUp(pane);lastTop.current=top;
   const gap=pane.scrollHeight-top-pane.clientHeight;
-  if(moreBelow&&moved>0&&gap<Math.max(400,pane.clientHeight)&&prependHeight.current===undefined){
-   showLater();
-   return;
+  // Paging preserves the visible row while reading. Once the reader reaches
+  // the bottom, preserving that row would move them back into history.
+  if(moreBelow&&moved>0&&(gap<=1||(readerScrolling()&&intent.current?.direction==='down'&&intent.current.bottom))){
+   jumpRef.current(visibleMessages);return;
   }
+  if(moreBelow&&moved>0&&canPageAhead('down')&&gap<Math.max(400,pane.clientHeight)&&loadLater(true))return;
   if(readerScrolling()){
    // Up by any amount stops following, even within the threshold; down to near the bottom resumes it.
    // A pane clamped to its new bottom (content folding below), or moved by its
@@ -229,19 +265,22 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   if(following.current)anchor.current=undefined;else capture(pane);
   if(nearTop(pane))loadEarlier(pane);
  };
- const jumpToLatest=()=>{
-  intent.current=undefined;pressed.current=false;anchor.current=undefined;
+ const goToTail=(count=INITIAL_MESSAGES)=>{
+  intent.current=undefined;pressed.current=undefined;anchor.current=undefined;
   reveal.current=undefined;prependHeight.current=undefined;
   setFollowing(true);
   if(paneRef.current)pin(paneRef.current);
-  if(endId||visibleMessages!==INITIAL_MESSAGES){
+  if(endId||visibleMessages!==count){
    // Dropping earlier rows changes the scroll range. Pin after React commits
    // the short tail, before a resize observer can interpret the clamp as input.
    pinAfterTrim.current=true;
-   setEndId('');setVisibleMessages(INITIAL_MESSAGES);
+   setEndId('');setVisibleMessages(count);
   }
  };
- const jumpRef=useRef(jumpToLatest);jumpRef.current=jumpToLatest;
+ // A normal downward scroll keeps the mounted window size. Only an
+ // explicit jump trims expanded history back to the initial tail.
+ const jumpToLatest=()=>goToTail();
+ const jumpRef=useRef(goToTail);jumpRef.current=goToTail;
  // Jumping to a message (a prompt) may need earlier history mounted first:
  // widen the window, then scroll it to the top once it is rendered.
  const reveal=useRef<string|undefined>(undefined);

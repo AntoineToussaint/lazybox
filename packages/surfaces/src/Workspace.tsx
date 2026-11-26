@@ -287,6 +287,11 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     title: target => conversationTitle(info?.sessions.find(session => session.id === target.sessionId)) || 'Conversation',
     announce: text => dock.current?.announce(text), error: setError,
   });
+  const restorePageSelection = (destination: WorkspacePage, target: ViewTarget) => {
+    if (sameConversation(destination.selection, target)) return destination;
+    if (!target.sessionId || !shownPanels(destination).some(isChatTab)) return { ...destination, selection: target };
+    return openConversation(destination, target, { mode: openModeFor('preview', tabsOn) }, () => crypto.randomUUID()).page;
+  };
   const select = (requested: RunnerTarget, mode: 'preview' | 'tab' = 'preview', restorePage?: string) => {
     if (switched(requested)) return;
     const target = localTarget(requested);
@@ -305,7 +310,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         if (restorePage && next.pages.some(p => p.id === restorePage)) next = { ...next, selectedPage: restorePage };
         if (target.sessionId || restorePage) next = { ...next, pages: next.pages.map(page => {
           if (page.id !== next.selectedPage) return page;
-          return target.sessionId ? shows(page) : { ...page, selection: target };
+          return restorePage ? restorePageSelection(page, target) : shows(page);
         }) };
         // Switching workspace never moves the dividers: the target keeps its own
         // pages and panels, but takes the current split sizes wherever its
@@ -361,11 +366,10 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       if (!select(target, 'preview', previous.pageId)) return;
     } else {
       const destination = layout.pages.find(p => p.id === previous.pageId) || page;
-      if (destination.id !== page.id || destination.selection.sessionId !== target.sessionId) {
-        const restored = target.sessionId ? openConversation(destination, target, { mode: openModeFor('preview', tabsOn) }, () => crypto.randomUUID()).page : { ...destination, selection: target };
-        if (!commit({ ...layout, selectedPage: restored.id, pages: layout.pages.map(p => p.id === restored.id ? restored : p) })) {
-          return;
-        }
+      const restored = restorePageSelection(destination, target);
+      if (destination.id !== page.id || restored !== destination) {
+        const pages = restored === destination ? layout.pages : layout.pages.map(p => p.id === restored.id ? restored : p);
+        if (!commit({ ...layout, selectedPage: restored.id, pages })) return;
       }
     }
     // Restoring an entry consumes it; the trip back is not another visit.

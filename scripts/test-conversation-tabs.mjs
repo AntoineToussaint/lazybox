@@ -115,6 +115,8 @@ async function tabsOn(){
  const work=(w,sessionId,chat)=>({version:2,selectedPage:'work',pages:[{id:'work',name:'Work',selection:{collectionId:w,sessionId,commandId:''},layout:{type:'split',direction:'row',sizes:[0.2,0.8],children:[sidebar(w),group(`g-${w}-chat`,[chat])]},floating:[],popouts:[],detached:[]}]});
  // Alpha as the first tabs build left it (the user's screenshot): the main conversation lost, its review alone in the preview tab.
  const alpha=work('alpha','alpha-review',{id:'alpha-review-tab',kind:'chat',binding:{mode:'pinned',target:{collectionId:'alpha',sessionId:'alpha-review',commandId:''}},detached:false,preview:true});
+ // A page can keep a conversation selected while showing only its files.
+ alpha.pages.push({...alpha.pages[0],id:'files-only',name:'Files only',layout:group('files-only-group',[panel('files-only-panel','files')])});
  // Beta as builds before tabs saved it: one chat following the page.
  const beta=work('beta','beta-session',panel('beta-chat','chat'));
  const context=await browser.newContext({viewport:{width:1600,height:900}});
@@ -133,6 +135,15 @@ async function tabsOn(){
  assert.equal((await titles())[0],'Review of the main conversation','the tab that was there stays first');
  await expect.poll(()=>inFront('Review of the main conversation')).toBe(true);
  await page.screenshot({path:'.cache/conversation-tabs-recovered.png'});
+ // Returning to the page restores the saved layout without inserting a chat.
+ const pages=page.getByRole('navigation',{name:'Pages'});
+ await pages.getByRole('button',{name:'Files only',exact:true}).click();
+ await expect(page.locator('[data-panel-id="files-only-panel"]')).toBeVisible();
+ await pages.getByRole('button',{name:'Work',exact:true}).click();
+ await page.getByRole('button',{name:'Go back',exact:true}).click();
+ await expect(pages.getByRole('button',{name:'Files only',exact:true})).toHaveAttribute('aria-current','page');
+ await expect(chatTabs).toHaveCount(0);
+ await pages.getByRole('button',{name:'Work',exact:true}).click();
  // A click focuses the conversation's tab: nothing is replaced, nothing is added.
  await row('Main alpha conversation').click();
  await expect.poll(()=>inFront('Main alpha conversation')).toBe(true);

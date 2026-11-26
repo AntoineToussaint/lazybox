@@ -1,4 +1,5 @@
 import type { ViewStateStore } from '@lazybox/platform';
+import { selectPanelText } from './panel-selection';
 import { Icon } from './Icons';
 import { SplitStoreContext } from './Resizer';
 import type { ModuleProps, PanelModule, PanelTitle } from './PanelRegistry';
@@ -40,7 +41,9 @@ export function WorkspacePanel({ panel, definition, target, store, module, actio
   shown?: boolean;
 }) {
   const onTarget = (next: ViewTarget) => actions.retarget(panel, next);
-  return <PanelShownContext.Provider value={shown}><section className={`workspace-panel panel-${panel.kind}`} aria-label={definition?.title || panel.kind} data-panel-id={panel.id} data-mobile-active={mobileActive || undefined}>
+  return <PanelShownContext.Provider value={shown}><section className={`workspace-panel panel-${panel.kind}`} tabIndex={-1} onKeyDown={event => {
+    if (event.currentTarget.contains(event.target as Node)) selectPanelText(event.nativeEvent, event.currentTarget);
+  }} aria-label={definition?.title || panel.kind} data-panel-id={panel.id} data-mobile-active={mobileActive || undefined}>
     <div className="module-body">
       {panel.detached
         ? <DetachedMessage canDetach={canDetach} pending={pending} onOpen={() => actions.detach(panel)} onDock={() => actions.dock(panel)}/>

@@ -4,7 +4,7 @@
  * the token catalogue and says exactly what is wrong, line by line, so the
  * person can fix the file while Settings shows the result.
  */
-import { BUILTIN_BY_ID, validTokenValue, type ThemeDefinition } from './themes';
+import { BUILTIN_BY_ID, currentThemeId, validTokenValue, type ThemeDefinition } from './themes';
 import { TOKENS, TOKEN_BY_NAME } from './tokens';
 import { DEFAULT_TYPOGRAPHY, typographyError, type Typography } from './preferences';
 
@@ -28,7 +28,7 @@ export function parseThemeDocument(file: string, document: unknown): ThemeFileRe
   if (scheme !== 'dark' && scheme !== 'light') errors.push('"appearance" must be "dark" or "light".');
   let parent: string | undefined;
   if (doc.extends !== undefined) {
-    const base = BUILTIN_BY_ID.get(String(doc.extends));
+    const base = BUILTIN_BY_ID.get(currentThemeId(String(doc.extends)));
     if (!base) errors.push(`"extends" must name a built-in theme: ${[...BUILTIN_BY_ID.keys()].join(', ')}.`);
     else if (base.scheme !== scheme) errors.push(`"extends" names ${base.name}, a ${base.scheme} theme, but this theme's appearance is "${String(scheme)}".`);
     else parent = base.id;

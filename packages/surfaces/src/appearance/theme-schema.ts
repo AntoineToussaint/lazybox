@@ -6,7 +6,7 @@
  * kept identical by scripts/theme-schema.test.ts); nothing is fetched.
  */
 import { TOKENS } from './tokens';
-import { BUILTIN_THEMES } from './themes';
+import { acceptedBuiltinThemeIds } from './themes';
 import { DEFAULT_TYPOGRAPHY, TYPOGRAPHY_LIMITS } from './preferences';
 
 export const THEME_SCHEMA_ID = 'urn:lazybox:schema:theme:v1';
@@ -39,7 +39,7 @@ export function themeSchema(): Record<string, unknown> {
       name: { type: 'string', minLength: 1, maxLength: 64, description: 'The name Settings shows.' },
       appearance: { enum: ['dark', 'light'], description: 'Whether this is a dark or a light theme.' },
       scheme: { enum: ['dark', 'light'], description: 'Another name for appearance.' },
-      extends: { enum: [...new Set(BUILTIN_THEMES.map(t => t.id))], description: 'A built-in theme of the same appearance to start from.' },
+      extends: { enum: acceptedBuiltinThemeIds, description: 'A built-in theme of the same appearance to start from.' },
       description: { type: 'string' },
       author: { type: 'string' },
       tokens: { type: 'object', description: 'Token = colour. A leading -- is accepted.', properties: tokens, patternProperties: { '^--': {} }, additionalProperties: false },

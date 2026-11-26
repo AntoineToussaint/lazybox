@@ -38,6 +38,14 @@
         "light",
         "dark-high-contrast",
         "solarized-light",
+        "dracula",
+        "one-dark-pro",
+        "tokyo-night",
+        "catppuccin-mocha",
+        "catppuccin-latte",
+        "github-dark-default",
+        "github-light-default",
+        "light-high-contrast",
         "midnight-blue",
         "pine",
         "ember",
@@ -52,8 +60,7 @@
         "rose-quartz",
         "lavender-mist",
         "sand",
-        "sea-glass",
-        "light-high-contrast"
+        "sea-glass"
       ],
       "description": "A built-in theme of the same appearance to start from."
     },

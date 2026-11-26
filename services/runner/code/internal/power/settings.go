@@ -90,12 +90,29 @@ var AppearanceFields = []appearanceField{
 
 // builtinThemes are the app's themes and their appearance (appearance/themes.ts).
 var builtinThemes = map[string]string{
-	"dark": "dark", "dark-high-contrast": "dark", "midnight-blue": "dark", "pine": "dark",
-	"ember": "dark", "aubergine": "dark", "graphite": "dark", "deep-ocean": "dark",
-	"rosewood": "dark", "ink": "dark",
-	"light": "light", "solarized-light": "light", "paper": "light", "glacier": "light",
-	"sage": "light", "rose-quartz": "light", "lavender-mist": "light", "sand": "light",
-	"sea-glass": "light", "light-high-contrast": "light",
+	"dark": "dark", "dark-high-contrast": "dark",
+	"dracula": "dark", "one-dark-pro": "dark", "tokyo-night": "dark", "catppuccin-mocha": "dark", "github-dark-default": "dark",
+	"catppuccin-latte": "light", "github-light-default": "light",
+	"light": "light", "solarized-light": "light",
+	"light-high-contrast": "light",
+}
+
+var retiredThemes = map[string]string{
+	"midnight-blue": "dracula",
+	"pine":          "dracula",
+	"ember":         "dracula",
+	"aubergine":     "dracula",
+	"graphite":      "dracula",
+	"deep-ocean":    "dracula",
+	"rosewood":      "dracula",
+	"ink":           "dracula",
+	"paper":         "github-light-default",
+	"glacier":       "github-light-default",
+	"sage":          "github-light-default",
+	"rose-quartz":   "github-light-default",
+	"lavender-mist": "github-light-default",
+	"sand":          "github-light-default",
+	"sea-glass":     "github-light-default",
 }
 
 var (
@@ -227,15 +244,19 @@ func (p *parser) appearance(n *yaml.Node, out map[string]any) {
 				p.fail(v, at, "%q is not a theme: a built-in one (%s) or user:<file name> for one of your themes", v.Value, themesOf(want))
 				continue
 			}
-			if scheme, builtin := builtinThemes[v.Value]; builtin && scheme != want {
+			id := v.Value
+			if replacement, retired := retiredThemes[id]; retired {
+				id = replacement
+			}
+			if scheme, builtin := builtinThemes[id]; builtin && scheme != want {
 				p.fail(v, at, "%q is a %s theme; %s takes a %s one (%s)", v.Value, scheme, f.Name, want, themesOf(want))
 				continue
 			}
-			if _, builtin := builtinThemes[v.Value]; !builtin && !strings.HasPrefix(v.Value, "user:") {
+			if _, builtin := builtinThemes[id]; !builtin && !strings.HasPrefix(v.Value, "user:") {
 				p.fail(v, at, "there is no built-in theme %q (%s; your own themes are user:<file name>)%s", v.Value, themesOf(want), didYouMean(v.Value, sortedKeys(builtinThemes)))
 				continue
 			}
-			out[f.App] = v.Value
+			out[f.App] = id
 		}
 	}
 }

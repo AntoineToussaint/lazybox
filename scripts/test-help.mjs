@@ -163,7 +163,10 @@ try {
   await docs.locator('.docs-page').getByRole('link', {name: 'Getting started', exact: true}).first().click();
   await expect(docs.locator('.docs-page h1')).toHaveText(/Getting started/);
   await expect(docs.locator('.docs-page img').first()).toHaveAttribute('src', /welcome-light\.webp/);
-  await docs.getByRole('button', {name: 'Close documentation'}).click();
+  await page.keyboard.press('Meta+[');
+  await expect(docs.locator('.docs-page h1')).toHaveText('Lazybox documentation');
+  await page.keyboard.press('Alt+ArrowLeft');
+  await expect(docs).toHaveCount(0);
   // Add a subscription: Settings → Subscriptions.
   await codexNeed.getByRole('button', {name: 'Add a ChatGPT subscription…'}).click();
   await expect(page.getByRole('tab', {name: 'Subscriptions'})).toHaveAttribute('aria-selected', 'true');

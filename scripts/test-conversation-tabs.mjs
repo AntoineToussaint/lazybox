@@ -208,12 +208,18 @@ async function tabsOn(){
  assert.ok((await sidebarGroup.boundingBox()).x<40,'the sidebar stays on the left');
  await page.keyboard.press('Meta+Shift+T');
  await expect(chatTabs).toHaveCount(6);
- // A conversation deleted leaves its tab.
+ // Visit a conversation, leave it, then delete it from another tab.
+ await row('Second alpha conversation').click();
+ await row('Review of the main conversation').click();
+ await row('Main alpha conversation').click();
  await row('Review of the main conversation').click({button:'right'});
  await page.getByRole('menuitem',{name:/^Delete$/}).click();
  await expect(page.getByText('Conversation moved to Recently deleted',{exact:true})).toBeVisible();
  await expect(tab('Review of the main conversation')).toHaveCount(0);
  await expect(chatTabs).toHaveCount(5);
+ await page.getByRole('button',{name:'Go back',exact:true}).click();
+ await expect.poll(()=>inFront('Second alpha conversation')).toBe(true);
+ await expect(tab('Review of the main conversation')).toHaveCount(0);
  // Another workspace's conversation, ⌘-clicked in Agents: the window goes to that workspace; this one's page does not get it.
  const pagesOf=w=>page.evaluate(key=>localStorage.getItem(key)||'',`${scope}:workspace:${w}:pages`);
  await page.getByRole('textbox',{name:/Filter agents/}).or(page.getByPlaceholder('Filter agents')).first().fill('Beta');
@@ -223,6 +229,13 @@ async function tabsOn(){
  // A page saved before tabs (a chat following the page): its conversation is a kept tab.
  await expect(chatTabs).toHaveCount(1);
  await expect.poll(previews).toEqual([]);
+ await page.getByRole('button',{name:'Go back',exact:true}).click();
+ await expect(page.getByRole('combobox',{name:'Workspace',exact:true})).toHaveValue('alpha');
+ await row('Second alpha conversation').click();
+ await row('Main alpha conversation').click();
+ await page.keyboard.press('Meta+[');
+ await expect.poll(()=>inFront('Second alpha conversation')).toBe(true);
+ await page.getByRole('combobox',{name:'Workspace',exact:true}).selectOption('beta');
  // Turned off (Settings → Chat): a click on a conversation without a tab shows it in the preview tab.
  await page.getByRole('button',{name:'Settings',exact:true}).click();
  await page.getByRole('tab',{name:'Chat'}).click();

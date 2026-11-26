@@ -16,7 +16,7 @@ import './extensions.css';
  * do, and the switch, review and removal; the bundled examples; where the
  * folder is and how to make one. Approving always goes through the sheet.
  */
-export function ExtensionsSettings({ onOpenPanel, onManageAccounts }: { onOpenPanel?(choice?: ExtensionPanelChoice): void; onManageAccounts(): void }) {
+export function ExtensionsSettings({ onOpenPanel, onManageAccounts, openAfterApproval }: { openAfterApproval?: boolean; onOpenPanel?(choice?: ExtensionPanelChoice): void; onManageAccounts(): void }) {
   const { value, error, change } = useExtensions();
   const [interview,setInterview] = useState(false);
   const [reviewing, setReviewing] = useState<Extension>();
@@ -44,32 +44,34 @@ export function ExtensionsSettings({ onOpenPanel, onManageAccounts }: { onOpenPa
     if (failed) setProblem(failed); else if (added) setReviewing(added);
   };
   const copy = (text: string) => void navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => undefined);
-  const { extensions: list, available, controls } = useExtensionCatalog(value?.extensions || [], value?.examples || []);
+  const { entries, controls } = useExtensionCatalog(value?.extensions || [], value?.examples || []);
   return <div className="extensions-settings">
-    <SettingsHeader title="Extensions" description="Install extensions, open their panels, and manage what they can access." actions={onOpenPanel && <button type="button" onClick={() => onOpenPanel()}><Icon name="puzzle" size={14}/> Browse panels</button>}/>
+    <SettingsHeader title="Extensions" description="Choose an extension to add a panel or automate a task. Review its access before turning it on."/>
     {(error && !value) && <p className="settings-error" role="alert">{error}</p>}
     {problem && <p className="settings-error" role="alert">{problem}</p>}
     {!value && !error && <p className="settings-empty" role="status">Loading extensions…</p>}
     {value && <>
       {controls}
-      <SettingsGroup title="Installed">
-        {list.length ? <ul className="extension-cards" aria-label="Your extensions">{list.map(ext => {
+      {!entries.length && !value.extensions.length && !value.examples.length && <p className="settings-empty">No extensions are available on this Runner.</p>}
+      <ul className="extension-cards extension-gallery" aria-label="Extension catalog">{entries.map(ext => {
+          if (!('state' in ext)) return <li key={ext.id} className="extension-card" aria-label={ext.name}>
+            <div className="extension-card-body"><div className="extension-card-title"><strong>{ext.name}</strong></div><p>{ext.description}</p><ExtensionPreview entry={ext}/></div>
+            <div className="extension-card-actions"><button type="button" className="primary" disabled={!!busy} onClick={() => void add(ext.id)}>{busy === ext.id ? 'Installing…' : 'Install'}</button></div>
+          </li>;
           const added = widening(ext), on = ext.state === 'enabled' || ext.state === 'review';
           return <li key={ext.id} className={`extension-card state-${ext.state}`} aria-label={ext.name || ext.id}>
-            <span className="extension-mark" aria-hidden="true"><Icon name={ext.state === 'broken' ? 'alert' : ext.panels[0]?.icon || 'puzzle'} size={18}/></span>
             <div className="extension-card-body">
               <div className="extension-card-title"><strong>{ext.name || ext.id}</strong>{ext.version && <small>{ext.version}</small>}<span className={`extension-chip state-${ext.state}`}>{extensionStateLabel[ext.state]}</span></div>
-              <ExtensionPreview entry={ext}/>{ext.description && <p>{ext.description}</p>}
-              {ext.state === 'broken' ? <ul className="extension-problems" aria-label={`Problems in ${ext.id}/extension.yaml`}>
+              {ext.description && <p>{ext.description}</p>}<ExtensionPreview entry={ext}/>
+              {ext.state === 'broken' ? <><ul className="extension-problems" aria-label={`Problems in ${ext.id}/extension.yaml`}>
                 {ext.error && <li>{ext.error}</li>}
                 {ext.issues.filter(i => i.severity === 'error').map((i, n) => <li key={n}><span className="where">line {i.line}</span> {i.message}</li>)}
-              </ul> : <ul className="extension-summary" aria-label={`What ${ext.name || ext.id} may do`}>
+              </ul><small className="extension-path mono" title={ext.path}>{ext.path}</small></> : <details className="extension-access"><summary>Requested access</summary><ul className="extension-summary" aria-label={`What ${ext.name || ext.id} may do`}>
                 {ext.grants.map(g => { const d = describeGrant(g); return <li key={g} className={`grant-${d.tone}${added.grants.includes(g) ? ' is-new' : ''}`} title={d.detail}><Icon name={d.icon} size={12}/>{d.title}{added.grants.includes(g) && ext.state !== 'new' ? ' · new' : ''}</li>; })}
                 {ext.hosts.map(h => <li key={h} className={`grant-act${added.hosts.includes(h) ? ' is-new' : ''}`} title={h}><Icon name="globe" size={12}/>{describeHost(h).title}</li>)}
                 {!ext.grants.length && !ext.hosts.length && <li className="grant-read"><Icon name="lock" size={12}/>Nothing of yours; no network</li>}
-              </ul>}
+              </ul><small className="extension-path mono" title={ext.path}>{ext.path}</small></details>}
               {on && ext.accountPolicy && switchedProviders(ext).includes('claude') && <p className="extension-caution" role="note"><Icon name="alert" size={13}/> <span>{CLAUDE_SWITCHING_WARNING} <a href={CLAUDE_TERMS_URL} target="_blank" rel="noreferrer">Anthropic’s terms</a></span></p>}
-              <small className="extension-path mono" title={ext.path}>{ext.path}</small>
             </div>
             <div className="extension-card-actions">
               {on && ext.grants.includes('answer:preferences') && ext.approvedGrants.includes('answer:preferences') && <button onClick={() => setInterview(true)}>Teach Clone Me</button>}
@@ -84,15 +86,7 @@ export function ExtensionsSettings({ onOpenPanel, onManageAccounts }: { onOpenPa
               <button type="button" className="quiet" aria-label={`Remove ${ext.name || ext.id}`} title="Remove" onClick={() => setRemoving(ext)}><Icon name="close" size={13}/></button>
             </div>
           </li>;
-        })}</ul> : <p className="settings-empty">No installed extensions to show.</p>}
-      </SettingsGroup>
-      {available.length > 0 && <SettingsGroup title="Available to install" description="These extensions come with Lazybox. Install one, then approve its access to enable it.">
-        <ul className="extension-cards" aria-label="Available extensions">{available.map(x => <li key={x.id} className="extension-card">
-          <span className="extension-mark" aria-hidden="true"><Icon name="puzzle" size={18}/></span>
-          <div className="extension-card-body"><div className="extension-card-title"><strong>{x.name}</strong></div><ExtensionPreview entry={x}/><p>{x.description}</p></div>
-          <div className="extension-card-actions"><button type="button" className="primary" disabled={!!busy} onClick={() => void add(x.id)}>{busy === x.id ? 'Installing…' : 'Install'}</button></div>
-        </li>)}</ul>
-      </SettingsGroup>}
+        })}</ul>
       <SettingsGroup title="Make your own" description="A folder with an extension.yaml and its pages. Lazybox reloads an open panel when you save a file in it.">
         <div className="settings-row"><div className="settings-row-text"><span className="settings-row-label">Extensions folder</span><small>One folder per extension, named by its id.</small></div>
           <div className="settings-row-control extension-folder"><code title={value.directory}>{value.directory}</code><button aria-label="Copy the extensions folder path" title="Copy path" onClick={() => copy(value.directory)}><Icon name="copy" size={13}/>{copied ? ' Copied' : ''}</button></div></div>
@@ -104,7 +98,7 @@ export function ExtensionsSettings({ onOpenPanel, onManageAccounts }: { onOpenPa
       </SettingsGroup>
     </>}
     {interview && <CloneInterview onClose={() => setInterview(false)}/>}
-    {reviewing && <ExtensionApprovalSheet extension={reviewing} onClose={() => setReviewing(undefined)}/>}
+    {reviewing && <ExtensionApprovalSheet extension={reviewing} onApproved={ext => { if (openAfterApproval && ext.panels[0]) onOpenPanel?.({ id: ext.id, panel: ext.panels[0].id }); }} onClose={() => setReviewing(undefined)}/>}
     {removing && <RemoveExtensionDialog extension={removing} onClose={() => setRemoving(undefined)} onRemove={() => run(removing.id, api => api.removeExtension({ id: removing.id })).then(() => setRemoving(undefined))}/>}
   </div>;
 }

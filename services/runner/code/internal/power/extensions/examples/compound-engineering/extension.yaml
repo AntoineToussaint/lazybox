@@ -5,5 +5,5 @@ description: Archive a conversation or workspace to receive a documentation prop
 author: Lazybox
 category: Code & documentation
 keywords: [retrospective, agent instructions, documentation]
-caption: Example documentation proposal in workspace Artifacts.
+caption: After archiving a conversation or workspace, open Artifacts to review the proposed documentation edits.
 grants: [review:archives]

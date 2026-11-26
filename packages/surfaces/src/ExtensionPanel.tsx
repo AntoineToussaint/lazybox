@@ -1,8 +1,7 @@
-import { CloneInterview } from './CloneInterview';
-import { ExtensionPreview, useExtensionCatalog } from './ExtensionCatalog';
+import { ExtensionsSettings } from './ExtensionsSettings';
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ConnectError, createRunnerClient, type RunnerClient } from '@lazybox/client-core';
-import type { Collection, Extension, ExtensionExample, ExtensionPanelSession } from '@lazybox/protocol';
+import type { Collection, Extension, ExtensionPanelSession } from '@lazybox/protocol';
 import type { ViewStateStore } from '@lazybox/platform';
 import { runAction } from './actions';
 import { getAppearance, subscribeAppearance } from './appearance/apply';
@@ -86,79 +85,11 @@ function ExtensionPanel({ viewState, collections, workspaceId, onShowPanel, onPa
     return () => onPanelTitle?.(undefined);
   }, [extension?.id, panel?.id, panel?.title]);
   if (!value) return <div className="extension-state" role="status">{error ? <><Icon name="alert" size={18}/><p>Extensions are not available: {error}</p></> : <p>Loading extensions…</p>}</div>;
-  if (!choice || !extension || !panel) return <ExtensionHome extensions={value.extensions} examples={value.examples} missing={choice && !extension ? choice.id : ''} onChoose={setChoice}/>;
-  return <RunningExtension key={`${extension.id}/${panel.id}`} extension={extension} panelId={panel.id} collections={collections} workspaceId={workspaceId} onShowPanel={onShowPanel} onClose={() => setChoice(undefined)} onSwitch={setChoice}/>;
-}
-
-/** What can be shown, what waits for the person, and the examples. */
-function ExtensionHome({ extensions: installed, examples: bundled, missing, onChoose }: { extensions: Extension[]; examples: ExtensionExample[]; missing: string; onChoose(choice: Choice): void }) {
-  const { change } = useExtensions();
-  const [interview, setInterview] = useState(false);
-  const [reviewing, setReviewing] = useState<Extension>();
-  const [busy, setBusy] = useState('');
-  const [error, setError] = useState('');
-  const { extensions, available: examples, controls } = useExtensionCatalog(installed, bundled);
-  const running = extensions.filter(e => e.state === 'enabled' || e.state === 'review');
-  const waiting = extensions.filter(e => e.state === 'new' || e.state === 'review' || e.state === 'disabled');
-  const broken = extensions.filter(e => e.state === 'broken');
-  const add = async (id: string) => {
-    setBusy(id); setError('');
-    let added: Extension | undefined;
-    const failed = await change(async api => { const list = await api.installExampleExtension({ example: id }); added = list.extensions.find(e => e.id === id); return list; });
-    setBusy('');
-    if (failed) setError(failed); else if (added) setReviewing(added);
-  };
-  return <div className="extension-home">
-    <button type="button" className="extension-manage" onClick={() => runAction('settings.open', 'extensions')}><Icon name="sliders" size={13}/> Manage extensions</button>
-    {controls}
-    {missing && <p className="extension-notice tone-warn" role="status"><Icon name="alert" size={14}/> The extension this panel showed ({missing}) is no longer in your extensions folder.</p>}
-    {running.some(e => e.panels.length) && <section aria-labelledby="extensions-running"><h3 id="extensions-running">Show</h3>
-      <ul className="extension-tiles">{running.flatMap(ext => ext.panels.map(p => <li key={`${ext.id}/${p.id}`}>
-        <button type="button" className="extension-tile" onClick={() => onChoose({ id: ext.id, panel: p.id })}>
-          <span className="extension-mark" aria-hidden="true"><Icon name={p.icon || 'puzzle'} size={18}/></span>
-          <span><strong>{p.title}</strong><small>{p.description || ext.description || ext.name}</small></span>
-        </button>
-      </li>))}</ul>
-    </section>}
-    {running.some(e => !e.panels.length) && <section aria-label="Background extensions"><h3>Background extensions</h3>
-      <ul className="extension-rows">{running.filter(e => !e.panels.length).map(ext => <li key={ext.id}>
-        <span className="extension-row-text"><strong>{ext.name}</strong><small>{ext.description}</small></span>
-        <ExtensionPreview entry={ext}/>
-        {ext.grants.includes('answer:preferences') && ext.approvedGrants.includes('answer:preferences') && <button onClick={() => setInterview(true)}>Teach Clone Me</button>}
-        {ext.accountPolicy?.switchOnLimit
-          ? <button onClick={() => runAction('settings.open', 'subscriptions')}>Manage rotation accounts</button>
-          : <button onClick={() => runAction('settings.open', 'extensions')}>Manage</button>}
-      </li>)}</ul>
-    </section>}
-    {waiting.length > 0 && <section aria-labelledby="extensions-waiting"><h3 id="extensions-waiting">Waiting for you</h3>
-      <ul className="extension-rows">{waiting.map(ext => <li key={ext.id}>
-        <span className="extension-mark" aria-hidden="true"><Icon name={ext.panels[0]?.icon || 'puzzle'} size={16}/></span>
-        <span className="extension-row-text"><strong>{ext.name || ext.id}</strong><small>{extensionStateLabel[ext.state]}{ext.grants.length ? ` · ${ext.grants.map(g => describeGrant(g).title.toLowerCase()).slice(0, 2).join(', ')}${ext.grants.length > 2 ? '…' : ''}` : ''}</small></span>
-        {ext.state === 'disabled' ? <button type="button" onClick={() => runAction('settings.open', 'extensions')}>Settings…</button>
-          : <button type="button" className="primary" onClick={() => setReviewing(ext)}>{ext.state === 'review' ? 'Review new access' : 'Enable…'}</button>}
-      </li>)}</ul>
-    </section>}
-    {broken.length > 0 && <section aria-labelledby="extensions-broken"><h3 id="extensions-broken">Do not load</h3>
-      <ul className="extension-rows">{broken.map(ext => <li key={ext.id} className="is-broken">
-        <span className="extension-mark" aria-hidden="true"><Icon name="alert" size={16}/></span>
-        <span className="extension-row-text"><strong>{ext.name || ext.id}</strong><small>{ext.error || ext.issues.filter(i => i.severity === 'error').map(i => `line ${i.line}: ${i.message}`)[0]}</small></span>
-      </li>)}</ul>
-    </section>}
-    {examples.some(x => !x.installed) && <section aria-labelledby="extensions-examples"><h3 id="extensions-examples">Available to install</h3>
-      <ul className="extension-rows">{examples.filter(x => !x.installed).map(x => <li key={x.id}>
-        <span className="extension-mark" aria-hidden="true"><Icon name="puzzle" size={16}/></span>
-        <span className="extension-row-text"><strong>{x.name}</strong><small>{x.description}</small></span><ExtensionPreview entry={x}/>
-        <button type="button" disabled={!!busy} onClick={() => void add(x.id)}>{busy === x.id ? 'Installing…' : 'Install'}</button>
-      </li>)}</ul>
-    </section>}
-    {!installed.length && !bundled.length && <div className="extension-state"><Icon name="puzzle" size={22}/><p>No extensions yet.</p></div>}
-    {error && <p className="settings-error" role="alert">{error}</p>}
-    <footer className="extension-home-footer">
-      <span>Make your own: <code>lazybox extension new my-panel</code></span>
-    </footer>
-    {interview && <CloneInterview onClose={() => setInterview(false)}/>}
-    {reviewing && <ExtensionApprovalSheet extension={reviewing} onClose={() => setReviewing(undefined)} onApproved={ext => onChoose({ id: ext.id, panel: ext.panels[0]?.id || '' })}/>}
+  if (!choice || !extension || !panel) return <div className="extension-home">
+    {choice && !extension && <p role="status">The extension this panel showed ({choice.id}) is no longer in your extensions folder.</p>}
+    <ExtensionsSettings onOpenPanel={setChoice} openAfterApproval onManageAccounts={() => runAction('settings.open', 'subscriptions')}/>
   </div>;
+  return <RunningExtension key={`${extension.id}/${panel.id}`} extension={extension} panelId={panel.id} collections={collections} workspaceId={workspaceId} onShowPanel={onShowPanel} onClose={() => setChoice(undefined)} onSwitch={setChoice}/>;
 }
 
 /** One running panel: its session, its frame and its bridge. */

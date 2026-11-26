@@ -118,8 +118,7 @@ Use `/pr-cost` to open the Cost dashboard. For one tracked PR it shows the works
 
 Choose **Extensions** in the main navigation or search for “plugins” in the
 command palette to manage installed extensions and add examples. Use **Open
-panel** on an enabled extension to launch it, or **Browse panels** to see all
-available panels. Each plugin shows the name of the workspace or Runner
+panel** on an enabled extension to launch it. New Extensions panels and Settings show the same alphabetical catalog of installed and available extensions. Search by purpose, filter by category or installation status, and expand **Requested access** on an installed extension to inspect its permissions and folder. Each plugin shows the name of the workspace or Runner
 it acts on.
 
 | Plugin | What you can do |

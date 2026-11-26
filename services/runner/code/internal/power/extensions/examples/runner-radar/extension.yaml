@@ -1,6 +1,6 @@
 lazybox: 1
 category: Agents & conversations
-caption: Runner Radar panel with fixture workspace data.
+caption: Open the conversation behind a pending question or failure.
 keywords: [blocked, waiting]
 name: Runner Radar
 version: 1.1.0

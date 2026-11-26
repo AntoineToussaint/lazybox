@@ -9,21 +9,24 @@ read your files, terminals or messages, run commands, change a setting, see a
 credential, or reach any site you did not allow.
 
 Clone Me and Compound Engineering are background workflows run by the Runner.
-In Settings → Extensions, search by name or keyword, filter by category, and
-choose **Preview** to see an extension before installing it. After approval, choose
+Open **Extensions** in the main navigation to browse installed and available extensions together. Search by name or purpose, filter by category or installation status, and select a thumbnail to enlarge its preview. After approval, choose
 **Teach Clone Me** to assign interview answers to code style, verification, or decisions that need your input. Compound Engineering checks applicable repository instructions and publishes proposed edits with citations to the archived conversation in workspace Artifacts. Use **Archive workspace…** in the workspace menu or **Archive conversation** to trigger a review.
 
 ## Try one
 
-1. **Panels → New Extensions panel** (or ⌘K, *Show Extensions*).
-2. Under **Available to install**, choose **Install** for the *Agent board* or the *Cost dashboard*.
+1. Open **Extensions** in the main navigation, or **Panels → New Extensions panel** to browse the same catalog beside your conversation.
+2. Find *Agent board* or *Cost dashboard* and choose **Install**.
 3. Read the sheet: what it can see, what it can do, where it can connect.
    **Allow and turn on** — or **Not now**.
 
-| Panel | What you can do |
+| Extension | What you can do |
 | --- | --- |
 | Agent board | Search conversations or select **Needs attention only**. Open a card to answer the agent. |
+| Clone Me | Choose **Teach Clone Me** to review and save coding preferences for your agents. |
+| Compound Engineering | Archive a conversation or workspace, then review the proposed documentation edits in Artifacts. |
 | Cost dashboard | Filter spend by period, workspace, or model. **Inspect peak spend** ranks conversations in the most expensive interval. |
+| Disk Cleanup | Review the latest scan and see which paths account for the most space. |
+| Subscription rotation | Choose **Manage rotation accounts** to select which signed-in accounts may take over at a limit. |
 | Mailbox | Use **Needs you** to find review requests, assignments and mentions. Open the item on GitHub. |
 | Release Watch | Find deployments awaiting approval, failed deployments, and failing checks. Open the deployment or failing check. |
 | Runner Radar | Filter blocked conversations by failure or pending input, see how long they have waited, and open one. |

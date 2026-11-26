@@ -45,7 +45,22 @@
         "catppuccin-latte",
         "github-dark-default",
         "github-light-default",
-        "light-high-contrast"
+        "light-high-contrast",
+        "midnight-blue",
+        "pine",
+        "ember",
+        "aubergine",
+        "graphite",
+        "deep-ocean",
+        "rosewood",
+        "ink",
+        "paper",
+        "glacier",
+        "sage",
+        "rose-quartz",
+        "lavender-mist",
+        "sand",
+        "sea-glass"
       ],
       "description": "A built-in theme of the same appearance to start from."
     },

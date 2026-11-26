@@ -184,3 +184,5 @@ export function themeCss(theme: ResolvedTheme): string {
   const lines = Object.entries(theme.tokens).map(([name, value]) => `--${name}:${value};`);
   return `:root{color-scheme:${theme.scheme};${lines.join('')}}`;
 }
+
+export const acceptedBuiltinThemeIds = [...new Set([...BUILTIN_THEMES.map(theme => theme.id), ...retiredThemes.keys()])];

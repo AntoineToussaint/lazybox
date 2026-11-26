@@ -80,7 +80,7 @@ async function scenario(browser,scheme){
   return selection.toString().trim().length>0 && panel.contains(selection.anchorNode) && panel.contains(selection.focusNode);
  }),'Select All from a dock tab should use its panel');
  await composer.fill('select this draft');
- await composer.press('Meta+a');
+ await composer.press('ControlOrMeta+a');
  assert.deepEqual(await composer.evaluate(node=>[node.selectionStart,node.selectionEnd]),[0,17]);
  await composer.fill('');
 

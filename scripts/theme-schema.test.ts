@@ -19,3 +19,8 @@ test('every token is in it, and nothing points at a web address', () => {
   assert.deepEqual(Object.keys(schema.properties.tokens.properties), TOKENS.map(t => t.name));
   assert.match(schema.$id, /^urn:lazybox:/);
 });
+
+test('legacy theme files can extend a retired preset', () => {
+  const schema = themeSchema() as { properties: { extends: { enum: string[] } } };
+  assert.ok(schema.properties.extends.enum.includes('pine'));
+});

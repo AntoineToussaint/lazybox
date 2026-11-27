@@ -251,7 +251,11 @@ test('real Vite server watches CSS and refuses runtime-state files', {timeout:15
 
 test('a frozen source beneath .cache serves UI assets but denies its private files', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'lazybox-stage-ui-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  let server;
+  t.after(async () => {
+    try { await server?.close(); }
+    finally { await rm(directory, { recursive: true, force: true }); }
+  });
   const source = join(directory, '.cache', 'release-[candidate]', 'source');
   for (const path of ['apps/desktop', 'packages', 'node_modules']) await mkdir(join(source, path), { recursive: true });
   await writeFile(join(source, 'package.json'), JSON.stringify({ type: 'module' }));
@@ -263,8 +267,9 @@ test('a frozen source beneath .cache serves UI assets but denies its private fil
     await mkdir(file.slice(0, file.lastIndexOf('/')), { recursive: true });
     await writeFile(file, 'PRIVATE-FIXTURE-CONTENT');
   }
-  const { server, url } = await startDesktopDevServer(source);
-  t.after(() => server.close());
+  const started = await startDesktopDevServer(source);
+  server = started.server;
+  const url = started.url;
   const canonical = await realpath(source);
   const response = await fetch(`${url}/public.css`);
   assert.equal(response.status, 200); assert.match(await response.text(), /visible/);

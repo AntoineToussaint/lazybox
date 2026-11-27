@@ -44,7 +44,7 @@ func (r *testRunner) nextBrief(t *testing.T) (*agenttest.Session, string) {
 // What the user hit in the field: the person asks an agent, in its chat, to
 // start a conversation. The agent asks; the person approves in one click and
 // a peer conversation starts with the brief; or declines; or has not answered
-// yet. `agents spawn` without a grant asks the same way instead of failing.
+// yet.
 func TestAnAgentStartsAConversationThePersonApproves(t *testing.T) {
 	r := newTestRunner(t)
 	asker, native := r.open("Planner")
@@ -98,9 +98,8 @@ func TestAnAgentStartsAConversationThePersonApproves(t *testing.T) {
 	if out = r.cli(env, "", "conversation", "new", "--title", "Write the docs", "--brief", "Docs.", "--timeout", "1s"); out.code != exitTimeout || !strings.Contains(out.err.Error(), "no answer yet") {
 		t.Fatalf("no answer: %+v", out)
 	}
-	// `agents spawn` without a grant asks too, instead of failing.
-	if out = r.cli(env, "", "agents", "spawn", "--title", "Index the corpus", "--brief", "An index.", "--no-wait"); out.code != 0 || !strings.Contains(out.stderr, "No Orchestrator grant") || !strings.Contains(out.stdout, "Asked the person to start “Index the corpus”") {
-		t.Fatalf("spawn without a grant: %+v", out)
+	if out = r.cli(env, "", "conversation", "new", "--title", "Index the corpus", "--brief", "An index.", "--no-wait"); out.code != 0 {
+		t.Fatalf("second pending conversation request: %+v", out)
 	}
 	// At most three wait at once.
 	if out = r.cli(env, "", "conversation", "new", "--title", "Fix the build", "--brief", "b", "--no-wait"); out.code != 0 {

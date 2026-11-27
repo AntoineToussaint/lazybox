@@ -132,13 +132,18 @@ try{
  await message.fill('Look at the retry loop too.');await message.press('Enter');
  await expect(message).toHaveValue('');await expect(message).toBeFocused();
  // Text another panel adds while a send is in flight (Quote in reply) waits for it: the send no longer erases it.
+ f.runner.journalMessages=true;
  f.sessions[0].applyDelayMs=1500;
  await message.fill('And the timeout.');await message.press('Enter');
+ await expect(chat.getByRole('status').filter({hasText:'And the timeout.'})).toContainText('Sending…',{timeout:900});
  await expect(message).toHaveValue('');await expect(message).toBeEditable();await expect(message).toBeFocused();
  await chat.getByText('Let me look at the test and the CI logs.').click({button:'right'});
  await page.getByRole('menuitem',{name:'Quote in reply'}).click();
  await expect(message).toHaveValue(/^> Let me look at the test and the CI logs\./,{timeout:8000});
  await expect(message).not.toHaveAttribute('aria-disabled','true');
+ await expect(chat.locator('.outgoing-message').filter({hasText:'And the timeout.'})).toHaveCount(0);
+ await expect(chat.getByText('And the timeout.',{exact:true})).toHaveCount(1);
+ f.runner.journalMessages=false;
  f.sessions[0].applyDelayMs=0;
  await message.fill('');
  // A failure says what happened in words, never the raw Connect error.
@@ -216,6 +221,9 @@ try{
  await expect(branchField).toHaveAttribute('aria-invalid','true');
  await expect(create.getByRole('alert')).toHaveText('This branch already exists. Enter a different branch name.');
  await expect(create.getByRole('button',{name:'Create workspace',exact:true})).toBeDisabled();
+ await create.getByRole('button',{name:'Delete local branch…'}).click();
+ await expect(create.getByRole('button',{name:'Confirm deletion'})).toBeVisible();
+ await create.getByRole('button',{name:'Keep branch'}).click();
  await branchField.fill('fix/login');
  await expect(create.getByRole('alert')).toHaveCount(0);
  await branchField.press('Escape');
@@ -225,7 +233,14 @@ try{
  await page.screenshot({path:'.cache/chat-polish-new-workspace.png'});
  await create.getByRole('button',{name:'Edit branch'}).click();await create.getByRole('textbox',{name:'Branch'}).fill('fix/login');await create.getByRole('textbox',{name:'Branch'}).press('Enter');
  await expect(create.getByTestId('branch-preview')).toHaveText('fix/login');
+ f.unusedBranches.set('r0',new Set(['fix/login']));
  await create.getByRole('button',{name:'Create workspace',exact:true}).click();
+ await create.getByRole('button',{name:'Delete local branch…'}).click();
+ await create.getByRole('button',{name:'Confirm deletion'}).click();
+ await expect(create.getByRole('button',{name:'Create workspace',exact:true})).toBeEnabled();
+ assert.deepEqual(f.mutations.findLast(m=>m.method==='DeleteLocalBranch')?.body,{repositoryId:'r0',branch:'fix/login'});
+ await create.getByRole('button',{name:'Create workspace',exact:true}).click();
+ await expect(create).toHaveCount(0);
  await expect.poll(()=>f.mutations.findLast(m=>m.method==='PrepareWorkspace')?.body.branch).toBe('fix/login');
  assert.equal(f.mutations.findLast(m=>m.method==='PrepareWorkspace').body.name,'Login fix');
 

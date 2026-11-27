@@ -644,3 +644,25 @@ func TestRevertKeepsIgnoredFilesInADirectoryTheTargetReplaces(t *testing.T) {
 		t.Fatalf("undo did not restore the directory: %q", got)
 	}
 }
+
+func TestMessageReadsCommittedNoteDuringCheckpoint(t *testing.T) {
+	m := manager(t, Limits{})
+	if err := m.save(&Record{Conversation: "chat", Note: "Re-read the reverted files."}); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := m.lockConversation("chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	got := make(chan string, 1)
+	go func() { got <- m.Note("chat") }()
+	select {
+	case note := <-got:
+		if note != "Re-read the reverted files." {
+			t.Fatalf("note: %q", note)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reading a committed note waited for checkpoint capture")
+	}
+}

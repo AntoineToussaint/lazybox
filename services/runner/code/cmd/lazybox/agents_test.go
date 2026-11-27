@@ -32,9 +32,12 @@ func TestAgentsVerbRunsALineage(t *testing.T) {
 	orch, orchNative := r.open("Orchestrator")
 	env := agentEnv(t, orchNative, orch.Id)
 
-	// No grant: spawn asks the person to start it instead (conversation_test.go), ls explains.
-	if out := r.cli(env, "", "agents", "spawn", "--title", "Index", "--brief", "An index.", "--no-wait"); out.code != 0 || !strings.Contains(out.stdout, "Asked the person to start “Index”") {
-		t.Fatalf("spawn without a grant: %+v", out)
+	spawn := []string{"agents", "spawn", "--title", "Index the corpus", "--brief", "Objective: an index\nDone when: go test passes", "--workspace", "new", "--role", "researcher", "--key", "phase-3", "--no-wait"}
+	for range 2 {
+		out := r.cli(env, "", spawn...)
+		if out.code != exitDenied || !strings.Contains(out.err.Error(), "grant_required") || r.pendingStart(orch.Id) != nil {
+			t.Fatalf("managed spawn without authorization: %+v", out)
+		}
 	}
 	if out := r.cli(env, "", "agents", "ls"); out.code != 0 || !strings.Contains(out.stdout, "You run no agents") {
 		t.Fatalf("ls without a grant: %+v", out)
@@ -50,9 +53,12 @@ func TestAgentsVerbRunsALineage(t *testing.T) {
 	if _, err = r.service.UpdateMission(ctx, &pb.UpdateMissionRequest{MissionId: mission.Id, Change: &pb.UpdateMissionRequest_Grant{Grant: &pb.OrchestratorGrantChange{SessionId: orch.Id, Ceiling: &pb.OrchestratorCeiling{MaxChildren: 2}}}}); err != nil {
 		t.Fatal(err)
 	}
-	out := r.cli(env, "", "agents", "spawn", "--title", "Index the corpus", "--brief", "Objective: an index\nDone when: go test passes", "--workspace", "new", "--role", "researcher")
+	out := r.cli(env, "", spawn...)
 	if out.code != 0 || !strings.Contains(out.stdout, "Started Index the corpus (researcher · claude-default") || !strings.Contains(out.stdout, "1 of 2 agents running") {
 		t.Fatalf("spawn: %+v", out)
+	}
+	if retry := r.cli(env, "", spawn...); retry.code != 0 || retry.stdout != out.stdout {
+		t.Fatalf("retry must return the original managed assignment: %+v", retry)
 	}
 	childNative := <-r.provider.opened
 	brief := <-childNative.Applied
@@ -83,15 +89,18 @@ func TestAgentsVerbRunsALineage(t *testing.T) {
 	if out = r.cli(kid, "", "agents", "ls"); !strings.Contains(out.stdout, "Started by “Orchestrator”") {
 		t.Fatalf("child's ls: %+v", out)
 	}
-	// A child has no grant: spawning asks the person, never its orchestrator.
-	if out = r.cli(kid, "", "agents", "spawn", "--title", "grandchild", "--brief", "b", "--no-wait"); out.code != 0 || !strings.Contains(out.stdout, "Asked the person") {
+	// A child cannot use its parent’s grant to start a grandchild.
+	if out = r.cli(kid, "", "agents", "spawn", "--title", "grandchild", "--brief", "b", "--no-wait"); out.code != exitDenied || !strings.Contains(out.err.Error(), "grant_required") || r.pendingStart(childSession) != nil {
 		t.Fatalf("child spawning: %+v", out)
 	}
 	// Past the lineage: refused.
 	if out = r.cli(kid, "", "agents", "stop", "parent", "--end"); out.code != exitDenied {
 		t.Fatalf("child stopping its parent: %+v", out)
 	}
-	stranger, _ := r.open("Stranger")
+	stranger, strangerNative := r.open("Stranger")
+	if out = r.cli(agentEnv(t, strangerNative, stranger.Id), "", "agents", "send", childSession, "take over"); out.code != exitDenied {
+		t.Fatalf("unrelated caller messaging the child: %+v", out)
+	}
 	if out = r.cli(env, "", "agents", "send", stranger.Id, "hi"); out.code != exitDenied {
 		t.Fatalf("message a stranger: %+v", out)
 	}

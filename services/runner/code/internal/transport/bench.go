@@ -149,7 +149,7 @@ func wireSession(e *runner.Execution) *pb.Session {
 	}
 	w.LastMessage = s.LastMessage
 	for _, q := range s.QueuedMessages {
-		m := &pb.QueuedMessage{Editing: q.Editing, OperationId: q.OperationID, Text: q.Text}
+		m := &pb.QueuedMessage{Priority: q.Priority, Editing: q.Editing, OperationId: q.OperationID, Text: q.Text}
 		if o := q.Origin; o != nil {
 			m.Origin = &pb.MessageOrigin{Kind: o.Kind, Summary: o.Summary, Detail: o.Detail, Copy: o.Copy, From: o.From}
 		}
@@ -416,13 +416,29 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 	reverted, orchestration := "", ""
 	// A message or steer the agent accepts goes in the prompt log.
 	var prompt *pb.Message
+	captureForeground := func(stop bool) []*commands.Command {
+		var foreground []*commands.Command
+		if stop && e.Engine.Snapshot().Busy {
+			for _, candidate := range s.Bench.Commands.List(e.ID) {
+				if candidate.CanBackground() {
+					if command, err := s.Bench.Commands.Get(candidate.ID); err == nil {
+						foreground = append(foreground, command)
+					}
+				}
+			}
+		}
+		return foreground
+	}
 	switch o := p.Operation.(type) {
-	case *pb.ApplyRequest_Message:
+	case *pb.ApplyRequest_Message, *pb.ApplyRequest_SendNow:
 		op.Kind = agent.Message
-		if err := message(o.Message); err != nil {
+		prompt = p.GetMessage()
+		if priority := p.GetSendNow(); priority != nil {
+			op.Priority, prompt = true, priority
+		}
+		if err := message(prompt); err != nil {
 			return nil, rpcError(err)
 		}
-		prompt = o.Message
 		// What changed in the agent's briefing travels with the next message
 		// that starts a turn, and so does a revert of the workspace's files
 		// since the last one.
@@ -488,16 +504,7 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 			}
 			return &pb.Receipt{OperationId: action.OperationId, Delivery: action.How, QueuedText: text}, nil
 		}
-		var foreground []*commands.Command
-		if o.DeliverQueued.GetHow() == engine.DeliverNow && e.Engine.Snapshot().Busy {
-			for _, candidate := range s.Bench.Commands.List(e.ID) {
-				if candidate.CanBackground() {
-					if command, err := s.Bench.Commands.Get(candidate.ID); err == nil {
-						foreground = append(foreground, command)
-					}
-				}
-			}
-		}
+		foreground := captureForeground(o.DeliverQueued.GetHow() == engine.DeliverNow)
 		receipt, err := queue.DeliverQueued(ctx, o.DeliverQueued.GetOperationId(), o.DeliverQueued.GetHow())
 		if errors.Is(err, engine.ErrNotQueued) {
 			return nil, grpcError(codes.FailedPrecondition, err)
@@ -507,8 +514,10 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 		}
 		// A followed run is owned by its pipe broker and can outlive the
 		// provider's turn interrupt. Ask that broker to stop it as well.
-		for _, command := range foreground {
-			command.CancelForegroundPipe()
+		if receipt.Interrupted {
+			for _, command := range foreground {
+				command.CancelForegroundPipe()
+			}
 		}
 		return &pb.Receipt{OperationId: receipt.ID, Delivery: receipt.Delivery, ProviderId: receipt.ProviderID, Error: receipt.Error}, nil
 	case *pb.ApplyRequest_ListProviderCatalog:
@@ -552,9 +561,15 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 	if op.Kind == agent.Approve && op.Decision == "accept" {
 		approved = e.Engine.Snapshot().Pending[op.RequestID]
 	}
+	foreground := captureForeground(op.Priority)
 	receipt, err := e.Engine.Apply(ctx, op)
 	if err != nil {
 		return nil, rpcError(err)
+	}
+	if receipt.Interrupted {
+		for _, command := range foreground {
+			command.CancelForegroundPipe()
+		}
 	}
 	if approved.Type != "" && receipt.Error == "" && receipt.Delivery != "failed" {
 		if err = s.Bench.PlanApproved(ctx, e, approved); err != nil {

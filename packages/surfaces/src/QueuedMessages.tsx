@@ -45,66 +45,63 @@ const queueFeedback = {
   delete: { pending: 'Deleting…', failure: 'Could not delete', timeout: 'Deletion was not confirmed. Try again.' },
   delegate: { pending: 'Requesting a sub-agent…', failure: 'Could not request a sub-agent', timeout: 'Delegation was not confirmed. Check the conversation.' },
 } satisfies Record<QueueAction, { pending: string; failure: string; timeout: string }>;
+type DeliveryAttempt = {
+  id: string; how: QueueAction; turn?: bigint; sessionID: string; started: number;
+  state: 'sending' | 'acknowledged' | 'prioritized' | 'failed'; error?: string;
+};
 export type QueuedDelivery = {
   edit(operationId: string, how: EditAction, editId: string, text?: string): Promise<string>;
-  working?: { id: string; how: QueueAction; acknowledged?: boolean };
-  error?: { id: string; text: string };
+  attemptFor(id: string): DeliveryAttempt | undefined;
   /**
-   * Delivers the queued message with this operation id. `justSent`: the
-   * message was sent a moment ago, so one the Runner already took (the turn
-   * ended meanwhile) went out as it should, and is no error.
+   * Delivers the queued message with this operation id.
    */
-  deliver(operationId: string, how: QueueAction, justSent?: boolean): Promise<void>;
+  deliver(operationId: string, how: QueueAction): Promise<void>;
 };
 /** How long Send now or Steer may say it is at work before the strip gives the buttons back to try again. */
 export const DELIVERY_TIMEOUT_MS = 20_000;
 export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: readonly { operationId: string; editing?: boolean }[] | undefined, turnBoundary?: bigint): QueuedDelivery {
-  // An interrupt belongs to the turn it targeted. Its message may still be in
-  // the queue when a different message starts the next turn.
-  const [attempt, setWorking] = useState<(NonNullable<QueuedDelivery['working']> & { turn?: bigint })>();
-  const working = attempt?.how === 'now' && attempt.turn !== turnBoundary ? undefined : attempt;
-  const [failure, setError] = useState<{ id: string; text: string; how: QueueAction; turn?: bigint }>();
-  const error = failure?.how === 'now' && failure.turn !== turnBoundary ? undefined : failure;
-  // A message that left the queue takes its confirmation, progress and error with it.
-  const ids = (queued || []).map(message => message.operationId).join('\0');
-  useEffect(() => {
-    const present = new Set(ids.split('\0'));
-    if (working && !present.has(working.id)) setWorking(undefined);
-    if (error && !present.has(error.id)) setError(undefined);
-  }, [ids]);
-  // Editing supersedes a Send now or Steer still at work on the message: the
-  // Runner holds it, so it stays queued, and the timeout below must not call
-  // that a step that would not stop. Edit in this window says so at once
-  // (`edit` below); a poll says so for an edit from another window.
-  const editing = (queued || []).flatMap(message => message.editing ? [message.operationId] : []).join('\0');
-  const superseded = (id: string) => {
-    setWorking(current => current?.id === id ? undefined : current);
-    setError(current => current?.id === id ? undefined : current);
+  const [attempts, setAttempts] = useState<ReadonlyMap<string, DeliveryAttempt>>(() => new Map());
+  const ids = JSON.stringify((queued || []).filter(row => !row.editing).map(row => row.operationId));
+  const attemptFor = (id: string) => {
+    const row = attempts.get(id);
+    if (row?.sessionID !== sessionID || (row.how === 'now' && row.state !== 'prioritized' && row.turn !== turnBoundary)) return;
+    return row;
   };
-  useEffect(() => { for (const id of editing ? editing.split('\0') : []) superseded(id); }, [editing]);
-  useEffect(() => { setWorking(undefined); setError(undefined); }, [sessionID]);
-  // An interrupt that never takes (the agent ignores it, the Runner restarted
-  // meanwhile) must not leave "Stopping the current step…" for good: the
-  // buttons come back, saying so, to try again.
+  const superseded = (id: string) => setAttempts(current => {
+    if (!current.has(id)) return current;
+    const next = new Map(current); next.delete(id); return next;
+  });
   useEffect(() => {
-    if (!working) return;
-    const timer = setTimeout(() => {
-      setWorking(current => current === working ? undefined : current);
-      setError({ id: working.id, how: working.how, turn: working.turn, text: queueFeedback[working.how].timeout });
-    }, DELIVERY_TIMEOUT_MS);
-    return () => clearTimeout(timer);
-  }, [working]);
-  const deliver = async (operationId: string, how: QueueAction, justSent = false) => {
-    const attempt = { id: operationId, how, turn: turnBoundary };
-    setError(undefined); setWorking(attempt);
+    const present = new Set<string>(JSON.parse(ids));
+    setAttempts(current => {
+      const next = new Map(current);
+      for (const [id, row] of current) if (row.sessionID !== sessionID || !present.has(id)) next.delete(id);
+      return next.size === current.size ? current : next;
+    });
+  }, [sessionID, ids]);
+  useEffect(() => {
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    for (const row of attempts.values()) {
+      if (row.state !== 'sending' && row.state !== 'acknowledged') continue;
+      timers.push(setTimeout(() => setAttempts(current => {
+        if (current.get(row.id) !== row) return current;
+        return new Map(current).set(row.id, {...row, state: 'failed', error: queueFeedback[row.how].timeout});
+      }), Math.max(0, row.started + DELIVERY_TIMEOUT_MS - Date.now())));
+    }
+    return () => timers.forEach(clearTimeout);
+  }, [attempts]);
+  const deliver = async (operationId: string, how: QueueAction) => {
+    const row: DeliveryAttempt = {id: operationId, how, turn: turnBoundary, sessionID, started: Date.now(), state: 'sending'};
+    setAttempts(current => new Map(current).set(operationId, row));
+    const finish = (state: DeliveryAttempt['state'], error?: string) => setAttempts(current => {
+      if (current.get(operationId) !== row) return current;
+      return new Map(current).set(operationId, {...row, state, error});
+    });
     try {
-      await api.apply({ sessionId: sessionID, operationId: crypto.randomUUID(), operation: { case: 'deliverQueued', value: { operationId, how } } }, { timeoutMs: DELIVERY_TIMEOUT_MS });
-      setWorking(current => current === attempt ? { ...attempt, acknowledged: true } : current);
+      const receipt = await api.apply({ sessionId: sessionID, operationId: crypto.randomUUID(), operation: { case: 'deliverQueued', value: { operationId, how } } }, { timeoutMs: DELIVERY_TIMEOUT_MS });
+      finish(receipt.delivery === 'prioritized' ? 'prioritized' : 'acknowledged');
     } catch (e) {
-      setWorking(current => current === attempt ? undefined : current);
-      const why = humanError(e);
-      if (justSent && /no longer queued/.test(why)) return;
-      setError({ id: operationId, how, turn: turnBoundary, text: `${queueFeedback[how].failure}: ${why}` });
+      finish('failed', queueFeedback[how].failure + ': ' + humanError(e));
     }
   };
   const edit: QueuedDelivery['edit'] = async (operationId, how, editId, text = '') => {
@@ -112,7 +109,7 @@ export function useQueuedDelivery(api: RunnerClient, sessionID: string, queued: 
     if (how === 'edit') superseded(operationId);
     return receipt.queuedText;
   };
-  return { working, error, deliver, edit };
+  return { attemptFor, deliver, edit };
 }
 
 type EditAction = 'edit' | 'save_edit' | 'cancel_edit';
@@ -201,8 +198,8 @@ function QueuedItem({ message, index, session, busy, steer, agentName, stops, se
   sendNowKey?: string;
   delivery: QueuedDelivery;
 }) {
-  const { working, error } = delivery;
-  const mine = working?.id === message.operationId;
+  const working = delivery.attemptFor(message.operationId);
+  const mine = working?.state === 'sending' || working?.state === 'acknowledged';
   const deliver = (how: QueueAction) => delivery.deliver(message.operationId, how);
   // A message Lazybox wrote says what it is, not the words it carries, and is not edited.
   const origin = messageOrigin(message.origin), event = origin && systemEventView(origin, agentName);
@@ -214,21 +211,22 @@ function QueuedItem({ message, index, session, busy, steer, agentName, stops, se
         : <q className="queued-text" title={message.text}>{clip(message.text)}</q>}
       <span className="queued-actions">
         {/* Edit stays offered while a delivery is at work, as it was before it joined this row. */}
-        {mine ? <><span className="queued-working" role="status">{working.how === 'now' && working.acknowledged ? 'Waiting for message delivery…' : queueFeedback[working.how].pending}</span>{edit}</> : <>
+        {(message.priority || working?.state === 'prioritized') && <span role="status">Prioritized</span>}
+        {mine ? <><span className="queued-working" role="status">{working.how === 'now' && working.state === 'acknowledged' ? 'Waiting for message delivery…' : queueFeedback[working.how].pending}</span>{edit}</> : <>
           {busy && !message.editing && steer && <button type="button" onClick={() => void deliver('steer')}
             title={`Give ${agentName} this message now, inside the running turn, without stopping it`}><Icon name="send" size={11}/>Steer</button>}
           {busy && !message.editing && steer && session.capabilities?.subagents && !origin && <button type="button" onClick={() => void deliver('delegate')}
             title={`Ask ${agentName} to delegate this message to a sub-agent and continue the current task`}>Request delegation</button>}
           {edit}
           {busy && !message.editing && <button type="button" onClick={() => void deliver('now')}
-            title={`${stops} and send this as the next turn${index === 0 && sendNowKey ? ` (${sendNowKey})` : ''}`}><Icon name="stop" size={11}/>Send now</button>}
+            title={`${stops} and prioritize this message after earlier Send now requests${index === 0 && sendNowKey ? ` (${sendNowKey})` : ''}`}><Icon name="stop" size={11}/>Send now</button>}
           <button type="button" onClick={() => void deliver('delete')}
             title="Delete this queued message">Delete</button>
         </>}
       </span>
     </div>
     {!origin && editing.editor}
-    {error?.id === message.operationId && <p className="queued-error" role="alert">{error.text}</p>}
+    {working?.error && <p className="queued-error" role="alert">{working.error}</p>}
   </li>;
 }
 
@@ -282,9 +280,9 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
     </ul>}
     {!collapsed && queued.length > shown.length && <button type="button" className="queued-more" onClick={() => setShowAll(true)}>Show {queued.length - shown.length} more</button>}
     {!collapsed && busy && steer && <p className="queued-note">
-      <strong>Steer</strong> adds instructions to the current turn. <strong>Send now</strong> interrupts it and starts the selected message next.
+      <strong>Steer</strong> adds instructions to the current turn. <strong>Send now</strong> puts the message ahead of ordinary queued messages. Earlier priority messages finish first.
       {session.capabilities?.subagents && shown.some(message => !message.origin && !message.editing) && <> <strong>Request delegation</strong> asks the agent to give this task to a sub-agent while it continues working.</>}
     </p>}
-    {!collapsed && busy && !steer && <p className="queued-note">{agentName} can’t take a message in the middle of a turn: <strong>Send now</strong>{sendNowKey ? ` (${sendNowKey})` : ''} stops its current step first, then sends yours.</p>}
+    {!collapsed && busy && !steer && <p className="queued-note">{agentName} can’t take a message in the middle of a turn: <strong>Send now</strong>{sendNowKey ? ` (${sendNowKey})` : ''} prioritizes your message. Earlier priority messages finish first.</p>}
   </section>;
 }

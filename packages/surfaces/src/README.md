@@ -96,3 +96,11 @@ For Codex replies with a turn boundary, **Ask a side question…** opens a separ
 The Inbox sends a reaction for the displayed observation and destination. Updated Runners store the acknowledgement so another device or a retry can retrieve it. If the Runner stops between dispatch and saving its receipt, it reports the outcome as unknown and prevents an automatic second dispatch. Feedback requiring a person stays in the Inbox until dismissed. Dismissals from older clients without a Runner and observation identity may appear again.
 
 Browser, repository and conversation requests offer a separate conversation Full access action when the agent supports it. The original request remains available to answer. Browser site requests also offer full browser access for navigation in that conversation.
+
+Chat shows the submitted message above the composer immediately. Its delivery status stays visible until the transcript or queue shows the same operation.
+
+Send now promotes a message ahead of ordinary queued messages. Priority messages run one at a time in promotion order. The first can interrupt ordinary work. Subsequent priority messages wait for earlier priority turns to finish. The composer submits the message with its delivery intent in one Runner request. Steer sends instructions into the running turn. If that turn is stopping, the message stays queued.
+
+An ordinary send is confirmed when the Runner acknowledges the request or its conversation journal shows the matching accepted operation. Queue acceptance can proceed while the previous turn prepares its checkpoint. If a receipt is lost, the next draft becomes editable when the journal confirms the send, including after reconnecting.
+
+The phone composer also confirms ordinary sends through the receipt or journal. An unchanged draft keeps its operation ID across a reload, and a delayed receipt leaves later edits in the composer.

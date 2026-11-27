@@ -34,7 +34,7 @@ Usage:
   lazybox agents stop <agent> [--end] [--reason WHY]
   lazybox agents report "what you did and how you checked it"   (as a child)
 
-Without a grant, spawn asks the person to start the conversation, as conversation new does.`
+Without an active grant, spawn returns grant_required. Use agents ls to inspect your grant.`
 
 func (c *cli) agents(args []string) error {
 	if c.subcommandHelp(args, agentsUsage) {
@@ -96,8 +96,9 @@ func (c *cli) agentsSpawn(args []string) error {
 	model := f.String("model", "", "model (default: yours)")
 	role := f.String("role", "", "a label shown on the board: worker, reviewer, researcher…")
 	key := f.String("key", "", "idempotency key: a retried spawn with the same key starts no second agent")
-	wait := f.Duration("timeout", defaultRequestWait, "without a grant: how long to wait for the person to start it")
-	noWait := f.Bool("no-wait", false, "without a grant: ask and return at once; the answer comes later as a note")
+	// Accept legacy flags so existing callers still receive the managed spawn result.
+	f.Duration("timeout", defaultRequestWait, "deprecated: managed spawn returns immediately when authorization is required")
+	f.Bool("no-wait", false, "deprecated: managed spawn never waits for human authorization")
 	if _, err := c.parse(f, args); err != nil {
 		return err
 	}
@@ -117,16 +118,6 @@ func (c *cli) agentsSpawn(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Without a grant in force, starting an agent is the person's to allow:
-	// ask them, as `lazybox conversation new` does, instead of failing.
-	if *task == "" {
-		if lineage, err := got(cl.ListAgentLineage(c.ctx, connect.NewRequest(&pb.AgentLineageRequest{SessionId: me}))); err == nil && (lineage.Grant == nil || !lineage.Grant.Live) {
-			if !c.json {
-				c.note("No Orchestrator grant here: asking the person to start it as a conversation (lazybox conversation new).\n")
-			}
-			return c.askToStart(cl, &pb.RequestConversationStartRequest{SessionId: me, Title: *title, Brief: *brief, Workspace: *workspace, ProfileId: *profile, Model: *model}, *wait, *noWait)
-		}
-	}
 	operation := *key
 	if operation == "" {
 		operation = fmt.Sprintf("spawn-%d", c.now().UnixNano())
@@ -135,12 +126,12 @@ func (c *cli) agentsSpawn(args []string) error {
 	if err != nil {
 		return err
 	}
+	s := out.Spawned
+	if s == nil || s.ConversationId == "" || s.TaskId == "" {
+		return errors.New("the Runner started no agent")
+	}
 	if c.json {
 		return c.printProtoJSON(out)
-	}
-	s := out.Spawned
-	if s == nil {
-		return errors.New("the Runner started no agent")
 	}
 	where := "your workspace"
 	if s.WorkspaceName != "" {
@@ -189,7 +180,7 @@ func (c *cli) printLineage(out *pb.AgentLineage) {
 			state = "revoked"
 		}
 		ceiling := g.GetCeiling()
-		c.out("Orchestrating “%s” (grant %s, %s): %d of %d agents running, %s or narrower, on %s.\n", out.MissionTitle, g.Id, state, g.LiveChildren, ceiling.GetMaxChildren(), ceiling.GetPermission(), strings.Join(ceiling.GetProfileIds(), ", "))
+		c.out("Orchestrating “%s” (grant %s, %s, held by %s [%s]): %d of %d agents running, %s or narrower, on %s.\n", out.MissionTitle, g.Id, state, g.Title, g.ConversationId, g.LiveChildren, ceiling.GetMaxChildren(), ceiling.GetPermission(), strings.Join(ceiling.GetProfileIds(), ", "))
 	}
 	if p := out.Parent; p != nil {
 		c.out("Started by “%s” (your orchestrator) for “%s” · it is %s.\n", p.Title, out.MissionTitle, liveWord(p))

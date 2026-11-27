@@ -217,3 +217,7 @@ lazybox workspace realize alpha.collection.json --key alpha-review --name "Revie
 ```
 
 The collection.v1 file is suitable for version control. Member names distinguish multiple checkouts of one registered repository. The Runner creates new worktrees and destination branches. A base ref selects a starting revision and may move between realizations. Export records the configured starting ref, so edits and commits made on the source workspace branch are outside this definition. Repository IDs must be registered on the target Runner.
+
+When a new workspace branch already exists, the branch editor offers to delete
+the local branch in the conflicting repository. Confirm deletion, then create
+the workspace again. Git refuses deletion for checked-out or unmerged branches.

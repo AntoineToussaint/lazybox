@@ -86,9 +86,11 @@ these codes:
 | `4` | You declined. It prints your reason. |
 | `5` | No answer yet. The request stays open, and your answer reaches the conversation later. |
 
-`lazybox agents spawn` works the same way without a grant: it asks you
-instead of failing. A conversation that holds a grant starts the agent at
-once, as part of its mission.
+`lazybox agents spawn` requires a live grant. The Runner returns
+`grant_required` (exit 4) and creates nothing when authorization is missing.
+Select **Authorize this coordinator** in the requesting conversation, review
+its mission and limits, then retry the spawn with the same `--key`.
+Use `lazybox agents ls` to inspect the grant and its managed children.
 
 ## Give a conversation the right
 

@@ -15,13 +15,14 @@ export function projectWorkspaces(collections: readonly Collection[]) {
   return { workspaces: collections.filter(c => c.state !== 'deleted' && c.state !== 'archived').map(c => ({ id: c.id, name: c.name, repositories: c.members.map(m => m.spec?.name || '').filter(Boolean) })) };
 }
 
-export function projectConversations(sessions: readonly Session[], collections: readonly Collection[], workspaceId?: string) {
+export function projectConversations(sessions: readonly Session[], collections: readonly Collection[], workspaceId?: string, planOnly = false) {
   const seen = new Set<string>();
   const conversations = [];
   for (const s of [...sessions].sort((a, b) => activityAt(b) - activityAt(a))) {
     const key = s.conversationId || s.id;
     if (seen.has(key) || (workspaceId && s.collectionId !== workspaceId) || ['help', 'planning', 'summary'].includes(s.purpose)) continue;
     seen.add(key);
+    if (planOnly && s.workflow !== 'plan') continue;
     conversations.push({
       sessionId: s.id, conversationId: key, title: conversationName(s, 'Conversation'),
       workspaceId: s.collectionId, workspaceName: workspaceName(collections, s.collectionId),

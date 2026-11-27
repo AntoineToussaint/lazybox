@@ -111,6 +111,27 @@ try {
   await phone.getByRole('button', { name: 'Send message' }).click();
   await expect(composer).toHaveValue('');
   await expect.poll(() => f.mutations.filter(m => m.method === 'Apply' && m.body.message).map(m => [m.body.sessionId, m.body.message.text])).toEqual([['review-session', 'Ship it, then open a PR.']]);
+  // A slow receipt belongs to the submitted draft. Typing the next one must survive it.
+  const reviewSession = f.sessions.find(s=>s.id==='review-session');
+  reviewSession.applyDelayMs = 1500;
+  await composer.fill('First draft');
+  await phone.getByRole('button', {name:'Send message'}).click();
+  await expect(phone.getByRole('button', {name:'Sending…'})).toBeVisible();
+  await composer.fill('Next draft');
+  await expect(phone.getByRole('button', {name:'Send message'})).toBeEnabled();
+  await expect(composer).toHaveValue('Next draft');
+
+  // Reload after the Runner receives the message, before this page sees the receipt.
+  const nextRequests = () => f.mutations.filter(m=>m.method==='Apply' && m.body.message?.text==='Next draft');
+  await phone.getByRole('button', {name:'Send message'}).click();
+  await expect.poll(()=>nextRequests().length).toBe(1);
+  await phone.reload();
+  await expect(composer).toHaveValue('Next draft');
+  reviewSession.applyDelayMs = 0;
+  await phone.getByRole('button', {name:'Send message'}).click();
+  await expect.poll(()=>nextRequests().length).toBe(2);
+  assert.equal(nextRequests()[0].body.operationId, nextRequests()[1].body.operationId);
+  await expect(composer).toHaveValue('');
   await phone.screenshot({ path: '/tmp/lazybox-phone-conversation.png' });
   await phone.getByRole('button', { name: 'Back to inbox' }).click();
   await expect(phone.locator('.group-review')).toHaveCount(0);

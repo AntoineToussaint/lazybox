@@ -119,7 +119,7 @@ type Manager struct {
 	root   string
 	limits Limits
 	mu     sync.Mutex
-	convs  map[string]*sync.Mutex
+	convs  map[string]*conversationLock
 	repos  map[string]*sync.Mutex
 }
 
@@ -136,24 +136,49 @@ func Open(root string, limits Limits) (*Manager, error) {
 	if err := os.MkdirAll(filepath.Join(root, "tmp"), 0700); err != nil {
 		return nil, err
 	}
-	return &Manager{root: root, limits: limits.withDefaults(), convs: map[string]*sync.Mutex{}, repos: map[string]*sync.Mutex{}}, nil
+	return &Manager{root: root, limits: limits.withDefaults(), convs: map[string]*conversationLock{}, repos: map[string]*sync.Mutex{}}, nil
 }
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
-func (m *Manager) lockConversation(id string) (func(), error) {
+// Record writes stay serialized. A sender only needs the last committed
+// revert note, but must wait if a revert or undo is changing the worktree.
+type conversationLock struct {
+	record sync.Mutex
+	revert sync.RWMutex
+}
+
+func (m *Manager) conversationLock(id string) (*conversationLock, error) {
 	if !validID.MatchString(id) {
 		return nil, errors.New("invalid conversation id")
 	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	l := m.convs[id]
 	if l == nil {
-		l = &sync.Mutex{}
+		l = &conversationLock{}
 		m.convs[id] = l
 	}
-	m.mu.Unlock()
-	l.Lock()
-	return l.Unlock, nil
+	return l, nil
+}
+
+func (m *Manager) lockConversation(id string) (func(), error) {
+	l, err := m.conversationLock(id)
+	if err != nil {
+		return nil, err
+	}
+	l.record.Lock()
+	return l.record.Unlock, nil
+}
+
+func (m *Manager) lockRevert(id string) (func(), error) {
+	l, err := m.conversationLock(id)
+	if err != nil {
+		return nil, err
+	}
+	l.record.Lock()
+	l.revert.Lock()
+	return func() { l.revert.Unlock(); l.record.Unlock() }, nil
 }
 
 // lockRepositories serializes everything that reads or writes these work
@@ -562,7 +587,7 @@ func (m *Manager) preview(ctx context.Context, target Point, current []Repositor
 // guard runs once the conversation is locked and refuses while an agent is
 // working. The current files are saved first: undoing restores them.
 func (m *Manager) Revert(ctx context.Context, conversation string, seq int, guard func() error) (Revert, error) {
-	unlock, err := m.lockConversation(conversation)
+	unlock, err := m.lockRevert(conversation)
 	if err != nil {
 		return Revert{}, err
 	}
@@ -591,7 +616,7 @@ func (m *Manager) Revert(ctx context.Context, conversation string, seq int, guar
 // Undo restores the files a revert replaced. Only the latest revert can be
 // undone; an undo is itself a revert, so it can be undone in turn.
 func (m *Manager) Undo(ctx context.Context, conversation, id string, guard func() error) (Revert, error) {
-	unlock, err := m.lockConversation(conversation)
+	unlock, err := m.lockRevert(conversation)
 	if err != nil {
 		return Revert{}, err
 	}
@@ -715,7 +740,15 @@ func (m *Manager) restorePoint(ctx context.Context, rec *Record, target Point, g
 
 // Note is what the agent should be told with its next message, or "".
 func (m *Manager) Note(conversation string) string {
-	rec, err := m.List(conversation)
+	l, err := m.conversationLock(conversation)
+	if err != nil {
+		return ""
+	}
+	l.revert.RLock()
+	defer l.revert.RUnlock()
+	// save atomically replaces the complete record. Capturing a checkpoint
+	// leaves the note unchanged, so its repository locks need not delay a send.
+	rec, err := m.load(conversation)
 	if err != nil {
 		return ""
 	}
@@ -742,7 +775,7 @@ func (m *Manager) Delete(ctx context.Context, conversation string) error {
 	if !validID.MatchString(conversation) {
 		return nil // nothing is ever recorded under such an id
 	}
-	unlock, err := m.lockConversation(conversation)
+	unlock, err := m.lockRevert(conversation)
 	if err != nil {
 		return err
 	}

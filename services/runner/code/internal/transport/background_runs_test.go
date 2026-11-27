@@ -204,4 +204,25 @@ func TestQueuedMessagesAreListedAndSentNow(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("no interrupt")
 	}
+	// The composer uses one request, including while a queue-row interrupt is in flight.
+	for _, id := range []string{"third", "fourth"} {
+		receipt, err := f.client.Apply(owner, &pb.ApplyRequest{SessionId: e.ID, OperationId: id, Operation: &pb.ApplyRequest_SendNow{SendNow: &pb.Message{Text: id}}})
+		if err != nil || receipt.Delivery != "prioritized" {
+			t.Fatalf("send %s: %+v %v", id, receipt, err)
+		}
+	}
+	got, err = f.client.GetSession(owner, &pb.SessionRequest{SessionId: e.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Session.QueuedMessages) != 3 {
+		t.Fatalf("queue: %+v", got.Session.QueuedMessages)
+	}
+	for i, id := range []string{"second", "third", "fourth"} {
+		q := got.Session.QueuedMessages[i]
+		if !q.Priority || q.OperationId != id {
+			t.Fatalf("queue[%d]: %+v", i, q)
+		}
+	}
+
 }

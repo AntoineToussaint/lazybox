@@ -52,12 +52,8 @@ async function run(scheme) {
   const chat = page.locator('.panel-chat').filter({ visible: true });
   const composer = chat.getByRole('textbox', { name: 'Message', exact: true });
   await expect(composer).toBeVisible();
-  // A conversation that holds no grant shows nothing about one.
-  await expect(chat.locator('.orchestrator-chip, .lineage-crumb')).toHaveCount(0);
-
-  // `/orchestrate` opens the grant sheet; it defaults to this conversation's own.
-  await composer.fill('/orchestrate');
-  await composer.press('Enter');
+  await expect(chat.locator('.orchestrator-chip')).toHaveCount(0);
+  await chat.getByRole('button', { name: 'Authorize this coordinator' }).click();
   const sheet = page.getByRole('dialog', { name: 'Let this conversation run agents' });
   await expect(sheet).toBeVisible();
   await expect(sheet.getByRole('radio', { name: 'Ask' })).toBeChecked();

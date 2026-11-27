@@ -12,6 +12,7 @@ import { useTranscript } from '../useTranscript';
 import { ConversationLoading, MessageList } from '../MessageList';
 import { RequestCard } from '../session-parts';
 import { QueuedMessages, useQueuedDelivery } from '../QueuedMessages';
+import { confirmMessage, conversationReader } from '../transcript-cache';
 import { queuedMessages } from '../transcript-model';
 import { LiveIndicator, useLiveStatus } from '../LiveIndicator';
 import { Icon } from '../Icons';
@@ -327,11 +328,25 @@ function PhoneComposer({ session, respond, start, onError }: { session: Session;
   const key = `lazybox-remote-draft:${session.id}`;
   const [text, setText] = useState(() => { try { return sessionStorage.getItem(key) || ''; } catch { return ''; } });
   const [sending, setSending] = useState(false);
-  const attempt = useRef('');
+  const attemptKey = key + ':operation';
+  const attempt = useRef<{id: string; message: string; target?: string} | undefined>(undefined);
+  const inFlight = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const saveAttempt = (value: typeof attempt.current) => {
+    attempt.current = value;
+    try {
+      if (value) sessionStorage.setItem(attemptKey, JSON.stringify(value));
+      else sessionStorage.removeItem(attemptKey);
+    } catch { /* The operation remains available in this window. */ }
+  };
   const box = useRef<HTMLTextAreaElement>(null);
   const commit = (value: string) => {
     setText(value);
-    attempt.current = '';
+    saveAttempt(undefined);
     try { if (value) sessionStorage.setItem(key, value); else sessionStorage.removeItem(key); } catch { /* The draft lives in memory. */ }
   };
   useEffect(() => { const node = box.current; if (node) { node.style.height = 'auto'; node.style.height = `${Math.min(node.scrollHeight, 160)}px`; } }, [text]);
@@ -345,21 +360,34 @@ function PhoneComposer({ session, respond, start, onError }: { session: Session;
   const send = async (event?: FormEvent) => {
     event?.preventDefault();
     const message = text.trim();
-    if (!message || sending) return;
+    if (!message || inFlight.current) return;
+    inFlight.current = true;
     setSending(true); onError('');
-    // The same operation id until it is accepted: a retried send is not a second message.
-    attempt.current ||= crypto.randomUUID();
+    let delivery = attempt.current;
+    if (!delivery) {
+      try {
+        const saved = JSON.parse(sessionStorage.getItem(attemptKey) || 'null');
+        if (saved?.message === message && typeof saved.id === 'string' && (!saved.target || typeof saved.target === 'string')) delivery = saved;
+      } catch { /* Older drafts have no operation record. */ }
+    }
+    if (!delivery || delivery.message !== message) delivery = {id: crypto.randomUUID(), message};
+    saveAttempt(delivery);
     try {
-      let target = session.id;
-      if (session.closed) {
+      let target = delivery.target || session.id;
+      if (!delivery.target && session.closed) {
         const resumed = await api.resumeSession({ sessionId: session.id }, { timeoutMs: 60000 });
         if (!resumed.session) throw new Error('The conversation could not be continued');
         target = resumed.session.id;
       }
-      await api.apply({ sessionId: target, operationId: attempt.current, operation: { case: 'message', value: { text: message, attachments: [] } } }, { timeoutMs: 30000 });
-      commit(''); refresh();
-    } catch (error) { onError(`Not sent: ${ConnectError.from(error).rawMessage || String(error)}. Your message is kept; try again.`); }
-    finally { setSending(false); }
+      delivery.target = target;
+      if (mounted.current && attempt.current === delivery) saveAttempt(delivery);
+      const request = api.apply({ sessionId: target, operationId: delivery.id, operation: { case: 'message', value: { text: message, attachments: [] } } }, { timeoutMs: 30000 });
+      const receipt = await confirmMessage(conversationReader(api, target), delivery.id, request);
+      if (receipt?.error || receipt?.delivery === 'failed') throw Error(receipt.error || 'The Runner rejected this message.');
+      if (mounted.current && attempt.current === delivery) commit('');
+      refresh();
+    } catch (error) { if (mounted.current) onError(`Could not confirm delivery: ${ConnectError.from(error).rawMessage || String(error)}`); }
+    finally { inFlight.current = false; if (mounted.current) setSending(false); }
   };
   const interrupt = async () => {
     try { await api.apply({ sessionId: session.id, operationId: crypto.randomUUID(), operation: { case: 'interrupt', value: {} } }, { timeoutMs: 15000 }); }

@@ -74,7 +74,12 @@ export type Transcript = { messages: TranscriptMessage[]; recent: JournalEvent[]
 export const emptyTranscript = (): Transcript => ({ messages: [], recent: [], activity: [], activityTruncated: false, cursor: 0n, appendToLast: false, reportedModel:'', subagents: emptySubagents(), requests: {}, catalog: emptyCatalog() });
 
 /** A message waiting behind the turn in progress, as the Queued strip shows it. */
-export type QueuedEntry = { editing?: boolean; operationId: string; text: string; /** A message Lazybox wrote (QueuedMessage.origin, or the transcript's parsed one). */ origin?: unknown };
+export type QueuedEntry = { priority?: boolean; editing?: boolean; operationId: string; text: string; /** A message Lazybox wrote (QueuedMessage.origin, or the transcript's parsed one). */ origin?: unknown };
+/** The Runner journal establishes acceptance independently of the Apply response. */
+export function hasAcceptedMessage(transcript: Pick<Transcript, 'messages' | 'pending'>, id: string): boolean {
+  return !!id && (!!transcript.pending?.[id] || transcript.messages.some(entry => entry.type === 'operation_accepted' && entry.operationId === id));
+}
+
 /**
  * What the Queued strip shows: the Runner's queue (polled every 1.5 s)
  * merged with the transcript's, which knows at once. A message accepted

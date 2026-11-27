@@ -326,3 +326,31 @@ func TestRequestedEmptyRepositoryCanBeRetriedAfterFirstPush(t *testing.T) {
 		t.Fatal(answer, err)
 	}
 }
+
+func TestDeleteConflictingBranchAndRetryWorkspace(t *testing.T) {
+	s, _ := replacingService(t)
+	ctx := context.Background()
+	ids := []string{"github:team/api"}
+	first, err := s.Bench.PrepareWorkspace(ctx, "first", "", "First", "", ids, noProgress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const branch = "feature/conflict"
+	member := first.Members[0]
+	git(t, member.Path, "branch", branch)
+	request := &pb.PrepareWorkspaceRequest{RequestKey: "retry", Name: "Second", RepositoryIdentities: ids, Branch: branch}
+	stream := &preparationStream{ctx: ctx}
+	if err := s.PrepareWorkspace(request, stream); err == nil || len(stream.sent) == 0 {
+		t.Fatalf("missing branch conflict: %v", err)
+	}
+	conflict := stream.sent[len(stream.sent)-1]
+	if conflict.ConflictingRepositoryId != member.RepositoryID {
+		t.Fatalf("unexpected conflicting repository: %v", conflict)
+	}
+	if _, err := s.DeleteLocalBranch(ctx, &pb.DeleteLocalBranchRequest{RepositoryId: conflict.ConflictingRepositoryId, Branch: branch}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PrepareWorkspace(request, stream); err != nil || stream.sent[len(stream.sent)-1].Collection == nil {
+		t.Fatalf("retry did not create workspace: %v", err)
+	}
+}

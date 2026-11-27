@@ -211,3 +211,46 @@ func TestAJournalThatTakesNothingMoreLeavesTheAgentRunning(t *testing.T) {
 		t.Fatal("the agent can no longer be handed to Resume or the next Runner")
 	}
 }
+
+func TestMessageAcceptanceDuringTurnCheckpoint(t *testing.T) {
+	e, provider := bench(t, false)
+	ctx := contextFor(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	e.SetTurnHooks(TurnHooks{Before: func(op agent.Operation) {
+		if op.ID == "first" {
+			close(entered)
+			<-release
+		}
+	}})
+	send := func(id string) error {
+		_, err := e.Apply(ctx, agent.Operation{Kind: agent.Message, ID: id, Text: id})
+		return err
+	}
+	if err := send("first"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("checkpoint did not start")
+	}
+	result := make(chan error, 1)
+	go func() { result <- send("next") }()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("message acceptance waited for the previous turn's checkpoint")
+	}
+	if q := e.Snapshot().QueuedMessages; len(q) != 1 || q[0].OperationID != "next" {
+		t.Fatalf("queued: %+v", q)
+	}
+	select {
+	case op := <-provider.Applied:
+		t.Fatalf("premature dispatch: %+v", op)
+	default:
+	}
+}

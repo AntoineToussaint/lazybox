@@ -61,6 +61,8 @@ export function WorkspaceRepositoryDialog({
     [progress, setProgress] = useState(""),
     [error, setError] = useState(""),
     [branchConflict, setBranchConflict] = useState("");
+  const [conflictingRepo, setConflictingRepo] = useState<{id: string; name: string}>();
+  const [confirmDelete, setConfirmDelete] = useState(false);
   useEffect(() => {
     dialog.current?.showModal();
     // Creating starts on the name, its suggestion selected: typing replaces it.
@@ -137,6 +139,8 @@ export function WorkspaceRepositoryDialog({
     setBusy(true);
     setError("");
     setBranchConflict("");
+    setConflictingRepo(undefined);
+    setConfirmDelete(false);
     setProgress("Preparing workspace…");
     const request = {
       collectionId: workspace?.id || "",
@@ -155,6 +159,9 @@ export function WorkspaceRepositoryDialog({
         { ...request, requestKey: attempt.current.key },
         { timeoutMs: 600000 },
       )) {
+        if (update.conflictingRepositoryId) {
+          setConflictingRepo({id: update.conflictingRepositoryId, name: update.conflictingRepositoryName || update.conflictingRepositoryId});
+        }
         setProgress(update.message);
         if (update.collection) result = update.collection;
       }
@@ -183,6 +190,24 @@ export function WorkspaceRepositoryDialog({
       }
     } finally {
       pending.current = false;
+      setBusy(false);
+    }
+  };
+  const deleteBranch = async () => {
+    if (!conflict || !conflictingRepo || pending.current) return;
+    pending.current = true;
+    setBusy(true);
+    setProgress("Deleting local branch…");
+    setError("");
+    try {
+      await api.deleteLocalBranch({repositoryId: conflictingRepo.id, branch});
+      setBranchConflict("");
+      setConflictingRepo(undefined);
+    } catch (error) {
+      setError(ConnectError.from(error).rawMessage);
+    } finally {
+      pending.current = false;
+      setConfirmDelete(false);
       setBusy(false);
     }
   };
@@ -288,6 +313,11 @@ export function WorkspaceRepositoryDialog({
               />
             </label>
             {conflict && <p className="workspace-branch-error" id="workspace-branch-conflict" role="alert">This branch already exists. Enter a different branch name.</p>}
+            {conflict && conflictingRepo && (confirmDelete ? <div>
+              <p>Delete local branch <code>{branch}</code> in <strong>{conflictingRepo.name}</strong>?</p>
+              <button type="button" disabled={busy} onClick={() => setConfirmDelete(false)}>Keep branch</button>
+              <button type="button" disabled={busy} onClick={() => void deleteBranch()}>Confirm deletion</button>
+            </div> : <button type="button" disabled={busy} onClick={() => setConfirmDelete(true)}>Delete local branch…</button>)}
             </div>
           ) : (
             <p className="workspace-branch-preview" aria-live="polite">

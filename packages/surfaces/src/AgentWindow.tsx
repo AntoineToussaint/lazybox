@@ -8,7 +8,7 @@ import { DetachedCommands } from './DetachedCommands';
 import { PromptSnippets } from './SnippetPrompt';
 import { SnippetPicker } from './SnippetPicker';
 import { useKeyboardNavigation, useKeyboardAction, useKeymap, useMenuSnippet, type KeyHint } from './keyboard';
-import { continueConversation } from './transcript-cache';
+import { continueConversation, conversationReader, confirmMessage } from './transcript-cache';
 import { useChatScroll } from './useChatScroll';
 import { sameModel } from './slash-commands';
 import { sessionModelLabel, sessionAccountLabel, conversationProvider, conversationTitle, titleFromMessage, branchSummary } from './conversation-model';
@@ -31,7 +31,7 @@ import { RunnerProvider, useRunner, type RunnerConnection } from './RunnerContex
 import { AttentionScope, PanelShownContext, useMarkViewed } from './useAttention';
 import { conversationName, currentSession } from './conversation-model';
 import { useComposeRequests } from './compose';
-import { queuedMessages } from './transcript-model';
+import { hasAcceptedMessage, queuedMessages } from './transcript-model';
 export type { RunnerConnection } from './RunnerContext';
 import { DeliveryVerdict } from './DeliveryVerdict';
 import { useDeliveryOutcome } from './useDeliveryOutcome';
@@ -202,6 +202,8 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const { followUp, followUpText, setFollowUp, editFollowUp, snippet: draftSnippet, reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
   const [commandsOpen, setCommandsOpen] = useState(initialCommandsOpen ?? !!initialCommandId);
   const [sending, setSending] = useState(false);
+  const sendError = useRef<{id: string; detail: string} | undefined>(undefined);
+  const [outgoing, setOutgoing] = useState<{id: string; session: string; text: string; confirmed: boolean}[]>([]);
   const [commands, setCommands] = useState<CommandStatus[]>([]);
   const [command, setCommand] = useState(initialCommandId);
   // A failed refresh of the session is current state, not an event: the next
@@ -349,6 +351,9 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       }
       const previous = sendAttempt.current;
       const attempt = previous?.text === text && previous.files.length === files.length && files.every((file, i) => file === previous.files[i]) ? previous : { id: uncertainSend || crypto.randomUUID(), text, files };
+      setOutgoing(rows => [...rows.filter(row => row.id !== attempt.id), {
+        id: attempt.id, session: sessionID, text: [text, ...files.map(file => file.name)].filter(Boolean).join('\n'), confirmed: false,
+      }]);
       sendAttempt.current = attempt;
       setUncertainSend(attempt.id); persistDraft(text, files, [], attempt.id);
       const attachments = await Promise.all(files.map(async file => ({ name: file.name, mediaType: file.type, data: new Uint8Array(await file.arrayBuffer()) })));
@@ -366,12 +371,21 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       // block sending forever. The operation id is kept, so sending again cannot
       // deliver the message twice.
       const deadline = AbortSignal.timeout(30_000);
-      try { const receipt = await api.apply({ sessionId: destination, operationId: attempt.id, operation: { case: 'message', value: { text, attachments } } }, { signal: AbortSignal.any([signal, deadline]) });
-        if (receipt.error || receipt.delivery === 'failed') throw new Error(receipt.error || 'The message failed to send.');
+      const reader = conversationReader(api, destination);
+      try {
+        const request = api.apply({ sessionId: destination, operationId: attempt.id, operation: { case: now ? 'sendNow' : 'message', value: { text, attachments } } }, { signal: AbortSignal.any([signal, deadline]) });
+        // Send now's receipt also reports whether the interrupt succeeded.
+        // For an ordinary send either channel can confirm the queue entry.
+        const receipt = now ? await request : await confirmMessage(reader, attempt.id, request);
+        if (receipt?.delivery === 'queued_stop_failed') setError('Message queued. The agent could not be interrupted. You can retry Send now from the queue.');
+        if (receipt?.error || receipt?.delivery === 'failed') throw new Error(receipt.error || 'The message failed to send.');
+      } catch (e) {
+        if (signal.aborted || !deadline.aborted) throw e;
+        if (!hasAcceptedMessage(reader.getSnapshot(), attempt.id)) throw new Error('Message delivery is unconfirmed. Your draft is saved. Press Enter to retry the same message.');
       }
-      catch (e) { if (deadline.aborted && !signal.aborted) throw new Error('The Runner did not confirm this message within 30 seconds. Press Enter to send it again: it will not be delivered twice.'); throw e; }
       // Delivered from here on: a bookkeeping failure below is reported as such, never as "not sent",
       // and the draft is still cleared, so sending again cannot deliver the message twice.
+      setOutgoing(rows => rows.map(row => row.id === attempt.id ? {...row, session: destination, confirmed: true} : row));
       let afterDelivery = '';
       const ids = [...new Set(reviewDrafts.current.filter(review => text.includes(review.text)).flatMap(review => review.ids))];
       if (ids.length && session?.collectionId) {
@@ -382,8 +396,6 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       savePrompt(viewState, text, session?.conversationId || sessionID); recall.reset();
       // Queued behind a busy turn, it shows above the box now, not at the next poll.
       refreshSession();
-      // Behind a busy turn the message was queued: it goes next, the turn stopped for it.
-      if (now && destination === sessionID) void queuedDelivery.deliver(attempt.id, 'now', true);
       if (!signal.aborted) {
         finishDraft(destination);
         setFiles([]);
@@ -395,7 +407,17 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
         if (afterDelivery) setError(afterDelivery);
       }
       return !signal.aborted;
-    } catch (e) { if (!signal.aborted) { setError(humanError(e)); if (snippetText) setMessage(text); } return false; }
+    } catch (e) {
+      if (!signal.aborted) {
+        const id = sendAttempt.current?.id;
+        const detail = humanError(e);
+        if (id) sendError.current = {id, detail};
+        setOutgoing(rows => rows.filter(row => row.id !== id));
+        setError(detail);
+        if (snippetText) setMessage(text);
+      }
+      return false;
+    }
     finally { if (!signal.aborted) { sendingRef.current = false; setSending(false); } }
   };
   // Files chosen, dropped or pasted: those over a limit become error boxes (useComposerAttachments).
@@ -451,8 +473,42 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // the oldest queued one, interrupting the turn in progress. Idle, it is a send.
   // What waits behind the turn: the Runner's queue and the transcript's, merged (transcript-model.ts).
   const queued = useMemo(() => queuedMessages(session?.queuedMessages, transcript), [session?.queuedMessages, transcript.pending, transcript.messages, transcript.canceled]);
+  useEffect(() => {
+    if (sending || restoring || !uncertainSend || !hasAcceptedMessage(transcript, uncertainSend)) return;
+    const next = followUp.current;
+    setFollowUp('');
+    setMessage(next);
+    setFiles([]);
+    setMissingFiles([]);
+    setUncertainSend('');
+    sendAttempt.current = null;
+    persistDraft(next, [], []);
+    const failure = sendError.current;
+    if (failure?.id === uncertainSend) {
+      setError(current => current === failure.detail ? '' : current);
+      sendError.current = undefined;
+    }
+  }, [sending, restoring, sessionID, uncertainSend, transcript.messages, transcript.pending]);
+  const visibleOutgoing = outgoing.filter(row => row.session === sessionID &&
+    !queued.some(entry => entry.operationId === row.id) &&
+    !conversation.some(entry => entry.operationId === row.id) && !transcript.canceled?.has(row.id));
+  useEffect(() => {
+    if (outgoing.some(row => row.session === sessionID && !visibleOutgoing.includes(row))) {
+      setOutgoing(rows => rows.filter(row => row.session !== sessionID || !outgoing.includes(row) || visibleOutgoing.includes(row)));
+    }
+  }, [outgoing, queued, conversation, transcript.canceled, sessionID]);
   const queuedDelivery = useQueuedDelivery(api, sessionID, queued, transcript.turnBoundary);
   const sendNowAt = useRef(0);
+  const [nextPriority, setNextPriority] = useState<{session: string; text: string}>();
+  // A second shortcut can arrive before the first receipt. Keep its draft
+  // editable; an edit withdraws the request to send that particular text.
+  useEffect(() => {
+    if (sending || !nextPriority) return;
+    setNextPriority(undefined);
+    if (nextPriority.session !== sessionID || uncertainSend || nextPriority.text !== message || !canSend) return;
+    sendNowAt.current = Date.now();
+    composer.current?.form?.requestSubmit();
+  }, [sending, nextPriority, sessionID, uncertainSend, message, canSend]);
   const sendNowBinding = bindings(keymap['chat.send-now'])[0];
   const sendNowKey = sendNowBinding ? displayBinding(sendNowBinding).join(' ') : '';
   const draftToSend = () => !!message.trim() || files.length > 0 || missingFiles.length > 0;
@@ -460,13 +516,18 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // run before that render (a busy machine). The form's submit waits for the last words (Composer).
   const saidHere = () => dictating() && voiceState().kind === 'composer' && !!voiceState().text.trim() && document.activeElement === composer.current;
   const sendNow = () => {
+    if (sendingRef.current) {
+      if (followUp.current.trim()) setNextPriority({session: sessionID, text: followUp.current});
+      return;
+    }
     if (draftToSend() || saidHere()) {
-      if (workingTurn) sendNowAt.current = Date.now();
+      sendNowAt.current = Date.now();
       composer.current?.form?.requestSubmit();
       return;
     }
     const oldest = workingTurn ? queued[0] : undefined;
-    if (oldest && !oldest.editing && queuedDelivery.working?.id !== oldest.operationId) { jumpToLatest(); void queuedDelivery.deliver(oldest.operationId, 'now'); }
+    const attempt = oldest && queuedDelivery.attemptFor(oldest.operationId);
+    if (oldest && !oldest.editing && (!attempt || attempt.state === 'failed')) { jumpToLatest(); void queuedDelivery.deliver(oldest.operationId, 'now'); }
   };
   useActions({
     'chat.send-now': mode === 'agent' && !!sessionID && {
@@ -834,6 +895,10 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {!transcript.error && <LiveBar api={api} session={session} sessionID={sessionID} live={live} disconnected={disconnected} activity={transcript.activity} viewState={viewState} onInterrupt={() => void interrupt()}
             onOpenCommand={openCommand} onOpenFile={session?.collectionId ? openFile : undefined}/>}
           {!transcript.error && !disconnected && <QueuedMessages session={session} queued={queued} turnRunning={transcript.turnRunning} live={live} agentName={agentName} activity={transcript.activity} delivery={queuedDelivery} sendNowKey={sendNowKey}/>}
+          {visibleOutgoing.map(row => <div className="outgoing-message" role="status" key={row.id}>
+            <small>{row.confirmed ? 'Sent' : 'Sending…'}</small>
+            <div>{row.text}</div>
+          </div>)}
           {historyOpen && sessionID && <PromptHistoryDialog key={sessionID} conversationId={session?.conversationId || sessionID} messages={conversation}
             onClose={() => setHistoryOpen(false)} onPick={text => {
               recall.reset(); setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles);
@@ -844,6 +909,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             <span>{run.reviewerLabel}{run.paused ? ' · Paused' : run.phase === 'triage' ? ' · Findings ready' : run.phase === 'fixing' ? ' · Fixes in progress' : ''}</span>
             <button type="button" onClick={() => showReview({collectionId: chatReview.workspaceId, reviewId: run.id})}>View review</button>
           </div>)}
+          {sending && nextPriority?.session === sessionID && <p role="status" className="composer-hint">Your next message will send when this delivery is confirmed.</p>}
           {!sending && followUpText && <p className="composer-hint">Next draft saved for after this send: {followUpText}</p>}
           <Composer workingTurn={workingTurn} textarea={composer} fileInput={fileInput} agentName={agentName} embedded={embedded} session={session} sessionID={sessionID} viewState={viewState} keymap={keymap}
             limited={limited} message={sending ? followUpText : message} files={files} attachments={boxes} missingFiles={missingFiles} uncertainSend={uncertainSend} handedOver={handedOver}
@@ -854,6 +920,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             onSubmit={send}
             onChange={text => {
               if (sendingRef.current) {
+                setNextPriority(undefined);
                 editFollowUp(text);
                 return;
               }

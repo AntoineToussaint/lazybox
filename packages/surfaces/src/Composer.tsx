@@ -136,7 +136,7 @@ export function Composer({ workingTurn, textarea, fileInput, agentName, embedded
     ? '' : ' · Shift+Enter for a new line';
   // While the agent works, a message queues behind its turn; Send now's key (⌘↵) stops the turn for it.
   const sendNowKey = bindings(keymap['chat.send-now'])[0];
-  const busyHint = workingTurn && sendNowKey ? `${displayBinding(sendKey).join(' ')} queues for later · Send now (${displayBinding(sendNowKey).join(' ')}) interrupts the current turn` : '';
+  const busyHint = workingTurn && sendNowKey ? `${displayBinding(sendKey).join(' ')} queues for later · Send now (${displayBinding(sendNowKey).join(' ')}) prioritizes in send order` : '';
   const dictateKey = bindings(keymap['voice.dictate'])[0];
   const dictateHint = dictateKey ? `Dictate · hold ${displayBinding(dictateKey).join(' ')} to talk, tap it ${isLoneModifier(dictateKey) ? 'twice ' : ''}to keep listening` : 'Dictate';
   // Sending while listening (↵, ⌘↵, Send) waits for the last words, then sends through this same form.

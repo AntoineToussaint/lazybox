@@ -177,3 +177,6 @@ small{color:var(--text-muted);font-size:calc(11px * var(--text-scale));overflow-
 .console{position:relative}
 .console-jump{position:absolute;right:18px;bottom:44px;z-index:2;padding:4px 10px;border:1px solid var(--line-bold);border-radius:12px;background:color-mix(in srgb,var(--surface-hover) 93%,transparent);color:var(--text-soft);font-size:calc(11px * var(--text-scale));box-shadow:0 6px 18px color-mix(in srgb,var(--shadow) calc(40% * var(--shadow-strength)),transparent)}
 .session-options>summary{display:flex;align-items:center;min-height:24px}
+
+.outgoing-message{align-self:flex-end;max-width:90%;max-height:6em;overflow:auto;padding:6px 12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.outgoing-message small{opacity:.75}

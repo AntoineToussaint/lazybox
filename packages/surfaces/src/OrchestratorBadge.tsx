@@ -38,6 +38,7 @@ export function OrchestratorBadge({ session, sessionID }: { session?: Session; s
   const lineage = session?.lineage;
   const open = useOpenConversation();
   return <>
+    {session && !lineage?.grantId && <button type="button" className="text-button" onClick={() => setGranting(true)}>Authorize this coordinator</button>}
     {lineage?.grantId && session && <OrchestratorChip session={session}/>}
     {lineage?.missionId && lineage.parentConversationId && <button type="button" className="lineage-crumb" title={`Started by the orchestrator “${lineage.parentTitle || 'Orchestrator'}” for the mission “${lineage.missionTitle}”${lineage.role ? ` as its ${lineage.role}` : ''}. Its approvals and questions still come to you.`}
       aria-label={`Started by ${lineage.parentTitle || 'an orchestrator'}: open it`} onClick={() => open(lineage.parentConversationId)}>

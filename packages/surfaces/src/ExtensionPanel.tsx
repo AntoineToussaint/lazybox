@@ -216,7 +216,7 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
       'sessions.list': async params => {
         const limit = Math.min(100, Math.max(1, Number(params.limit) || 100));
         const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : undefined;
-        return projectConversations((await client.listHistory({ limit, ...(workspaceId ? { collectionId: workspaceId } : {}) })).sessions, collectionsRef.current, workspaceId);
+        return projectConversations((await client.listHistory({ limit, ...(workspaceId ? { collectionId: workspaceId } : {}) })).sessions, collectionsRef.current, workspaceId, params.planOnly === true);
       },
       'reminders.list': async () => listReminders(localStorage, reminderRoot, extension.id),
       'reminders.create': async params => createReminder(localStorage, reminderRoot, extension.id, stringParam(params, 'text', 240), params.due),

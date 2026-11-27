@@ -1,5 +1,5 @@
 import { Code, ConnectError, follow, runnerLink, type RunnerClient } from '@lazybox/client-core';
-import { foldTranscript, emptyTranscript, type Transcript } from './transcript-model';
+import { foldTranscript, emptyTranscript, hasAcceptedMessage, type Transcript } from './transcript-model';
 import type { JournalEvent } from '@lazybox/protocol';
 import type { Session } from '@lazybox/protocol';
 import { humanError } from './human-error';
@@ -170,6 +170,18 @@ export function conversationReader(api:RunnerClient,id:string){
  cache.delete(id);cache.set(id,entry);
  for(const [key,value] of cache){if(cache.size<=16)break;if(key!==id&&!value.active)cache.delete(key);}
  return entry;
+}
+
+/** An accepted journal entry and the RPC receipt identify the same ordinary send. */
+export async function confirmMessage<T>(reader: ConversationReader, operationId: string, request: Promise<T>): Promise<T | undefined> {
+ let unsubscribe: (() => void) | undefined;
+ try {
+  return await Promise.race([request, new Promise<undefined>(resolve => {
+   const check = () => { if (hasAcceptedMessage(reader.getSnapshot(), operationId)) resolve(undefined); };
+   unsubscribe = reader.subscribe(check);
+   check();
+  })]);
+ } finally { unsubscribe?.(); }
 }
 
 export function forgetConversation(api:RunnerClient,id:string){caches.get(owner(api))?.delete(id);}

@@ -6,6 +6,7 @@ option go_package = "github.com/AntoineToussaint/lazybox/services/runner/code/pk
 service RunnerService {
   rpc ListSnippets(InfoRequest) returns (SnippetCatalog);
   rpc GetRepositoryCatalog(GetRepositoryCatalogRequest) returns (RepositoryCatalog);
+  rpc DeleteLocalBranch(DeleteLocalBranchRequest) returns (DeleteLocalBranchResponse);
   rpc PrepareWorkspace(PrepareWorkspaceRequest) returns (stream WorkspacePreparation);
   // A repository's branches for New task's "Start from" choice, its default
   // branch and the branch it last started from (WORKSPACES.md, "Start from").
@@ -1539,6 +1540,8 @@ message QueuedMessage {
   MessageOrigin origin = 4;
   // Automatic and manual delivery are paused while a person edits this message.
   bool editing = 5;
+  // Selected for FIFO delivery ahead of ordinary queued messages.
+  bool priority = 6;
 }
 // MessageOrigin marks a message Lazybox wrote, not the person: the answer to a
 // repository request, a review's findings, a question between two agents, a
@@ -1831,6 +1834,8 @@ message ApplyRequest {
     CompactContext compact_context = 14;
     ListProviderCatalog list_provider_catalog = 15;
     RetryTurn retry_turn = 16;
+    // Accept a message into the priority FIFO and interrupt only an ordinary turn.
+    Message send_now = 17;
   }
 }
 // Lists the running agent’s MCP servers without starting a turn.
@@ -2456,7 +2461,15 @@ message RepositoryBranches {
   // prepared; a typed branch name is still checked then.
   bool unregistered = 8;
 }
+message DeleteLocalBranchRequest {
+  string repository_id = 1;
+  string branch = 2;
+}
+message DeleteLocalBranchResponse {}
 message WorkspacePreparation {
+  // The repository with the conflicting local branch.
+  string conflicting_repository_id = 5;
+  string conflicting_repository_name = 6;
   string identity = 1; string message = 2; Collection collection = 3;
   // Sent just before the stream fails because this repository's history
   // changed on GitHub (RefreshRepositoryIdentity is the way forward).

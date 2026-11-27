@@ -415,6 +415,9 @@ func authorize(ctx context.Context, owner string, agents AgentCredentials, metho
 	if allowed := agentRPCs[method]; req != nil && allowed != nil && allowed(agents, who, req) {
 		return who, nil
 	}
+	if spawn, ok := req.(*pb.SpawnAgentRequest); ok && method == pb.RunnerService_SpawnAgent_FullMethodName && spawn.SessionId == who.session {
+		return principal{}, status.Error(codes.PermissionDenied, runner.ErrNoGrant.Error())
+	}
 	return principal{}, status.Error(codes.PermissionDenied, agentDenial(method))
 }
 
@@ -425,8 +428,8 @@ func authorize(ctx context.Context, owner string, agents AgentCredentials, metho
 func agentDenial(method string) string {
 	name := method[strings.LastIndex(method, "/")+1:]
 	switch method {
-	case pb.RunnerService_SpawnAgent_FullMethodName, pb.RunnerService_ProposePlan_FullMethodName:
-		return "starting another agent needs the person's OK: ask them with `lazybox conversation new --title … --brief …` (one click for them)"
+	case pb.RunnerService_ProposePlan_FullMethodName:
+		return "proposing a plan requires an active Orchestrator grant for your own conversation"
 	case pb.RunnerService_SendAgentMessage_FullMethodName, pb.RunnerService_WaitAgents_FullMethodName, pb.RunnerService_StopChildAgent_FullMethodName:
 		return "refused: you reach only the agents you started, and your own parent: `lazybox agents ls` lists them"
 	}

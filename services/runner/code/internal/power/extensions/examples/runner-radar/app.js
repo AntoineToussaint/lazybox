@@ -32,14 +32,14 @@ function render() {
       row.querySelector('small').prepend(preview);
     }
     return row;
-  }), state === 'all' ? 'No conversations are blocked on this Runner.' :
-    state === 'failed' ? 'No failed conversations.' : 'No conversations need input.');
+  }), state === 'all' ? 'No blocked conversations on this history page.' :
+    state === 'failed' ? 'No failed conversations on this history page.' : 'No conversations need input on this history page.');
 }
 
 stateFilter.addEventListener('change', render);
-workflow.poll(5000, async () => {
-  const { items } = await lazybox.attention.list();
+const refresh = attentionPages(({ items }) => {
   blocked = items.filter(item => item.state === 'needs-input' || item.state === 'failed')
     .sort((a, b) => (a.at || Infinity) - (b.at || Infinity));
   render();
-});
+}, error => workflow.say(error.message));
+workflow.poll(5000, refresh);

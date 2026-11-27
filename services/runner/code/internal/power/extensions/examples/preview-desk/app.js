@@ -20,11 +20,12 @@ function render() {
     const show = (label, kind, target) => workflow.button(label, () => lazybox.runtime.show(workspaceId, kind, target));
     const actions = [];
     if (service.preview) actions.push(show('Open preview', 'preview', service.id));
+    if (!service.preview) actions.push(show('Show in Actions', 'service', service.id));
     if (service.hasLog) actions.push(show('Open logs', 'logs', service.id));
     if (setups.some(setup => setup.member === service.member && setup.pendingApproval)) {
       actions.push(show('Review repository setup', 'setup', service.member));
     }
-    if (service.preview || (service.state === 'failed' && service.hasLog)) actions[0].classList.add('primary');
+    if (service.preview) actions[0].classList.add('primary');
     const detail = [service.member, service.port && 'Port ' + service.port].filter(Boolean).join(' · ');
     const row = workflow.row(service.id, service.name, detail, ...actions);
     const status = document.createElement('span');

@@ -91,12 +91,13 @@ func (c *contentServer) close() { _ = c.server.Close() }
 
 // runtimeFiles are Lazybox's own files under _lazybox/.
 var runtimeFiles = map[string]string{
-	"shell.html":  "text/html; charset=utf-8",
-	"shell.js":    "text/javascript; charset=utf-8",
-	"shell.css":   "text/css; charset=utf-8",
-	"lazybox.js":  "text/javascript; charset=utf-8",
-	"lazybox.css": "text/css; charset=utf-8",
-	"workflow.js": "text/javascript; charset=utf-8",
+	"shell.html":         "text/html; charset=utf-8",
+	"shell.js":           "text/javascript; charset=utf-8",
+	"shell.css":          "text/css; charset=utf-8",
+	"lazybox.js":         "text/javascript; charset=utf-8",
+	"lazybox.css":        "text/css; charset=utf-8",
+	"workflow.js":        "text/javascript; charset=utf-8",
+	"attention-pages.js": "text/javascript; charset=utf-8",
 }
 
 func (c *contentServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {

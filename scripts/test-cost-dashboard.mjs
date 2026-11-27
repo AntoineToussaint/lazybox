@@ -27,6 +27,10 @@ const dollars = v => new Intl.NumberFormat('en-US', { style: 'currency', currenc
 const spent = (from, to = Infinity, keep = () => true) => series.filter(b => b.at >= from && b.at < to && keep(b)).reduce((n, b) => n + (b.usd || 0), 0);
 
 const f = await startRunnerFixture();
+// Put the workspaces with actual spend beyond the first twenty.
+f.collections.unshift(...Array.from({ length: 20 }, (_, i) => ({
+  ...f.collections[0], id: 'empty-' + i, name: 'Empty workspace ' + i, members: [],
+})));
 const usage = body => body.series ? report(body.workspace) : { ...report(body.workspace), series: [] };
 f.telemetry = usage;
 f.tracked.trackingError = 'GitHub is offline';

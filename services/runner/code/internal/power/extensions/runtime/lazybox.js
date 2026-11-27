@@ -81,7 +81,7 @@
       var timer = setTimeout(function () {
         pending.delete(id);
         reject(LazyboxError({ code: 'timeout', message: 'Lazybox did not answer ' + method + ' in time' }));
-      }, 30000);
+      }, method === 'releases.list' ? 45000 : 30000);
       pending.set(id, { resolve: resolve, reject: reject, timer: timer });
       post({ id: id, method: method, params: params || {} });
     });
@@ -154,7 +154,7 @@
       create: function (text, due) { return call('reminders.create', { text: text, due: due }); },
       remove: function (id) { return call('reminders.remove', { id: id }); },
     },
-    attention: { list: function () { return call('attention.list'); } },
+    attention: { list: function (options) { return call('attention.list', options); } },
     commands: { list: function (sessionId) { return call('commands.list', { sessionId: sessionId }); } },
     missions: { list: function () { return call('missions.list'); } },
     usage: { read: function (options) { return call('usage.read', options); } },

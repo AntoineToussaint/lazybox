@@ -37,6 +37,12 @@ import './extensions.css';
 type Choice = ExtensionPanelChoice;
 type Notice = { key: string; tone: 'info' | 'warn' | 'bad'; text: string; review?: boolean; reload?: boolean };
 
+function githubPage(raw: string) {
+  const url = URL.canParse(raw) ? new URL(raw) : undefined;
+  if (url?.origin !== 'https://github.com' || url.username || url.password) return undefined;
+  return /^\/[\w.-]+\/[\w.-]+\/(?:deployments\/?$|(?:pull|issues|actions\/runs)\/\d+(?:\/|$))/.test(url.pathname) ? url.href : undefined;
+}
+
 const readChoice = (store: ViewStateStore | undefined, key: string): Choice | undefined => {
   try { const value = JSON.parse(store?.getItem(key) || 'null'); return value && typeof value.id === 'string' ? { id: value.id, panel: typeof value.panel === 'string' ? value.panel : '' } : undefined; } catch { return undefined; }
 };
@@ -64,7 +70,7 @@ class ExtensionBoundary extends Component<{ children: ReactNode }, { error?: str
   }
 }
 
-function ExtensionPanel({ viewState, collections, workspaceId, onShowPanel, onPanelTitle, extensionRequest }: ModuleProps) {
+function ExtensionPanel({ viewState, collections, workspaceId, onShowPanel, onReviewDiskCleanup, onPanelTitle, extensionRequest }: ModuleProps) {
   const key = viewState ? `${viewState.key}:extension` : '';
   const [choice, setChoiceState] = useState<Choice | undefined>(() => extensionRequest ? extensionRequest.choice : readChoice(viewState, key));
   const setChoice = (next?: Choice) => { setChoiceState(next); try { viewState?.setItem(key, next ? JSON.stringify(next) : ''); } catch { /* a convenience */ } };
@@ -89,11 +95,11 @@ function ExtensionPanel({ viewState, collections, workspaceId, onShowPanel, onPa
     {choice && !extension && <p role="status">The extension this panel showed ({choice.id}) is no longer in your extensions folder.</p>}
     <ExtensionsSettings onOpenPanel={setChoice} openAfterApproval onManageAccounts={() => runAction('settings.open', 'subscriptions')}/>
   </div>;
-  return <RunningExtension key={`${extension.id}/${panel.id}`} extension={extension} panelId={panel.id} collections={collections} workspaceId={workspaceId} onShowPanel={onShowPanel} onClose={() => setChoice(undefined)} onSwitch={setChoice}/>;
+  return <RunningExtension key={`${extension.id}/${panel.id}`} extension={extension} panelId={panel.id} collections={collections} workspaceId={workspaceId} onShowPanel={onShowPanel} onReviewDiskCleanup={onReviewDiskCleanup} onClose={() => setChoice(undefined)} onSwitch={setChoice}/>;
 }
 
 /** One running panel: its session, its frame and its bridge. */
-function RunningExtension({ extension, panelId, collections, workspaceId, onShowPanel, onClose, onSwitch }: { extension: Extension; panelId: string; collections: Collection[]; workspaceId: string; onShowPanel?: ModuleProps['onShowPanel']; onClose(): void; onSwitch(choice: Choice): void }) {
+function RunningExtension({ extension, panelId, collections, workspaceId, onShowPanel, onReviewDiskCleanup, onClose, onSwitch }: { extension: Extension; panelId: string; collections: Collection[]; workspaceId: string; onShowPanel?: ModuleProps['onShowPanel']; onReviewDiskCleanup?: ModuleProps['onReviewDiskCleanup']; onClose(): void; onSwitch(choice: Choice): void }) {
   const { api, connection } = useRunner();
   const runner = useRunnerIdentity();
   const { value } = useExtensions();
@@ -108,6 +114,7 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
   const [opening, setOpening] = useState('');
   const [notices, setNotices] = useState<Notice[]>([]);
   const [reviewing, setReviewing] = useState(false);
+  const [startingCleanup, setStartingCleanup] = useState(false);
   const [stalled, setStalled] = useState(() => { const at = Number(storage()?.getItem(loadingKey(extension.id)) || 0); return at > 0 && Date.now() - at > 15_000; });
   const [reopen, setReopen] = useState(0);
   const panel = extension.panels.find(p => p.id === panelId) || extension.panels[0];
@@ -140,12 +147,9 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
         return { workspace: workspace ? projectWorkspaces([workspace]).workspaces[0] : null };
       },
       'github.open': async params => {
-        const raw = stringParam(params, 'url', 2048);
-        const url = URL.canParse(raw) ? new URL(raw) : undefined;
-        if (!url || url.origin !== 'https://github.com' || url.username || url.password ||
-          !/^\/[\w.-]+\/[\w.-]+\/(?:deployments\/?$|(?:pull|issues|actions\/runs)\/\d+(?:\/|$))/.test(url.pathname))
-          throw new BridgeRefusal('bad-request', 'Choose a GitHub issue, pull request or Actions run');
-        await openInBrowser(url.href);
+        const url = githubPage(stringParam(params, 'url', 2048));
+        if (!url) throw new BridgeRefusal('bad-request', 'Choose a GitHub issue, pull request or Actions run');
+        await openInBrowser(url);
         return { shown: true };
       },
       'runtime.read': async params => {
@@ -168,7 +172,8 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
         } else if (params.kind === 'setup' && runtime.setups.some(setup => setup.member === target)) {
           requestActionFocus(workspaceId, 'setup:' + target);
           onShowPanel('actions');
-        } else if (params.kind === 'logs' && runtime.actions.some(action => action.key === target && action.runState?.commandId)) {
+        } else if (runtime.actions.some(action => action.key === target &&
+          (params.kind === 'service' || (params.kind === 'logs' && action.runState?.commandId)))) {
           requestActionFocus(workspaceId, target);
           onShowPanel('actions');
         } else throw new BridgeRefusal('bad-request', 'That runtime target is unavailable');
@@ -187,11 +192,14 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
           workspaceId: pull.link.collectionId, conversationId: pull.link.conversationId, sessionId: pull.link.sessionId, url: pull.url, detail: pull.detail,
           checkUrl: pull.link.item?.pullRequest?.failingChecks?.[0]?.url || '',
           checks: pull.link.item?.pullRequest?.checks || '',
+          failingChecks: (pull.link.item?.pullRequest?.failingChecks || []).map(check => ({
+            name: check.name, url: githubPage(check.url) || (pull.url && githubPage(pull.url.split(/[?#]/)[0] + '/checks')) || '',
+          })),
         })), error: result.trackingError };
       },
       'artifacts.list': async params => {
         const result = await client.listArtifacts({ collectionId: stringParam(params, 'workspaceId') });
-        return { artifacts: result.artifacts.slice(0, 100).map(({ id, title, kind }) => ({ id, title, kind })) };
+        return { truncated: result.artifacts.length > 100, artifacts: result.artifacts.slice(0, 100).map(({ id, title, kind }) => ({ id, title, kind })) };
       },
       'artifacts.draft': async params => {
         const workspaceId = stringParam(params, 'workspaceId');
@@ -202,7 +210,7 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
       },
       'mailbox.list': async () => {
         const { items, truncated } = await client.listMailbox({});
-        return { items: items.slice(0, 100).map(({ id, repository, title, reason, url, updatedAt }) => ({ id, repository, title, reason, url, updatedAt })), truncated: truncated || items.length > 100 };
+        return { items: items.map(({ id, repository, title, reason, url, updatedAt }) => ({ id, repository, title, reason, url, updatedAt })), truncated };
       },
       'workspaces.list': async () => projectWorkspaces((await client.listCollections({})).collections),
       'sessions.list': async params => {
@@ -213,13 +221,26 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
       'reminders.list': async () => listReminders(localStorage, reminderRoot, extension.id),
       'reminders.create': async params => createReminder(localStorage, reminderRoot, extension.id, stringParam(params, 'text', 240), params.due),
       'reminders.remove': async params => removeReminder(localStorage, reminderRoot, extension.id, stringParam(params, 'id', 64)),
-      'attention.list': async () => projectAttention((await client.listHistory({ limit: 100 })).sessions, collectionsRef.current, seenRef.current),
+      'attention.list': async params => {
+        const offset = params.offset ?? 0;
+        if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0 || offset > 0xffffffff) throw new BridgeRefusal('bad-request', 'Invalid history offset');
+        const { sessions, hasMore } = await client.listHistory({ limit: 100, offset });
+        return { ...projectAttention(sessions, collectionsRef.current, seenRef.current), hasMore };
+      },
       'commands.list': async params => projectCommands((await client.listCommands({ sessionId: stringParam(params, 'sessionId') })).commands),
       'missions.list': async () => projectMissions((await client.listMissions({})).missions),
       'usage.read': async params => {
-        const ids = typeof params.workspaceId === 'string' ? [params.workspaceId] : collectionsRef.current.filter(c => c.state !== 'deleted').slice(0, 20).map(c => c.id);
+        const ids = typeof params.workspaceId === 'string' ? [params.workspaceId] : collectionsRef.current.filter(c => c.state !== 'deleted').map(c => c.id);
         const series = params.series === true;
-        const reports = await Promise.all(ids.map(async workspaceId => ({ workspaceId, report: await client.getTelemetry({ workspace: workspaceId, series }) })));
+        // Bound concurrent Runner reads without dropping workspaces from the totals.
+        const reports = [];
+        const signal = AbortSignal.timeout(25_000);
+        for (let i = 0; i < ids.length; i += 4) {
+          const batch = ids.slice(i, i + 4);
+          reports.push(...await Promise.all(batch.map(async workspaceId => ({
+            workspaceId, report: await client.getTelemetry({ workspace: workspaceId, series }, { signal }),
+          }))));
+        }
         return projectUsage(reports, collectionsRef.current, { series });
       },
       'conversations.show': async params => {
@@ -300,6 +321,16 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
       <button type="button" className="quiet" aria-label={`What ${extension.name || extension.id} may do`} title="What it may read and do" onClick={() => setReviewing(true)}><Icon name="shield" size={13}/></button>
       <button type="button" className="quiet" aria-label="Reload the extension" title="Reload" disabled={!session} onClick={reload}><Icon name="refresh" size={13}/></button>
     </div>
+    {runs && extension.grants.includes('scan:disk') && extension.approvedGrants.includes('scan:disk') && onReviewDiskCleanup &&
+      <div className="disk-cleanup-actions">
+        <button type="button" className="primary" disabled={startingCleanup} onClick={async () => {
+          setStartingCleanup(true);
+          try { await onReviewDiskCleanup(); }
+          catch (error) { notify({ key: 'cleanup', tone: 'bad', text: String(error instanceof Error ? error.message : error) }); }
+          finally { setStartingCleanup(false); }
+        }}>{startingCleanup ? 'Opening terminal…' : 'Review and clean…'}</button>
+        <span>Scan again, select items and confirm removal in the Runner terminal. The terminal shows what was cleaned.</span>
+      </div>}
     {!runs ? <div className="extension-state"><Icon name="lock" size={18}/><p>{extension.name || extension.id}: {extensionStateLabel[extension.state]?.toLowerCase()}.</p>
         {extension.state === 'new' ? <button type="button" className="primary" onClick={() => setReviewing(true)}>Enable…</button> : <button type="button" onClick={() => runAction('settings.open', 'extensions')}>Open Settings → Extensions</button>}</div>
       : stalled ? <div className="extension-state" role="alert"><Icon name="alert" size={18}/><p>{extension.name || extension.id} did not finish loading last time; the window may have frozen.</p>

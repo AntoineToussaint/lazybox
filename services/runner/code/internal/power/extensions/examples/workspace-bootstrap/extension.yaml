@@ -3,7 +3,7 @@ category: Workspace tools
 caption: Open the setup row in Actions to review or retry a failed step.
 keywords: [setup, repositories]
 name: Workspace Bootstrap
-version: 1.1.0
+version: 1.2.0
 description: See repository setup progress and recover failed steps.
 author: Lazybox
 panels:

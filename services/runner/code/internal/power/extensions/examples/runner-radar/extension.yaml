@@ -3,7 +3,7 @@ category: Agents & conversations
 caption: Open the conversation behind a pending question or failure.
 keywords: [blocked, waiting]
 name: Runner Radar
-version: 1.1.0
+version: 1.2.0
 description: Read pending questions and failure details across workspaces, oldest first. Open the conversation to respond.
 author: Lazybox
 panels:

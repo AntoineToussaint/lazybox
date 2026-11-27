@@ -140,6 +140,21 @@ async function scenario(browser, scheme, full) {
   await expect(board.getByRole('region', { name: 'Needs you' }).getByRole('button', { name: /Pick the database/ })).toBeVisible();
   await expect(board.getByRole('heading', { name: /1 need you/ })).toBeVisible();
   const boardFrame = await inner(page);
+  if (full) {
+    await page.route('**/ListHistory', async route => {
+      if (!route.request().headers().authorization?.startsWith('Bearer lbx-ext.')) return route.continue();
+      if (route.request().postDataJSON().offset === 100) return route.fulfill({ json: {
+        sessions: [{ id: 'older-question', title: 'Long waiting question', status: 'waiting_input' }], hasMore: false,
+      } });
+      const response = await route.fetch();
+      return route.fulfill({ response, json: { ...await response.json(), hasMore: true } });
+    });
+    await board.getByRole('button', { name: 'Older conversations' }).click();
+    await expect(board.getByRole('button', { name: /Long waiting question/ })).toBeVisible();
+    await board.getByRole('button', { name: 'Newer conversations' }).click();
+    await expect(board.getByRole('button', { name: /Pick the database/ })).toBeVisible();
+    await page.unroute('**/ListHistory');
+  }
   await board.getByRole('searchbox').fill('no-match-example');
   await expect(board.getByText('No conversations match your search.')).toBeVisible();
   await board.getByRole('searchbox').fill('');
@@ -299,6 +314,12 @@ async function scenario(browser, scheme, full) {
     await expect(page.locator('.page-layout .panel-agents')).toBeHidden();
     await expect(page.locator('.page-layout .panel-chat')).toBeHidden();
     await expect(cleanup.getByText('Waiting for the first scan.')).toBeVisible();
+    const beforeReview = new Set(f.terminals.keys());
+    await page.getByRole('button', { name: 'Review and clean…' }).click();
+    const reviewTerminal = () => [...f.terminals.values()].find(t => !beforeReview.has(t.id) && t.place === 'user-home');
+    await expect.poll(() => reviewTerminal()?.input.join('')).toBe('command dev-cleaner --sizes --verbose --skip procs\r');
+    assert.equal(reviewTerminal().collectionId, 'alpha');
+    await expect(page.locator('.panel-terminal:visible').getByRole('tab', { name: '~', exact: true })).toHaveAttribute('aria-selected', 'true');
     await page.getByRole('button', { name: 'Restore layout' }).first().click();
     await expect(page.locator('.page-layout .panel-agents')).toBeVisible();
     f.runnerSettings.notices = [];
@@ -385,6 +406,11 @@ try {
   await expect(preview.getByText('No matching items.')).toBeVisible();
   await filter.fill('');
   await expect(preview.getByRole('listitem').first()).toBeVisible();
+  const manageService = preview.getByRole('button', { name: 'Show in Actions' }).first();
+  await expect(manageService).toBeVisible();
+  await manageService.click();
+  await expect(page.locator('.panel-actions:visible')).toBeVisible();
+  await page.locator('.dv-tab').filter({ has: page.locator('[data-kind="extension"]') }).first().click();
   const reads = () => f.extensions.calls.filter(call => call.extension === 'preview-desk' && call.method === 'GetWorkspaceRuntime').length;
   const before = reads();
   await preview.getByRole('button', { name: 'Refresh' }).click();
@@ -395,22 +421,63 @@ try {
   await expect(mailbox.getByRole('listitem')).toContainText('Review the retry policy');
   await mailbox.getByRole('button', { name: 'All unread 2' }).click();
   await expect(mailbox.getByRole('listitem')).toHaveCount(2);
+  // The Runner can return more than a hundred notifications. A direct request
+  // beyond that first hundred must still be possible to find and open.
+  await page.route('**/ListMailbox', route => route.fulfill({ json: { items: Array.from({ length: 101 }, (_, i) => ({
+    id: String(i), repository: 'acme/api', reason: i === 100 ? 'mention' : 'comment',
+    title: 'Thread ' + i, url: 'https://github.com/acme/api/issues/' + (i + 1),
+  })) } }));
+  await mailbox.getByRole('button', { name: 'Refresh' }).click();
+  await mailbox.getByRole('button', { name: 'Needs you 1' }).click();
+  await expect(mailbox.getByRole('listitem')).toContainText('Thread 100');
+  await page.evaluate(() => { window.open = url => { window.__workflowUrl = String(url); return null; }; });
+  await mailbox.getByRole('button', { name: 'Open on GitHub' }).click();
+  await expect.poll(() => page.evaluate(() => window.__workflowUrl)).toBe('https://github.com/acme/api/issues/101');
+  f.tracked.links.push({ collectionId: 'alpha', role: 'delivers', item: {
+    kind: 'pull_request', title: 'Two failed checks', ref: { key: 'acme/api#72' }, repository: 'acme/api',
+    state: { category: 'open' }, pullRequest: { checks: 'failure', failingChecks: [
+      { name: 'Build', url: 'https://github.com/acme/api/actions/runs/72' },
+      { name: 'External CI', url: 'https://ci.example.test/72' },
+    ] },
+  } });
   const releases = await installPanel('Release Watch');
   await expect(releases.getByRole('listitem').first()).toContainText('Production');
   await expect(releases.getByRole('button', { name: 'Review deployment' })).toBeVisible();
+  await releases.getByRole('button', { name: 'Inspect Build' }).click();
+  await expect.poll(() => page.evaluate(() => window.__workflowUrl)).toBe('https://github.com/acme/api/actions/runs/72');
+  await releases.getByRole('button', { name: 'Inspect External CI' }).click();
+  await expect.poll(() => page.evaluate(() => window.__workflowUrl)).toBe('https://github.com/acme/api/pull/72/checks');
   const bootstrap = await installPanel('Workspace Bootstrap');
   await bootstrap.getByLabel(/Needs attention only/).check();
   await expect(bootstrap.getByRole('listitem')).toHaveCount(1);
   await expect(bootstrap.getByRole('listitem')).toContainText('1 missing file');
+  const apiSetup = f.runtimeFor('alpha').setups.find(setup => setup.member === 'api');
+  apiSetup.runState = { state: 'stopped' };
+  await bootstrap.getByRole('button', { name: 'Refresh' }).click();
+  const interrupted = bootstrap.getByRole('listitem').filter({ hasText: 'api' });
+  await expect(interrupted).toContainText('Stopped');
+  await expect(interrupted.getByRole('button', { name: 'Inspect stopped setup' })).toBeVisible();
   const radar = await installPanel('Runner Radar');
   await radar.getByRole('combobox').selectOption('needs-input');
   await expect(radar.getByRole('button', { name: 'Respond' }).first()).toBeVisible();
   f.artifacts.agentPut({ collectionId: 'alpha', sessionId: 'alpha-session', kind: 'notes', title: 'Handoff checklist', content: 'Verify deployment.' });
+  f.tracked.trackingError = 'GitHub connection unavailable';
   const handoff = await installPanel('Handoff Brief');
   const include = handoff.getByRole('button', { name: 'Include Handoff checklist' });
   await expect(include).toHaveAttribute('aria-pressed', 'true');
   await include.click();
   await expect(include).toHaveAttribute('aria-pressed', 'false');
+  await expect(handoff.getByText(/GitHub connection unavailable/)).toBeVisible();
+  await handoff.getByLabel('Open decisions').fill('Choose a release window.');
+  await handoff.getByLabel('Next step').fill('Verify the deployment.');
+  await handoff.getByRole('button', { name: 'Review handoff draft' }).click();
+  const draft = page.getByRole('dialog', { name: 'Track as artifact' });
+  await expect(draft.getByLabel('Preview')).toContainText('Choose a release window.');
+  await expect(draft.getByLabel('Preview')).not.toContainText('Handoff checklist');
+  await draft.getByRole('button', { name: 'Track artifact' }).click();
+  await expect(draft).toHaveCount(0);
+  assert.ok(f.mutations.some(({ method, body }) => method === 'PutArtifact' && body.collectionId === 'alpha' && body.content.includes('Verify the deployment.')));
+
   await drainPageErrors(errors);
   assert.deepEqual(errors, [], 'workflow panels produced no page errors');
   await page.close();

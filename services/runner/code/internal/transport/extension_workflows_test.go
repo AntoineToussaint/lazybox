@@ -178,6 +178,22 @@ func TestCompoundEngineeringReviewsAnArchiveOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			<-source.Applied
+			// Large tool output is kept in the journal but must not crowd the
+			// person's instruction out of the archived review's evidence.
+			cursor := e.Retained()
+			source.Events <- agent.Event{Type: "tool_result", Text: strings.Repeat("tool output ", 8192)}
+			readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			for {
+				record, err := e.Engine.Events(readCtx, cursor)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cursor = record.Sequence
+				if strings.Contains(string(record.Value), "tool_result") {
+					break
+				}
+			}
 			if scope == "workspace" {
 				if err := e.Engine.Close(); err != nil {
 					t.Fatal(err)

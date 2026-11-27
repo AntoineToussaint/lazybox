@@ -136,3 +136,6 @@ button.extension-chip{cursor:pointer}
 .extension-gallery .extension-card-body { width: 100%; }
 .extension-access summary { cursor: pointer; color: var(--text-muted); }
 .extension-access[open] .extension-summary { margin-block: 6px; }
+
+.disk-cleanup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 10px; border-bottom: 1px solid var(--line-subtle); }
+.disk-cleanup-actions span { flex: 1 1 20ch; color: var(--text-secondary); font-size: calc(12px * var(--text-scale)); }

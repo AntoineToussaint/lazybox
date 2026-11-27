@@ -16,6 +16,7 @@ import (
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/power"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/artifacts"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/journal"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/sessionstore"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/work"
 )
@@ -395,9 +396,25 @@ func (b *Bench) conversationEvidence(ctx context.Context, workspace *string, ses
 		if err != nil {
 			return nil, "", err
 		}
-		records, _, _, err := timeline.Page(0, 0, 64<<10)
+		records, start, _, err := timeline.Page(0, 0, 64<<10)
 		if err != nil {
 			return nil, "", err
+		}
+		// If the latest turn generated more than a page of output, recover
+		// its initiating prompt directly from the journal's turn index.
+		if start > 1 && !slices.ContainsFunc(records, func(r journal.Record) bool { return turnStart(r.Value) }) {
+			counts := make([]uint64, len(timeline.chain))
+			for i, attempt := range timeline.chain {
+				counts[i] = attempt.Retained()
+			}
+			marks := timeline.marks(counts, start-1)
+			if len(marks) > 0 {
+				prompt, err := timeline.Next(ctx, marks[len(marks)-1]-1)
+				if err != nil {
+					return nil, "", err
+				}
+				records = slices.Insert(records, 0, prompt)
+			}
 		}
 		var excerpts strings.Builder
 		for _, r := range records {
@@ -411,8 +428,12 @@ func (b *Bench) conversationEvidence(ctx context.Context, workspace *string, ses
 			} else if event.Type != "message_delta" {
 				continue
 			}
-			if excerpts.Len()+len(event.Text) > 48000 {
-				continue
+			remaining := 48000 - excerpts.Len()
+			if remaining <= 0 {
+				break
+			}
+			if len(event.Text) > remaining {
+				event.Text = strings.ToValidUTF8(event.Text[:remaining], "") + "…"
 			}
 			fmt.Fprintf(&excerpts, "%s [%d]: %s\n", role, r.Sequence, event.Text)
 		}

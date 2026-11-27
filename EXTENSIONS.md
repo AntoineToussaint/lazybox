@@ -405,4 +405,9 @@ While any enabled extension holds this grant, the Runner runs
 leaves scans running. Turning off the last approved extension cancels scanning.
 Open Disk Cleanup and choose **Review latest disk scan** for free space and
 candidate paths ordered by size. The last attempt and latest report are saved in private Runner state. A tight or critical result shows a notice in the main workspace window until a healthy scan or disablement.
-To select and remove items, use dev-cleaner's interactive review on that machine.
+Choose **Review and clean…** to open dev-cleaner’s interactive review in a fresh
+Runner-home terminal. It scans current candidates, excludes process termination,
+and removes the items the person selects and confirms. The terminal shows each
+cleanup result. The report below the button is the last scheduled scan. Lazybox
+owns the button outside the sandboxed frame. The scan grant exposes no shell
+input or deletion method to an extension.

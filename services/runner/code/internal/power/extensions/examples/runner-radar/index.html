@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="radar.css">
 <script src="_lazybox/lazybox.js"></script>
 <script src="_lazybox/workflow.js" defer></script>
+<script src="_lazybox/attention-pages.js" defer></script>
 <script src="app.js" defer></script>
 </head>
 <body class="workflow">
@@ -17,5 +18,10 @@
 </select></label>
 <p id="notice" role="status">Loading…</p>
 <ul id="rows" aria-label="Blocked conversations"></ul>
+<nav id="history-pages" aria-label="Conversation history" hidden>
+  <button type="button" data-newer>Newer conversations</button>
+  <output></output>
+  <button type="button" data-older>Older conversations</button>
+</nav>
 </body>
 </html>

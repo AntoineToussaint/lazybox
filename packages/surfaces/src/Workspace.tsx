@@ -573,18 +573,18 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
    * one) and shows the shell panel, where the person watches it run. Settings
    * → Claude → Install Claude Code uses it for Anthropic's installer.
    */
-  const runInShell = async (command: string) => {
+  const runInShell = async (command: string, userHome = false) => {
     const target = workspaceID || collections.find(c => c.state === 'ready')?.id || '';
     if (!target) throw new Error(`Create a workspace first: the shell runs in one. Or run this in a terminal: ${command}`);
     const startedIn = workspaceID;
-    const terminal = await api.openTerminal({ collectionId: target, directory: '', cols: 100, rows: 30, requestKey: crypto.randomUUID() });
+    const terminal = await api.openTerminal({ collectionId: target, userHome, cols: 100, rows: 30, requestKey: crypto.randomUUID() });
     requestTerminal(target, terminal.id);
     // Shown only if the person is still where they asked: after a switch meanwhile, this
     // render's page is another workspace's, and the shell's panel opens when its own is shown.
     if (shownWorkspace.current === startedIn) { showPanelFor('terminal', { collectionId: target, sessionId: '', commandId: '' }); setSettings(false); }
     else pendingModule.current = { workspace: target, kind: 'terminal' };
     // Written once the shell can read it: earlier, the terminal echoes it and the prompt shows it again.
-    await writeWhenReady(api, target, terminal.id, command + '\r');
+    if (!await writeWhenReady(api, target, terminal.id, command + '\r')) throw new Error('The new shell closed before it could run the command.');
   };
   /** Show the panel of this kind for target: its workspace and conversation first, then the panel. */
   const showPanelFor = (kind: string, requested?: RunnerTarget) => {
@@ -1127,6 +1127,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       void host.arrangeWindows!(choice).catch(error => setError(String(error)));
     } : undefined,
     onReviewLayout: workspaceOpen && !locked && !narrow ? setImporting : undefined,
+    onReviewDiskCleanup: () => runInShell('command dev-cleaner --sizes --verbose --skip procs', true),
     workspaceId: workspaceID, openMission: host?.openMission, chooseRepositoryFolder: host?.chooseRepositoryFolder, collections, error: catalogError, loaded: catalogLoaded, refresh: refreshCatalog,
     onWorkspaceCreated: (id: string) => beginConversation(id, undefined, true),
     onNewConversation: beginConversation, onShowSession: showSession,

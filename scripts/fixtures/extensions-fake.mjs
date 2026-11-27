@@ -18,7 +18,7 @@ const power = fileURLToPath(new URL('../../services/runner/code/internal/power/e
 const runtimeDir = join(power, 'runtime'), examplesDir = join(power, 'examples');
 const policy = JSON.parse(await readFile(join(runtimeDir, 'policy.json'), 'utf8'));
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png' };
-const runtimeFiles = ['shell.html', 'shell.js', 'shell.css', 'lazybox.js', 'lazybox.css', 'workflow.js'];
+const runtimeFiles = ['shell.html', 'shell.js', 'shell.css', 'lazybox.js', 'lazybox.css', 'workflow.js', 'attention-pages.js'];
 
 /** The manifests' YAML subset: scalars, `key: [a, b]`, lists of scalars and of `- id: …` mappings. */
 export function parseManifest(text) {

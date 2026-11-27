@@ -1,10 +1,10 @@
 lazybox: 1
 category: Notifications
-caption: Open a GitHub notification in Inbox to see the discussion.
+caption: Open a GitHub notification to read the discussion.
 keywords: [github, inbox]
 name: Mailbox
-version: 1.0.0
-description: See your unread GitHub activity and open it in Inbox.
+version: 1.1.0
+description: Filter your unread GitHub activity and open a discussion on GitHub.
 author: Lazybox
 panels:
   - id: main

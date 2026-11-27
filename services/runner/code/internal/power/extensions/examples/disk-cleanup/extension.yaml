@@ -1,10 +1,10 @@
 lazybox: 1
 category: Workspace tools
-caption: Open the latest disk scan to see candidate paths ordered by size. Scheduled scans continue with the panel closed.
+caption: Choose Review and clean to scan again, select items and confirm removal in the Runner terminal.
 keywords: [storage, reclaim]
 name: Disk Cleanup
-version: 1.1.0
-description: See free disk space and find the largest cleanup candidates on this Runner.
+version: 1.2.0
+description: Find reclaimable space and clean selected build directories and caches on this Runner.
 author: Lazybox
 panels:
   - id: main

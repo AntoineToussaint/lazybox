@@ -21,18 +21,18 @@ Open **Extensions** in the main navigation to browse installed and available ext
 
 | Extension | What you can do |
 | --- | --- |
-| Agent board | Search conversations or select **Needs attention only**. Open a card to answer the agent. |
+| Agent board | Search conversations or select **Needs attention only**. Open a card to answer the agent. Use **Older conversations** to browse earlier history. |
 | Clone Me | Choose **Teach Clone Me** to review and save coding preferences for your agents. |
 | Compound Engineering | Archive a conversation or workspace, then review the proposed documentation edits in Artifacts. |
 | Cost dashboard | Filter spend by period, workspace, or model. **Inspect peak spend** ranks conversations in the most expensive interval. |
-| Disk Cleanup | Review the latest scan and see which paths account for the most space. |
+| Disk Cleanup | Review the saved scan, then choose which build directories and caches to clean. |
 | Subscription rotation | Choose **Manage rotation accounts** to select which signed-in accounts may take over at a limit. |
 | Mailbox | Use **Needs you** to find review requests, assignments and mentions. Open the item on GitHub. |
 | Release Watch | Find deployments awaiting approval, failed deployments, and failing checks. Open the deployment or failing check. |
 | Runner Radar | Filter blocked conversations by failure or pending input, see how long they have waited, and open one. |
-| Preview Desk | Find a running preview, inspect service logs, or open the repository setup that needs approval. |
-| Workspace Bootstrap | Find failed setup, missing files or pending approvals and open the relevant setup or logs. |
-| Handoff Brief | Pick the pull requests and artifacts to include, write the next step, then review the draft before publishing. |
+| Preview Desk | Find a running preview, inspect service logs, or open the repository setup that needs approval. Choose **Show in Actions** to manage a stopped service. |
+| Workspace Bootstrap | Find failed or stopped setup, missing files or pending approvals and open the relevant setup or logs. |
+| Handoff Brief | Pick the pull requests and artifacts to include, write the next step, then review the draft before publishing. If a source is unavailable or capped at 100 entries, the panel identifies it and you can draft with the sources that loaded. |
 | Reminders | Schedule a follow-up at a local time, tomorrow morning or next Monday morning. Cancel it from the scheduled list. |
 
 The panel's bar switches between your extensions (*All extensions…* lists
@@ -41,7 +41,7 @@ them, and what waits for your approval), shows what the one in front may do
 
 Opening a specific extension from Settings or a workspace alert shows its docked panel maximized. Choose **Restore layout** to see your other panels again.
 
-A low-disk-space alert has an **Open Disk Cleanup** button. The bundled panel opens the saved report with free space and cleanup candidates, largest measured items first. Earlier installed copies have a **Review latest disk scan** link. Opening the report leaves files in place. **Dismiss** hides the current warning in this window, including after reload. A change in pressure can show a new warning.
+A low-disk-space alert has an **Open Disk Cleanup** button. The bundled panel opens the saved report with free space and cleanup candidates, largest measured items first. Earlier installed copies have a **Review latest disk scan** link. Choose **Review and clean…** to start a fresh scan in a new terminal in the Runner’s home folder. Select items in dev-cleaner and confirm to remove them, or quit to keep them. The terminal reports cleaned, skipped or failed items. The panel shows the time of its last scheduled scan. **Dismiss** hides the current warning in this window, including after reload. A change in pressure can show a new warning.
 
 Mailbox, Release Watch, Preview Desk, Runner Radar, Workspace Bootstrap and Handoff Brief support filtering their current list and refreshing it on demand. Row actions open the corresponding conversation, preview, log or GitHub item where available.
 
@@ -67,7 +67,9 @@ these sites”). Everything else is refused; the panel says so quietly
 (“*Agent board asked to send messages as you; you have not allowed it*”, with
 **Review access**).
 
-**Updates.** If an extension's files change to ask for more, it keeps running
+**Updates.** Installing a bundled extension copies its files into your extensions folder. App updates preserve those copies, including your edits. To get a newer bundled panel, save any local edits you want to keep, then remove the installed copy and install it again from the catalog. Review its access when enabling it.
+
+If an extension's files change to ask for more, it keeps running
 with what you allowed and shows **Asks for more** in Settings and in its panel
 bar; the sheet marks what is new. Asking for less needs nothing from you.
 

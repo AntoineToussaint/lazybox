@@ -70,7 +70,7 @@ func ParseURL(raw string, blockedHosts []string, loopbackPorts func() []int) (*u
 	}
 	// The address the browser goes to is the one judged: 2130706433 is
 	// 127.0.0.1 to it, and so it is to the policy and the site grants.
-	if host != u.Hostname() {
+	if host != strings.ToLower(u.Hostname()) {
 		hostname := host
 		if strings.Contains(host, ":") {
 			hostname = "[" + host + "]"

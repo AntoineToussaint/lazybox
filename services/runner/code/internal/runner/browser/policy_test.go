@@ -37,6 +37,7 @@ func TestParseURLJudgesHostsAsABrowserReadsThem(t *testing.T) {
 		}
 	}
 	for raw, want := range map[string]string{
+		"https://İ.example.com/":     "https://%C4%B0.example.com/",
 		"https://example.com/":       "https://example.com/",
 		"https://deadbeef/":          "https://deadbeef/",
 		"https://example.com./":      "https://example.com./",

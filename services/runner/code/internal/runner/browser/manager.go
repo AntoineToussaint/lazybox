@@ -793,7 +793,7 @@ func (m *Manager) siteGrantedLocked(b *conv, u *url.URL) bool {
 	if s.DefaultPermission == PermissionAllow || b.freely || b.granted[Site(u)] {
 		return true
 	}
-	if u.Hostname() == "localhost" && slices.Contains(s.WorkspaceSites[b.workspace], localhostPreviews) {
+	if strings.ToLower(u.Hostname()) == "localhost" && slices.Contains(s.WorkspaceSites[b.workspace], localhostPreviews) {
 		return true
 	}
 	for _, entry := range append(slices.Clone(s.AllowedSites), s.WorkspaceSites[b.workspace]...) {
@@ -905,7 +905,7 @@ func (m *Manager) Decide(id, decision, reason string) (State, error) {
 	valid := []string{"once", "deny"}
 	u, _ := url.Parse(r.URL)
 	if r.Kind == "site" {
-		if b != nil && b.workspace != "" && u != nil && u.Hostname() == "localhost" {
+		if b != nil && b.workspace != "" && u != nil && strings.ToLower(u.Hostname()) == "localhost" {
 			valid = append(valid, "workspace_previews")
 		}
 		valid = append(valid, "conversation", "workspace", "browse_freely")

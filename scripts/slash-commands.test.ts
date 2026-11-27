@@ -171,6 +171,7 @@ test('the current model is found by id, by name or as an alias, and an alias of 
  const choices=modelChoices(listed,'claude-opus-5-5');
  assert.deepEqual(choices.map(c=>[c.value,!!c.current]),[['opus',true],['sonnet',false]],'not listed twice: the alias is the current model');
  const {items,best}=rankChoices('',choices);assert.equal(items[best].value,'sonnet');
+ assert.equal(sameModel({value:'claude-opus-5-5-20261002',displayName:'Opus 5.5',description:''},'claude-opus-5-5-20261001'),false);
  assert.equal(sameModel({value:'opus',displayName:'Opus 5.5',description:''},'claude-opus-5-5'),true);
  assert.equal(sameModel({value:'fable',displayName:'Fable 5.1',description:''},'claude-fable-5-2'),false,'an alias for another version is another model');
  assert.equal(sameModel({value:'default',displayName:'Default (recommended)',description:''},'claude-opus-5-5'),false);

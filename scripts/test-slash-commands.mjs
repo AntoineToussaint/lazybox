@@ -416,6 +416,15 @@ try{
  });
  await expect(choice).toBeHidden();
 
+ // A refused selection can be retried even when the picker marks it current.
+ Object.assign(runningCodex,{busy:false,fault:'model_required',retryableOperationId:''});
+ await page.reload();
+ await expect(codexChat.getByText(/Your prompt is still queued/)).toBeVisible();
+ const priorModelRequests=applies().filter(m=>m.body.model).length;
+ await chooseWhileRunning('luna high');
+ await expect.poll(()=>applies().filter(m=>m.body.model).length).toBe(priorModelRequests+1);
+ assert.equal(applies().findLast(m=>m.body.model).body.model.model,'gpt-6-luna');
+
  // The ⋯ menu says what is current: Full access is selected (pressed, not greyed out), and the provider's
  // Default is the current model when the conversation names none. Twelve models: the first few, then More.
  await go(`${base}/?view=workspace&collection=beta&session=codex-default-session#token=${f.token}`);

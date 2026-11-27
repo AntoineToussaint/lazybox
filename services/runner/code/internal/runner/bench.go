@@ -1147,7 +1147,10 @@ func (b *Bench) toolWithEnv(ctx context.Context, e *Execution, name string, args
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if e.Purpose == agent.Reviewer && (agent.BrowserTool(name) || name == agent.CommandTool && !agent.ReviewCommandAllowed(args)) {
+	e.activity.Lock()
+	readOnlyReview := e.Purpose == agent.Reviewer && e.Options.Permission != "ask" && e.Options.Permission != "yolo"
+	e.activity.Unlock()
+	if readOnlyReview && (agent.BrowserTool(name) || name == agent.CommandTool && !agent.ReviewCommandAllowed(args)) {
 		return "", errors.New("review is read-only; use native file inspection tools")
 	}
 	if agent.BrowserTool(name) {

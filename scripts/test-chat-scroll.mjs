@@ -228,6 +228,14 @@ async function run(name,engine){
   };
   await shift('360px','Content growing above the viewport');
   await shift('0px','Content shrinking above the viewport');
+  // Rich text can replace a node while keeping the surrounding message.
+  // Replace the exact hit element, then grow an earlier row in the same frame.
+  await pane.evaluate(node=>{
+   const box=node.getBoundingClientRect(),hit=document.elementFromPoint(box.left+node.clientWidth/2,box.top+1);
+   if(!hit?.closest('[data-message-id]'))throw new Error('expected a transcript anchor');
+   hit.replaceWith(hit.cloneNode(true));
+  });
+  await shift('240px','An earlier row growing after the anchored element is replaced');
   await expect(latest).toBeVisible();
   // Sending mid-stream, while reading, returns to the bottom and follows.
   await page.getByRole('textbox',{name:'Message',exact:true}).fill('One more thing');await page.getByRole('button',{name:'Send message',exact:true}).click();
@@ -288,6 +296,50 @@ async function run(name,engine){
    const first=[...node.querySelectorAll('[data-message-id]')].find(item=>item.getBoundingClientRect().height>0);
    return row&&first!==row ? Math.abs(row.getBoundingClientRect().top-node.getBoundingClientRect().top-held.offset) : Infinity;
   },heldRow),{message:'Paging older history keeps the first visible message on screen'}).toBeLessThanOrEqual(1);
+  await latest.click();
+  // Cold reopen in the real panel: exceed the inactive reader budget
+  // with journal diagnostics, then read a row outside the six-turn tail.
+  for(let i=0;i<26;i++)channel.push({type:'diagnostic',text:'x'.repeat(1<<20)});
+  for(let i=0;i<24;i++){
+   channel.push({type:'operation_accepted',text:'Cold prompt '+i});
+   channel.push({type:'message_delta',text:'Cold answer '+i+' '+('visible lines '.repeat(200))});
+  }
+  await expect(pane).toContainText('Cold answer 23');
+  const row=n=>pane.locator('[data-message-id]').filter({hasText:'Cold answer '+n+' '});
+  const offset=locator=>locator.evaluate(el=>el.getBoundingClientRect().top-el.closest('.messages').getBoundingClientRect().top);
+  const align=async locator=>{
+   await locator.evaluate(el=>{
+    const scroller=el.closest('.messages');
+    scroller.scrollTop+=el.getBoundingClientRect().top-scroller.getBoundingClientRect().top+8;
+    scroller.dispatchEvent(new Event('scroll'));
+   });
+   await expect.poll(async()=>Math.abs((await offset(locator))+8)).toBeLessThanOrEqual(1);
+   return offset(locator);
+  };
+  for(const override of [false,true]){
+   let expectedOffset=await align(row(12));
+   await expect(latest).toBeVisible();
+   await page.locator('.workspace-row').filter({hasText:'Beta release'}).locator('button').first().click();
+   await expect(row(12)).toHaveCount(0);
+   let release,requested=false;
+   const gate=new Promise(resolve=>{release=resolve;});
+   const hold=async route=>{
+    if(BigInt(route.request().postDataJSON().fromCursor||0)>0n){requested=true;await gate;}
+    await route.continue();
+   };
+   await page.route('**/ReadSessionTail',hold);
+   try{
+    await page.locator('.workspace-row').filter({hasText:'Alpha feature'}).locator('button').first().click();
+    await expect.poll(()=>requested).toBe(true);
+    await expect(pane).toContainText('Cold answer 23');
+    await expect(row(12)).toHaveCount(0);
+    if(override)expectedOffset=await align(row(20));
+    release();
+    await expect(row(12)).toHaveCount(1,{timeout:30000});
+    await expect.poll(async()=>Math.abs((await offset(row(override?20:12)))-expectedOffset)).toBeLessThanOrEqual(1);
+    await expect(latest).toBeVisible();
+   }finally{release();await page.unroute('**/ReadSessionTail',hold);}
+  }
   await page.screenshot({path:`/tmp/lazybox-chat-scroll-${name}.png`});
   await drainPageErrors(errors);assert.deepEqual(errors,[]);
   console.log(`PASS ${name}: true bottom after late header, resize and Mermaid; reading held mid-stream against wheel, PageUp, Home, ArrowUp and a scrollbar drag; Latest pill, End, wheel to bottom and send resume following; layout shifts above the viewport keep the reading position.`);

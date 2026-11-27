@@ -1148,7 +1148,7 @@ Git checks and worktree removal for a deletion run outside the shared
 workspace registry lock. Other workspaces remain readable during cleanup.
 
 Deleting a workspace or conversation moves it out of the normal lists for
-five minutes. The **Undo** notification is visible for one minute. Open
+five minutes. The **Undo** notification is visible for five seconds. Open
 **Recently deleted** at the bottom of the Workspaces sidebar to undo during the rest of the
 five-minute window. The Runner persists the deadline, and
 existing files, messages and running processes stay in place during that
@@ -1334,9 +1334,9 @@ normal mode the arrows keep their Vim meaning.
 The existing message/receipt and resume paths own delivery and retry identity.
 
 The Runner's `snippets.Catalog` seam has a command adapter. The shipped
-`lazybox-snippets` helper (`tools/lazybox-snippets`) links V1's `lazybox-config` Rust library, pinned to a lazybox-v1 revision, so built-in
-content, profile paths, global/launch-directory overrides and skill-backed bodies
-remain authoritative in one place. It is read-only. `snippetCommand` and
+`lazybox-snippets` helper (`tools/lazybox-snippets`) ships its built-in catalog
+from `builtin.yaml`, applies global and launch-directory overrides in order,
+and resolves skill-backed bodies. It is read-only. `snippetCommand` and
 `snippetDirectory` in Runner configuration can select another compatible adapter
 and launch-directory layer. An unconfigured adapter produces a visible error.
 The native Dev launcher builds the helper; staged Working releases contain a frozen

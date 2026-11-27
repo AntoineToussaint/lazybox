@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/journal"
@@ -109,6 +110,20 @@ func (t *Timeline) Next(ctx context.Context, cursor uint64) (journal.Record, err
 // of the first record (1: nothing is earlier); retained is the timeline's
 // last cursor when it was read.
 func (t *Timeline) Page(before uint64, turns int, maxBytes int64) (records []journal.Record, start, retained uint64, err error) {
+	return t.page(0, before, turns, maxBytes)
+}
+
+// ForwardPage returns contiguous records from the inclusive first cursor,
+// within the byte budget and exclusive upper bound. One oversized record
+// travels alone so a reader always advances.
+func (t *Timeline) ForwardPage(first, before uint64, maxBytes int64) ([]journal.Record, uint64, uint64, error) {
+	if first == 0 {
+		return nil, 0, 0, journal.ErrCursor
+	}
+	return t.page(first, before, 0, maxBytes)
+}
+
+func (t *Timeline) page(first, before uint64, turns int, maxBytes int64) (records []journal.Record, start, retained uint64, err error) {
 	counts := make([]uint64, len(t.chain))
 	for i, e := range t.chain {
 		counts[i] = e.spool.Count()
@@ -121,10 +136,20 @@ func (t *Timeline) Page(before uint64, turns int, maxBytes int64) (records []jou
 		}
 		end = before - 1
 	}
+	if first > 0 && first-1 > end {
+		return nil, 0, retained, journal.ErrCursor
+	}
+	if first > 0 && first-1 == end {
+		return nil, first, retained, nil
+	}
 	if end == 0 {
 		return nil, 1, retained, nil
 	}
-	start = t.fit(counts, end, maxBytes)
+	if first == 0 {
+		start = t.fit(counts, end, maxBytes)
+	} else {
+		start = first
+	}
 	if turns > 0 {
 		marks := t.marks(counts, end)
 		aligned := uint64(1)
@@ -149,6 +174,20 @@ func (t *Timeline) Page(before uint64, turns int, maxBytes int64) (records []jou
 	for i, e := range t.chain {
 		from, to := max(start, offset+1), min(end, offset+counts[i])
 		if from <= to {
+			if first > 0 {
+				after := from - 1 - offset
+				span := e.spool.Span(after, to-offset)
+				if span > maxBytes {
+					fit := sort.Search(int(to-from+1), func(i int) bool { return e.spool.Span(after, after+uint64(i)+1) > maxBytes })
+					if fit == 0 && len(records) > 0 {
+						break
+					}
+					to = from + uint64(max(1, fit)) - 1
+					end = to
+				} else {
+					maxBytes -= span
+				}
+			}
 			part, err := e.spool.Range(from-1-offset, to-offset)
 			if err != nil {
 				return nil, 0, retained, err

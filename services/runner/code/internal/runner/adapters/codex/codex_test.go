@@ -126,6 +126,18 @@ func TestLivePermissionChangesApplyToFollowingTurns(t *testing.T) {
 	}
 }
 
+func TestReviewerPermissionsCanBeChangedAndRestored(t *testing.T) {
+	s := &session{purpose: agent.Reviewer, permission: "read-only"}
+	for _, mode := range []string{"ask", "yolo", "read-only"} {
+		if _, err := s.Apply(context.Background(), agent.Operation{Kind: agent.Permission, Permission: mode}); err != nil {
+			t.Fatal(err)
+		}
+		if s.readOnlyReview() != (mode == "read-only") || s.fullAccess() != (mode == "yolo") {
+			t.Fatalf("reviewer did not apply %s", mode)
+		}
+	}
+}
+
 func TestInstructionUpdateIsItsOwnInputAheadOfTheMessage(t *testing.T) {
 	items := inputs(agent.Operation{Kind: agent.Message, Text: "hello", Context: "new instructions"})
 	data, _ := json.Marshal(items)

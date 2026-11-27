@@ -1925,9 +1925,13 @@ message ReadSessionTailRequest {
   // default (1 MiB). A turn larger than this is cut to its latest records.
   // At least one record is returned when any precedes `before`.
   uint32 max_bytes = 4;
+  // When positive, read forward starting at this cursor (inclusive), stopping
+  // before the exclusive upper bound or at max_bytes. Includes at least the
+  // first available record, even if it exceeds the budget. Use with turns=0.
+  uint64 from_cursor = 5;
 }
 message ReadSessionTailResponse {
-  // Contiguous and ascending, from `start` up to just before `before`. Each
+  // Contiguous and ascending, from `start` through the last record that fit. Each
   // record's `retained` is the response's.
   repeated JournalEvent events = 1;
   // The cursor of the first record: 1 when nothing precedes the page.

@@ -745,7 +745,17 @@ func (s *Service) ReadSessionTail(ctx context.Context, r *pb.ReadSessionTailRequ
 	if budget == 0 {
 		budget = tailBytes
 	}
-	records, start, retained, err := timeline.Page(r.Before, int(r.Turns), min(budget, maxTailBytes))
+	budget = min(budget, maxTailBytes)
+	var records []journal.Record
+	var start, retained uint64
+	if r.FromCursor > 0 {
+		if r.Turns != 0 {
+			return nil, status.Error(codes.InvalidArgument, "turn alignment requires a backward page")
+		}
+		records, start, retained, err = timeline.ForwardPage(r.FromCursor, r.Before, budget)
+	} else {
+		records, start, retained, err = timeline.Page(r.Before, int(r.Turns), budget)
+	}
 	if err != nil {
 		return nil, rpcError(err)
 	}

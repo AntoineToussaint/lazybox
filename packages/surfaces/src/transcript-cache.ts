@@ -27,6 +27,16 @@ const contiguous=(events:readonly JournalEvent[],start:bigint)=>events.every((ev
 const GAP='Replay gap: retained cursor is not contiguous';
 const pause=(ms:number,signal:AbortSignal)=>new Promise<void>(resolve=>{const done=()=>{clearTimeout(timer);signal.removeEventListener('abort',done);resolve();};const timer=setTimeout(done,ms);signal.addEventListener('abort',done,{once:true});});
 
+// Charge cached projections by the amount of journal input folded. This is a
+// cache admission budget, not an estimate of the JavaScript heap.
+const INACTIVE_INPUT_BUDGET=32<<20;
+// Allow the most recently viewed reader alone to exceed the normal budget
+// by half, so switching away briefly need not rebuild a large conversation.
+const SINGLE_READER_BUDGET=48<<20;
+function inputSize(event:JournalEvent){
+ return 128+(event.event?.providerDataJson.length||0)+2*(event.event?.text.length||0);
+}
+
 /** Per-client readers survive navigation, without holding provider execution alive. */
 export class ConversationReader {
  snapshot: Snapshot = {...emptyTranscript(),status:'Connecting',error:'',loading:true};
@@ -35,22 +45,23 @@ export class ConversationReader {
  private listeners = new Set<()=>void>();
  private controller?: AbortController;
  identity:string;
- constructor(private api:RunnerClient,private id:string){this.identity=id;}
+ inputBytes=0;
+ constructor(private api:RunnerClient,private id:string,private onIdle?:()=>void){this.identity=id;}
  getSnapshot = () => this.snapshot;
  private publish(value:Partial<Snapshot>){this.snapshot={...this.snapshot,...value};this.listeners.forEach(listener=>listener());}
  subscribe = (listener:()=>void) => {
   this.listeners.add(listener);this.start();
-  return()=>{this.listeners.delete(listener);if(!this.listeners.size){this.controller?.abort();this.controller=undefined;this.flush();}};
+  return()=>{this.listeners.delete(listener);if(!this.listeners.size){this.controller?.abort();this.controller=undefined;this.flush();this.onIdle?.();}};
  };
  get active(){return this.listeners.size>0;}
  private start(){
   if(this.controller||!this.id)return;
   const live=this.snapshot.status!=='Complete';
-  if(!live&&!this.since)return;
+  if(!live&&!this.history)return;
   const controller=new AbortController();this.controller=controller;
-  if(this.snapshot.cursor===0n&&!this.since){void this.open(controller);return;}
+  if(this.snapshot.cursor===0n&&!this.history){void this.open(controller);return;}
   if(live)this.follow(controller);
-  if(this.since)void this.complete(controller);
+  if(this.history)void this.complete(controller);
  }
  private follow(controller:AbortController){
   void follow((after,signal)=>this.api.watchEvents({sessionId:this.id,after,includePrevious:true,heartbeats:true},{signal}),controller.signal,
@@ -58,18 +69,9 @@ export class ConversationReader {
    status=>{if(!controller.signal.aborted)this.status(status);},
    error=>{if(!controller.signal.aborted){this.flush();this.publish({error:humanError(error),loading:false});}},this.snapshot.cursor);
  }
- // A long conversation's whole replay took the Runner and the window most of
- // a second before anything was shown. Opening one now shows its latest turns
- // from one read, follows it live from there, and reads the earlier history
- // behind them. The fold of a conversation depends on everything before (its
- // sub-agents, slash commands, questions, review cards), so what is shown
- // from the tail is a preview: once the earlier history is in, the whole
- // conversation is folded from its first record, and everything recorded
- // since the tail's start folded again on top of it.
- /** Records from the tail's first on, while the earlier history is read; then folded again onto it. */
- private since?:JournalEvent[];
- /** The earlier history read so far (pages, newest first), back to `before`. */
- private earlier?:{before:bigint;pages:JournalEvent[][];folded:Transcript};
+ // Rebuild the exact projection in cursor order. Live events are already in
+ // the Runner journal, so the preview does not need a second copy of them.
+ private history?:Transcript;
  private async open(controller:AbortController){
   let tail:{events:JournalEvent[];start:bigint}|undefined;
   try{tail=await this.api.readSessionTail({sessionId:this.id,turns:TAIL_TURNS,maxBytes:TAIL_BYTES},{signal:controller.signal});}
@@ -78,9 +80,9 @@ export class ConversationReader {
   catch{tail=undefined;}
   if(controller.signal.aborted)return;
   if(tail&&!contiguous(tail.events,tail.start)){this.publish({error:humanError(GAP),loading:false});return;}
+  if(tail)for(const event of tail.events)this.inputBytes+=inputSize(event);
   if(tail&&tail.events.length&&tail.start>1n){
-   this.since=[...tail.events];
-   this.earlier={before:tail.start,pages:[],folded:emptyTranscript()};
+   this.history=emptyTranscript();
    this.publish({...foldTranscript(this.snapshot,tail.events),partial:true});
    this.follow(controller);
    void this.complete(controller);
@@ -92,70 +94,127 @@ export class ConversationReader {
  }
  /** Read the history before the tail, then show the whole conversation. */
  private async complete(controller:AbortController){
-  const earlier=this.earlier!,signal=controller.signal;
-  while(earlier.before>1n){
+  const signal=controller.signal;
+  let streamHistory=false;
+  while(this.history&&!signal.aborted){
+   this.flush();
+   if(signal.aborted)return;
+   const cursor=this.history.cursor,target=this.snapshot.cursor;
+   if(cursor===target){
+    const exact=this.history;
+    this.history=undefined;
+    this.snapshot={...exact,status:this.snapshot.status,error:this.snapshot.error,loading:false};
+    this.listeners.forEach(listener=>listener());
+    return;
+   }
    let page:{events:JournalEvent[];start:bigint};
-   try{page=await this.api.readSessionTail({sessionId:this.id,before:earlier.before,maxBytes:PAGE_BYTES},{signal});}
-   catch(error){
+   try{
+    if(streamHistory){
+     await this.readLegacyHistory(cursor,target,signal);
+     continue;
+    }
+    page=await this.api.readSessionTail({sessionId:this.id,fromCursor:cursor+1n,before:target+1n,maxBytes:PAGE_BYTES},{signal});
+   }catch(error){
     if(signal.aborted)return;
     const failure=ConnectError.from(error);
-    if(FINAL.includes(failure.code)){this.flush();this.publish({error:humanError(failure),loading:false});return;}
-    // The Runner restarting or out of reach: read the page again shortly.
-    await pause(1000,signal);if(signal.aborted)return;continue;
+    if(!streamHistory&&(failure.code===Code.InvalidArgument||failure.code===Code.Unimplemented)){streamHistory=true;continue;}
+    if(FINAL.includes(failure.code)){this.failHistory(failure);return;}
+    await pause(1000,signal);continue;
    }
    if(signal.aborted)return;
-   const events=page.events;
-   if(!events.length||page.start>=earlier.before||!contiguous(events,page.start)||events.at(-1)!.cursor!==earlier.before-1n){this.flush();this.publish({error:humanError(GAP),loading:false});return;}
-   earlier.pages.push(events);earlier.before=page.start;
+   // Older Runners ignore the forward bound and return the tail of the
+   // range. Use their existing forward stream instead of probing byte sizes.
+   if(page.start!==cursor+1n && page.events.at(-1)?.cursor===target){streamHistory=true;continue;}
+   if(!page.events.length||page.start!==cursor+1n||!contiguous(page.events,page.start)||page.events.at(-1)!.cursor>target){
+    this.failHistory(GAP);return;
+   }
+   this.foldHistory(page.events);
+   await pause(0,signal);
   }
-  // Fold from the first record a page at a time, yielding between pages so
-  // the window keeps answering; live records go on arriving meanwhile.
-  while(earlier.pages.length){
-   earlier.folded=foldTranscript(earlier.folded,earlier.pages.pop()!);
-   await pause(0,signal);if(signal.aborted)return;
-  }
+ }
+ private foldHistory(events:JournalEvent[]){
+  for(const event of events)this.inputBytes+=inputSize(event);
+  this.history=foldTranscript(this.history!,events);
+ }
+ private async readLegacyHistory(cursor:bigint,target:bigint,signal:AbortSignal){
+  const control=new AbortController();
+  const stop=()=>control.abort();
+  signal.addEventListener('abort',stop,{once:true});
+  let batch:JournalEvent[]=[],bytes=0;
+  try{
+   for await(const event of this.api.watchEvents({sessionId:this.id,after:cursor,includePrevious:true},{signal:control.signal})){
+    if(signal.aborted)return;
+    if(event.heartbeat)continue;
+    if(event.cursor!==cursor+1n)break;
+    cursor=event.cursor;batch.push(event);bytes+=inputSize(event);
+    if(bytes>=PAGE_BYTES||batch.length>=512||cursor===target){
+     this.foldHistory(batch);batch=[];bytes=0;
+    }
+    if(cursor===target)return;
+   }
+   if(!signal.aborted)throw new ConnectError(GAP,Code.OutOfRange);
+  }finally{stop();signal.removeEventListener('abort',stop);}
+ }
+ private failHistory(error:unknown){
+  this.history=undefined;
   this.flush();
-  const exact=foldTranscript(earlier.folded,this.since!);
-  this.since=undefined;this.earlier=undefined;
-  this.publish({...exact,loading:false,partial:undefined});
+  this.publish({error:humanError(error),loading:false});
  }
  // Replaying a saved conversation delivers thousands of records. Publishing
- // each one re-rendered the view per streamed delta and made opening a long
- // conversation take tens of seconds. While the Runner says retained history
- // is still coming, records are held and only progress is reported; the
- // conversation is published once, at its latest message, when the replay
- // catches up. Live records are published in batches, at most every couple
- // of frames.
+ // each one re-rendered the view per streamed delta. Fold bounded batches
+ // even when a legacy Runner replays continuously without yielding to timers.
  private queue:JournalEvent[]=[];
+ private queuedBytes=0;
+ private staged?:Transcript;
+ private retained=0n;
  private timer?:ReturnType<typeof setTimeout>;
  private flushed=0;
  private behind=false;
  private receive(event:JournalEvent){
-  this.queue.push(event);this.since?.push(event);
+  this.queue.push(event);
+  const bytes=inputSize(event);this.inputBytes+=bytes;this.queuedBytes+=bytes;
+  this.retained=event.retained;
+  if(this.queuedBytes>=PAGE_BYTES||this.queue.length>=512)this.foldQueue();
   const behind=event.retained>event.cursor,caughtUp=this.behind&&!behind;this.behind=behind;
   if(caughtUp){clearTimeout(this.timer);this.timer=setTimeout(this.flush,0);}
   else this.timer??=setTimeout(this.tick,behind?PROGRESS_INTERVAL:Math.max(0,this.flushed+PUBLISH_INTERVAL-Date.now()));
  }
  private tick=()=>{
   this.timer=undefined;
-  const last=this.queue.at(-1);
-  if(this.behind&&last&&!this.since)this.publish({replay:{loaded:Number(last.cursor),total:Number(last.retained)}});
+  const cursor=this.queue.at(-1)?.cursor??this.staged?.cursor;
+  if(this.behind&&cursor&&!this.history)this.publish({replay:{loaded:Number(cursor),total:Number(this.retained)}});
   else this.flush();
  };
  private status(status:string){
   if(status==='Live'&&this.snapshot.status==='Live')return;
-  if(status==='Live'&&this.queue.length){this.pendingStatus=status;return;}
-  this.flush();this.publish({status,...(status==='Complete'&&!this.since?{loading:false}:{})});
+  if(status==='Live'&&(this.queue.length||this.staged)){this.pendingStatus=status;return;}
+  this.flush();this.publish({status,...(status==='Complete'&&!this.history?{loading:false}:{})});
  }
  private pendingStatus?:string;
- /** Fold every queued record now; the cursor is current once this returns. */
+ private foldQueue(){
+  if(!this.queue.length)return;
+  this.staged=foldTranscript(this.staged??this.snapshot,this.queue);
+  this.queue=[];
+  this.queuedBytes=0;
+ }
+ /** Commit every delivered record, including any batches folded between renders. */
  flush=()=>{
   clearTimeout(this.timer);this.timer=undefined;
-  const batch=this.queue,status=this.pendingStatus;this.queue=[];this.pendingStatus=undefined;this.flushed=Date.now();
-  if(batch.length)this.publish({...foldTranscript(this.snapshot,batch),...(this.since?{}:{loading:false}),replay:undefined,...(status?{status}:{})});
+  this.foldQueue();
+  const staged=this.staged,status=this.pendingStatus;
+  this.staged=undefined;this.pendingStatus=undefined;this.flushed=Date.now();
+  if(staged)this.publish({...staged,...(this.history||this.retained>staged.cursor?{}:{loading:false}),replay:undefined,...(status?{status}:{})});
   else if(this.snapshot.replay)this.publish({replay:undefined});
  };
- retry=()=>{this.controller?.abort();this.controller=undefined;clearTimeout(this.timer);this.timer=undefined;this.queue=[];this.behind=false;this.pendingStatus=undefined;this.since=undefined;this.earlier=undefined;this.publish({...emptyTranscript(),error:'',loading:true,status:'Connecting',replay:undefined,partial:undefined});if(this.active)this.start();};
+ retry=()=>{
+  this.controller?.abort();this.controller=undefined;
+  clearTimeout(this.timer);this.timer=undefined;
+  this.queue=[];this.staged=undefined;this.queuedBytes=0;this.inputBytes=0;
+  this.behind=false;this.pendingStatus=undefined;this.history=undefined;
+  this.snapshot={...emptyTranscript(),error:'',loading:true,status:'Connecting'};
+  this.listeners.forEach(listener=>listener());
+  if(this.active)this.start();
+ };
 }
 // Keyed by the window's Runner link, not one client: a restarted Runner gives
 // the window a new client, and its readers continue from their cursors.
@@ -165,9 +224,23 @@ const caches=new WeakMap<object,Map<string,ConversationReader>>();
 const owner=(api:RunnerClient):object=>runnerLink(api)||api;
 export function conversationReader(api:RunnerClient,id:string){
  let cache=caches.get(owner(api));if(!cache){cache=new Map();caches.set(owner(api),cache);}
- let entry=cache.get(id);if(!entry){entry=new ConversationReader(api,id);cache.set(id,entry);}
- // Keep recent inactive readers; never evict a reader mounted in another panel.
- cache.delete(id);cache.set(id,entry);
+ let entry=cache.get(id);
+ if(!entry){
+  entry=new ConversationReader(api,id,()=>{
+   // Keep navigation anchors even when the journal projection is evicted.
+   if(!entry||cache.get(id)!==entry)return;
+   cache.delete(id);cache.set(id,entry);
+   let remaining=INACTIVE_INPUT_BUDGET;
+   if(entry.inputBytes<=SINGLE_READER_BUDGET)remaining=Math.max(remaining,entry.inputBytes);
+   for(const reader of [...cache.values()].reverse()){
+    if(reader.active)continue;
+    if(reader.inputBytes>remaining)reader.retry();
+    else remaining-=reader.inputBytes;
+   }
+  });
+  cache.set(id,entry);
+ }
+ // A lookup by an invisible panel does not count as viewing the conversation.
  for(const [key,value] of cache){if(cache.size<=16)break;if(key!==id&&!value.active)cache.delete(key);}
  return entry;
 }
@@ -194,6 +267,7 @@ export function continueConversation(api:RunnerClient,previousId:string,session:
  next.identity=previous.identity;
  // Only a whole conversation is a prefix: a preview of its latest turns is not.
  if(!next.active&&!previous.snapshot.partial&&next.snapshot.cursor<previous.snapshot.cursor){
+  next.inputBytes=previous.inputBytes;
   next.snapshot={...previous.snapshot,status:'Connecting',error:'',loading:false};
   next.view={...previous.view};
  }

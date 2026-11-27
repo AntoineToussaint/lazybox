@@ -61,18 +61,26 @@ func (b *Bench) requestTerminalHandoff(ctx context.Context, e *Execution, argv [
 		}
 		h.agentConversation = conversationOf(e)
 	}
-	b.terminalHandoffs.Store(id, h)
-	defer b.terminalHandoffs.Delete(id)
+	var runningData json.RawMessage
 	record := func(status, text string, data json.RawMessage) error {
 		return b.Record(e, agent.Event{Type: "terminal_handoff", RequestID: id, Name: e.CollectionID, Status: status, TerminalAgentInput: agentInput, Text: text, Data: data})
 	}
-	if err := record("pending", dir, data); err != nil {
-		return nil, err
-	}
-	select {
-	case <-h.decided:
-	case <-approval.Done():
-	case <-b.ctx.Done():
+	if e.Options.Permission == "yolo" {
+		if _, err := b.startTerminalHandoff(h, agentInput); err != nil {
+			return nil, err
+		}
+		runningData, _ = json.Marshal(map[string]any{"cwd": dir, "argv": argv})
+	} else {
+		b.terminalHandoffs.Store(id, h)
+		defer b.terminalHandoffs.Delete(id)
+		if err := record("pending", dir, data); err != nil {
+			return nil, err
+		}
+		select {
+		case <-h.decided:
+		case <-approval.Done():
+		case <-b.ctx.Done():
+		}
 	}
 	// If approval won the race with the deadline, the terminal already exists.
 	// Take the same lock as the owner decision before reading the outcome.
@@ -88,7 +96,7 @@ func (b *Bench) requestTerminalHandoff(ctx context.Context, e *Execution, argv [
 		_ = record(status, "", nil)
 		return map[string]string{"status": status}, nil
 	}
-	_ = record("running", terminal.Status().ID, nil)
+	_ = record("running", terminal.Status().ID, runningData)
 	if terminal.Status().Spec.AgentConversation != "" {
 		go func() {
 			if result, err := terminal.Wait(b.ctx); err == nil {
@@ -152,6 +160,16 @@ func (b *Bench) DecideTerminalHandoff(id string, accept, allowAgentInput bool) (
 		h.rejected = true
 		close(h.decided)
 		return nil, nil
+	}
+	return b.startTerminalHandoff(h, allowAgentInput)
+}
+
+func (b *Bench) startTerminalHandoff(h *terminalHandoff, allowAgentInput bool) (*terminals.Terminal, error) {
+	if err := h.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := b.ctx.Err(); err != nil {
+		return nil, err
 	}
 	b.terminalStart.Lock()
 	defer b.terminalStart.Unlock()

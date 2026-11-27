@@ -89,7 +89,11 @@ try{
  // 3. The review card brings its tab to the front: no second panel, the work's tab kept.
  const chatTabs=await tabs().filter({has:page.locator('[data-kind=chat]')}).count();
  const nav=page.getByRole('navigation',{name:'Workspaces'});
- await expect(nav.getByText('Review · Changes · Codex',{exact:true})).toHaveCount(0);
+ const child = nav.locator('[data-review-child]').filter({hasText:first.title});
+ await expect(child).toBeVisible();
+ await child.getByRole('button').first().click();
+ await expect(activeTab().filter({hasText:'Review · Codex'})).toHaveCount(1);
+ await nav.getByText('Harden the handler',{exact:true}).first().click();
  await chat().getByRole('group',{name:'Codex review'}).getByRole('button',{name:'Open conversation'}).click();
  await expect(activeTab().filter({hasText:'Review · Codex'})).toHaveCount(1);
  await expect(tabs()).toHaveCount(await tabs().count());
@@ -99,6 +103,11 @@ try{
  await nav.getByText('Harden the handler',{exact:true}).first().click();
  await expect(activeTab().filter({hasText:'Harden the handler'})).toHaveCount(1);
  await expect(reviewTabs()).toHaveCount(1);
+
+ // Sending the completed review archives its reviewer. The author remains in the sidebar.
+ Object.assign(first,{closed:true,archivedAtUnixMillis:String(Date.now())});
+ await expect(child).toHaveCount(0,{timeout:20000});
+ await expect(nav.getByText(author.title,{exact:true}).first()).toBeVisible();
 
  // 4. `/review <focus>`: the default reviewer, with what to look at; the person stays in the composer.
  await box().click();await page.keyboard.type('/review the error path of Handle');
@@ -217,12 +226,19 @@ try{
   await lastCard().getByRole('button',{name:'Open conversation'}).click();
   await expect(chat().locator('.chat-heading')).toContainText(`Review · Changes · ${run.reviewerLabel}`);
   await expect(chat().locator('.messages:visible')).toContainText(`Asked ${run.reviewerLabel} to review Claude's work`);
-  await expect(chat().getByRole('note',{name:'Read-only review'})).toBeVisible();
+  await expect(chat().getByRole('note',{name:'Review permissions'})).toBeVisible();
   await chat().locator('.chat-heading').getByLabel('Session actions',{exact:true}).click();
  };
  const backToWork=async()=>{await page.getByRole('navigation',{name:'Workspaces'}).getByText('Harden the handler',{exact:true}).first().click();await expect(chat().locator('.messages:visible')).toContainText('REPLY_ONE');};
  await openReviewer(viaMenu);
  await page.keyboard.press('Escape');
+ const permissions=chat().getByRole('note',{name:'Review permissions'});
+ await expect(permissions).toContainText('Read only');
+ for(const label of ['Ask for approval','Full access','Read only']){
+  await permissions.getByRole('button',{name:'Change permissions'}).click();
+  await chat().getByRole('listbox',{name:'/permissions choices'}).getByRole('option',{name:new RegExp(label)}).click();
+  await expect(permissions).toContainText(label);
+ }
  await chat().getByRole('button',{name:'Open author conversation',exact:true}).click();
  await expect(chat().locator('.messages:visible')).toContainText('REPLY_ONE');
  await openReviewer(viaMenu);

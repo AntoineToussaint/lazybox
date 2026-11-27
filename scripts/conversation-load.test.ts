@@ -42,7 +42,8 @@ const whole = (journal: JournalEvent[]) => comparable(foldTranscript(emptyTransc
  * `hold` keeps earlier pages back until released; `fail` makes the next calls
  * of a method fail with a code.
  */
-function runner(journal: JournalEvent[], options: { tail?: boolean } = {}) {
+function runner(journal: JournalEvent[], options: { tail?: boolean; forward?:boolean } = {}) {
+  const historyReads:{start:bigint; bytes:number; count:number}[]=[];
   const calls: { method: string; before?: bigint; after?: bigint }[] = [];
   let wake: () => void = () => {};
   let hold: Promise<void> | undefined, release = () => {};
@@ -50,12 +51,13 @@ function runner(journal: JournalEvent[], options: { tail?: boolean } = {}) {
   const fail = (kind: keyof typeof failures) => { const code = failures[kind].shift(); if (code !== undefined) throw new ConnectError(`fixture ${kind} failure`, code); };
   const withRetained = (record: JournalEvent, retained: number) => create(JournalEventSchema, { ...record, retained: BigInt(Math.max(retained, Number(record.cursor))) });
   const api = {
-    async readSessionTail({ before = 0n, turns = 0, maxBytes = 0 }: { before?: bigint; turns?: number; maxBytes?: number }) {
+    async readSessionTail({ before = 0n, fromCursor=0n, turns = 0, maxBytes = 0 }: { before?: bigint; fromCursor?: bigint; turns?: number; maxBytes?: number }) {
       calls.push({ method: 'ReadSessionTail', before });
       if (options.tail === false) throw new ConnectError('unknown method', Code.Unimplemented);
       if (before === 0n) fail('tail'); else { if (hold) await hold; fail('page'); }
-      const page = tailPage(journal, { before: Number(before), turns, maxBytes }, size);
+      const page = tailPage(journal, { before: Number(before), fromCursor:options.forward===false?0:Number(fromCursor), turns, maxBytes }, size);
       if (!page) throw new ConnectError('cursor outside retained range', Code.OutOfRange);
+      if(fromCursor)historyReads.push({start:BigInt(page.start),count:page.events.length,bytes:page.events.reduce((sum:number,r:JournalEvent)=>sum+size(r),0)});
       return { events: page.events.map((record: JournalEvent) => withRetained(record, page.retained)), start: BigInt(page.start), retained: BigInt(page.retained) };
     },
     async *watchEvents({ after }: { after: bigint }, { signal }: { signal: AbortSignal }) {
@@ -70,7 +72,7 @@ function runner(journal: JournalEvent[], options: { tail?: boolean } = {}) {
     },
   } as unknown as RunnerClient;
   return {
-    api, calls, failures,
+    api, calls, failures, historyReads,
     add(events: any[]) { journal.push(...records(events, journal.length + 1)); wake(); },
     hold() { hold = new Promise(resolve => { release = resolve; }); },
     release() { hold = undefined; release(); },
@@ -150,7 +152,7 @@ test('the latest turns show first; the whole conversation, once read, is one fol
     assert.deepEqual(transcriptOf(done), whole(journal));
     const pages = fixture.calls.filter(call => call.method === 'ReadSessionTail' && call.before! > 0n);
     assert.ok(pages.length >= 2, `earlier history read in pages (${pages.length})`);
-    for (let i = 1; i < pages.length; i++) assert.ok(pages[i].before! < pages[i - 1].before!, 'pages are read backward, each before the last');
+    assert.equal(pages.at(-1)!.before, journal.at(-2)!.cursor + 1n, 'reconstruction includes the live event received during the read');
     // Across turns: one card where the sub-agent started, its report in it; the
     // late answer names the early question; the late slash command is one.
     assert.equal(done.messages.filter(m => m.type === 'subagent').length, 1);
@@ -267,4 +269,136 @@ test('a window keeps one reader per conversation and Runner, forgets a deleted o
     const after = continueConversation(dev.api, 'first-attempt', create(SessionSchema, { id: 'third-attempt', previousExecutionId: 'first-attempt' }));
     assert.equal(after.getSnapshot().cursor, previous.getSnapshot().cursor);
   } finally { stop(); }
+});
+
+test('a failed history read releases raw live events while the preview keeps updating', async () => {
+  const fixture = runner(records(longConversation({ turns: 20, toolOutputBytes: 100 })));
+  fixture.failures.page.push(Code.OutOfRange);
+  const reader = new ConversationReader(fixture.api, 'failed-history');
+  const stop = reader.subscribe(() => {});
+  try {
+    await until(() => !!reader.getSnapshot().error);
+    const payload = { payload: 'x'.repeat(8192) };
+    const payloadBytes = Buffer.byteLength(JSON.stringify(payload));
+    fixture.add(Array.from({length: 256}, (_, i) => ({
+      type: 'message_delta', text: String(i), providerDataJson: json(payload),
+    })));
+    await until(() => reader.getSnapshot().messages.at(-1)?.text.endsWith('255') === true);
+    assert.equal(reader.getSnapshot().partial, true);
+    // Count the actual raw byte buffers reachable from this reader. The fixture
+    // Runner owns the journal independently, just like the real remote service.
+    const seen = new Set<object>();
+    let buffers = 0;
+    function visit(value: unknown) {
+      if (!value || typeof value !== 'object' || value === fixture.api || seen.has(value)) return;
+      seen.add(value);
+      if (value instanceof Uint8Array) { if (value.length === payloadBytes) buffers++; return; }
+      for (const child of Object.values(value)) visit(child);
+    }
+    visit(reader);
+    assert.ok(buffers === 0, `reader retained ${buffers} raw payloads`);
+    reader.retry();
+    await until(() => !reader.getSnapshot().partial && !reader.getSnapshot().loading);
+    assert.ok(reader.getSnapshot().messages.at(-1)?.text.endsWith('255'));
+  } finally { stop(); }
+});
+
+test('an oversized inactive transcript releases its projection and can reopen at its saved message', async () => {
+  // Reuse the source buffer across fixture events, as a proxy can do.
+  const payload = new Uint8Array(1 << 20);
+  const journal = Array.from({length: 49}, (_, i) => create(JournalEventSchema, {
+    cursor: BigInt(i + 1), event: {type: 'message_delta', text: 'a', providerDataJson: payload},
+  }));
+  const fixture = runner(journal);
+  const reader = conversationReader(fixture.api, 'oversized');
+  let stop = reader.subscribe(() => {});
+  try {
+    await until(() => !reader.snapshot.loading);
+    const expected = reader.snapshot.messages[0];
+    reader.view.following = false;
+    reader.view.anchorId = expected.id;
+    reader.view.anchorOffset = -35;
+    stop();
+    assert.equal(reader.snapshot.cursor, 0n);
+    assert.equal(reader.snapshot.messages.length, 0);
+    assert.equal(reader.view.anchorOffset, -35);
+    stop = reader.subscribe(() => {});
+    await until(() => !reader.snapshot.loading);
+    assert.deepEqual(reader.snapshot.messages[0], expected);
+    assert.equal(reader.view.anchorId, expected.id);
+  } finally { stop(); }
+});
+
+test('a small activity payload cannot keep a large RPC response buffer alive', () => {
+  const page = new Uint8Array(1 << 20);
+  const bytes = new TextEncoder().encode('{"type":"tool_call","id":"one","name":"Bash"}');
+  page.set(bytes, 1024);
+  const event = create(JournalEventSchema, {cursor: 1n, event: {
+    type: 'tool_activity', providerDataJson: page.subarray(1024, 1024 + bytes.length),
+  }});
+  const transcript = foldTranscript(emptyTranscript(), [event]);
+  const kept = transcript.activity[0].event!.providerDataJson;
+  assert.deepEqual(kept, bytes);
+  assert.equal(kept.buffer.byteLength, bytes.length);
+  assert.equal(transcript.recent[0].event!.providerDataJson.length, 0);
+});
+
+test('forward reconstruction transfers each record once, including oversized tool payloads', async () => {
+  const journal = records(Array.from({length: 25}, (_, i) => ({
+    type:'operation_accepted', text:'turn '+i,
+    providerDataJson:i%6===3 ? json({evidence:'x'.repeat(1100000)}) : undefined,
+  })));
+  const fixture=runner(journal);
+  const reader=new ConversationReader(fixture.api,'mixed');
+  const stop=reader.subscribe(()=>{});
+  try {
+    await until(()=>!reader.snapshot.loading);
+    const pages=fixture.historyReads;
+    assert.equal(pages.length,9,'four oversized pages separated by five runs of small records');
+    assert.equal(pages.reduce((sum,page)=>sum+page.bytes,0),journal.reduce((sum,r)=>sum+size(r),0));
+    let next=1n;
+    for(const page of pages){assert.equal(page.start,next);next+=BigInt(page.count);}
+    assert.equal(next,BigInt(journal.length+1));
+  }finally{stop();}
+});
+
+test('alternating mounted tabs keeps both recently shown projections warm', async () => {
+  const fixture=runner(records([{type:'message_delta',text:'cached'}]));
+  const tabs=['a','b','c','d'].map(id=>conversationReader(fixture.api,id));
+  // All four tabs were mounted in this order before any of them was shown.
+  for(const i of [2,3,0,1,0,1,0,1]){
+    const tab=tabs[i],reads=fixture.calls.filter(c=>c.method==='ReadSessionTail').length;
+    const stop=tab.subscribe(()=>{});
+    await until(()=>!tab.snapshot.loading);
+    tab.inputBytes=12<<20;
+    stop();
+    if(reads>=4)assert.equal(fixture.calls.filter(c=>c.method==='ReadSessionTail').length,reads);
+  }
+  assert.deepEqual(tabs.map(tab=>tab.snapshot.cursor),[1n,1n,0n,0n]);
+});
+
+test('a backward-only Runner reconstructs through one forward stream', async () => {
+  const journal=records(longConversation({turns:40,toolOutputBytes:2000}));
+  const fixture=runner(journal,{forward:false});
+  const reader=new ConversationReader(fixture.api,'older-pager');
+  const stop=reader.subscribe(()=>{});
+  try{
+    await until(()=>!reader.snapshot.loading);
+    assert.deepEqual(transcriptOf(reader.snapshot),whole(journal));
+    assert.equal(fixture.historyReads.length,1);
+    assert.equal(fixture.calls.filter(call=>call.method==='WatchEvents'&&call.after===0n).length,1);
+  }finally{stop();}
+});
+
+test('a recently viewed large reader can stay warm on its own', async () => {
+  const fixture=runner(records([{type:'message_delta',text:'large conversation'}]));
+  const reader=conversationReader(fixture.api,'large');
+  const stop=reader.subscribe(()=>{});
+  await until(()=>!reader.snapshot.loading);
+  reader.inputBytes=40<<20;
+  stop();
+  assert.equal(reader.snapshot.cursor,1n);
+  const again=reader.subscribe(()=>{});
+  again();
+  assert.equal(fixture.calls.filter(c=>c.method==='ReadSessionTail').length,1);
 });

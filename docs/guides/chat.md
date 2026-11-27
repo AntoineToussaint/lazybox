@@ -262,6 +262,11 @@ the agent goes on.
 
 Scroll up to read an earlier turn while the agent works. Scroll down to read later turns in order. Drag the scrollbar to the bottom, press End in the transcript, or choose **Jump to latest** to follow the newest reply.
 
+Long conversations show their latest turns first while earlier history loads in pages.
+If an earlier page fails, you can still read incoming replies. Use **Retry** to rebuild
+the conversation from the Runner’s journal. Returning to a large conversation may
+reload its history to restore the message you were reading.
+
 - **The header** names the conversation and says how it is going. The title
   is a few words the agent gives it when its first turn ends (turn this off in
   Settings → Agents & workspaces → *Name conversations after their first

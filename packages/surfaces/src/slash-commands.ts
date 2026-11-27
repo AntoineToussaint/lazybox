@@ -260,6 +260,7 @@ export type SlashContext = {
   busy: boolean;
   /** A coding conversation (assistants take no permissions or Run). */
   coding: boolean;
+  reviewer?: boolean;
   /** In a workspace: review, artifacts and missions belong to one. */
   workspace: boolean;
   permission: string;
@@ -306,7 +307,7 @@ export function lazyboxCommands(ctx: SlashContext): SlashCommand[] {
   const permissions: SlashChoice[] = (['ask', 'read-only', 'yolo'] as PermissionMode[]).map(mode => ({ value: mode, label: PERMISSION_LABELS[mode], detail: PERMISSION_DETAILS[mode] + restart(ctx.livePermission), current: ctx.permission === mode, disabled: permissionBlocked(ctx.planWorkflow ? 'plan' : '', mode) || undefined, keywords: mode === 'yolo' ? 'yolo bypass dangerous skip' : mode === 'ask' ? 'approve default' : 'plan readonly' }));
   return [
     { key: 'lazybox:model', name: 'model', group: 'lazybox', icon: 'sparkle', argumentHint: '<name> [effort]', description: ctx.liveModel ? `Switch ${agentName}'s model` : `Switch ${agentName}'s model${restart(false)}`, choices: models, freeArgument: true, disabled: unless(notLive), keywords: 'opus sonnet haiku gpt' },
-    { key: 'lazybox:permissions', name: 'permissions', group: 'lazybox', icon: 'shield', argumentHint: 'ask|read-only|yolo', aliases: ['permission', 'yolo'], description: 'Change agent and Lazybox command permissions', choices: permissions, disabled: unless(notLive, !ctx.coding && 'Assistants are read-only') },
+    { key: 'lazybox:permissions', name: 'permissions', group: 'lazybox', icon: 'shield', argumentHint: 'ask|read-only|yolo', aliases: ['permission', 'yolo'], description: 'Change agent and Lazybox command permissions', choices: permissions, disabled: unless(notLive, !ctx.coding && !ctx.reviewer && 'Assistants are read-only') },
     { key: 'lazybox:subscription', name: 'subscription', group: 'lazybox', icon: 'card', description: 'Switch subscription…', aliases: ['account'], disabled: unless(notLive), keywords: 'account login profile limit' },
     { key: 'lazybox:browser', name: 'browser', group: 'lazybox', icon: 'globe', description: `Give ${agentName} the browser${ctx.browser === 'can_give' ? ' (restarts the agent; the conversation continues)' : ''}`,
       disabled: unless(notLive, ctx.browser === 'has' && `${agentName} has the browser`, ctx.browser === 'off' && 'The agent browser is off in Settings → Browser', !ctx.browser && 'The agent browser is not available in this conversation'),

@@ -14,7 +14,7 @@ tauri-build = { version = "=2.7.6", features = [] }
 [dependencies]
 # `unstable` is Tauri's multiwebview: a Web panel is a child webview of the
 # window it is docked in (WORKSPACES.md, "The Web panel").
-tauri = { version = "=2.12.5", features = ["dynamic-acl", "unstable"] }
+tauri = { version = "=2.12.7", features = ["dynamic-acl", "unstable"] }
 tauri-plugin-http = "=2.9.0"
 tauri-plugin-opener = "=2.7.3"
 tauri-plugin-clipboard-manager = "=2.5.0"

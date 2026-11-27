@@ -113,6 +113,7 @@
 .recently-deleted ul{list-style:none;margin:4px 0 0;padding:0}
 .recently-deleted li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px 10px;padding:8px;border-radius:6px;background:var(--surface-raised);overflow-wrap:anywhere}
 .recently-deleted li+li{margin-top:4px}
-.deleted-item{display:grid;gap:3px;min-width:0}
+.deleted-item{display:grid;grid-template-columns:minmax(0,1fr);gap:3px;min-width:0}
+.deleted-item>strong,.deleted-item>small{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .recently-deleted small{color:var(--text-muted)}
 .recently-deleted small[role=status]{grid-column:1/-1}

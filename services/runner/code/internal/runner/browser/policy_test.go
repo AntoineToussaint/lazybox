@@ -32,7 +32,7 @@ func TestParseURLJudgesHostsAsABrowserReadsThem(t *testing.T) {
 		"http://08/",
 		"http://example.0x/",
 	} {
-		if u, err := ParseURL(raw, blocked, []int{5173}); !errors.Is(err, ErrBlocked) {
+		if u, err := ParseURL(raw, blocked, func() []int { return []int{5173} }); !errors.Is(err, ErrBlocked) {
 			t.Errorf("ParseURL(%s) = %v, %v; want it refused", raw, u, err)
 		}
 	}
@@ -47,9 +47,19 @@ func TestParseURLJudgesHostsAsABrowserReadsThem(t *testing.T) {
 		"https://134744072/":         "https://8.8.8.8/",
 		"https://[2606:4700::1111]/": "https://[2606:4700::1111]/",
 	} {
-		u, err := ParseURL(raw, blocked, []int{5173})
+		u, err := ParseURL(raw, blocked, func() []int { return []int{5173} })
 		if err != nil || u.String() != want {
 			t.Errorf("ParseURL(%s) = %v, %v; want %s", raw, u, err, want)
 		}
+	}
+}
+
+func TestPublicSiteSkipsPreviewLookup(t *testing.T) {
+	_, err := ParseURL("https://example.com/", nil, func() []int {
+		t.Fatal("public site queried workspace preview ports")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

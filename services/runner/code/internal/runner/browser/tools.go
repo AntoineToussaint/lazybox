@@ -275,13 +275,17 @@ func (m *Manager) run(ctx context.Context, b *conv, action string, a toolArgs) (
 	return r.Text, r.Image, nil
 }
 
+func (m *Manager) parseURL(ctx context.Context, workspace, raw string) (*url.URL, error) {
+	return ParseURL(raw, m.cfg.BlockedHosts, func() []int { return m.cfg.LoopbackPorts(ctx, workspace) })
+}
+
 // permitted checks a URL the agent asked for and, for a site not allowed
 // yet, asks the person.
 func (m *Manager) permitted(ctx context.Context, b *conv, raw, reason string) (*url.URL, error) {
 	m.mu.Lock()
 	workspace := b.workspace
 	m.mu.Unlock()
-	u, err := ParseURL(raw, m.cfg.BlockedHosts, m.cfg.LoopbackPorts(ctx, workspace))
+	u, err := m.parseURL(ctx, workspace, raw)
 	if err != nil {
 		if errors.Is(err, ErrBlocked) {
 			m.mu.Lock()
@@ -500,7 +504,7 @@ func (m *Manager) Control(ctx context.Context, c Caller, action, raw string) (St
 		params := map[string]any{"browser": b.id, "actor": "person", "action": action}
 		summary := map[string]string{"back": "You went back", "forward": "You went forward", "reload": "You reloaded the page"}[action]
 		if action == "navigate" {
-			u, err := ParseURL(raw, m.cfg.BlockedHosts, m.cfg.LoopbackPorts(ctx, workspace))
+			u, err := m.parseURL(ctx, workspace, raw)
 			if err != nil {
 				return State{}, err
 			}

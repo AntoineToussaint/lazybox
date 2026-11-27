@@ -43,7 +43,7 @@ func Site(u *url.URL) string {
 // ParseURL accepts an absolute http or https URL an agent asked for. Anything
 // else (file:, javascript:, data:, a Lazybox origin) is refused with a reason
 // the agent can act on.
-func ParseURL(raw string, blockedHosts []string, loopbackPorts []int) (*url.URL, error) {
+func ParseURL(raw string, blockedHosts []string, loopbackPorts func() []int) (*url.URL, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, errors.New("a URL is required")
@@ -70,7 +70,7 @@ func ParseURL(raw string, blockedHosts []string, loopbackPorts []int) (*url.URL,
 	}
 	// The address the browser goes to is the one judged: 2130706433 is
 	// 127.0.0.1 to it, and so it is to the policy and the site grants.
-	if host != strings.ToLower(u.Hostname()) {
+	if host != u.Hostname() {
 		hostname := host
 		if strings.Contains(host, ":") {
 			hostname = "[" + host + "]"
@@ -176,7 +176,7 @@ func ipv4Number(label string) (uint64, bool) {
 // checkHost refuses Lazybox's own addresses, loopback except a workspace
 // preview's port, and private networks. Names are checked as written; the
 // browser service also checks what they resolve to.
-func checkHost(u *url.URL, blockedHosts []string, loopbackPorts []int) error {
+func checkHost(u *url.URL, blockedHosts []string, loopbackPorts func() []int) error {
 	host, err := canonicalHost(u.Hostname())
 	if err != nil {
 		return err
@@ -194,7 +194,7 @@ func checkHost(u *url.URL, blockedHosts []string, loopbackPorts []int) error {
 		}
 	}
 	if isLoopbackName(host) {
-		for _, p := range loopbackPorts {
+		for _, p := range loopbackPorts() {
 			if fmt.Sprint(p) == port {
 				return nil
 			}

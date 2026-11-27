@@ -699,7 +699,7 @@ func TestWorkspacePreviewGrantSurvivesPortChange(t *testing.T) {
 	})
 	done := make(chan error, 1)
 	go func() {
-		_, err := call(t, m, alice, "browser_navigate", map[string]string{"url": "http://localhost:5173/"})
+		_, err := call(t, m, alice, "browser_navigate", map[string]string{"url": "http://LOCALHOST:5173/"})
 		done <- err
 	}()
 	r := waitRequest(t, m, alice.Conversation)
@@ -716,7 +716,7 @@ func TestWorkspacePreviewGrantSurvivesPortChange(t *testing.T) {
 	}
 	defer restarted.Close()
 	bob := Caller{Session: "exec-b", Conversation: "conv-b", Workspace: alice.Workspace, Agent: "Codex"}
-	if _, err := call(t, restarted, bob, "browser_navigate", map[string]string{"url": "http://localhost:5174/new"}); err != nil {
+	if _, err := call(t, restarted, bob, "browser_navigate", map[string]string{"url": "http://LocalHost:5174/new"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := call(t, restarted, bob, "browser_navigate", map[string]string{"url": "http://localhost:5173/old"}); !errors.Is(err, ErrBlocked) {

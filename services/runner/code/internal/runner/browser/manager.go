@@ -670,7 +670,7 @@ func (m *Manager) serve(p *jsonl.Process, msg jsonl.Message) {
 	ctx := m.ctx
 	switch msg.Method {
 	case "site":
-		u, err := ParseURL(r.URL, m.cfg.BlockedHosts, m.cfg.LoopbackPorts(ctx, workspace))
+		u, err := m.parseURL(ctx, workspace, r.URL)
 		if err != nil {
 			_ = p.Reply(msg.ID, map[string]any{"allow": false, "reason": err.Error()})
 			return

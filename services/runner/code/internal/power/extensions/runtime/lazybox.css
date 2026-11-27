@@ -44,28 +44,74 @@ button:disabled { opacity: .5; cursor: default; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; border: 2px solid var(--surface); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
-.workflow { height: auto; min-height: 100%; max-width: 72rem; margin-inline: auto; padding: clamp(12px, 3vw, 32px); }
-.workflow header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line-subtle); margin-bottom: 14px; }
-.workflow h1 { font-size: calc(18px * var(--text-scale)); }
-.workflow header p { grid-column: 1; margin: 0; color: var(--text-muted); }
+.workflow {
+  height: auto; min-height: 100%; max-width: 64rem; margin-inline: auto;
+  padding: clamp(14px, 3vw, 32px); line-height: 1.48;
+}
+.workflow header {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  gap: 4px 10px; margin-bottom: 18px; padding: 4px 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+.workflow h1 { font-size: calc(clamp(20px, 4vw, 29px) * var(--text-scale)); letter-spacing: -.035em; line-height: 1.15; overflow-wrap: anywhere; }
+.workflow h2 { margin: 18px 0 8px; font-size: calc(15px * var(--text-scale)); letter-spacing: -.015em; }
+.workflow header p { grid-column: 1; margin: 0; color: var(--text-secondary); font-size: calc(12px * var(--text-scale)); }
 .workflow header button, .workflow header a { grid-column: 2; grid-row: 1 / span 2; }
+.workflow header button { border-color: transparent; background: transparent; color: var(--text-secondary); }
+.workflow header button:hover { background: var(--surface-hover); }
 .workflow #notice, .workflow .filter-empty { color: var(--text-secondary); }
 .workflow input, .workflow textarea, .workflow select {
-  font: inherit; color: var(--text); background: var(--surface-sunken); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; max-width: 100%;
+  font: inherit; color: var(--text); background: var(--surface-sunken);
+  border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; max-width: 100%;
 }
-.workflow input[type=search] { width: min(100%, 24rem); margin-bottom: 10px; }
-.workflow ul { list-style: none; padding: 0; margin: 0 0 14px; }
-.workflow ul:not(:empty) { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--surface-raised); }
-.workflow li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 12px; border-bottom: 1px solid var(--line-subtle); padding: 10px 12px; overflow-wrap: anywhere; }
-.workflow li:last-child { border-bottom: 0; }
-.workflow li small { grid-column: 1; }
+.workflow :is(input, textarea, select):focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.workflow input[type=search] { width: min(100%, 24rem); margin-bottom: 12px; }
+.workflow ul { list-style: none; padding: 0; margin: 0 0 16px; }
+.workflow li {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 12px;
+  margin-bottom: 8px; padding: 12px 14px; overflow-wrap: anywhere; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--surface-raised);
+}
+.workflow li strong { color: var(--text-strong); font-size: calc(14px * var(--text-scale)); line-height: 1.35; }
+.workflow li small { grid-column: 1; color: var(--text-secondary); }
 .workflow li div, .workflow li > button, .workflow li > output { grid-column: 2; grid-row: 1 / span 2; }
 .workflow li div { display: flex; flex-wrap: wrap; gap: 6px; }
+.workflow button { min-height: 30px; }
+.workflow li button:not(.primary) { background: var(--surface); }
+.workflow li button:not(.primary):hover { background: var(--surface-hover); }
+.workflow li button[aria-pressed=true] { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
 .workflow [hidden] { display: none; }
-.workflow-form { display: grid; gap: 12px; max-width: 46rem; margin-bottom: 16px; }
+.workflow-form { padding: 14px; background: var(--surface-raised); border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 12px; max-width: 46rem; margin-bottom: 16px; }
 .workflow-form label { display: grid; gap: 4px; }
 .workflow-form textarea { resize: vertical; width: 100%; }
 .workflow-form button { justify-self: start; }
 @media (max-width: 540px) {
-  .workflow li div { grid-column: 1 / -1; grid-row: auto; }
+  .workflow li div { grid-column: 1 / -1; grid-row: auto; margin-top: 4px; }
 }
+
+.disk-report section[aria-label="Disk space"] {
+  padding: clamp(14px, 3vw, 24px);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.disk-report section h2 { margin: 0; font-size: calc(24px * var(--text-scale)); }
+.disk-report meter { appearance: none; height: 8px; display: block; width: 100%; margin-block: 10px; }
+.disk-report output { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+.disk-report .pressure { display: block; margin-bottom: 8px; color: var(--warn); }
+.disk-report [data-pressure="critical"] .pressure { color: var(--danger); }
+.disk-report [data-pressure="tight"] meter::-webkit-meter-optimum-value { background: var(--warn); }
+.disk-report [data-pressure="critical"] meter::-webkit-meter-optimum-value { background: var(--danger); }
+.disk-report li output { color: var(--text-strong); white-space: nowrap; }
+
+.disk-report meter::-webkit-meter-bar { background: var(--line); border: 0; border-radius: 8px; }
+.disk-report meter::-webkit-meter-optimum-value { border-radius: 8px; }
+
+.disk-report section[aria-label="Current disk space"] h2 { font-size: calc(24px * var(--text-scale)); }
+.disk-report #target-filters { margin-block: 10px; }
+.disk-report #target-filters label { display: inline-flex; align-items: center; gap: 6px; }
+.disk-report #match-count:empty { display: none; }
+.workflow #source-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
+.workflow #source-controls output { flex-basis: 100%; color: var(--text-secondary); }
+.workflow #source-controls[hidden] { display: none; }

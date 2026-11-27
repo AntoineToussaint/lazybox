@@ -39,3 +39,11 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .filters input[type="checkbox"] { margin: 0; accent-color: var(--accent-solid); }
 .filters input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 #no-matches { margin: 12px; padding: 12px; color: var(--text-muted); border: 1px solid var(--line-subtle); border-radius: 6px; }
+
+@media (max-width: 560px) {
+  .bar { flex-wrap: wrap; gap: 8px; padding: 14px; }
+  .summary { flex-basis: 100%; white-space: normal; line-height: 1.2; font-size: calc(20px * var(--text-scale)); letter-spacing: -.03em; }
+  .bar .spacer { display: none; }
+  .bar #next { color: var(--accent); background: var(--accent-bg); }
+  .card .title span { white-space: normal; overflow-wrap: anywhere; }
+}

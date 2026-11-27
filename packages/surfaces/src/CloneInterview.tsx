@@ -15,6 +15,7 @@ const sectionNames = { style: 'Code style', testing: 'Verification', askWhen: 'D
 export function CloneInterview({ onClose }: { onClose(): void }) {
   const { api } = useRunner();
   const [profile, setProfile] = useState<CloneProfile>();
+  const [suggestionField, setSuggestionField] = useState<Field>('style');
   const [learning, setLearning] = useState(false);
   const [error, setError] = useState('');
   const [responses, setResponses] = useState<Record<string, string>>({});
@@ -65,8 +66,11 @@ export function CloneInterview({ onClose }: { onClose(): void }) {
         <textarea value={profile[key]} onChange={event => setProfile({ ...profile, [key]: event.target.value })}/>
       </label>)}
       {profile.suggestions.length > 0 && <fieldset className="clone-suggestions"><legend>Suggested code preferences</legend>
-        {profile.suggestions.map(line => <button type="button" key={line} disabled={profile.style.split('\n').includes(line)}
-          onClick={() => setProfile({ ...profile, style: [profile.style, line].filter(Boolean).join('\n') })}>{line}</button>)}
+        <label>Apply suggestion to <select value={suggestionField} onChange={event => setSuggestionField(event.target.value as Field)}>
+          {fields.map(([key]) => <option key={key} value={key}>{sectionNames[key]}</option>)}
+        </select></label>
+        {profile.suggestions.map(line => <button type="button" key={line} disabled={profile[suggestionField].split('\n').includes(line)}
+          onClick={() => setProfile({ ...profile, [suggestionField]: [profile[suggestionField], line].filter(Boolean).join('\n') })}>{line}</button>)}
       </fieldset>}
       <section className="clone-history" aria-label="Conversation history">
         <button type="button" disabled={learning} onClick={() => void learn()}>

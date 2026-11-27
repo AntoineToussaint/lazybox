@@ -5,3 +5,6 @@
 .bootstrap-state[data-tone=warn] { color: var(--warn); background: var(--warn-bg); }
 .bootstrap-state[data-tone=danger] { color: var(--danger); background: var(--danger-bg); }
 .bootstrap-state[data-tone=ok] { color: var(--ok); background: var(--ok-bg); }
+
+#rows li:has(.bootstrap-state[data-tone=warn]) { border-inline-start: 3px solid var(--warn); }
+#rows li:has(.bootstrap-state[data-tone=danger]) { border-inline-start: 3px solid var(--danger); }

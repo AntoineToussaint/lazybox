@@ -51,6 +51,7 @@ function card(item) {
 }
 
 const search = document.getElementById('search');
+const unread = document.getElementById('unread');
 const attention = document.getElementById('attention');
 const empty = document.getElementById('no-matches');
 let latest;
@@ -58,10 +59,10 @@ let latest;
 function render(result) {
   latest = result;
   const query = search.value.trim().toLowerCase();
-  const matching = result.items.filter(item => (!attention.checked || ['needs-input', 'failed', 'review'].includes(item.state))
+  const matching = result.items.filter(item => (!unread.checked || item.unread) && (!attention.checked || ['needs-input', 'failed', 'review'].includes(item.state))
     && [item.title, item.workspaceName, item.reason, item.line].some(value => (value || '').toLowerCase().includes(query)));
   empty.hidden = matching.length > 0;
-  empty.textContent = query ? 'No conversations match your search.' : attention.checked ? 'No conversations need attention.' : 'No conversations on this Runner.';
+  empty.textContent = query ? 'No conversations match your search.' : unread.checked ? 'No matching unread conversations on this page.' : attention.checked ? 'No conversations need attention.' : 'No conversations on this Runner.';
 
   const focused = document.activeElement && document.activeElement.closest('.card') ? document.activeElement.dataset.session : '';
   board.replaceChildren(...columns.filter(column => matching.some(item => item.state === column.state)).map(column => {
@@ -78,7 +79,7 @@ function render(result) {
   if (focused) [...board.querySelectorAll('.card')].find(node => node.dataset.session === focused)?.focus();
   const counts = result.counts;
   const parts = [];
-  if (counts['needs-input']) parts.push(counts['needs-input'] + ' need you');
+  if (counts['needs-input']) parts.push(counts['needs-input'] + (counts['needs-input'] === 1 ? ' needs you' : ' need you'));
   if (counts.failed) parts.push(counts.failed + ' failed');
   if (counts.review) parts.push(counts.review + ' ready for review');
   if (counts.working) parts.push(counts.working + ' working');
@@ -87,6 +88,7 @@ function render(result) {
 }
 
 search.addEventListener('input', () => { if (latest) render(latest); });
+unread.addEventListener('change', () => { if (latest) render(latest); });
 attention.addEventListener('change', () => { if (latest) render(latest); });
 
 // Arrow keys move between cards: up and down in a column, left and right across.

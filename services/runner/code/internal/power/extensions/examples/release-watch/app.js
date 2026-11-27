@@ -1,15 +1,17 @@
 workflow.openInbox();
-const allPulls = document.getElementById('all-pulls');
+const activity = document.getElementById('activity');
 let checks = [], releases = [], checksError = '', releaseError = '';
-allPulls.addEventListener('change', render);
+activity.addEventListener('change', render);
 
 function render() {
   const rows = [...releases, ...checks]
-    .filter(entry => allPulls.checked || entry.priority < 2)
+    .filter(entry => activity.value === 'all' || (activity.value === 'approval' ? entry.priority === 0 :
+      activity.value === 'failures' ? entry.priority === 1 : entry.priority < 2))
     .sort((a, b) => a.priority - b.priority);
-  workflow.list(rows.map(entry => entry.row), allPulls.checked
-    ? 'No open pull requests or deployments.'
-    : 'No deployment approvals or failures to address.');
+  workflow.list(rows.map(entry => entry.row), {
+    all: 'No open pull requests or deployments.', approval: 'No pending deployment approvals.',
+    failures: 'No failed checks or deployments.', attention: 'No deployment approvals or failures to address.',
+  }[activity.value]);
   if (checksError || releaseError) workflow.say([checksError, releaseError].filter(Boolean).join(' · '));
 }
 

@@ -179,3 +179,10 @@ button.row { cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
   .page[data-state="loading"] .state-icon { animation: none; }
 }
+
+@container page (max-width: 540px) {
+  .spend { grid-row: 1; }
+  .tile-title { white-space: normal; overflow-wrap: anywhere; }
+}
+
+#conversation-search { width: 100%; margin-block: 8px; padding: 7px 10px; font: inherit; color: var(--text); background: var(--surface-sunken); border: 1px solid var(--line); border-radius: 6px; }

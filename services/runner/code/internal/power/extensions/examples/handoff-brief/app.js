@@ -15,18 +15,39 @@ function githubLink(pull) {
 let workspaceId = '';
 const excluded = new Set();
 
+const sourceControls = document.getElementById('source-controls');
+const includeAll = document.getElementById('include-all');
+const excludeAll = document.getElementById('exclude-all');
+
+function renderSelection() {
+  const rows = document.querySelectorAll('#rows > li');
+  let included = 0;
+  for (const row of rows) {
+    const on = !excluded.has(row.dataset.key);
+    const toggle = row.querySelector('button');
+    toggle.textContent = on ? 'Included' : 'Include';
+    toggle.setAttribute('aria-pressed', String(on));
+    if (on) included++;
+  }
+  sourceControls.hidden = rows.length === 0;
+  document.getElementById('selection-count').textContent = included + ' of ' + rows.length + ' sources selected';
+  includeAll.disabled = included === rows.length;
+  excludeAll.disabled = included === 0;
+}
+
+includeAll.onclick = () => { excluded.clear(); renderSelection(); };
+excludeAll.onclick = () => {
+  for (const row of document.querySelectorAll('#rows > li')) excluded.add(row.dataset.key);
+  renderSelection();
+};
+
 function sourceRow(key, title, detail) {
   const toggle = workflow.button('Include', () => {
     if (excluded.has(key)) excluded.delete(key);
     else excluded.add(key);
-    updateSelection();
+    renderSelection();
   });
-  function updateSelection() {
-    toggle.textContent = excluded.has(key) ? 'Include' : 'Included';
-    toggle.setAttribute('aria-pressed', String(!excluded.has(key)));
-    toggle.setAttribute('aria-label', 'Include ' + title);
-  }
-  updateSelection();
+  toggle.setAttribute('aria-label', 'Include ' + title);
   return workflow.row(key, title, detail, toggle);
 }
 
@@ -38,18 +59,21 @@ workflow.poll(10000, async () => {
     draft.disabled = true;
     excluded.clear();
     sourceStatus.hidden = true;
+    sourceControls.hidden = true;
     decisions.value = '';
     next.value = '';
     if (workspace) workflow.list([], 'Loading workspace sources…');
   }
   if (!workspace) return;
   const [pullResult, artifactResult] = await Promise.allSettled([lazybox.pulls.list(workspace.id), lazybox.artifacts.list(workspace.id)]);
-  const pulls = pullResult.status === 'fulfilled' ? pullResult.value.pulls : [];
-  const artifacts = artifactResult.status === 'fulfilled' ? artifactResult.value.artifacts : [];
+  const pulls = pullResult.status === 'fulfilled' ? pullResult.value.pulls : selected?.pulls || [];
+  const artifacts = artifactResult.status === 'fulfilled' ? artifactResult.value.artifacts : selected?.artifacts || [];
   const warnings = [];
   const pullError = pullResult.status === 'rejected' ? pullResult.reason.message : pullResult.value.error;
   if (pullError) warnings.push('Pull request tracking: ' + pullError);
   if (artifactResult.status === 'rejected') warnings.push('Could not load artifacts: ' + artifactResult.reason.message);
+  if (pullResult.status === 'rejected' && pulls.length) warnings.push('Showing the last loaded pull requests.');
+  if (artifactResult.status === 'rejected' && artifacts.length) warnings.push('Showing the last loaded artifacts.');
   if (pullResult.value?.truncated) warnings.push('Showing the first ' + pulls.length + ' pull requests.');
   if (artifactResult.value?.truncated) warnings.push('Showing the first ' + artifacts.length + ' artifacts.');
   sourceStatus.textContent = warnings.join(' ');
@@ -59,6 +83,7 @@ workflow.poll(10000, async () => {
     ...pulls.map(pull => sourceRow('pull:' + pull.key, pull.title, [pull.repository + ' #' + pull.number, pull.detail].filter(Boolean).join(' · '))),
     ...artifacts.map(artifact => sourceRow('artifact:' + artifact.id, artifact.title, 'Artifact · ' + artifact.kind)),
   ], warnings.length ? '' : 'No tracked pull requests or artifacts in this workspace.');
+  renderSelection();
   draft.disabled = false;
 });
 

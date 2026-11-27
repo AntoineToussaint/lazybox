@@ -149,6 +149,8 @@
     "test:agent-browser": "node scripts/test-agent-browser.mjs",
     "test:power-actions": "node scripts/test-power-actions.mjs",
     "test:config-files": "node scripts/test-config-files.mjs",
+    "review:extensions": "node scripts/capture-extension-previews.mjs --review",
+    "inspect:extensions": "node scripts/capture-extension-previews.mjs --inspect",
     "test:extensions": "node scripts/test-extensions.mjs",
     "test:cost-dashboard": "node scripts/test-cost-dashboard.mjs",
     "test:activity-detail": "node scripts/test-activity-detail.mjs",

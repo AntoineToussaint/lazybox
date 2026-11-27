@@ -2,3 +2,7 @@
 .radar-state { display: inline-block; font-size: calc(11px * var(--text-scale)); font-weight: 500; border-radius: 4px; padding: 1px 6px; color: var(--warn); background: var(--warn-bg); }
 [data-state="failed"] .radar-state { color: var(--danger); background: var(--danger-bg); }
 .radar-preview { display: block; margin: 3px 0; color: var(--text-secondary); white-space: pre-line; }
+
+.radar-preview { margin: 6px 0; padding-inline-start: 10px; border-inline-start: 2px solid var(--line-strong); color: var(--text); }
+#rows [data-state="needs-input"] { border-inline-start: 3px solid var(--warn); }
+#rows [data-state="failed"] { border-inline-start: 3px solid var(--danger); }

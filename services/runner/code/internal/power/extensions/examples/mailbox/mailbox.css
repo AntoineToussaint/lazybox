@@ -3,3 +3,5 @@
 .mailbox-views button { background: transparent; border-color: transparent; color: var(--text-muted); }
 .mailbox-views button[aria-pressed="true"] { color: var(--text-strong); background: var(--surface-selected); }
 .mailbox-views span { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+
+#rows .direct-request { border-inline-start: 3px solid var(--accent); }

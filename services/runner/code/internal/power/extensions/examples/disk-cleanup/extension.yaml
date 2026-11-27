@@ -1,6 +1,6 @@
 lazybox: 1
 category: Workspace tools
-caption: Choose Review and clean to scan again, select items and confirm removal in the Runner terminal.
+caption: Review Runner storage and clean Go caches or select other cleanup targets.
 keywords: [storage, reclaim]
 name: Disk Cleanup
 version: 1.2.0

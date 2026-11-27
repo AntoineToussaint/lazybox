@@ -5,3 +5,6 @@
 [data-state="running"] .service-state { color: var(--ok); background: var(--ok-bg); }
 [data-state="failed"] .service-state { color: var(--danger); background: var(--danger-bg); }
 [data-state="stopping"] .service-state { color: var(--warn); background: var(--warn-bg); }
+
+#rows [data-state="running"] { border-inline-start: 3px solid var(--ok); }
+#rows [data-state="failed"] { border-inline-start: 3px solid var(--danger); }

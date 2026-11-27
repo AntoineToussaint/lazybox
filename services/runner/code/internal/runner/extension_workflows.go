@@ -495,8 +495,21 @@ func (b *Bench) reviewArchive(workspace, session, key string) error {
 		}
 		for _, name := range paths {
 			doc, err := b.Collections.ReadFile(ctx, workspace, name)
-			if err == nil && !doc.Binary && !doc.Directory && !doc.Truncated && len(doc.Text) <= 12000 && evidence.Len()+len(doc.Text) < 118000 {
-				fmt.Fprintf(&evidence, "\nCurrent %s\n%s\n", name, doc.Text)
+			if err != nil || doc.Binary || doc.Directory {
+				continue
+			}
+			excerpt := doc.Text
+			partial := doc.Truncated
+			if len(excerpt) > 12000 {
+				excerpt = strings.ToValidUTF8(excerpt[:12000], "")
+				partial = true
+			}
+			if evidence.Len()+len(excerpt)+len(name)+100 >= 118000 {
+				continue
+			}
+			fmt.Fprintf(&evidence, "\nCurrent %s\n%s\n", name, excerpt)
+			if partial {
+				evidence.WriteString("[Partial document. Verify remaining instructions before proposing edits.]\n")
 			}
 		}
 	}

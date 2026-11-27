@@ -152,3 +152,13 @@ The complete answer is still process isolation: agents as a separate OS user,
 or in a sandbox that cannot read the Runner's state. With the two parts above
 an agent that misbehaves can still use its own credential and read the
 workspace it works in, but no longer act as the person.
+
+### Desktop drawing assets
+
+The packaged editor loads its bundled font subsets from `drawing-assets/`.
+Excalidraw reads font bytes using Fetch, which is governed by `connect-src`
+even when `font-src` permits the same resource. The production policy allows
+the app’s own origin for these reads. Development permits blob image URLs so
+the editor can decode a selected local picture. Both clients bundle the fonts.
+The browser fixture covers drawing export. Font loading and export under the
+packaged WKWebView CSP still need an interactive packaged-app check.

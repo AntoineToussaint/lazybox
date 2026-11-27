@@ -2,12 +2,13 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { readFileSync } from 'node:fs';
 import { uiWatcher } from '../../scripts/ui-watch.mjs';
+import { drawingAssets } from '../../scripts/drawing-assets.mjs';
 import { monacoVimCompat } from '../../scripts/monaco-vim-compat.mjs';
 
 export default defineConfig(({ command }) => {
-  if (command === 'build') return { plugins: [react(), monacoVimCompat()] };
+  if (command === 'build') return { plugins: [react(), monacoVimCompat(), drawingAssets()] };
   const path = process.env.LAZYBOX_V2_ENDPOINT;
   if (!path) throw new Error('Set LAZYBOX_V2_ENDPOINT to the endpoint file printed by the Runner');
   const endpoint = JSON.parse(readFileSync(path, 'utf8')) as { url: string };
-  return { plugins: [react(), monacoVimCompat()], server: { watch: uiWatcher().options, proxy: { '/lazybox.bench.v1.RunnerService/': { target: endpoint.url, changeOrigin: true } } } };
+  return { plugins: [react(), monacoVimCompat(), drawingAssets()], server: { watch: uiWatcher().options, proxy: { '/lazybox.bench.v1.RunnerService/': { target: endpoint.url, changeOrigin: true } } } };
 });

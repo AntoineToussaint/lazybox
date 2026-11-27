@@ -78,7 +78,7 @@ function ImagePreview({ anchor, image, name, onClose }: { anchor: HTMLElement; i
 }
 
 /** What a composer box can do besides being removed. */
-type ComposerBoxActions = { item?: HTMLAttributes<HTMLLIElement> & { 'data-dragging'?: boolean }; disabled?: boolean; onRemove(): void; onMove?(by: -1 | 1): void; onReplace?(file: File): void; onInline?(text: string): void };
+type ComposerBoxActions = { onAnnotate?(): void; item?: HTMLAttributes<HTMLLIElement> & { 'data-dragging'?: boolean }; disabled?: boolean; onRemove(): void; onMove?(by: -1 | 1): void; onReplace?(file: File): void; onInline?(text: string): void };
 
 /**
  * One file attached to the message being written, as its box: an image as
@@ -92,7 +92,7 @@ export function ComposerAttachment({ file, ...actions }: { file: File } & Compos
   return <ComposerFile file={file} kind={kind} {...actions}/>;
 }
 
-function ComposerImage({ file, item, disabled, onRemove, onMove }: { file: File } & ComposerBoxActions) {
+function ComposerImage({ file, item, disabled, onRemove, onMove, onAnnotate }: { file: File } & ComposerBoxActions) {
   const [loading, setLoading] = useState<Loading>({ state: 'loading' });
   useEffect(() => {
     let alive = true, loaded: LoadedImage | undefined;
@@ -107,7 +107,7 @@ function ComposerImage({ file, item, disabled, onRemove, onMove }: { file: File 
       disabled={disabled} onRemove={onRemove} onMove={onMove} removeLabel={`Remove ${file.name}`}/>
   </li>;
   const remove = <button type="button" className="attachment-remove" aria-label={`Remove ${file.name}`} title="Remove" disabled={disabled} onClick={onRemove}><Icon name="close" size={12}/></button>;
-  return <li {...item} className="attachment-chip image" data-kind="image"><ImageThumbnail name={file.name} size={file.size} loading={loading} variant="composer" onRemove={disabled ? undefined : onRemove} onMove={disabled ? undefined : onMove}/>{remove}</li>;
+  return <li {...item} className="attachment-chip image" data-kind="image"><ImageThumbnail name={file.name} size={file.size} loading={loading} variant="composer" onRemove={disabled ? undefined : onRemove} onMove={disabled ? undefined : onMove}/>{onAnnotate && <button type="button" onClick={onAnnotate} aria-label={`Annotate ${file.name}`}>Edit</button>}{remove}</li>;
 }
 
 /** A text box's text: known for a paste, read from the file (up to a bound) for a dropped one. */

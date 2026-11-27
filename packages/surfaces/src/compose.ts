@@ -4,7 +4,7 @@ import { runnerLink, type RunnerClient } from '@lazybox/client-core';
 import { appendToDraft } from './command-runs';
 
 /** Text another panel puts in a conversation's message box for the person to review and send. */
-export type ComposeRequest = { sessionId: string; text: string; api?: RunnerClient; reviews?: ReviewDraft[] };
+export type ComposeRequest = { sessionId: string; text: string; api?: RunnerClient; files?: File[]; reviews?: ReviewDraft[] };
 const EVENT = 'lazybox-compose';
 const SCOPED_EVENT = 'lazybox-scoped-compose';
 const pending = new Map<string, ComposeRequest>();
@@ -24,7 +24,7 @@ export function composeInConversation(request: ComposeRequest): boolean {
   const requests = requestsFor(request.api);
   const previous = requests.get(request.sessionId);
   const text = appendToDraft(previous?.text || '', request.text);
-  const combined = { ...request, text, reviews: [...previous?.reviews || [], ...request.reviews || []] };
+  const combined = { ...request, text, files: [...previous?.files || [], ...request.files || []], reviews: [...previous?.reviews || [], ...request.reviews || []] };
   requests.delete(request.sessionId);
   const event = new CustomEvent<ComposeRequest>(request.api ? SCOPED_EVENT : EVENT, { detail: combined, cancelable: true });
   if (!window.dispatchEvent(event)) return true;
@@ -33,14 +33,14 @@ export function composeInConversation(request: ComposeRequest): boolean {
 }
 
 /** A composer takes requests for its conversation once ready. */
-export function useComposeRequests(sessionId: string, ready: boolean, accept: (text: string, reviews?: ReviewDraft[]) => void, api?: RunnerClient) {
+export function useComposeRequests(sessionId: string, ready: boolean, accept: (text: string, reviews?: ReviewDraft[], files?: File[]) => void, api?: RunnerClient) {
   const ref = useRef(accept);
   ref.current = accept;
   useEffect(() => {
     if (!sessionId || !ready) return;
     const take = (requests: Map<string, ComposeRequest>) => {
       const queued = requests.get(sessionId);
-      if (queued !== undefined) { requests.delete(sessionId); ref.current(queued.text, queued.reviews); }
+      if (queued !== undefined) { requests.delete(sessionId); ref.current(queued.text, queued.reviews, queued.files); }
     };
     take(pending);
     if (api) take(requestsFor(api));
@@ -48,7 +48,7 @@ export function useComposeRequests(sessionId: string, ready: boolean, accept: (t
       const request = (event as CustomEvent<ComposeRequest>).detail;
       if (request.sessionId !== sessionId || event.defaultPrevented) return;
       if (request.api && (!api || owner(api) !== owner(request.api))) return;
-      event.preventDefault(); ref.current(request.text, request.reviews);
+      event.preventDefault(); ref.current(request.text, request.reviews, request.files);
     };
     window.addEventListener(EVENT, listener);
     window.addEventListener(SCOPED_EVENT, listener);

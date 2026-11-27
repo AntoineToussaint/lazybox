@@ -1,5 +1,6 @@
 import {testViteCache} from './fixtures/vite-cache.mjs';
 import { createServer } from './fixtures/vite-cache.mjs';
+import { drawingAssets } from './drawing-assets.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +10,7 @@ import { collectPageErrors, drainPageErrors } from './fixtures/page-errors.mjs';
 
 // Exercise the real shared composer against fake RPC, without accounts/inference.
 const fixture = await startRunnerFixture();
-const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
+const server = await createServer({...testViteCache(import.meta.url), configFile: false, root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react(), drawingAssets()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
 let browser;
 try {
   await server.listen();
@@ -20,10 +21,11 @@ try {
     const context = await browser.newContext();
     const page = await context.newPage();
     await collectPageErrors(page, errors);
+    let drawingLimits = view === 'agent';
     await page.route('**/Info', async route => {
       const response = await route.fetch();
       const body = await response.json();
-      body.attachmentLimits = { maxFiles: 4, maxFileBytes: '1024', maxMessageBytes: '1500' };
+      body.attachmentLimits = { maxFiles: 4, maxFileBytes: drawingLimits ? '8000000' : '1024', maxMessageBytes: drawingLimits ? '8000000' : '1500' };
       await route.fulfill({ response, json: body });
     });
     let failNext = true;
@@ -38,6 +40,63 @@ try {
     const chat = view === 'workspace' ? page.getByRole('region', { name: 'Agent chat', exact: true }) : page.locator('.agent-window');
     const composer = chat.getByRole('textbox', { name: 'Message', exact: true });
     await expect(composer).toBeEnabled();
+    if (drawingLimits) {
+      await chat.getByRole('button', { name: 'Draw', exact: true }).click();
+      const editor = page.getByRole('dialog', { name: 'Drawing editor' });
+      await editor.getByRole('button', { name: 'Attach drawing' }).click();
+      await expect(editor.getByRole('alert')).toContainText('Draw something');
+      async function drawRectangle() {
+        const canvas = editor.locator('canvas.interactive');
+        const bounds = await canvas.boundingBox();
+        assert.ok(bounds);
+        await editor.getByRole('radio', { name: /rectangle/i }).locator('..').click();
+        await page.mouse.move(bounds.x + bounds.width * 0.48, bounds.y + bounds.height * 0.48);
+        await page.mouse.down();
+        await page.mouse.move(bounds.x + bounds.width * 0.68, bounds.y + bounds.height * 0.65, { steps: 5 });
+        await page.mouse.up();
+      }
+      await drawRectangle();
+      await page.keyboard.press('Escape');
+      await expect(editor).toBeVisible();
+      await editor.getByRole('button', { name: 'Attach drawing' }).click();
+      await expect(editor).toHaveCount(0).catch(async error => { throw new Error(await editor.innerText(), { cause: error }); });
+      await chat.getByRole('button', { name: 'Annotate drawing.excalidraw.png' }).click();
+      await expect(editor.getByRole('button', { name: 'Attach drawing' })).toBeEnabled();
+      await editor.getByRole('button', { name: 'Cancel' }).click();
+      await chat.getByRole('button', { name: 'Remove drawing.excalidraw.png' }).click();
+      const picture = await page.evaluate(() => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 700; canvas.height = 480;
+        const ctx = canvas.getContext('2d'); ctx.fillRect(0, 0, 700, 480);
+        return canvas.toDataURL().split(',')[1];
+      });
+      await chat.locator('input[type=file]').setInputFiles({ name: 'original.png', mimeType: 'image/png', buffer: Buffer.from(picture, 'base64') });
+      await chat.getByRole('button', { name: 'Annotate original.png' }).click();
+      await drawRectangle();
+      await editor.getByRole('button', { name: 'Attach marks as edit mask' }).click();
+      const mask = chat.getByRole('button', { name: /^Open edit-mask.png/ }).locator('img');
+      await expect(mask).toBeVisible();
+      const alphaRange = await mask.evaluate(image => {
+        const canvas = document.createElement('canvas');
+        canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+        const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+        const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        let min = 255, max = 0;
+        for (let i = 3; i < pixels.length; i += 4) { min = Math.min(min, pixels[i]); max = Math.max(max, pixels[i]); }
+        return { min, max };
+      });
+      assert.ok(alphaRange.min < 255 && alphaRange.max === 255, 'mask distinguishes marked and preserved pixels');
+      await chat.getByRole('button', { name: 'Remove edit-mask.png' }).click();
+      await chat.getByRole('button', { name: 'Annotate original.png' }).click();
+      await drawRectangle();
+      await editor.getByRole('button', { name: 'Attach drawing' }).click();
+      await expect(chat.getByRole('button', { name: 'Annotate original.png' })).toBeVisible();
+      await chat.getByRole('button', { name: 'Remove drawing.excalidraw.png' }).click();
+      await chat.getByRole('button', { name: 'Remove original.png' }).click();
+      drawingLimits = false;
+      await page.reload();
+      await expect(composer).toBeEnabled();
+    }
     const originalUrl = page.url();
     // The owner's bearer is read from the fragment, then leaves the address bar and the history entry.
     assert.doesNotMatch(originalUrl, /token=/, `${view}: the bearer is still in the address bar`);

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
+import { Drawing, DiagramAnnotation } from './Drawing';
+import { useContext, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react';
 import { beginDrag, preventMouseDown } from './drag-gesture';
 import { Icon } from './Icons';
 import type { Rendered, Size } from './diagram-svg';
@@ -192,11 +193,15 @@ function FullScreenDiagram({ rendered, onClose }: { rendered: Rendered; onClose(
 
 function DiagramViewer({ rendered, actions }: { rendered: Rendered; actions: ReactNode }) {
   const control = useDiagramView(rendered, 'inline');
+  const annotate = useContext(DiagramAnnotation);
+  const [drawing, setDrawing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const expand = useRef<HTMLButtonElement>(null);
   const close = () => { setExpanded(false); requestAnimationFrame(() => expand.current?.focus()); };
   return <>
     <header><span>Mermaid diagram</span><div className="diagram-toolbar"><ZoomControls control={control}/>
+      {annotate && <button type="button" className="diagram-tool text" onClick={() => setDrawing(true)}>Annotate</button>}
+      {drawing && annotate && <Drawing diagram={rendered} onClose={() => setDrawing(false)} onAttach={file => { annotate(file, rendered.text); setDrawing(false); }}/>}
       <button ref={expand} type="button" className="diagram-tool" aria-label="Open full screen" title="Full screen (Enter)" onClick={() => setExpanded(true)}><Icon name="expand" size={14}/></button>
       {actions}<CopyButton text={rendered.svg} label="Copy SVG">SVG</CopyButton></div></header>
     <DiagramCanvas rendered={rendered} control={control} mode="inline" onExpand={() => setExpanded(true)} label="Mermaid diagram viewer"/>

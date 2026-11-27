@@ -1035,7 +1035,7 @@ actions:
       }
       case 'OpenAssistant': {
         mutations.push({ method, body });
-        const session = { id: `assistant-${sessions.length}`, collectionId:body.collectionId||'', profileId: body.profileId, purpose: body.purpose, status: 'ready', capabilities: { images: true }, pending: [] }; sessions.push(session); return json({ session });
+        const session = { id: `assistant-${sessions.length}`, collectionId:body.collectionId||'', profileId: body.profileId, purpose: body.purpose, status: 'ready', capabilities: { images: true, files: body.purpose === 'artifact' }, pending: [] }; sessions.push(session); return json({ session });
       }
       // Like the Runner: the agent ends between turns and the conversation continues in a new one with that model.
       case 'RestartWithModel': case 'RestartWithPermission': {

@@ -559,3 +559,16 @@ access.
 In the sub-agent panel, the timer shows elapsed run time. After a minute without a reported event, **Last update** shows how long it has been since Lazybox heard from that sub-agent. Hover over it for the timestamp.
 
 If the provider stops responding during a turn, the chat reports any background work still running. With an empty composer, choose **Continue from here** to ask the agent to check existing commands and results before finishing the task. Once the Runner accepts the continuation, the button shows a delivery confirmation while the chat waits for updated turn status. You can also send your own follow-up.
+
+Choose **Draw** beside the attachment button to sketch in the embedded
+Excalidraw editor. **Attach drawing** puts a PNG in the draft. Choose **Edit**
+on its thumbnail to reopen the strokes. Editing an attached picture adds the
+annotated copy beside the original. In an artifact with an agent companion, choose **Annotate** on a
+Mermaid diagram to attach the marked image with its Mermaid source and version
+reference. Add your instructions and send the draft to the agent.
+
+For image generation, attach the sketch as a reference and describe the
+picture you want to an agent with an image-generation tool. For a localized
+edit, open an attached picture, brush over the region, and choose **Attach
+marks as edit mask**. The draft contains the original and a same-size PNG
+whose transparent pixels identify the area to regenerate.

@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 )
@@ -286,5 +287,151 @@ func TestAdoptionDrainsAQueueLeftBehindAProviderError(t *testing.T) {
 	a.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed", Cursor: 1}
 	if op := applied(t, a.Session); op.ID != "later" {
 		t.Fatalf("out of order: %+v", op)
+	}
+}
+
+func TestRepeatedSendNowKeepsPriorityOrderAndLetsEachTurnFinish(t *testing.T) {
+	e, provider := bench(t, false)
+	ctx := contextFor(t)
+	send := func(id string) {
+		t.Helper()
+		if _, err := e.Apply(ctx, agent.Operation{ID: id, Kind: agent.Message, Text: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := func(id string) {
+		t.Helper()
+		if _, err := e.DeliverQueued(ctx, id, DeliverNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expect := func(id string) {
+		t.Helper()
+		if op := applied(t, provider); op.ID != id {
+			t.Fatalf("provider got %s, want %s", op.ID, id)
+		}
+	}
+	send("original")
+	expect("original")
+	send("ordinary")
+	send("first")
+	send("second")
+	now("first")
+	expect("first:now")
+	now("second")
+	provider.Events <- agent.Event{Type: "turn_ended", Status: "interrupted"}
+	expect("first")
+	send("third")
+	now("third")
+	for _, id := range []string{"second", "third", "ordinary"} {
+		provider.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+		expect(id)
+	}
+}
+
+func TestPriorityComposerSendSurvivesRestartAndRetry(t *testing.T) {
+	e, native, store, path := durableEngine(t)
+	ctx := contextFor(t)
+	first := agent.Operation{ID: "first", Kind: agent.Message, Text: "first", Priority: true}
+	if _, err := e.Apply(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if op := applied(t, native); op.ID != first.ID {
+		t.Fatalf("idle send: %+v", op)
+	}
+	native.Events <- agent.Event{Type: "turn_started", SessionID: "native-ref", Cursor: 1}
+	await(t, e, "turn_started")
+	for _, op := range []agent.Operation{
+		{ID: "ordinary", Kind: agent.Message, Text: "later"},
+		{ID: "second", Kind: agent.Message, Text: "second", Priority: true},
+	} {
+		if _, err := e.Apply(ctx, op); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	next, adapter, err := adopt(t, path, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := agent.Operation{ID: "third", Kind: agent.Message, Text: "third", Priority: true}
+	r, err := next.Apply(ctx, third)
+	if err != nil || r.Delivery != "prioritized" || r.Interrupted {
+		t.Fatalf("after restart: %+v %v", r, err)
+	}
+	third.Priority = false
+	if _, err := next.Apply(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{"second", "third", "ordinary"} {
+		adapter.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed", Cursor: uint64(2 + i)}
+		if op := applied(t, adapter.Session); op.ID != want {
+			t.Fatalf("got %+v, want %s", op, want)
+		}
+	}
+}
+
+func TestSteerDuringSendNowKeepsMessageQueued(t *testing.T) {
+	e, provider := bench(t, true)
+	ctx := contextFor(t)
+	for _, op := range []agent.Operation{
+		{ID: "active", Kind: agent.Message, Text: "start"},
+		{ID: "urgent", Kind: agent.Message, Text: "next", Priority: true},
+		{ID: "follow", Kind: agent.Message, Text: "detail"},
+	} {
+		if _, err := e.Apply(ctx, op); err != nil {
+			t.Fatal(err)
+		}
+		if op.ID != "follow" {
+			applied(t, provider)
+		}
+	}
+	if _, err := e.DeliverQueued(ctx, "follow", DeliverSteer); err == nil {
+		t.Fatal("steered into the stopping turn")
+	}
+	provider.Events <- agent.Event{Type: "turn_ended", Status: "interrupted"}
+	if op := applied(t, provider); op.ID != "urgent" {
+		t.Fatalf("next turn: %+v", op)
+	}
+	if _, err := e.DeliverQueued(ctx, "follow", DeliverSteer); err != nil {
+		t.Fatal(err)
+	}
+	if op := applied(t, provider); op.Kind != agent.Steer || op.ID != "follow" {
+		t.Fatalf("steer: %+v", op)
+	}
+}
+
+func TestPriorityQueueAdvancesBeforeInterruptReceipt(t *testing.T) {
+	e, provider := bench(t, false)
+	ctx := contextFor(t)
+	submit := func(id string, priority bool) error {
+		_, err := e.Apply(ctx, agent.Operation{ID: id, Kind: agent.Message, Text: id, Priority: priority})
+		return err
+	}
+	if err := submit("active", false); err != nil {
+		t.Fatal(err)
+	}
+	applied(t, provider)
+	release := make(chan struct{})
+	defer close(release)
+	provider.Hold(agent.Interrupt, release, nil)
+	go func() { _ = submit("first", true) }()
+	for e.Snapshot().Queued == 0 {
+		select {
+		case <-ctx.Done():
+			t.Fatal("priority message was not accepted")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := submit("second", true); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"first", "second"} {
+		provider.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+		if op := applied(t, provider); op.ID != want {
+			t.Fatalf("got %s, want %s", op.ID, want)
+		}
 	}
 }

@@ -22,6 +22,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	RunnerService_ListSnippets_FullMethodName                 = "/lazybox.bench.v1.RunnerService/ListSnippets"
 	RunnerService_GetRepositoryCatalog_FullMethodName         = "/lazybox.bench.v1.RunnerService/GetRepositoryCatalog"
+	RunnerService_DeleteLocalBranch_FullMethodName            = "/lazybox.bench.v1.RunnerService/DeleteLocalBranch"
 	RunnerService_PrepareWorkspace_FullMethodName             = "/lazybox.bench.v1.RunnerService/PrepareWorkspace"
 	RunnerService_ListRepositoryBranches_FullMethodName       = "/lazybox.bench.v1.RunnerService/ListRepositoryBranches"
 	RunnerService_RefreshRepositoryIdentity_FullMethodName    = "/lazybox.bench.v1.RunnerService/RefreshRepositoryIdentity"
@@ -266,6 +267,7 @@ const (
 type RunnerServiceClient interface {
 	ListSnippets(ctx context.Context, in *InfoRequest, opts ...grpc.CallOption) (*SnippetCatalog, error)
 	GetRepositoryCatalog(ctx context.Context, in *GetRepositoryCatalogRequest, opts ...grpc.CallOption) (*RepositoryCatalog, error)
+	DeleteLocalBranch(ctx context.Context, in *DeleteLocalBranchRequest, opts ...grpc.CallOption) (*DeleteLocalBranchResponse, error)
 	PrepareWorkspace(ctx context.Context, in *PrepareWorkspaceRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkspacePreparation], error)
 	// A repository's branches for New task's "Start from" choice, its default
 	// branch and the branch it last started from (WORKSPACES.md, "Start from").
@@ -845,6 +847,16 @@ func (c *runnerServiceClient) GetRepositoryCatalog(ctx context.Context, in *GetR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RepositoryCatalog)
 	err := c.cc.Invoke(ctx, RunnerService_GetRepositoryCatalog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) DeleteLocalBranch(ctx context.Context, in *DeleteLocalBranchRequest, opts ...grpc.CallOption) (*DeleteLocalBranchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteLocalBranchResponse)
+	err := c.cc.Invoke(ctx, RunnerService_DeleteLocalBranch_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3271,6 +3283,7 @@ func (c *runnerServiceClient) SaveSnippet(ctx context.Context, in *SaveSnippetRe
 type RunnerServiceServer interface {
 	ListSnippets(context.Context, *InfoRequest) (*SnippetCatalog, error)
 	GetRepositoryCatalog(context.Context, *GetRepositoryCatalogRequest) (*RepositoryCatalog, error)
+	DeleteLocalBranch(context.Context, *DeleteLocalBranchRequest) (*DeleteLocalBranchResponse, error)
 	PrepareWorkspace(*PrepareWorkspaceRequest, grpc.ServerStreamingServer[WorkspacePreparation]) error
 	// A repository's branches for New task's "Start from" choice, its default
 	// branch and the branch it last started from (WORKSPACES.md, "Start from").
@@ -3841,6 +3854,9 @@ func (UnimplementedRunnerServiceServer) ListSnippets(context.Context, *InfoReque
 }
 func (UnimplementedRunnerServiceServer) GetRepositoryCatalog(context.Context, *GetRepositoryCatalogRequest) (*RepositoryCatalog, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRepositoryCatalog not implemented")
+}
+func (UnimplementedRunnerServiceServer) DeleteLocalBranch(context.Context, *DeleteLocalBranchRequest) (*DeleteLocalBranchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteLocalBranch not implemented")
 }
 func (UnimplementedRunnerServiceServer) PrepareWorkspace(*PrepareWorkspaceRequest, grpc.ServerStreamingServer[WorkspacePreparation]) error {
 	return status.Error(codes.Unimplemented, "method PrepareWorkspace not implemented")
@@ -4603,6 +4619,24 @@ func _RunnerService_GetRepositoryCatalog_Handler(srv interface{}, ctx context.Co
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).GetRepositoryCatalog(ctx, req.(*GetRepositoryCatalogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_DeleteLocalBranch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteLocalBranchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).DeleteLocalBranch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_DeleteLocalBranch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).DeleteLocalBranch(ctx, req.(*DeleteLocalBranchRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -8827,6 +8861,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRepositoryCatalog",
 			Handler:    _RunnerService_GetRepositoryCatalog_Handler,
+		},
+		{
+			MethodName: "DeleteLocalBranch",
+			Handler:    _RunnerService_DeleteLocalBranch_Handler,
 		},
 		{
 			MethodName: "ListRepositoryBranches",

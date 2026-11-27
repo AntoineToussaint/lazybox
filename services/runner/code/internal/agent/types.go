@@ -240,6 +240,8 @@ func ValidEffort(provider, effort string) error {
 }
 
 type Operation struct {
+	// Priority marks messages promoted by Send now in the durable queue.
+	Priority bool `json:"priority,omitempty"`
 	// QueueEditID holds a queued message until its editor saves or cancels.
 	QueueEditID string  `json:"queueEditId,omitempty"`
 	ID          string  `json:"id"`
@@ -347,10 +349,11 @@ const (
 // Delivery is "acknowledged" only if the provider actually replied. A pipe
 // write, an SDK iterator submission, and a completed turn are different facts.
 type Receipt struct {
-	ID         string `json:"id"`
-	Delivery   string `json:"delivery"`
-	ProviderID string `json:"providerId,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Interrupted bool   `json:"-"` // This call interrupted a turn for a priority message.
+	ID          string `json:"id"`
+	Delivery    string `json:"delivery"`
+	ProviderID  string `json:"providerId,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 // File refers to bytes retained by the Runner, never a client-supplied path.

@@ -153,3 +153,9 @@ lazybox.every(5000, async () => {
 Every call, its grant and what it returns: [the bridge
 reference](../reference/extensions.md). How it is kept safe:
 [EXTENSIONS.md](../../EXTENSIONS.md).
+
+### PR Create / Explain and Mission Planning
+
+Install either panel from the Extensions catalog. Select a workspace and a conversation with a provider account. **Explain as artifact** asks that conversation to inspect a tracked PR or the current changes and publish the explanation in workspace Artifacts. **Create draft PR** explicitly requests GitHub publication for the current branch. Read the artifact for examples, interface changes, implementation evidence and verification gaps. Rerunning the explanation requests a new version of the same report.
+
+**Mission Planning** lists workspace conversations in Plan mode. Enter an outcome and choose **Plan for approval** on the Mission orchestrator's conversation. The planner traces the baseline, investigates disproportionate implementation scope, proposes estimates and turns acceptance examples into a versioned delivery spec. Unresolved criteria stay in planning. Configure the Mission grant to require plan approval. Review the spec revision, task boundaries and estimates in the native approval sheet before dispatch. A conversation without a Mission grant can prepare artifacts but cannot submit the Mission proposal.

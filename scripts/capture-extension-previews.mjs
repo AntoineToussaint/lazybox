@@ -13,6 +13,7 @@ const fixture = await startRunnerFixture();
 fixture.telemetry = body => report(body.workspace);
 fixture.artifacts.agentPut({collectionId:'alpha',sessionId:'alpha-session',kind:'notes',title:'Deployment checklist',content:'Verify the release candidate before promoting it.'});
 Object.assign(fixture.sessions.find(item => item.id === 'beta-session'), {title:'Review the migration plan',status:'waiting_input',pending:[{type:'question',requestId:'migration',text:'Which schema should we deploy?'}]});
+if (process.argv.includes('mission-planning')) fixture.sessions.find(s => s.id === 'alpha-session').workflow = 'plan';
 const server = await createServer({...testViteCache(import.meta.url), configFile:false, root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:fixture.url}}}});
 const browser = await webkit.launch();
 try {

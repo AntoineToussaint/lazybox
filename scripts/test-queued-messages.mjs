@@ -34,7 +34,7 @@ for(const session of [claude,codex]){
 const agentSays=async(chat,session,text)=>{channels[session.id].push({type:'message_delta',text});await expect(chat.getByText(text)).toBeVisible();};
 const youSaid=(chat,text)=>chat.locator('article.message.operation_accepted',{hasText:text});
 const deliveries=()=>f.mutations.filter(m=>m.method==='Apply'&&m.body.deliverQueued).map(m=>m.body.deliverQueued);
-const sentAs=text=>f.mutations.findLast(m=>m.method==='Apply'&&m.body.message?.text===text)?.body.operationId;
+const sentAs=text=>f.mutations.findLast(m=>m.method==='Apply'&&(m.body.message||m.body.sendNow)?.text===text)?.body.operationId;
 
 const server=await createServer({...testViteCache(import.meta.url),configFile:false,logLevel:'error',root:fileURLToPath(new URL('../apps/web',import.meta.url)),plugins:[react()],server:{host:'127.0.0.1',port:0,proxy:{'/lazybox.bench.v1.RunnerService/':{target:f.url}}}});let browser;
 try{
@@ -52,7 +52,7 @@ try{
  await expect(chat.getByRole('region',{name:'What the agent is doing'})).toBeVisible();
  await expect(strip).toHaveCount(0);
  // While the agent works, the message box says what ↵ and Send now's key do.
- await expect(hint).toHaveText(`↵ queues for later · Send now (${nowKey}) interrupts the current turn`);
+ await expect(hint).toHaveText(`↵ queues for later · Send now (${nowKey}) prioritizes in send order`);
  // The session poll lags the stream (frozen here): the strip shows the message from the stream, at once.
  f.freezeSession(claude.id);
  await composer.fill('Use port 4000 instead, 3000 is taken.');await composer.press('Enter');
@@ -67,7 +67,7 @@ try{
  await expect(youSaid(chat,'Use port 4000 instead')).toHaveCount(0);
  // Claude cannot take a message mid-turn: no Steer, and the strip says so.
  await expect(item.getByRole('button',{name:'Steer'})).toHaveCount(0);
- await expect(strip.locator('.queued-note')).toHaveText(`Claude can’t take a message in the middle of a turn: Send now (${nowKey}) stops its current step first, then sends yours.`);
+ await expect(strip.locator('.queued-note')).toHaveText(`Claude can’t take a message in the middle of a turn: Send now (${nowKey}) prioritizes your message. Earlier priority messages finish first.`);
  await page.screenshot({path:'.cache/queued-claude.png'});
 
  // ── Send now is one click; its tooltip names the step it stops, and the key that sends the oldest queued message.
@@ -75,7 +75,7 @@ try{
  f.thawSession(claude.id);f.freezeSession(claude.id);
  assert.equal(f.sessions[0].queuedMessages.length,1);
  const sendNow=item.getByRole('button',{name:'Send now'});
- await expect(sendNow).toHaveAttribute('title',`Stop npm run dev and send this as the next turn (${nowKey})`);
+ await expect(sendNow).toHaveAttribute('title',`Stop npm run dev and prioritize this message after earlier Send now requests (${nowKey})`);
  await page.screenshot({path:'.cache/queued-send-now.png'});
  await sendNow.click();
  await expect.poll(deliveries).toEqual([{operationId:f.mutations.find(m=>m.method==='Apply'&&m.body.message)?.body.operationId,how:'now'}]);
@@ -102,20 +102,21 @@ try{
  await sentNowOrder();
  await page.screenshot({path:'.cache/queued-sent-now.png'});
 
- // ── Typed, then ⌘↵ while the agent works: the message goes now, never left waiting in the queue.
- claude.sentNowReply='Restarting on port 5000.';
+ // A second shortcut keeps the running priority turn and waits behind it.
  await composer.fill('Actually use port 5000.');await composer.press(sendNowKey);
- await expect.poll(()=>deliveries().at(-1)).toEqual({operationId:sentAs('Actually use port 5000.'),how:'now'});
- assert.equal(deliveries().length,2);assert.equal(claude.interrupted,2,'the Runner interrupts the turn for it');
- await expect(composer).toHaveValue('');
- await expect(chat.locator('.stopped-line')).toHaveCount(2);
- await expect(chat.getByText('Restarting on port 5000.')).toBeVisible();
+ await expect.poll(()=>sentAs('Actually use port 5000.')).toBeTruthy();
+ await expect(strip.getByText('Actually use port 5000.',{exact:true})).toBeVisible();
+ assert.equal(claude.interrupted,1);
+ assert.equal(deliveries().length,1,'typed Send now is one atomic request');
+ assert.equal(claude.queuedMessages[0].text,'Actually use port 5000.');
+ const next=claude.queuedMessages.shift();
+ channels[claude.id].push({type:'turn_ended',status:'completed'});
+ channels[claude.id].push({type:'receipt',receipt:{operationId:next.operationId,delivery:'submitted'}});
+ channels[claude.id].push({type:'turn_started'});
+ channels[claude.id].push({type:'turn_ended',status:'completed'});
+ claude.priorityTurn=false;claude.queued=0;
+ channels[claude.id].push({type:'turn_started'});
  await expect(strip).toHaveCount(0);
- await expect(chat.getByRole('alert')).toHaveCount(0);
- {const order=await chat.locator('[data-message-id]').evaluateAll(nodes=>nodes.map(n=>n.textContent.trim()));
-  const typedAt=order.findIndex(t=>t.includes('Actually use port 5000.')),stoppedAt=order.lastIndexOf('Stopped to send your message'),repliedAt=order.findIndex(t=>t.includes('Restarting on port 5000.'));
-  assert.ok(typedAt>=0&&stoppedAt<typedAt&&typedAt<repliedAt,`the stop, then the typed message where the agent got it, then its turn: ${JSON.stringify(order)}`);}
-
  // ── Several queued messages: two shown, the rest counted, and the strip can be put away.
  for(const text of ['First follow-up','Second follow-up','Third follow-up']){await composer.fill(text);await composer.press('Enter');await expect.poll(()=>claude.queuedMessages.length).toBeGreaterThan(0);}
  await expect.poll(()=>claude.queuedMessages.length).toBe(3);
@@ -168,7 +169,7 @@ try{
  await composer.press(sendNowKey);
  await expect.poll(()=>deliveries().at(-1)).toEqual({operationId:sentAs('First follow-up'),how:'now'});
  f.thawSession(claude.id);
- assert.equal(claude.interrupted,3);
+ assert.equal(claude.interrupted,2);
  assert.deepEqual(claude.queuedMessages.map(m=>m.text),['Second follow-up','Third follow-up']);
  await expect(strip.locator('.queued-head [role=status]')).toHaveText(/^2 messages queued — Claude is busy/,{timeout:5000});
  await expect(strip.getByRole('listitem').first().locator('q')).toHaveText('Second follow-up');
@@ -213,7 +214,7 @@ try{
  await expect(claudeSteer).toHaveAttribute('title','Give Claude this message now, inside the running turn, without stopping it');
  await claudeSteer.click();
  await expect.poll(()=>deliveries().at(-1)).toEqual({operationId:sentAs('Second follow-up'),how:'steer'});
- assert.equal(claude.interrupted,3,'steering Claude does not interrupt its turn');
+ assert.equal(claude.interrupted,2,'steering Claude does not interrupt its turn');
  await expect(youSaid(chat,'Second follow-up').locator('.message-tag')).toHaveText('steered');
  await expect(strip.locator('.queued-head [role=status]')).toHaveText(/^Queued — Claude is busy/);
  await open(codex);
@@ -239,12 +240,32 @@ try{
    await expect(page.getByRole('alert').filter({hasText:'Still sending your previous message'})).toHaveCount(0);
  } finally { releaseReceipt(); }
  await expect.poll(()=>sentAs('Thanks, that is all.')).toBeTruthy();
- await expect(chat.locator('.send-button')).toBeEnabled();
- await expect(composer).toHaveValue('Follow-up before receipt');
- assert.equal(sentAs('Follow-up before receipt'), undefined);
+ await expect.poll(()=>sentAs('Follow-up before receipt')).toBeTruthy();
+ await expect(composer).toHaveValue('');
  await composer.fill('');
- assert.equal(f.mutations.filter(m => m.method === 'Apply' && m.body.message?.text === 'Thanks, that is all.').length, 1);
+ assert.equal(f.mutations.filter(m => m.method === 'Apply' && m.body.sendNow?.text === 'Thanks, that is all.').length, 1);
  assert.equal(deliveries().length,delivered,'no Send now');assert.equal(codex.interrupted,undefined,'nothing interrupted');
+ // The journal can confirm an ordinary send while its HTTP response is still missing.
+ let releaseJournalReceipt;
+ const holdJournalReceipt = new Promise(resolve => { releaseJournalReceipt = resolve; });
+ let requestId;
+ await page.route('**/Apply', async route => {
+   requestId = route.request().postDataJSON().operationId;
+   const response = await route.fetch();
+   await holdJournalReceipt;
+   await route.fulfill({response});
+ }, {times:1});
+ await composer.fill('Confirm from the journal');
+ await composer.press('Enter');
+ try {
+   await expect.poll(()=>requestId).toBeTruthy();
+   await expect(composer).toHaveValue('');
+   await composer.fill('Continue typing here');
+   channels[codex.id].push({type:'operation_accepted',operationId:requestId,text:'Confirm from the journal'});
+   await expect(chat.locator('.send-button')).toBeEnabled();
+   await expect(composer).toHaveValue('Continue typing here');
+   assert.equal(f.mutations.filter(m=>m.method==='Apply'&&m.body.operationId===requestId).length,1);
+ } finally { releaseJournalReceipt(); }
  // Click Send, lose the receipt, then retry after reload with both drafts intact.
  let failSend;
  const failedReceipt = new Promise(resolve => { failSend = resolve; });
@@ -268,6 +289,20 @@ try{
  await expect.poll(()=>sentAs('Retry the original')).toBe(firstOperation);
  await expect(composer).toHaveValue('Keep this next draft');
  await composer.fill('');
+ // A late journal event also resolves an already displayed transport failure.
+ let lateId;
+ await page.route('**/Apply', async route => {
+   lateId = route.request().postDataJSON().operationId;
+   await route.abort('failed');
+ }, {times:1});
+ await composer.fill('Recover delayed confirmation');
+ await composer.press('Enter');
+ await expect(composer).toHaveValue('Recover delayed confirmation');
+ await expect(chat.getByText('The previous send was not confirmed.',{exact:false})).toBeVisible();
+ channels[codex.id].push({type:'operation_accepted',operationId:lateId,text:'Recover delayed confirmation'});
+ await expect(composer).toHaveValue('');
+ await expect(chat.getByText('The previous send was not confirmed.',{exact:false})).toHaveCount(0);
+ await expect(chat.getByRole('alert')).toHaveCount(0);
  // A custom send shortcut takes precedence over the default newline key.
  await page.getByRole('button',{name:'Settings',exact:true}).click();
  await page.getByRole('tab',{name:'Shortcuts'}).click();

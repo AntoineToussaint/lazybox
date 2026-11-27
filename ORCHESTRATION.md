@@ -833,8 +833,7 @@ chat, to start a second conversation. In the field, an agent asked to do
 that ran `lazybox agents` (exit 2), then `spawn` (exit 4 and a paragraph of
 what agent credentials may do), and got no further. Now:
 
-- **One request, one click.** `lazybox conversation new` (and `lazybox
-  agents spawn` without a grant) calls `RequestConversationStart`, which
+- **One request, one click.** `lazybox conversation new` calls `RequestConversationStart`, which
   records a request on the asking conversation
   (`runner/conversation_starts.go`, persisted in `conversation-starts.json`).
   The request carries the title, the brief (at most 8 KB) or an artifact of

@@ -274,6 +274,20 @@ async function run(name,engine){
   await folded.evaluate(node=>node.remove());
   await expect(pane).toContainText('KEYBOARD_TAIL');
   await expect.poll(gap).toBeLessThan(3);
+  // At the top of a history window, its paging button can be the first visible
+  // element. The first actual message should stay on screen as older rows mount.
+  const heldRow=await pane.evaluate(node=>{
+   node.scrollTop=0;
+   const row=[...node.querySelectorAll('[data-message-id]')].find(item=>item.getBoundingClientRect().height>0);
+   const held={id:row.dataset.messageId,offset:row.getBoundingClientRect().top-node.getBoundingClientRect().top};
+   node.dispatchEvent(new Event('scroll'));
+   return held;
+  });
+  await expect.poll(()=>pane.evaluate((node,held)=>{
+   const row=node.querySelector('[data-message-id="'+CSS.escape(held.id)+'"]');
+   const first=[...node.querySelectorAll('[data-message-id]')].find(item=>item.getBoundingClientRect().height>0);
+   return row&&first!==row ? Math.abs(row.getBoundingClientRect().top-node.getBoundingClientRect().top-held.offset) : Infinity;
+  },heldRow),{message:'Paging older history keeps the first visible message on screen'}).toBeLessThanOrEqual(1);
   await page.screenshot({path:`/tmp/lazybox-chat-scroll-${name}.png`});
   await drainPageErrors(errors);assert.deepEqual(errors,[]);
   console.log(`PASS ${name}: true bottom after late header, resize and Mermaid; reading held mid-stream against wheel, PageUp, Home, ArrowUp and a scrollbar drag; Latest pill, End, wheel to bottom and send resume following; layout shifts above the viewport keep the reading position.`);

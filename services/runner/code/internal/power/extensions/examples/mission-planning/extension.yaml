@@ -1,0 +1,14 @@
+lazybox: 1
+name: Mission Planning
+version: 1.0.0
+author: Lazybox
+category: Code & documentation
+description: Define acceptance criteria, investigate change scope and estimate work before proposing a Mission plan.
+caption: Define acceptance criteria, investigate change scope and estimate work before proposing a Mission plan.
+keywords: [planning, architecture, acceptance]
+panels:
+  - id: main
+    title: Mission Planning
+    icon: notes
+    entry: index.html
+grants: [read:workspaces, read:sessions, send:messages]

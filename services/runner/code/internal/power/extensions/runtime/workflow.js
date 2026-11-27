@@ -90,5 +90,24 @@ const workflow = (() => {
     const trigger = document.getElementById('inbox');
     trigger.addEventListener('click', () => lazybox.run('inbox.open').catch(error => say(error.message)));
   };
-  return { list, row, button, say, workspace, poll, openInbox };
+  // Bind each explicit action to the workspace and conversation shown on its row.
+  const conversationActions = (load, actions, planOnly = false) => poll(15000, async () => {
+    const current = await workspace();
+    if (!current) return;
+    const result = await lazybox.sessions.list({workspaceId: current.id, planOnly});
+    await load(current);
+    const sessions = result.conversations.filter(s => !s.closed && s.workspaceId === current.id);
+    list(sessions.map(s => row(s.sessionId, s.title, s.provider, ...actions(s).map(([label, prompt]) =>
+      button(label, async () => {
+        if ((await lazybox.workspaces.focused()).workspace?.id !== current.id) throw Error('Workspace changed. Refresh the panel.');
+        if (planOnly) {
+          const latest = await lazybox.sessions.list({workspaceId: current.id, planOnly: true});
+          if (!latest.conversations.some(item => item.sessionId === s.sessionId && !item.closed)) throw Error('Choose a conversation still in Plan mode.');
+        }
+        const text = prompt();
+        await lazybox.messages.send(s.sessionId, text);
+        document.getElementById('result').textContent = 'Requested in ' + s.title + '.';
+      })))), planOnly ? 'Open a workspace conversation in Plan mode to continue.' : 'Open a conversation in this workspace to continue.');
+  });
+  return { list, row, button, say, workspace, poll, openInbox, conversationActions };
 })();

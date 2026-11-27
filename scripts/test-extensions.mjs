@@ -94,7 +94,7 @@ async function scenario(browser, scheme, full) {
     await expect(catalog.getByRole('button', {name:'Install', exact:true})).toHaveCount(0);
     await status.selectOption('available');
     await expect(catalog.getByRole('listitem', { name: 'Mischief' })).toHaveCount(0);
-    await expect(catalog.locator(':scope > li')).toHaveCount(13);
+    await expect(catalog.locator(':scope > li')).toHaveCount(15);
     await status.selectOption('all');
     await search.fill('coding style');
     await expect(panel.getByText('Clone Me',{exact:true})).toBeVisible();
@@ -396,6 +396,18 @@ try {
     await page.getByRole('dialog', { name: 'Allow ' + name + '?' }).getByRole('button', { name: 'Allow and turn on' }).click();
     return page.frameLocator('iframe.extension-frame').frameLocator('iframe');
   }
+  const explain = await installPanel('PR Create / Explain');
+  await explain.getByRole('button', {name:'Explain as artifact'}).first().click();
+  await expect(explain.locator('#result')).toContainText('Requested in');
+  assert.ok(f.mutations.some(m => m.method === 'Apply' && m.body.message?.text.includes('report.v1')));
+  const planning = await installPanel('Mission Planning');
+  await expect(planning.getByRole('button', {name:'Plan for approval'})).toHaveCount(0);
+  f.sessions.find(s => s.id === 'alpha-session').workflow = 'plan';
+  await planning.getByRole('button', {name:'Refresh'}).click();
+  await planning.getByLabel('Mission outcome').fill('Preserve the draft on reconnect');
+  await planning.getByRole('button', {name:'Plan for approval'}).first().click();
+  await expect(planning.locator('#result')).toContainText('Requested in');
+  assert.ok(f.mutations.some(m => m.method === 'Apply' && m.body.message?.text.includes('Preserve the draft on reconnect')));
   const preview = await installPanel('Preview Desk');
   await expect(preview.getByRole('button', { name: 'Review repository setup' }).first()).toBeVisible();
   await preview.getByLabel('Ready previews only').check();

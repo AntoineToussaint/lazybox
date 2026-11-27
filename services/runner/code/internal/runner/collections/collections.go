@@ -629,7 +629,7 @@ func (m *Manager) planMembers(ctx context.Context, c Collection, specs []MemberS
 			}
 		}
 		if exists {
-			return Collection{}, ErrBranchExists
+			return Collection{}, &BranchConflict{RepositoryID: r.ID, RepositoryName: r.Name}
 		}
 		branches[branchKey] = true
 		// No explicit base: origin's default branch as last fetched (base.go),
@@ -1120,4 +1120,30 @@ func (m *Manager) SetWorkflowReviewSchedule(id string, hourly bool) (Collection,
 		return Collection{}, err
 	}
 	return c, nil
+}
+
+// BranchConflict identifies the repository that owns a conflicting branch.
+type BranchConflict struct {
+	RepositoryID, RepositoryName string
+}
+
+func (e *BranchConflict) Error() string { return ErrBranchExists.Error() }
+func (e *BranchConflict) Unwrap() error { return ErrBranchExists }
+
+// DeleteLocalBranch removes a merged local branch. Git guards active worktrees.
+func (m *Manager) DeleteLocalBranch(ctx context.Context, id, branch string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.repos[id]
+	if !ok || r.Unavailable != "" {
+		return errors.New("repository unavailable")
+	}
+	if branch == "" || strings.HasPrefix(branch, "-") {
+		return errors.New("invalid branch name")
+	}
+	if _, err := m.git(ctx, r.Path, "check-ref-format", "refs/heads/"+branch); err != nil {
+		return err
+	}
+	_, err := m.git(ctx, r.Path, "branch", "-d", "--", branch)
+	return err
 }

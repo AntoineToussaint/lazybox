@@ -121,7 +121,7 @@ export async function startRunnerFixture() {
     { id: '101', name: 'api', fullName: 'fixture-team/api', private: true, defaultBranch: 'main', htmlUrl: 'https://github.com/fixture-team/api' },
     { id: '102', name: 'web', fullName: 'fixture-team/web', private: false, defaultBranch: 'main', htmlUrl: 'https://github.com/fixture-team/web' },
   ];
-  let catalogRemote=[], catalogUpdated='0';const preparationFailures=new Set();const prepared=[];
+  let catalogRemote=[], catalogUpdated='0';const unusedBranches=new Map();const preparationFailures=new Set();const prepared=[];
   // "Start from": origin's branches for every repository (main the default; the
   // newest commit first), the branch each repository last started from, and
   // how often origin was asked (the picker asks only when it opens).
@@ -780,6 +780,11 @@ actions:
        const known=body.remote?originBranches:originBranches.filter(b=>b.name==='main'||start.recent.includes(b.name));
        return json({repositoryIdentity:body.repositoryIdentity,defaultBranch:'main',startFrom:start.branch,recent:start.recent,branches:[...known].sort((a,b)=>Number(b.committedAtUnixMillis)-Number(a.committedAtUnixMillis)),remote:!!body.remote});
       }
+      case 'DeleteLocalBranch': {
+       const deleted=unusedBranches.get(body.repositoryId)?.delete(body.branch);
+       if(!deleted)return error('failed_precondition','Branch is checked out in a worktree');
+       mutations.push({method,body});return json({});
+      }
       case 'PrepareWorkspace': {
        mutations.push({method,body});const values=[];const members=[];
        for(const [identity,branch] of Object.entries(body.startFrom||{}))if(branch&&!originBranches.some(b=>b.name===branch))return error('failed_precondition',`${identity.replace(/^github:/,'')} has no branch ${branch} on origin: choose another to start from`);
@@ -788,8 +793,9 @@ actions:
         const changed=replacedRepositories.get(identity);if(changed){res.writeHead(200,{'Content-Type':'application/connect+json'});res.end(Buffer.concat([...values.map(v=>frame(v)),frame({identity,replaced:{identity,name:choice.name,hasCopy:!!changed.hasCopy}}),frame({error:{code:'failed_precondition',message:`could not prepare ${choice.name}: ${changed.hasCopy?"the repository's history changed on GitHub since Lazybox copied it; replace Lazybox's copy to continue":'on GitHub this name now belongs to another repository than the one Lazybox listed; use the repository GitHub has now to continue'}`}},2)]));return;}
         let repo=library.find(r=>r.id===choice.repositoryId);if(!repo){if(preparationFailures.delete(identity)){res.writeHead(200,{'Content-Type':'application/connect+json'});res.end(Buffer.concat([...values.map(v=>frame(v)),frame({error:{code:'failed_precondition',message:'Fixture preparation failure'}},2)]));return;}const remote=githubRepositories.find(r=>'github:'+r.fullName.toLowerCase()===identity);repo={id:remote?'github-'+remote.id:'local-'+(library.length+1),name:choice.name.split('/').at(-1),path:choice.path||'/fixture/repos/'+remote.id,gitIdentity:identity};library.push(repo);prepared.push(identity);}values.push({identity,message:'Preparing '+choice.name});members.push({repositoryId:repo.id,name:repo.name||repo.id,...(body.branch&&!body.collectionId?{branch:body.branch}:{})});}
        let collection=requests.get(body.requestKey);
-       if(!collection&&!body.collectionId&&body.branch&&members.some(spec=>collections.some(c=>c.members.some(m=>m.spec.repositoryId===spec.repositoryId&&m.spec.branch===body.branch)))){
-        res.writeHead(200,{'Content-Type':'application/connect+json'});res.end(frame({error:{code:'already_exists',message:'branch already exists; choose a new collection branch'}},2));return;
+       const conflicting=members.find(spec=>unusedBranches.get(spec.repositoryId)?.has(body.branch)||collections.some(c=>c.members.some(m=>m.spec.repositoryId===spec.repositoryId&&m.spec.branch===body.branch)));
+       if(!collection&&!body.collectionId&&body.branch&&conflicting){
+        res.writeHead(200,{'Content-Type':'application/connect+json'});res.end(Buffer.concat([frame({conflictingRepositoryId:conflicting.repositoryId,conflictingRepositoryName:conflicting.name}),frame({error:{code:'already_exists',message:'branch already exists; choose a new collection branch'}},2)]));return;
        }
        if(!collection){if(body.collectionId){collection=collections.find(c=>c.id===body.collectionId);if(!collection)return error('not_found','Missing workspace');collection.members.push(...members.map(spec=>({spec,path:collection.root+'/'+spec.name,ready:true})));}else{const id='created-'+collections.length;collection={id,name:body.name,...(body.item?{origin:{provider:body.item.provider||'github',key:body.item.key}}:{}),root:'/fixture/collections/'+id,state:'ready',members:members.map(spec=>({spec,path:'/fixture/collections/'+id+'/'+spec.name,ready:true}))};collections.push(collection);}requests.set(body.requestKey,collection);}rememberStarts();values.push({message:'Ready',collection});
        // Answering an agent's request for a repository: the request is resolved (the agent told)
@@ -1256,6 +1262,17 @@ actions:
         // Like the Runner: at a subscription limit a message is accepted and
         // waits in the queue (journaled once), delivered after the switch.
         const session=sessions.find(s=>s.id===body.sessionId);
+        if(session && body.sendNow) {
+          const op = {operationId:body.operationId,text:body.sendNow.text};
+          const ch = eventStreams.get(session.id);
+          ch?.push({type:'operation_accepted',...op});
+          if(!session.busy) {
+            ch?.push({type:'receipt',receipt:{operationId:op.operationId,delivery:'submitted'}});
+            return json({operationId:op.operationId,delivery:'accepted'});
+          }
+          (session.queuedMessages ||= []).push(op);
+          session.queued=session.queuedMessages.length;
+        }
         // `applyDelayMs`: a message the Runner takes a while to confirm (a send in flight).
         if(session?.applyDelayMs&&body.message)await new Promise(resolve=>setTimeout(resolve,session.applyDelayMs));
         // `turnOver`: the turn ended in the Runner before the client's view of it, as the engine says it.
@@ -1275,10 +1292,10 @@ actions:
         if(session&&body.permission){session.permission=body.permission.mode;eventStreams.get(session.id)?.push({type:'permission_changed',text:body.permission.mode,status:'live'});return json({operationId:body.operationId,delivery:'acknowledged'});}
         // Like the Runner: a queued message delivered ahead of its turn, "now" (the turn is
         // interrupted, it goes next) or "steer" (into the running turn, where the agent can).
-        if(session&&body.deliverQueued){
-          const {operationId,how}=body.deliverQueued,queue=session.queuedMessages||[],index=queue.findIndex(m=>m.operationId===operationId);
+        if(session&&(body.deliverQueued||body.sendNow)){
+          const {operationId,how}=body.deliverQueued||{operationId:body.operationId,how:"now"},queue=session.queuedMessages||[],index=queue.findIndex(m=>m.operationId===operationId);
           if(index<0)return error('failed_precondition','that message is no longer queued');
-          const message=queue[index], editor=body.deliverQueued.editId;
+          const message=queue[index], editor=body.deliverQueued?.editId;
           if(how==='edit'){
             if(message.editing && message.editor!==editor)return error('failed_precondition','message is being edited');
             message.editor=editor;message.editing=true;
@@ -1301,13 +1318,17 @@ actions:
           if(!session.busy)return error('failed_precondition','no active turn');
           // An agent slow to stop (a test opts in with session.sendNowWaits): like the Runner,
           // Send now interrupts and moves the message first in line, where it waits for the turn to end.
-          if(how==='now'&&session.sendNowWaits){
-            queue.unshift(...queue.splice(index,1));session.interrupted=(session.interrupted||0)+1;
+          if(how==='now' && (session.sendNowWaits || session.priorityTurn)){
+            const position = message.priority ? index : queue.slice(0,index).filter(m=>m.priority).length;
+            queue.splice(index,1);queue.splice(position,0,message);message.priority=true;
+            if(position || session.priorityTurn)return json({operationId:body.operationId,delivery:'prioritized'});
+            session.interrupted=(session.interrupted||0)+1;
             return json({operationId:body.operationId,delivery:'accepted'});
           }
           queue.splice(index,1);session.queued=Math.max(0,(session.queued||1)-1);
           const ch=eventStreams.get(session.id);
           if(how==='now'){
+            session.priorityTurn=true;
             session.interrupted=(session.interrupted||0)+1;
             // The journal of a Claude turn stopped for it, as a Claude worker
             // that still reports the stop writes it: the interrupt, Claude's
@@ -1463,7 +1484,7 @@ actions:
   const endpoint = join(directory, 'endpoint.json');
   const publish = () => writeFile(endpoint, JSON.stringify({ url, token, runnerId: 'fixturerunneridentity' }), { mode: 0o600 });
   await publish();
-  return { claudeAuth, arrangement, get runnerSettings() { return runnerSettings; }, freezeSession: id => frozenSessions.set(id, structuredClone(sessions.find(value => value.id === id))), thawSession: id => frozenSessions.delete(id), items, versionInfo, reviewBriefs, fileFinding, finishReview, authorFixed, resolveFinding, reopenFinding, exchange, power, config, extensions, browser, artifacts: artifactStore, themeFolder, remote, checkpoints, setCheckpoints, attachments, set telemetry(fn) { telemetry = fn; }, set attachmentReadDelayMs(value) { attachmentReadDelayMs = value; }, set terminalStartDelayMs(value) { terminalStartDelayMs = value; }, terminalOutput, set tailReadDelayMs(value) { tailReadDelayMs = value; }, runner, missions, processes, processHosting, terminals, commands, runtimeCommands, runtimes, runtimeFor, finishSetup, runtimeTiming, previewPort, startRun, startTerminalRun, streamCommand, claimedShares, githubRepositories, preparationFailures, prepared, startFrom, branchListings, ownership, replacedRepositories, refreshedRepositories, repositoryRequests, workspaceFiles, openEvents, reviews, reviewOf, diffs, workingFiles,
+  return { claudeAuth, arrangement, get runnerSettings() { return runnerSettings; }, freezeSession: id => frozenSessions.set(id, structuredClone(sessions.find(value => value.id === id))), thawSession: id => frozenSessions.delete(id), items, versionInfo, reviewBriefs, fileFinding, finishReview, authorFixed, resolveFinding, reopenFinding, exchange, power, config, extensions, browser, artifacts: artifactStore, themeFolder, remote, checkpoints, setCheckpoints, attachments, set telemetry(fn) { telemetry = fn; }, set attachmentReadDelayMs(value) { attachmentReadDelayMs = value; }, set terminalStartDelayMs(value) { terminalStartDelayMs = value; }, terminalOutput, set tailReadDelayMs(value) { tailReadDelayMs = value; }, runner, missions, processes, processHosting, terminals, commands, runtimeCommands, runtimes, runtimeFor, finishSetup, runtimeTiming, previewPort, startRun, startTerminalRun, streamCommand, claimedShares, githubRepositories, unusedBranches, preparationFailures, prepared, startFrom, branchListings, ownership, replacedRepositories, refreshedRepositories, repositoryRequests, workspaceFiles, openEvents, reviews, reviewOf, diffs, workingFiles,
     availability, acp, tracked,
     /** A conversation's open journal, without replacing it (openEvents starts a new one). */
     eventsOf: id => eventStreams.get(id),

@@ -78,6 +78,17 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
    anchor.current={node:hit,offset:hit.getBoundingClientRect().top-top};
    return;
   }
+  // Padding, gaps and paging controls can occupy the top edge. A paging
+  // control stays put when history is prepended, while the messages move.
+  for(const message of contentRef.current?.querySelectorAll<HTMLElement>('[data-message-id]')??[]){
+   const box=message.getBoundingClientRect();
+   if(box.height>0&&box.bottom>top&&box.top<rect.bottom){
+    reader.view.anchorId=message.dataset.messageId||'';
+    reader.view.anchorOffset=box.top-top;
+    anchor.current={node:message,offset:box.top-top};
+    return;
+   }
+  }
   reader.view.anchorId='';
   // Descend into the row across the top edge, so a change above the viewport
   // inside one long message is caught too.

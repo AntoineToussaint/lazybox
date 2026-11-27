@@ -106,3 +106,20 @@ func TestReaddRemovedRepositoryKeepsExistingBranch(t *testing.T) {
 		t.Fatal("branch changed")
 	}
 }
+
+func TestDeleteLocalBranch(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	m := newTest(t, t.TempDir(), repo)
+	current := gitTest(t, repo.Path, "branch", "--show-current")
+	if err := m.DeleteLocalBranch(ctx, repo.ID, current); err == nil {
+		t.Fatal("deleted checked-out branch")
+	}
+	gitTest(t, repo.Path, "branch", "feature/conflict")
+	if err := m.DeleteLocalBranch(ctx, repo.ID, "feature/conflict"); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := m.branchExists(ctx, repo.Path, "feature/conflict"); err != nil || exists {
+		t.Fatalf("branch exists = %t, err = %v", exists, err)
+	}
+}

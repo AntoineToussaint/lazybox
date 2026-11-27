@@ -29,7 +29,7 @@ import (
 
 // Errors the transport maps to a refusal an agent can read.
 var (
-	ErrNoGrant = errors.New("no Orchestrator grant for this conversation: ask the person to start a conversation with `lazybox conversation new --title … --brief …`")
+	ErrNoGrant = errors.New("grant_required: ask the person to select Authorize this coordinator in this conversation, then retry with the same request key")
 	ErrNoChild = errors.New("no such agent: you reach only the agents you started, and your own parent (lazybox agents ls)")
 )
 
@@ -525,9 +525,10 @@ func (b *Bench) spawnedView(ctx context.Context, parent *Execution, childConvers
 	for i := range view.Children {
 		if view.Children[i].Conversation == childConversation {
 			view.Spawned = &view.Children[i]
+			return view, nil
 		}
 	}
-	return view, nil
+	return LineageView{}, errors.New("the assigned conversation could not be found in the coordinator’s lineage")
 }
 
 // childWorkspace creates a workspace with the parent workspace's

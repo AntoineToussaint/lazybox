@@ -1,0 +1,14 @@
+lazybox: 1
+name: PR Create / Explain
+version: 1.0.0
+author: Lazybox
+category: Code & documentation
+description: Explain changes in a versioned artifact or create a draft pull request for the current branch.
+caption: Explain changes in a versioned artifact or create a draft pull request for the current branch.
+keywords: [pull requests, interfaces, review]
+panels:
+  - id: main
+    title: PR Create / Explain
+    icon: notes
+    entry: index.html
+grants: [read:workspaces, read:sessions, send:messages, read:pulls]

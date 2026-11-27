@@ -23,6 +23,7 @@ type accepted struct {
 	adopted bool
 }
 type Snapshot struct {
+	PriorityTurn         bool   `json:"priorityTurn,omitempty"`
 	RetryableOperationID string `json:"-"`
 	Title                string `json:"title,omitempty"`
 	// Opening is the conversation's first message, bounded: what a generated
@@ -54,6 +55,7 @@ type Snapshot struct {
 
 // QueuedMessage is a message accepted while the agent was busy.
 type QueuedMessage struct {
+	Priority    bool      `json:"priority,omitempty"`
 	Editing     bool      `json:"editing,omitempty"`
 	OperationID string    `json:"operationId"`
 	Text        string    `json:"text"`
@@ -223,7 +225,7 @@ func QueuedMessages(queue []agent.Operation, at map[string]time.Time) []QueuedMe
 		if len(text) > queuedPreview {
 			text = append(text[:queuedPreview-1], '…')
 		}
-		out = append(out, QueuedMessage{Editing: op.QueueEditID != "", OperationID: op.ID, Text: string(text), QueuedAt: at[op.ID], Origin: op.Origin})
+		out = append(out, QueuedMessage{Priority: op.Priority, Editing: op.QueueEditID != "", OperationID: op.ID, Text: string(text), QueuedAt: at[op.ID], Origin: op.Origin})
 	}
 	return out
 }
@@ -349,26 +351,36 @@ func (e *Engine) apply(ctx context.Context, op agent.Operation, interruptChildre
 	if err := ctx.Err(); err != nil {
 		return agent.Receipt{}, err
 	}
-	// A stop never waits behind a delivery in progress (a message waits for
-	// its turn's code checkpoint under opMu): it is what the person reaches
-	// for when that takes too long. Its acceptance is serialized by e.mu.
-	if op.Kind != agent.Interrupt {
+	// Message acceptance and queue order are serialized by mu. Only dispatch
+	// needs the provider delivery lock: a checkpoint for the previous turn
+	// may take minutes. Stops also bypass it so they can interrupt that turn.
+	if op.Kind != agent.Interrupt && op.Kind != agent.Message {
 		e.opMu.Lock()
 		defer e.opMu.Unlock()
 	}
 	return e.applySerialized(ctx, op, interruptChildren, false)
 }
 
-// Non-interrupt callers hold opMu, which also serializes queue dispatch.
+// Normal submissions hold opMu, which also serializes queue dispatch.
 func (e *Engine) applySerialized(ctx context.Context, op agent.Operation, interruptChildren, first bool) (agent.Receipt, error) {
 	op.Origin = op.Origin.Bounded()
-	// The attached instruction update is decided by the Runner, not the client,
-	// so a client retrying the same operation is recognized without it.
-	identity := op
-	identity.Context = ""
-	b, _ := json.Marshal(identity)
-	fingerprint := sha256.Sum256(b)
+	fingerprint := operationFingerprint(op)
 	e.mu.Lock()
+	return e.applyLocked(ctx, op, fingerprint, interruptChildren, first)
+}
+
+func operationFingerprint(identity agent.Operation) [sha256.Size]byte {
+	// The Runner supplies current instructions. Retrying a message also
+	// checks its original delivery even when a different shortcut was used.
+	identity.Context = ""
+	identity.Priority = false
+	b, _ := json.Marshal(identity)
+	return sha256.Sum256(b)
+}
+
+// applyLocked accepts an operation under e.mu and releases the lock before returning.
+// Send now can select its target and accept the interrupt under the same lock.
+func (e *Engine) applyLocked(ctx context.Context, op agent.Operation, fingerprint [sha256.Size]byte, interruptChildren, first bool) (agent.Receipt, error) {
 	if old, ok := e.ops[op.ID]; ok {
 		e.mu.Unlock()
 		if !old.adopted && old.fingerprint != fingerprint {
@@ -498,6 +510,14 @@ func (e *Engine) applySerialized(ctx context.Context, op agent.Operation, interr
 			e.queuedAt = map[string]time.Time{}
 		}
 		e.queuedAt[op.ID] = time.Now()
+		if op.Priority && !first {
+			result, err := e.prioritizeLocked(ctx, len(e.queue)-1, true)
+			if err != nil {
+				// The input was already accepted. The queue row can retry the stop.
+				return agent.Receipt{ID: op.ID, Delivery: "queued_stop_failed"}, nil
+			}
+			return result, nil
+		}
 		e.persistDurableLocked()
 		e.mu.Unlock()
 		go e.dispatch()
@@ -521,7 +541,7 @@ func (e *Engine) applySerialized(ctx context.Context, op agent.Operation, interr
 	}
 	e.mu.Unlock()
 	r, err := e.control(op)
-	rootStopFailed := err != nil
+	rootStopFailed := err != nil || r.Delivery == "failed" || r.Error != ""
 	for _, child := range children {
 		var childErr error
 		if !e.provider.Capabilities().StopAgent || child.NativeID == "" {
@@ -629,6 +649,10 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 	if how != DeliverNow && how != DeliverSteer && how != DelegateQueued && how != DeleteQueued {
 		return agent.Receipt{}, errors.New(`queue action must be "now", "steer", "delegate", or "delete"`)
 	}
+	if how == DeliverSteer || how == DelegateQueued {
+		e.opMu.Lock()
+		defer e.opMu.Unlock()
+	}
 	e.mu.Lock()
 	at := -1
 	for i, op := range e.queue {
@@ -638,6 +662,12 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 		}
 	}
 	if at < 0 {
+		// A composer send races normal dispatch when the conversation was idle.
+		if how == DeliverNow && e.state.Busy && e.turnOp == id && id != "" {
+			e.state.PriorityTurn = true
+			e.mu.Unlock()
+			return agent.Receipt{ID: id, Delivery: "prioritized"}, nil
+		}
 		previous := e.ops[id].receipt
 		e.mu.Unlock()
 		if how == DeleteQueued && previous.Delivery == "canceled_before_delivery" {
@@ -669,24 +699,38 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 			e.mu.Unlock()
 			return agent.Receipt{}, errors.New("no active turn")
 		}
+		if e.stop.stopping() {
+			e.mu.Unlock()
+			return agent.Receipt{}, errors.New("the current turn is stopping; the message is still queued")
+		}
 		e.queue = append(e.queue[:at:at], e.queue[at+1:]...)
 		queuedAt := e.queuedAt[op.ID]
 		delete(e.queuedAt, op.ID)
 		e.persistDurableLocked()
 		e.mu.Unlock()
-		e.opMu.Lock()
 		steer := op
 		steer.Kind = agent.Steer
 		if how == DelegateQueued {
 			steer.Text = "Please spawn a sub-agent for the following queued message and continue your current task. If delegation is unavailable, tell me.\n\n" + op.Text
 		}
 		r, err := e.control(steer)
-		e.opMu.Unlock()
 		r.ID = op.ID
 		e.mu.Lock()
+		if err == nil && (r.Delivery == "failed" || r.Error != "") {
+			err = errors.New("provider refused queued message: " + r.Error)
+		}
 		if err != nil {
-			// Not delivered: the message keeps its place, first in line.
-			e.queue = append([]agent.Operation{op}, e.queue...)
+			// Preserve earlier priority requests even if another window promoted
+			// a message while the provider was answering.
+			position := min(at, len(e.queue))
+			if !op.Priority {
+				for position < len(e.queue) && e.queue[position].Priority {
+					position++
+				}
+			}
+			e.queue = append(e.queue, agent.Operation{})
+			copy(e.queue[position+1:], e.queue[position:])
+			e.queue[position] = op
 			if !queuedAt.IsZero() {
 				e.queuedAt[op.ID] = queuedAt
 			}
@@ -709,7 +753,24 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 		e.mu.Unlock()
 		return r, nil
 	}
-	e.queue = append(append([]agent.Operation{op}, e.queue[:at]...), e.queue[at+1:]...)
+	return e.prioritizeLocked(ctx, at, false)
+}
+
+// prioritizeLocked serves both the composer and an existing queue row. It releases e.mu.
+func (e *Engine) prioritizeLocked(ctx context.Context, at int, newlyAccepted bool) (agent.Receipt, error) {
+	op := e.queue[at]
+	// Preserve promotion order ahead of ordinary messages. Repeating the first
+	// request can retry a stalled interrupt without changing its position.
+	position := at
+	if newlyAccepted || !op.Priority {
+		position = 0
+		for position < at && e.queue[position].Priority {
+			position++
+		}
+		copy(e.queue[position+1:at+1], e.queue[position:at])
+		op.Priority = true
+		e.queue[position] = op
+	}
 	e.persistDurableLocked()
 	busy := e.state.Busy
 	if e.state.Fault == agent.DeliveryRejectedFault {
@@ -717,26 +778,41 @@ func (e *Engine) DeliverQueued(ctx context.Context, id, how string) (agent.Recei
 		// message they send would (dispatch holds the queue otherwise).
 		e.state.Fault = ""
 	}
-	interruptID := op.ID[:min(len(op.ID), 120)] + ":now"
+	if busy && (position > 0 || e.state.PriorityTurn) {
+		e.mu.Unlock()
+		return agent.Receipt{ID: op.ID, Delivery: "prioritized"}, nil
+	}
+	interruptID := op.ID + ":now"
+	if len(interruptID) > 128 {
+		interruptID = fmt.Sprintf("%x:now", sha256.Sum256([]byte(op.ID)))
+	}
 	if previous, found := e.ops[interruptID]; found && previous.receipt.Delivery != "accepted" {
 		interruptID = "queued-interrupt:" + rand.Text()
 	}
-	e.mu.Unlock()
 	if !busy {
+		e.mu.Unlock()
 		go e.dispatch()
 		return agent.Receipt{ID: op.ID, Delivery: "accepted"}, nil
 	}
 	// The interrupt ends the turn; the dispatch that follows takes this message.
 	// Each delivery attempt can interrupt again if the provider did not end
 	// the turn. Reusing the queued message ID here only replayed the old receipt.
-	r, err := e.apply(ctx, agent.Operation{ID: interruptID, Kind: agent.Interrupt}, false)
+	if err := ctx.Err(); err != nil {
+		e.mu.Unlock()
+		return agent.Receipt{}, err
+	}
+	stop := agent.Operation{ID: interruptID, Kind: agent.Interrupt}
+	r, err := e.applyLocked(ctx, stop, operationFingerprint(stop), false, false)
+	if err == nil && (r.Delivery == "failed" || r.Error != "") {
+		err = fmt.Errorf("interrupt failed: %s", r.Error)
+	}
 	if err != nil && e.stillQueued(op.ID) {
 		return r, err
 	}
 	// Stopped, or the turn ended meanwhile and the message left the queue
 	// for its own turn (the stop then found nothing to stop): either way it
 	// is delivered next, which is what was asked.
-	return agent.Receipt{ID: op.ID, Delivery: "accepted"}, nil
+	return agent.Receipt{ID: op.ID, Delivery: "accepted", Interrupted: err == nil}, nil
 }
 
 // EditQueued serializes an edit hold with dispatch. The head keeps its position
@@ -902,6 +978,7 @@ func (e *Engine) dispatch() {
 	delete(e.queuedAt, op.ID)
 	e.persistDurableLocked()
 	e.state.Busy = true
+	e.state.PriorityTurn = op.Priority
 	e.observe(agent.Event{Type: "agent_status", Status: string(agent.Starting)})
 	if op.Kind == agent.Answer || op.Kind == agent.Approve {
 		e.responses[op.RequestID] = true
@@ -945,6 +1022,7 @@ func (e *Engine) dispatch() {
 			e.queuedAt[op.ID] = queuedAt
 		}
 		e.turnOp = ""
+		e.state.PriorityTurn = false
 		e.turnInput = agent.Operation{}
 		e.persistDurableLocked()
 		e.mu.Unlock()
@@ -954,6 +1032,7 @@ func (e *Engine) dispatch() {
 	e.appendLocked(map[string]any{"type": "receipt", "receipt": r})
 	if err != nil {
 		e.state.Busy = false
+		e.state.PriorityTurn = false
 		e.turnInput = agent.Operation{}
 		// Its turn never starts: a stop that waited for it has nothing to stop.
 		e.stop.undelivered()
@@ -1102,6 +1181,7 @@ func (e *Engine) receive() {
 				break
 			}
 			e.state.Busy = false
+			e.state.PriorityTurn = false
 			ev.OperationID = e.turnOp
 			if e.stop.ended() && (ev.Status == "failed" || ev.Status == "") {
 				ev.Status = "interrupted"

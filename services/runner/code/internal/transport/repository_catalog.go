@@ -50,6 +50,12 @@ func (s *Service) PrepareWorkspace(r *pb.PrepareWorkspaceRequest, stream grpc.Se
 		workspace, err = s.Bench.PrepareWorkspaceFrom(stream.Context(), r.RequestKey, r.CollectionId, r.Name, r.Branch, r.RepositoryIdentities, r.StartFrom, progress)
 	}
 	if err != nil {
+		var conflict *collections.BranchConflict
+		if errors.As(err, &conflict) {
+			if sendErr := stream.Send(&pb.WorkspacePreparation{ConflictingRepositoryId: conflict.RepositoryID, ConflictingRepositoryName: conflict.RepositoryName}); sendErr != nil {
+				return sendErr
+			}
+		}
 		// The client's error card offers replacing Lazybox's copy, then retries.
 		var replaced *runner.RepositoryReplaced
 		if errors.As(err, &replaced) {
@@ -68,4 +74,15 @@ func (s *Service) RefreshRepositoryIdentity(ctx context.Context, r *pb.RefreshRe
 		return nil, rpcError(err)
 	}
 	return &pb.RepositoryIdentityRefresh{Identity: refresh.Identity, Name: refresh.Name, Reason: refresh.Reason, HasCopy: refresh.HasCopy, Workspaces: refresh.Workspaces, Replaced: refresh.Replaced, RepositoryId: refresh.RepositoryID}, nil
+}
+
+func (s *Service) DeleteLocalBranch(ctx context.Context, r *pb.DeleteLocalBranchRequest) (*pb.DeleteLocalBranchResponse, error) {
+	m, err := s.collectionStore()
+	if err != nil {
+		return nil, err
+	}
+	if err := m.DeleteLocalBranch(ctx, r.RepositoryId, r.Branch); err != nil {
+		return nil, rpcError(err)
+	}
+	return &pb.DeleteLocalBranchResponse{}, nil
 }

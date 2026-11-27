@@ -40,6 +40,9 @@ const (
 	// RunnerServiceGetRepositoryCatalogProcedure is the fully-qualified name of the RunnerService's
 	// GetRepositoryCatalog RPC.
 	RunnerServiceGetRepositoryCatalogProcedure = "/lazybox.bench.v1.RunnerService/GetRepositoryCatalog"
+	// RunnerServiceDeleteLocalBranchProcedure is the fully-qualified name of the RunnerService's
+	// DeleteLocalBranch RPC.
+	RunnerServiceDeleteLocalBranchProcedure = "/lazybox.bench.v1.RunnerService/DeleteLocalBranch"
 	// RunnerServicePrepareWorkspaceProcedure is the fully-qualified name of the RunnerService's
 	// PrepareWorkspace RPC.
 	RunnerServicePrepareWorkspaceProcedure = "/lazybox.bench.v1.RunnerService/PrepareWorkspace"
@@ -745,6 +748,7 @@ const (
 type RunnerServiceClient interface {
 	ListSnippets(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.SnippetCatalog], error)
 	GetRepositoryCatalog(context.Context, *connect.Request[gen.GetRepositoryCatalogRequest]) (*connect.Response[gen.RepositoryCatalog], error)
+	DeleteLocalBranch(context.Context, *connect.Request[gen.DeleteLocalBranchRequest]) (*connect.Response[gen.DeleteLocalBranchResponse], error)
 	PrepareWorkspace(context.Context, *connect.Request[gen.PrepareWorkspaceRequest]) (*connect.ServerStreamForClient[gen.WorkspacePreparation], error)
 	// A repository's branches for New task's "Start from" choice, its default
 	// branch and the branch it last started from (WORKSPACES.md, "Start from").
@@ -1323,6 +1327,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+RunnerServiceGetRepositoryCatalogProcedure,
 			connect.WithSchema(runnerServiceMethods.ByName("GetRepositoryCatalog")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteLocalBranch: connect.NewClient[gen.DeleteLocalBranchRequest, gen.DeleteLocalBranchResponse](
+			httpClient,
+			baseURL+RunnerServiceDeleteLocalBranchProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("DeleteLocalBranch")),
 			connect.WithClientOptions(opts...),
 		),
 		prepareWorkspace: connect.NewClient[gen.PrepareWorkspaceRequest, gen.WorkspacePreparation](
@@ -2748,6 +2758,7 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 type runnerServiceClient struct {
 	listSnippets                 *connect.Client[gen.InfoRequest, gen.SnippetCatalog]
 	getRepositoryCatalog         *connect.Client[gen.GetRepositoryCatalogRequest, gen.RepositoryCatalog]
+	deleteLocalBranch            *connect.Client[gen.DeleteLocalBranchRequest, gen.DeleteLocalBranchResponse]
 	prepareWorkspace             *connect.Client[gen.PrepareWorkspaceRequest, gen.WorkspacePreparation]
 	listRepositoryBranches       *connect.Client[gen.ListRepositoryBranchesRequest, gen.RepositoryBranches]
 	refreshRepositoryIdentity    *connect.Client[gen.RefreshRepositoryIdentityRequest, gen.RepositoryIdentityRefresh]
@@ -2994,6 +3005,11 @@ func (c *runnerServiceClient) ListSnippets(ctx context.Context, req *connect.Req
 // GetRepositoryCatalog calls lazybox.bench.v1.RunnerService.GetRepositoryCatalog.
 func (c *runnerServiceClient) GetRepositoryCatalog(ctx context.Context, req *connect.Request[gen.GetRepositoryCatalogRequest]) (*connect.Response[gen.RepositoryCatalog], error) {
 	return c.getRepositoryCatalog.CallUnary(ctx, req)
+}
+
+// DeleteLocalBranch calls lazybox.bench.v1.RunnerService.DeleteLocalBranch.
+func (c *runnerServiceClient) DeleteLocalBranch(ctx context.Context, req *connect.Request[gen.DeleteLocalBranchRequest]) (*connect.Response[gen.DeleteLocalBranchResponse], error) {
+	return c.deleteLocalBranch.CallUnary(ctx, req)
 }
 
 // PrepareWorkspace calls lazybox.bench.v1.RunnerService.PrepareWorkspace.
@@ -4180,6 +4196,7 @@ func (c *runnerServiceClient) SaveSnippet(ctx context.Context, req *connect.Requ
 type RunnerServiceHandler interface {
 	ListSnippets(context.Context, *connect.Request[gen.InfoRequest]) (*connect.Response[gen.SnippetCatalog], error)
 	GetRepositoryCatalog(context.Context, *connect.Request[gen.GetRepositoryCatalogRequest]) (*connect.Response[gen.RepositoryCatalog], error)
+	DeleteLocalBranch(context.Context, *connect.Request[gen.DeleteLocalBranchRequest]) (*connect.Response[gen.DeleteLocalBranchResponse], error)
 	PrepareWorkspace(context.Context, *connect.Request[gen.PrepareWorkspaceRequest], *connect.ServerStream[gen.WorkspacePreparation]) error
 	// A repository's branches for New task's "Start from" choice, its default
 	// branch and the branch it last started from (WORKSPACES.md, "Start from").
@@ -4754,6 +4771,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		RunnerServiceGetRepositoryCatalogProcedure,
 		svc.GetRepositoryCatalog,
 		connect.WithSchema(runnerServiceMethods.ByName("GetRepositoryCatalog")),
+		connect.WithHandlerOptions(opts...),
+	)
+	runnerServiceDeleteLocalBranchHandler := connect.NewUnaryHandler(
+		RunnerServiceDeleteLocalBranchProcedure,
+		svc.DeleteLocalBranch,
+		connect.WithSchema(runnerServiceMethods.ByName("DeleteLocalBranch")),
 		connect.WithHandlerOptions(opts...),
 	)
 	runnerServicePrepareWorkspaceHandler := connect.NewServerStreamHandler(
@@ -6178,6 +6201,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceListSnippetsHandler.ServeHTTP(w, r)
 		case RunnerServiceGetRepositoryCatalogProcedure:
 			runnerServiceGetRepositoryCatalogHandler.ServeHTTP(w, r)
+		case RunnerServiceDeleteLocalBranchProcedure:
+			runnerServiceDeleteLocalBranchHandler.ServeHTTP(w, r)
 		case RunnerServicePrepareWorkspaceProcedure:
 			runnerServicePrepareWorkspaceHandler.ServeHTTP(w, r)
 		case RunnerServiceListRepositoryBranchesProcedure:
@@ -6665,6 +6690,10 @@ func (UnimplementedRunnerServiceHandler) ListSnippets(context.Context, *connect.
 
 func (UnimplementedRunnerServiceHandler) GetRepositoryCatalog(context.Context, *connect.Request[gen.GetRepositoryCatalogRequest]) (*connect.Response[gen.RepositoryCatalog], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.GetRepositoryCatalog is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) DeleteLocalBranch(context.Context, *connect.Request[gen.DeleteLocalBranchRequest]) (*connect.Response[gen.DeleteLocalBranchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.DeleteLocalBranch is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) PrepareWorkspace(context.Context, *connect.Request[gen.PrepareWorkspaceRequest], *connect.ServerStream[gen.WorkspacePreparation]) error {

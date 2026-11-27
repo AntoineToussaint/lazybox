@@ -21,11 +21,22 @@ export function turnStart(event) {
  * event) that ends just before `before` (0: at the last). Undefined when
  * `before` is past the end, like the Runner's OutOfRange.
  */
-export function tailPage(records, { before = 0, turns = 0, maxBytes = 0 } = {}, size = record => JSON.stringify(record).length + 1) {
+export function tailPage(records, { before = 0, fromCursor = 0, turns = 0, maxBytes = 0 } = {}, size = record => JSON.stringify(record).length + 1) {
   const retained = records.length, end = Number(before || 0) > 0 ? Number(before) - 1 : retained;
   if (end > retained) return undefined;
   if (!end) return { events: [], start: 1, retained };
   const budget = Number(maxBytes) || 1 << 20;
+  if(Number(fromCursor)>0){
+    const start=Number(fromCursor);
+    if(start>end+1)return undefined;
+    let next=start,used=0;
+    while(next<=end){
+      const bytes=size(records[next-1]);
+      if(next>start && used+bytes>budget)break;
+      used+=bytes;next++;
+    }
+    return {events:records.slice(start-1,next-1),start,retained};
+  }
   let start = end, used = size(records[end - 1]);
   while (start > 1 && used + size(records[start - 2]) <= budget) { start--; used += size(records[start - 1]); }
   if (Number(turns) > 0) {

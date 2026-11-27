@@ -50,8 +50,11 @@ export function DeleteWorkspaceDialog({ workspace, onClose, onDeleted }: {
         <p>When the five minutes end, deletion will stop {active === 1 ? 'this session' : 'these sessions'} and their owned commands.</p>
         <ConfirmCheckbox label={`Stop ${active} active ${active === 1 ? 'session' : 'sessions'} and their owned commands`} checked={stop} disabled={busy} onChange={setStop}/>
       </ConfirmWarning>}
-      {!unconfirmed && dirty && <ConfirmWarning title="Uncommitted or untracked files">
-        <p>{preview!.dirtyRepositories.length ? `In ${preview!.dirtyRepositories.join(', ')}. ` : ''}{preview!.filesOutsideRepositories ? 'Also found outside repository folders. ' : ''}These files, including ignored files, will be discarded when the five minutes end.</p>
+      {!unconfirmed && dirty && <ConfirmWarning title="Workspace contents will be discarded">
+        {preview!.discardReasons.length > 0
+          ? <ul>{preview!.discardReasons.map(reason => <li key={reason}>{reason}</li>)}</ul>
+          : preview!.dirtyRepositories.length > 0 && <p>Local files or Git state in {preview!.dirtyRepositories.join(', ')}. This Runner does not report which kind.</p>}
+        {preview!.filesOutsideRepositories && <p>Files also exist at the workspace root outside the repositories.</p>}
         <ConfirmCheckbox label="Discard these workspace files permanently" checked={discard} disabled={busy} onChange={setDiscard}/>
       </ConfirmWarning>}
     </>}

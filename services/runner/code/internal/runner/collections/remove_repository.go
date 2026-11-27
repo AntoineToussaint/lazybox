@@ -62,12 +62,12 @@ func (m *Manager) RemoveRepositoryMember(ctx context.Context, id, name string, a
 		if unsaved != "" {
 			return Collection{}, fmt.Errorf("%s; finish or abort it before removing this worktree", unsaved)
 		}
-		dirty, err := m.git(ctx, member.Path, "status", "--porcelain", "--untracked-files=all", "--ignored", "--ignore-submodules=none")
+		reason, err := m.worktreeFileReason(ctx, member.Path)
 		if err != nil {
 			return Collection{}, err
 		}
-		if dirty != "" {
-			return Collection{}, errors.New("worktree contains changed, untracked or ignored files; move or commit them before removing this repository")
+		if reason != "" {
+			return Collection{}, fmt.Errorf("worktree contains %s; move or commit them before removing this repository", reason)
 		}
 	}
 	if err := m.removeWorktree(ctx, member, false); err != nil {

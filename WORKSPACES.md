@@ -32,7 +32,9 @@ GitHub API connection supplies repository discovery/import and issue/PR lists.
    blocks removal, the dialog identifies it. Commit or
    move changed, untracked, or ignored files, and finish or abort a rebase,
    merge, cherry-pick, revert or bisect, before removing the checkout.
-   Conversations and existing worktrees remain in place.
+   Ignored generated directories (`node_modules/`, `build/`, `dist/`, `target/`,
+   `coverage/`, `.next/`, and `.cache/`) are removed with the checkout at any depth.
+   Tracked edits inside them still block removal. Conversations and existing worktrees remain in place.
 
 **Connections & folders** expands inside the picker: connect GitHub or choose a
 folder to discover existing checkouts. There is no registration/import step and
@@ -1161,7 +1163,7 @@ fails, Recently deleted shows the failure until you dismiss it.
 **Workspace actions → Delete workspace** uses a confirmation button without name
 typing. It previews active executions and local
 files, states the detected risks, and asks explicitly before stopping sessions
-or discarding changed/untracked/ignored files. A repository whose HEAD is
+or discarding changed/untracked/ignored files. Git-ignored directories named `node_modules/`, `build/`, `dist/`, `target/`, `coverage/`, `.next/`, or `.cache/` can be removed without discard consent at any depth. Tracked edits inside them still require consent. The preview identifies repositories with Git-ignored files separately from repositories with uncommitted or untracked files. A repository whose HEAD is
 detached (its commits may be on no branch) or with a rebase, merge,
 cherry-pick, revert or bisect stopped part-way counts as changed too, even
 when `git status` is clean: removing the worktree deletes its HEAD history and

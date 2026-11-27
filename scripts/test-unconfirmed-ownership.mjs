@@ -99,7 +99,7 @@ try {
   assert.equal(alpha.ownershipUncertain, false);
   assert.match(alpha.lastOwnershipResolution, /You confirmed its processes had stopped/);
   // The dialog goes on as an ordinary deletion.
-  await expect(remove.getByText('Uncommitted or untracked files')).toBeVisible();
+  await expect(remove.getByText('Workspace contents will be discarded')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(remove).not.toBeVisible();
   await expect(nav.getByRole('img', { name: 'Owner uncertain' })).toHaveCount(0);

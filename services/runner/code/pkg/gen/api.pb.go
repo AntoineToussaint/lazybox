@@ -17946,8 +17946,10 @@ type WorkspaceDeletionPreview struct {
 	FilesOutsideRepositories bool                   `protobuf:"varint,3,opt,name=files_outside_repositories,json=filesOutsideRepositories,proto3" json:"files_outside_repositories,omitempty"`
 	Blocked                  string                 `protobuf:"bytes,4,opt,name=blocked,proto3" json:"blocked,omitempty"`
 	SupportsKeepArtifacts    bool                   `protobuf:"varint,5,opt,name=supports_keep_artifacts,json=supportsKeepArtifacts,proto3" json:"supports_keep_artifacts,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// Human-readable reasons for each repository requiring discard consent.
+	DiscardReasons []string `protobuf:"bytes,6,rep,name=discard_reasons,json=discardReasons,proto3" json:"discard_reasons,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *WorkspaceDeletionPreview) Reset() {
@@ -18013,6 +18015,13 @@ func (x *WorkspaceDeletionPreview) GetSupportsKeepArtifacts() bool {
 		return x.SupportsKeepArtifacts
 	}
 	return false
+}
+
+func (x *WorkspaceDeletionPreview) GetDiscardReasons() []string {
+	if x != nil {
+		return x.DiscardReasons
+	}
+	return nil
 }
 
 type DeleteWorkspaceRequest struct {
@@ -41661,13 +41670,14 @@ const file_api_proto_rawDesc = "" +
 	"updated_at\x18\b \x01(\tR\tupdatedAt\"h\n" +
 	"\x17ListGitHubItemsResponse\x122\n" +
 	"\x05items\x18\x01 \x03(\v2\x1c.lazybox.bench.v1.GitHubItemR\x05items\x12\x19\n" +
-	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\x87\x02\n" +
+	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\xb0\x02\n" +
 	"\x18WorkspaceDeletionPreview\x12,\n" +
 	"\x12active_session_ids\x18\x01 \x03(\tR\x10activeSessionIds\x12-\n" +
 	"\x12dirty_repositories\x18\x02 \x03(\tR\x11dirtyRepositories\x12<\n" +
 	"\x1afiles_outside_repositories\x18\x03 \x01(\bR\x18filesOutsideRepositories\x12\x18\n" +
 	"\ablocked\x18\x04 \x01(\tR\ablocked\x126\n" +
-	"\x17supports_keep_artifacts\x18\x05 \x01(\bR\x15supportsKeepArtifacts\"\xd5\x01\n" +
+	"\x17supports_keep_artifacts\x18\x05 \x01(\bR\x15supportsKeepArtifacts\x12'\n" +
+	"\x0fdiscard_reasons\x18\x06 \x03(\tR\x0ediscardReasons\"\xd5\x01\n" +
 	"\x16DeleteWorkspaceRequest\x12#\n" +
 	"\rcollection_id\x18\x01 \x01(\tR\fcollectionId\x12!\n" +
 	"\fconfirm_name\x18\x02 \x01(\tR\vconfirmName\x12'\n" +

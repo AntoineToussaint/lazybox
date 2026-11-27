@@ -60,6 +60,103 @@ func TestDeleteWorktreesFencesStartsAndPreservesSourcesBranchesAndRetryIdentity(
 		t.Fatal("restart restored deleted workspace")
 	}
 }
+func TestDeletionWithIgnoredGeneratedDirectories(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	write := func(root, name, data string) {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(repo.Path, ".gitignore", "node_modules/\nbuild/\ndist/\ntarget/\ncoverage/\n.next/\n.cache/\n.env\n")
+	write(repo.Path, "packages/app/manifest", "app")
+	write(repo.Path, "node_modules/tracked", "original")
+	gitTest(t, repo.Path, "add", ".gitignore", "packages")
+	gitTest(t, repo.Path, "add", "-f", "node_modules/tracked")
+	gitTest(t, repo.Path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "dependency fixture")
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "dependencies", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := c.Members[0].Path
+	inactive := func(string) bool { return false }
+	write(root, "node_modules/pkg/index.js", "installed")
+	write(root, "packages/app/node_modules/pkg/index.js", "installed")
+	for _, dir := range []string{"build", "dist", "target", "coverage", ".next", ".cache"} {
+		write(root, dir+"/output", "generated")
+		write(root, "packages/app/"+dir+"/output", "generated")
+	}
+	write(root, ".env", "local")
+	write(root, "node_modules/tracked", "edit")
+	check := func(reason string) {
+		t.Helper()
+		p, err := m.PreviewDeletion(ctx, c.ID, inactive)
+		if err != nil || len(p.DiscardReasons) != 1 || p.DiscardReasons[0] != c.Members[0].Name+": "+reason+"." {
+			t.Fatal(p, err)
+		}
+	}
+	check("uncommitted or untracked files and Git-ignored files")
+	if err := os.Remove(filepath.Join(root, ".env")); err != nil {
+		t.Fatal(err)
+	}
+	check("uncommitted or untracked files")
+	write(root, "node_modules/tracked", "original")
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.FinishDeletion(ctx, c.ID, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeletionReportsIgnoredFilesWithCleanGitStatus(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	if err := os.WriteFile(filepath.Join(repo.Path, ".gitignore"), []byte("cache/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo.Path, "add", ".gitignore")
+	gitTest(t, repo.Path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore cache")
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "ignored", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := c.Members[0]
+	cache := filepath.Join(member.Path, "cache")
+	if err := os.Mkdir(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "output"), []byte("cached"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if status := gitTest(t, member.Path, "status", "--porcelain"); status != "" {
+		t.Fatal(status)
+	}
+	inactive := func(string) bool { return false }
+	check := func(reason string) {
+		t.Helper()
+		preview, err := m.PreviewDeletion(ctx, c.ID, inactive)
+		if err != nil || len(preview.Dirty) != 1 || len(preview.DiscardReasons) != 1 || preview.DiscardReasons[0] != member.Name+": "+reason+"." {
+			t.Fatal(preview, err)
+		}
+	}
+	check("Git-ignored files")
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err == nil {
+		t.Fatal("discard consent missing")
+	}
+	if err := os.WriteFile(filepath.Join(member.Path, "new.txt"), []byte("untracked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check("uncommitted or untracked files and Git-ignored files")
+}
+
 func TestDeletionRequiresConsentAndPreservesChangedFilesOnFailure(t *testing.T) {
 	ctx := context.Background()
 	repo := repoTest(t)

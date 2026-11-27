@@ -49,6 +49,20 @@ func TestRemoveRepositoryMemberPreservesFilesBranchAndWorkspace(t *testing.T) {
 		t.Fatal("removed a detached checkout")
 	}
 	gitTest(t, member.Path, "checkout", member.Branch)
+	writeTest(t, filepath.Join(member.Path, ".gitignore"), "node_modules/\nbuild/\n.env\n")
+	gitTest(t, member.Path, "add", ".gitignore")
+	gitTest(t, member.Path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore generated output")
+	tip = gitTest(t, member.Path, "rev-parse", "HEAD")
+	writeTest(t, filepath.Join(member.Path, "pkg/node_modules/dep/index.js"), "dependency")
+	writeTest(t, filepath.Join(member.Path, "build/out"), "output")
+	env := filepath.Join(member.Path, ".env")
+	writeTest(t, env, "local settings")
+	if _, err := m.RemoveRepositoryMember(ctx, c.ID, member.Name, inactive, nil); err == nil {
+		t.Fatal("removed a checkout with local settings")
+	}
+	if err := os.Remove(env); err != nil {
+		t.Fatal(err)
+	}
 	failedSave := errors.New("runtime record could not be written")
 	if _, err := m.RemoveRepositoryMember(ctx, c.ID, member.Name, inactive, func() error { return failedSave }); !errors.Is(err, failedSave) {
 		t.Fatalf("expected removal to report an incomplete update: %v", err)

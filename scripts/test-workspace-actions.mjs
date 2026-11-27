@@ -30,7 +30,7 @@ try{
  await expect(removeArtifacts).not.toBeChecked();
  await removeArtifacts.check();
  await expect(dialog).toContainText('Artifacts will be removed');
- await expect(dialog).toContainText('running session');await expect(dialog).toContainText('Uncommitted or untracked files');await expect(dialog.getByRole('textbox')).toHaveCount(0);
+ await expect(dialog).toContainText('running session');await expect(dialog).toContainText('Workspace contents will be discarded');await expect(dialog.getByRole('textbox')).toHaveCount(0);
  const stopSessions=dialog.getByLabel(/Stop .* active session/),discardFiles=dialog.getByLabel('Discard these workspace files permanently');
  // Check all covers the two consents deleting needs (stop, discard): there while one is unticked, back when one is unticked again.
  const checkAll=dialog.getByRole('button',{name:'Check all',exact:true});
@@ -89,8 +89,9 @@ try{
  await expect(trash).toHaveCount(0);
  assert.equal(fixture.mutations.filter(m=>m.method==='UndoDeletion').length,1);
  // Discard and artifact deletion can be selected together.
- await page.route('**/PreviewWorkspaceDeletion',route=>route.fulfill({json:{supportsKeepArtifacts:true,activeSessionIds:[],dirtyRepositories:['api'],filesOutsideRepositories:false,blocked:''}}));
+ await page.route('**/PreviewWorkspaceDeletion',route=>route.fulfill({json:{supportsKeepArtifacts:true,activeSessionIds:[],dirtyRepositories:['api'],discardReasons:['api: Git-ignored files.'],filesOutsideRepositories:false,blocked:''}}));
  await page.getByLabel('Actions for Alpha feature',{exact:true}).click();await page.getByRole('button',{name:'Delete workspace…',exact:true}).click();await expect(dialog).toBeVisible();
+ await expect(dialog).toContainText('api: Git-ignored files.');await expect(dialog).not.toContainText('uncommitted');
  await expect(dialog.getByRole('checkbox')).toHaveCount(2);await expect(dialog.getByRole('button',{name:'Check all',exact:true})).toBeVisible();
  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await expect(dialog).toHaveCount(0);
  // Still blocked once the ownership panel settles: Check all ticks both consents, Delete stays off, and the focus goes to Cancel.

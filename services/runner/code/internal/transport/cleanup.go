@@ -19,7 +19,7 @@ func (s *Service) PreviewWorkspaceDeletion(ctx context.Context, r *pb.Collection
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &pb.WorkspaceDeletionPreview{ActiveSessionIds: p.Active, DirtyRepositories: p.Dirty, FilesOutsideRepositories: p.FilesOutsideRepositories, Blocked: p.Blocked, SupportsKeepArtifacts: true}, nil
+	return &pb.WorkspaceDeletionPreview{ActiveSessionIds: p.Active, DirtyRepositories: p.Dirty, DiscardReasons: p.DiscardReasons, FilesOutsideRepositories: p.FilesOutsideRepositories, Blocked: p.Blocked, SupportsKeepArtifacts: true}, nil
 }
 func (s *Service) DeleteWorkspace(ctx context.Context, r *pb.DeleteWorkspaceRequest) (*pb.CollectionResponse, error) {
 	c, err := s.Bench.DeleteWorkspace(ctx, r.CollectionId, r.ConfirmName, r.DiscardChanges, r.StopSessions, r.KeepArtifacts)

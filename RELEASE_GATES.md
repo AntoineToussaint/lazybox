@@ -1,8 +1,8 @@
 # Release validation
 
 The deterministic release gate has one owner:
-[`scripts/release-gates.json`](scripts/release-gates.json). Staging and
-`make check-release` / `make check-dogfood` run the same ordered catalog, and
+[`scripts/release-gates.json`](scripts/release-gates.json).
+`make check-release` and `make check-dogfood` run the ordered catalog, and
 per-change [CI](#ci) runs it in parallel jobs. Codefly still owns service generation and transport validation;
 the catalog delegates those checks to the existing Make targets.
 
@@ -84,7 +84,7 @@ with `-v`, otherwise a failing test's lines and the package results, as
 `go test` prints them.
 
 The rule cannot erode quietly. Loading the gate catalog (CI's first job,
-staging, `make check-release`) runs
+`make check-release`) runs
 [`scripts/unit-test-timeouts.mjs`](scripts/unit-test-timeouts.mjs), which fails
 on a `node --test` without `--test-timeout=30000`; on a `go test` outside
 the guard (however `go` is named: `go -C <dir> test`, `$GO test`,
@@ -129,11 +129,11 @@ The UI matrix reads the same catalog as local checks.
 `release-gates.mjs shards ui <count>` splits the UI gates into disjoint shards.
 Fast CI selects its smoke gates with `--only` before sharding,
 and each shard runs `release-gates.mjs run ui --only <ids>`, so it gets the same
-environment scrubbing, process groups and deadlines as staging. An `--only`
+environment scrubbing, process groups and deadlines as the local release checks. An `--only`
 report records its selection and can never promote a release. CI adds
 `--retry-flaky` ([Flaky in CI](#flaky-in-ci)). Adding a gate to
 the catalog adds it to full CI with no workflow edit; an unclassified `test:` script
-fails the first job, as it fails staging. A failed shard uploads the
+fails the first job, as it fails local release validation. A failed shard uploads the
 screenshots its suites saved (`.cache/*.png`, `/tmp/lazybox-*.png`) and its
 gate report. The suites drive Playwright as a library, so there are no traces.
 
@@ -149,7 +149,7 @@ and Tauri embeds WKWebView. CI runs the UI gates on Linux: they drive Playwright
 fixture Runner, and the suites take their browsers from
 [`scripts/fixtures/playwright.mjs`](scripts/fixtures/playwright.mjs), whose
 pages report macOS off a Mac, so ⌘ stays ⌘ (the suites press `Meta`). Run
-`make stage` on a Mac before a release: it runs every gate there, the UI gates
+`make check-release` on a Mac before a release: it runs every gate there, the UI gates
 in macOS WebKit included.
 
 `generated` installs the Codefly CLI release that produced the committed output
@@ -186,8 +186,8 @@ require in branch protection.
 Each run records its profile, catalog fingerprint, initial/final source digest,
 platform, command/arguments, result, exit code and elapsed time per gate. A failed
 gate does not suppress later diagnostic results in `make check-release`.
-Staging uses `--fail-fast`: the first failure stops execution, with all remaining
-gates recorded as `not-run`. Such a receipt cannot promote. Cancellation leaves explicit
+With `--fail-fast`, the first failure stops execution, with all remaining
+gates recorded as `not-run`. Cancellation leaves explicit
 not-run results. Each gate owns a process group, has a deadline, and uses the
 existing launcher cleanup for its descendants. Cleanup failure cannot become a
 passing gate.
@@ -200,21 +200,13 @@ under `.cache` or a temporary directory. Receipts are local validation records, 
 operator with write access to the release store. External toolchain distributions
 still need P00/P02 version qualification and packaging.
 
-`stage` runs inside its frozen candidate, saves `gates.json` there, and writes
-release metadata version 2 only after the full catalog and desktop build succeed.
-`promote` requires every expected gate to have passed for the exact source and
-current policy, plus the original app/source/compiled-worker hashes. Missing, failed, partial,
-outdated-policy or legacy metadata cannot replace the Working pointer. A changed
-policy requires a freshly staged candidate.
-
-Already pinned version-1 installations can still launch; existing user state is
-not migrated or interrupted. They cannot be newly promoted under the stronger
-rules. Version-2 launch verifies the receipt against its frozen policy. Updating
-Dev's policy does not silently invalidate a running Working release.
+Local Working staging builds a frozen candidate. Release qualification runs
+separately through the release catalog and CI. See [Working staging and
+promotion](ENVIRONMENTS.md) for candidate formats and integrity checks.
 
 Default reports go under `.cache/gates-<profile>.json`; `--report <path>` selects
-another output. Run mutable-tree validation while editing is idle, or use
-`make stage` for a separate snapshot. Dependencies and generated outputs may be
+another output. Run mutable-tree validation while editing is idle, or run it in
+a separate checkout. Dependencies and generated outputs may be
 validated/rebuilt; source changes are reported, not silently blessed.
 
 ## Flake detection

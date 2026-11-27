@@ -66,12 +66,12 @@ cd lazybox
 make deps                                # npm dependencies, once
 
 # Freeze a build you will use day to day ("Working"):
-make stage                               # builds, runs the release checks, prints a release id
+make stage                               # builds the Working snapshot and prints its candidate ID
 make promote RELEASE=<that id>
 make working                             # opens Lazybox; keep this terminal open
 ```
 
-`stage` runs the full release check suite, so the first one takes a while.
+Run `make check-release` separately when qualifying a release.
 To try Lazybox straight from your checkout instead, run `make dev`: it
 opens **Lazybox Dev**, a separate app with its own Runner and data, which
 reloads as the source changes.

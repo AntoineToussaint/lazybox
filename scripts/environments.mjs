@@ -78,8 +78,7 @@ async function run(command, args, cwd, env = buildEnv) {
   const [code, signal] = await once(child, 'exit');
   if (code !== 0) throw new Error(`${command} failed (${signal || code})`);
 }
-async function buildSnippetAdapter(source) {
-  const target = join(source, '.cache', 'snippet-adapter');
+async function buildSnippetAdapter(source, target = join(source, '.cache', 'snippet-adapter')) {
   await run('cargo', ['build', '--locked', '--manifest-path', join(source, 'tools/lazybox-snippets/Cargo.toml')], source, {...buildEnv, CARGO_TARGET_DIR:target});
   return join(target, 'debug', 'lazybox-snippets');
 }
@@ -269,7 +268,7 @@ export async function pruneFailedCandidate(destination) {
 }
 
 async function buildCandidate(environmentRoot, revision, id, destination, source) {
-  const snippetAdapter=await buildSnippetAdapter(root);
+  const snippetAdapter = await buildSnippetAdapter(root, join(environmentRoot, 'build', 'working-snippets'));
   await copySource(root, source);
   await mkdir(join(source,'resources'),{recursive:true});
   await cp(snippetAdapter,join(source,'resources','lazybox-snippets'));
@@ -277,10 +276,7 @@ async function buildCandidate(environmentRoot, revision, id, destination, source
   await freezeRunnerReload(source);
   const before = await digestTree(source);
   await run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], source);
-  const receiptPath = join(destination, 'gates.json');
-  await run(process.execPath, ['scripts/release-gates.mjs', 'run', 'release', '--fail-fast', '--report', receiptPath], source, { ...buildEnv, CARGO_TARGET_DIR: join(environmentRoot, 'build', 'working') });
-  const gateReceipt = JSON.parse(await readFile(receiptPath, 'utf8'));
-  validateReleaseReceipt(gateReceipt, await loadGateCatalog(source), before);
+  await run('make', ['build-worker', 'browser'], source);
   const app = await buildDesktop(source, environmentPaths(environmentRoot, 'working'), join(environmentRoot, 'build', 'working'));
   // The phone app the Runner's device gateway serves (REMOTE.md).
   await run('npm', ['run', 'build:web'], source);
@@ -288,7 +284,7 @@ async function buildCandidate(environmentRoot, revision, id, destination, source
   const after = await digestTree(source);
   // The snapshot is removed with the failed candidate: say where to look instead.
   if (before !== after) throw new Error('Validation modified the source snapshot (generated files are not current): run make check-generated in your repository, commit what it regenerates, and stage again');
-  await saveJSON(join(destination, 'release.json'), { version: 2, id, revision, sourceDigest: after, appDigest: await digestTree(join(destination, 'Lazybox.app'), () => true), workerDigest: await digestTree(join(source, 'workers/claude-sdk/dist'), () => true), validatedAt: new Date().toISOString(), gateReceipt, liveGitHubVerified: false });
+  await saveJSON(join(destination, 'release.json'), { version: 3, id, revision, sourceDigest: after, appDigest: await digestTree(join(destination, 'Lazybox.app'), () => true), workerDigest: await digestTree(join(source, 'workers/claude-sdk/dist'), () => true), builtAt: new Date().toISOString() });
   console.log(`Candidate ready: ${id}\nPromote explicitly with: make promote RELEASE=${id}`);
   return id;
 }
@@ -298,17 +294,19 @@ export async function readValidatedRelease(environmentRoot, id) {
   const directory = releasePath(environmentRoot, id);
   const source = join(directory, 'source'), app = join(directory, 'Lazybox.app');
   const metadata = JSON.parse(await readFile(join(directory, 'release.json'), 'utf8'));
-  if (![1, 2].includes(metadata.version) || metadata.id !== id || await digestTree(source) !== metadata.sourceDigest || await digestTree(app, () => true) !== metadata.appDigest) throw new Error('Release is incomplete or changed after validation; stage again');
+  if (![1, 2, 3].includes(metadata.version) || metadata.id !== id || await digestTree(source) !== metadata.sourceDigest || await digestTree(app, () => true) !== metadata.appDigest) throw new Error('Release is incomplete or changed after validation; stage again');
   if (metadata.version === 2) {
     validateReleaseReceipt(metadata.gateReceipt, await loadGateCatalog(source), metadata.sourceDigest);
+  }
+  if (metadata.version >= 2) {
     if (metadata.workerDigest !== await digestTree(join(source, 'workers/claude-sdk/dist'), () => true)) throw new Error('Compiled worker changed after validation; stage again');
   }
   return { metadata, source, app };
 }
 export async function promote(environmentRoot, id) {
   const { metadata } = await readValidatedRelease(environmentRoot, id);
-  if (metadata.version !== 2) throw new Error('Release uses legacy validation; stage again');
-  validateReleaseReceipt(metadata.gateReceipt, await loadGateCatalog(root), metadata.sourceDigest);
+  if (metadata.version === 1) throw new Error('Release uses legacy validation; stage again');
+  if (metadata.version === 2) validateReleaseReceipt(metadata.gateReceipt, await loadGateCatalog(root), metadata.sourceDigest);
   const currentPath = join(environmentRoot, 'working', 'current.json');
   let previous; try { previous = JSON.parse(await readFile(currentPath, 'utf8')).id; } catch (error) { if (error.code !== 'ENOENT') throw error; }
   await saveJSON(currentPath, { id, previous, promotedAt: new Date().toISOString() });

@@ -42,7 +42,11 @@ function baseOptions(o: ExecutionOptions, env: NodeJS.ProcessEnv): Options {
     // The help assistant's only tools are Lazybox's settings: reading them is
     // allowed, and every update asks, whatever the Runner permission says.
     o.purpose === 'reviewer' ? {
-      permissionMode: 'plan', strictMcpConfig: true,
+      permissionMode: 'default', strictMcpConfig: true,
+      // Keep native read-only shell inspection. A saved Bash allow rule must
+      // never bypass the reviewer's denial of commands that require permission.
+      settingSources: [],
+      disallowedTools: ['EnterPlanMode', 'ExitPlanMode'],
       tools: ['Read', 'Glob', 'Grep', 'Bash', 'AskUserQuestion'],
       settings: { ...connectorsOff.setting, permissions: { ask: ['mcp__lazybox__command'] } },
     } : o.purpose === 'help' ? { permissionMode: 'default', settings: { permissions: helpPermissions, ...off } }

@@ -79,8 +79,6 @@ async function run(command, args, cwd, env = buildEnv) {
   if (code !== 0) throw new Error(`${command} failed (${signal || code})`);
 }
 async function buildSnippetAdapter(source) {
-  // The helper (tools/lazybox-snippets) links V1's config library at a pinned
-  // lazybox-v1 revision; no duplicated paths or YAML semantics.
   const target = join(source, '.cache', 'snippet-adapter');
   await run('cargo', ['build', '--locked', '--manifest-path', join(source, 'tools/lazybox-snippets/Cargo.toml')], source, {...buildEnv, CARGO_TARGET_DIR:target});
   return join(target, 'debug', 'lazybox-snippets');

@@ -27,6 +27,7 @@ const interrupts = new TurnInterrupts();
 // Current Lazybox permission mode; 'yolo' approves tool requests here, which
 // works even when the SDK refuses to switch a running session to bypass mode.
 let permission = '';
+let reviewer = false;
 // Whether approvals rest on the worker's own ask rules (settings-effect.ts).
 let asks = false;
 let inputWake: (() => void) | undefined;
@@ -84,6 +85,7 @@ export function mcpServers(purpose: string, browser = false, call: typeof callRu
 }
 
 async function open(options: any) {
+  reviewer = options.purpose === 'reviewer';
   permission = options.permission || '';
   const restored = restoreGrants(options.grants);
   grants = restored.grants;
@@ -217,7 +219,8 @@ async function handle(request: Request) {
       case 'permission': {
         const mode = p.permission;
         if (!['ask', 'read-only', 'yolo'].includes(mode)) throw new Error('permission must be ask, read-only or yolo');
-        const native = mode === 'read-only' ? 'plan' : mode === 'yolo' ? 'bypassPermissions' : 'default';
+        if (reviewer && mode !== 'read-only') throw new Error('Reviewers require read-only access');
+        const native = reviewer ? 'default' : mode === 'read-only' ? 'plan' : mode === 'yolo' ? 'bypassPermissions' : 'default';
         // Bypass mode needs a flag set at launch; without it, 'default' plus the
         // approvals granted above gives the same result.
         let applied = native;

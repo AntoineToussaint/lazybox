@@ -57,6 +57,7 @@ type Run struct {
 	ID             string        `json:"id"`
 	TemplateID     string        `json:"templateId,omitempty"`
 	Input          []ReviewInput `json:"input,omitempty"`
+	PendingSummary string        `json:"pendingSummary,omitempty"`
 	PRHandoffSent  bool          `json:"prHandoffSent,omitempty"`
 	ResultArtifact string        `json:"resultArtifact,omitempty"`
 	// The reviewer: its conversation (session and conversation id, which

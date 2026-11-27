@@ -94,7 +94,9 @@ test('an API key from the Runner reaches Claude Code untouched', () => {
 
 test('reviewers keep native read-only enforcement and never enter the plan approval workflow', () => {
   const reviewer = nativeOptions({ cwd: '/fixture', purpose: 'reviewer', permission: 'read-only', browser: true }, {});
-  assert.equal(reviewer.permissionMode, 'plan');
+  assert.equal(reviewer.permissionMode, 'default');
+  assert.deepEqual(reviewer.settingSources, []);
+  assert.deepEqual(reviewer.disallowedTools, ['EnterPlanMode', 'ExitPlanMode']);
   assert.equal(reviewer.strictMcpConfig, true);
   assert.deepEqual(reviewer.tools, ['Read', 'Glob', 'Grep', 'Bash', 'AskUserQuestion']);
 });

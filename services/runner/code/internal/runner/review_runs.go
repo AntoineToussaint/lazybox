@@ -969,7 +969,11 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match, operation, reply string) {
 			first = r.State == reviews.RunRunning
 		}
 		var err error
+		wasReviewing := false
 		for i := range rv.Runs {
+			if rv.Runs[i].ID == m.Run.ID {
+				wasReviewing = rv.Runs[i].Phase == reviews.PhaseReviewing
+			}
 			if rv.Runs[i].ID == m.Run.ID && len(rv.Runs[i].Verification) > 0 {
 				b.refreshVerification(&rv.Runs[i])
 			}
@@ -980,6 +984,9 @@ func (b *Bench) reviewerTurnEnded(m reviews.Match, operation, reply string) {
 		for i := range rv.Runs {
 			if r := &rv.Runs[i]; r.ID == m.Run.ID {
 				r.State, r.UpdatedAt = reviews.RunDone, time.Now().Unix()
+				if wasReviewing && r.TemplateID == "" && r.Loop == reviews.LoopAuto && !r.Paused && r.StopReason == reviews.StopClean && reviews.CountFindings(*rv, r.ID).Total() == 0 {
+					r.PendingSummary = strings.TrimSpace("Review complete · no open findings.\n\n" + reply)
+				}
 				if r.TemplateID != "" {
 					if err := b.publishReviewResult(m.Workspace, *r, rv.Comments, reviewCoverage(reply), reply); err != nil {
 						r.State, r.Detail = reviews.RunFailed, "Could not publish review result: "+err.Error()

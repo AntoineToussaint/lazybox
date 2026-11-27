@@ -428,7 +428,7 @@ func agentDenial(method string) string {
 	case pb.RunnerService_SpawnAgent_FullMethodName, pb.RunnerService_ProposePlan_FullMethodName:
 		return "starting another agent needs the person's OK: ask them with `lazybox conversation new --title … --brief …` (one click for them)"
 	case pb.RunnerService_SendAgentMessage_FullMethodName, pb.RunnerService_WaitAgents_FullMethodName, pb.RunnerService_StopChildAgent_FullMethodName:
-		return "you reach only the agents you started, and your own parent: `lazybox agents ls` lists them"
+		return "refused: you reach only the agents you started, and your own parent: `lazybox agents ls` lists them"
 	}
 	if agentRPCs[method] != nil {
 		return "refused: an agent's " + name + " reaches only its own conversation, commands and workspace"

@@ -414,6 +414,12 @@ func (c *cli) send(args []string) error {
 	if err != nil {
 		return err
 	}
+	if session := c.getenv("LAZYBOX_V2_SESSION_ID"); cl.target.Scoped && session != "" {
+		if *steer {
+			return fail(exitUsage, "agent messages queue behind a running turn; send without --steer")
+		}
+		return c.sendLineageMessage(cl, session, positional[0], text)
+	}
 	k, err := loadCatalog(c.ctx, cl)
 	if err != nil {
 		return err

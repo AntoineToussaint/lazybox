@@ -18,6 +18,7 @@ import (
 const askUsage = `Usage:
   lazybox ask author "question"     (as the reviewer)
   lazybox ask reviewer "question"   (as the author)
+  lazybox ask <review-id> "question"   (when several reviews are active)
   [--timeout 90s] [--no-wait]`
 
 func (c *cli) askAgent(args []string) error {
@@ -34,9 +35,11 @@ func (c *cli) askAgent(args []string) error {
 	}
 	to, question := positional[0], strings.Join(positional[1:], " ")
 	if question == "-" {
-		data := make([]byte, 4<<10+1)
-		n, _ := c.stdin.Read(data)
-		question = string(data[:n])
+		var err error
+		question, err = c.text([]string{"-"})
+		if err != nil {
+			return err
+		}
 	}
 	session := c.getenv("LAZYBOX_V2_SESSION_ID")
 	if session == "" {
@@ -46,6 +49,7 @@ func (c *cli) askAgent(args []string) error {
 	if err != nil {
 		return err
 	}
+	deadline := c.now().Add(*wait)
 	first := uint32(0)
 	if !*noWait {
 		first = uint32(min(*wait, 55*time.Second) / time.Second)
@@ -61,7 +65,6 @@ func (c *cli) askAgent(args []string) error {
 		c.out("Asked %s (question %s). The reply comes as a message in this conversation.\n", a.AnswererLabel, a.Id)
 		return nil
 	}
-	deadline := c.now().Add(*wait)
 	for a.State == "pending" {
 		left := deadline.Sub(c.now())
 		if left <= 0 {

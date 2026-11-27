@@ -10,6 +10,7 @@ import (
 
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent"
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/agent/agenttest"
+	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/runner/reviews"
 	pb "github.com/AntoineToussaint/lazybox/services/runner/code/pkg/gen"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -72,7 +73,7 @@ func TestReviewLoopTwoRoundsEndsClean(t *testing.T) {
 	reviewerSession := started.Session.Id
 
 	// The reviewer asks the author; the author's reply comes back.
-	asked, err := f.client.AskAgent(reviewer, &pb.AskAgentRequest{SessionId: reviewerSession, To: "author", Question: "Should Handle ever log?"})
+	asked, err := f.client.AskAgent(reviewer, &pb.AskAgentRequest{SessionId: reviewerSession, To: f.conversation.ID, Question: "Should Handle ever log?"})
 	if err != nil || asked.State != "pending" || asked.AskerLabel != "Codex" || asked.AnswererLabel != "Claude" {
 		t.Fatal(asked, err)
 	}
@@ -235,4 +236,50 @@ func TestDefaultReviewDeliversMinorFindingWithoutAnotherRound(t *testing.T) {
 		t.Fatal(op.Text)
 	}
 	runUntil(t, f, func(r *pb.ReviewRun) bool { return r.Round == 1 && r.Phase == "done" && r.StopReason == "clean" })
+}
+
+func TestAskSelectsOneActiveReview(t *testing.T) {
+	f := newReviewFixture(t)
+	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Scope: "turn", Turn: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.bench.Reviews.Update(f.mine.Id, func(rv *reviews.Review) error {
+		second := rv.Runs[0]
+		second.ID = "rv-another"
+		rv.Runs = append(rv.Runs, second)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := bearer(timeout(t), f.agentToken)
+	req := &pb.AskAgentRequest{SessionId: f.conversation.ID, To: "reviewer", Question: "Which file?"}
+	if _, err := f.client.AskAgent(ctx, req); err == nil || !strings.Contains(err.Error(), "multiple active reviews") {
+		t.Fatalf("ambiguous role: %v", err)
+	}
+	req.To = started.Run.Id
+	if _, err := f.client.AskAgent(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A Runner may start with an answer on disk but no waiter or notification timer.
+func TestPersistedReviewAnswerReachesAsker(t *testing.T) {
+	f := newReviewFixture(t)
+	started, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Scope: "turn", Turn: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.bench.Reviews.UpdateRun(f.mine.Id, started.Run.Id, func(r *reviews.Run) error {
+		r.Asks = append(r.Asks, reviews.Ask{ID: "ask-saved", FromSession: f.conversation.ID, Question: "Which file?", Answer: "handler.go", State: reviews.AskAnswered, AnsweredAt: time.Now().Add(-time.Minute).Unix()})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := applied(t, f.claude, "answered your question")
+	if op.ID != "review-answer-saved" || op.Origin == nil || op.Origin.Kind != agent.OriginAgentAnswer {
+		t.Fatalf("recovered answer: %+v", op)
+	}
 }

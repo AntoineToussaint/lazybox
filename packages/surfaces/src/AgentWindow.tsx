@@ -159,10 +159,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // to the conversation being typed in, or inserts it when there is already a
   // draft (never overwriting one).
   const [snippetsOpen, setSnippetsOpen] = useState(false);
-  useKeyboardAction('snippets.open', () => { if (canCompose && composerFocused()) setSnippetsOpen(true); });
+  useKeyboardAction('snippets.open', () => { if (canCompose && !sendingRef.current && composerFocused()) setSnippetsOpen(true); });
   useMenuSnippet(entry => {
-    if (!canCompose || !composerFocused()) return;
+    if (!canCompose || sendingRef.current || !composerFocused()) return;
     void api.listSnippets({}).then(result => {
+      if (sendingRef.current) return;
       slash.updateSnippetCatalog(result.snippets);
       const snippet = result.snippets.find(row => row.key === entry.snippet);
       if (!snippet) { setError(`Snippet "${entry.snippet}" no longer exists. Update the ]] menu in Settings → Keyboard.`); return; }
@@ -171,7 +172,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       else { const next = message + (message && !message.endsWith('\n') ? '\n' : '') + snippet.body; draftSnippet.current = next === snippet.body ? {key:snippet.key, text:next} : undefined; setMessage(next); persistDraft(next, files, missingFiles); requestAnimationFrame(() => composer.current?.focus()); }
     }, error => setError(humanError(error)));
   });
-  // Enter while a send is in flight (the box is read-only meanwhile) does nothing: the send under way says how it went.
+  // The next draft is editable while the previous send awaits its receipt.
   useKeyboardAction('chat.send', () => { const focused = document.activeElement as HTMLTextAreaElement; if (focused === composer.current && !sendingRef.current && (canSend || missingFiles.length > 0 || !!message.trim())) focused.form?.requestSubmit(); });
 
   const assistant = purpose !== 'coding' && purpose !== 'artifact';
@@ -197,7 +198,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const scroll = useChatScroll(transcript.reader, conversation, session?.pending.length);
   const { jumpToLatest } = scroll;
   const [error, setError] = useState('');
-  const { snippet: draftSnippet, reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
+  const { followUp, followUpText, setFollowUp, editFollowUp, snippet: draftSnippet, reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
   const [commandsOpen, setCommandsOpen] = useState(initialCommandsOpen ?? !!initialCommandId);
   const [sending, setSending] = useState(false);
   const [commands, setCommands] = useState<CommandStatus[]>([]);
@@ -307,6 +308,15 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     if (!(snippetText ? canCompose && (!session?.fault || limited || continuesAfterError) && !message.trim() && !files.length && !missingFiles.length : canSend)) return false;
     sendingRef.current = true; setSending(true); setError(''); jumpToLatest();
     const signal = lifetime.current!.signal;
+    composer.current?.focus();
+    const finishDraft = (destination = sessionID) => {
+      const next = followUp.current;
+      setFollowUp('');
+      setMessage(next);
+      setUncertainSend('');
+      if (destination !== sessionID) persistDraft('', [], []);
+      persistDraft(next, [], [], '', destination);
+    };
     try {
       const reviewKey = snippetKey ?? (draftSnippet.current?.text === text ? draftSnippet.current.key : undefined);
       let prWorkflow = uncertainSend.startsWith('review-pr-ci-');
@@ -333,7 +343,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           if (!signal.aborted) { setUncertainSend(''); persistDraft(text, [], []); }
           return false;
         }
-        if (!signal.aborted) { setUncertainSend(''); setMessage(''); persistDraft('', [], []); }
+        if (!signal.aborted) finishDraft();
         return true;
       }
       const previous = sendAttempt.current;
@@ -373,7 +383,16 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
       refreshSession();
       // Behind a busy turn the message was queued: it goes next, the turn stopped for it.
       if (now && destination === sessionID) void queuedDelivery.deliver(attempt.id, 'now', true);
-      if (!signal.aborted) { setMessage(''); setFiles([]); boxes.clearRejected(); setUncertainSend(''); sendAttempt.current = null; persistDraft('', [], []); if (destination !== sessionID) { persistDraft('', [], [], '', destination); setSessionID(destination); onSessionChange?.(destination); refresh(); } if (afterDelivery) setError(afterDelivery); }
+      if (!signal.aborted) {
+        finishDraft(destination);
+        setFiles([]);
+        boxes.clearRejected();
+        sendAttempt.current = null;
+        if (destination !== sessionID) {
+          setSessionID(destination); onSessionChange?.(destination); refresh();
+        }
+        if (afterDelivery) setError(afterDelivery);
+      }
       return !signal.aborted;
     } catch (e) { if (!signal.aborted) { setError(humanError(e)); if (snippetText) setMessage(text); } return false; }
     finally { if (!signal.aborted) { sendingRef.current = false; setSending(false); } }
@@ -819,16 +838,23 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             <span>{run.reviewerLabel}{run.paused ? ' · Paused' : run.phase === 'triage' ? ' · Findings ready' : run.phase === 'fixing' ? ' · Fixes in progress' : ''}</span>
             <button type="button" onClick={() => showReview({collectionId: chatReview.workspaceId, reviewId: run.id})}>View review</button>
           </div>)}
+          {!sending && followUpText && <p className="composer-hint">Next draft saved for after this send: {followUpText}</p>}
           <Composer workingTurn={workingTurn} textarea={composer} fileInput={fileInput} agentName={agentName} embedded={embedded} session={session} sessionID={sessionID} viewState={viewState} keymap={keymap}
-            limited={limited} message={message} files={files} attachments={boxes} missingFiles={missingFiles} uncertainSend={uncertainSend} handedOver={handedOver}
+            limited={limited} message={sending ? followUpText : message} files={files} attachments={boxes} missingFiles={missingFiles} uncertainSend={uncertainSend} handedOver={handedOver}
             sending={sending} canCompose={canCompose} canAttach={canAttach} canSend={canSend}
             permissionPrompt={<>{restartTo && <PermissionRestartPrompt mode={restartTo} restarting={permissionRestarting} busy={!!session?.busy} returnTo={composer} onRestart={() => void restartWithPermission(restartTo)} onCancel={() => setRestartTo('')}/>}{slash.prompt}</>}
-            slash={slash}
+            slash={sending ? undefined : slash}
             info={session ? <ComposerInfo permission={session.permission} reportedPermission={transcript.reportedPermission} agentName={agentName} modelLabel={modelLabel} modelRequested={!!session.model && !session.modelReported && !transcript.reportedModel} sessionID={sessionID} onPickModel={session.closed ? undefined : slash.models.pick} onPickPermissions={slash.pickPermissions}/> : undefined}
             onSubmit={send}
-            onChange={text => { if (sendingRef.current) return; recall.reset(); setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); }}
+            onChange={text => {
+              if (sendingRef.current) {
+                editFollowUp(text);
+                return;
+              }
+              recall.reset(); setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); }}
             onDictate={setMessage}
             onRecallKey={(event, mode) => {
+              if (sendingRef.current) return false;
               const previous = escapePress.current;
               escapePress.current = undefined;
               if (canBranch && event.key === 'Escape' && !event.repeat && !event.nativeEvent.isComposing && !event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.currentTarget.value) {

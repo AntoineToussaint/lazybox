@@ -284,7 +284,7 @@ try {
   const busySession = f.sessions[0];
   Object.assign(busySession, { busy: true, status: 'running', queued: 0, queuedMessages: [] });
   const hint = page.locator('.composer .keyboard-hint').first();
-  await expect(hint).toHaveText('↵ queues · ⌘↵ sends now', { timeout: 5000 });
+  await expect(hint).toHaveText('↵ queues for later · Send now (⌘↵) interrupts the current turn', { timeout: 5000 });
   await message.click();
   await page.keyboard.press('Alt+Space');
   await listening();

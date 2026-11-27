@@ -177,7 +177,7 @@ export async function startRunnerFixture() {
   // shows it again, as zsh's line editor does with typeahead.
   // A line starting `watch ` keeps running until Ctrl+C.
   const terminals=new Map();let terminalStartDelayMs=0;
-  const terminalStatus=t=>({id:t.id,collectionId:t.collectionId,directory:t.directory,title:t.title,shell:'/bin/fixture-sh',cols:t.cols,rows:t.rows,offset:String(t.output.length),retained:String(t.output.length),done:t.done,...(t.signal?{signal:t.signal}:t.done?{exitCode:0}:{}),createdAtUnixMillis:String(t.createdAt),...(t.place?{place:t.place,repositoryId:t.repositoryId||'',cwd:t.cwd}:{}),...shellMarks(t)});
+  const terminalStatus=t=>({id:t.id,keyboardControl:t.keyboardControl,collectionId:t.collectionId,directory:t.directory,title:t.title,shell:'/bin/fixture-sh',cols:t.cols,rows:t.rows,offset:String(t.output.length),retained:String(t.output.length),done:t.done,...(t.signal?{signal:t.signal}:t.done?{exitCode:0}:{}),createdAtUnixMillis:String(t.createdAt),...(t.place?{place:t.place,repositoryId:t.repositoryId||'',cwd:t.cwd}:{}),...shellMarks(t)});
   // As the Runner does: the shell's command-end marks (OSC 133;D;<status>) counted, with the latest status; prompts ready (133;B); idle at the last one.
   const shellMarks=t=>{const text=t.output.toString();const ends=[...text.matchAll(/\x1b\]133;D;(\d+)\x07/g)];const marks=[...text.matchAll(/\x1b\]133;([BCD])/g)];const ready=marks.filter(m=>m[1]==='B').length;
     return {promptMarks:true,...(ends.length?{commandEnds:String(ends.length),lastCommandStatus:Number(ends.at(-1)[1])}:{}),...(ready?{promptsReady:String(ready)}:{}),idle:!t.done&&marks.at(-1)?.[1]==='B'};};
@@ -963,7 +963,7 @@ actions:
         const request=channel?.events.find(record=>record.event.type==='terminal_handoff'&&record.event.requestId===body.handoffId)?.event;
         if(!request)return error('not_found','Handoff missing');
         if(!body.accept){channel.push({...request,status:'declined',text:''});return json({});}
-        const t={id:'interactive-'+body.handoffId,collectionId:request.name,place:'interactive-command',cwd:request.text,directory:'',title:'Interactive command',cols:100,rows:30,createdAt:Date.now(),output:Buffer.alloc(0),line:'',ready:true,input:[],resizes:[],done:false,clients:new Set()};
+        const t={id:'interactive-'+body.handoffId,keyboardControl:body.allowAgentInput?'agent':'private',collectionId:request.name,place:'interactive-command',cwd:request.text,directory:'',title:'Interactive command',cols:100,rows:30,createdAt:Date.now(),output:Buffer.alloc(0),line:'',ready:true,input:[],resizes:[],done:false,clients:new Set()};
         terminals.set(t.id,t);terminalOutput(t,'Enter device code: ');
         channel.push({...request,status:'running',text:t.id});
         return json(terminalStatus(t));
@@ -988,6 +988,12 @@ actions:
         const after=Number(body.after||0);if(t.output.length>after)res.write(frame({offset:String(after),data:t.output.subarray(after).toString('base64'),status:terminalStatus(t)}));
         if(t.done){res.end(Buffer.concat([frame({offset:String(t.output.length),status:terminalStatus(t)}),frame({},2)]));return;}
         t.clients.add(res);res.on('close',()=>t.clients.delete(res));return;
+      }
+      case 'SetTerminalControl': {
+        const t=terminals.get(body.terminalId);
+        if(!t||t.done||!['agent','person'].includes(t.keyboardControl))return error('failed_precondition','Keyboard unavailable');
+        t.keyboardControl=body.personControls?'person':'agent';
+        return json(terminalStatus(t));
       }
       case 'WriteTerminal': {
         const t=terminals.get(body.terminalId);if(!t||t.done)return error(t?'failed_precondition':'not_found','Terminal unavailable');

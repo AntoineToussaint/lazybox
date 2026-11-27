@@ -292,3 +292,5 @@ without this.
 | `npm run test:terminal-share` | A terminal run in the console; **Send to agent** and `--to` fill the message box with the compact view, never the full output, and nothing is sent until the person sends (Chromium; `TEST_WEBKIT=1` for WebKit) |
 | `npm run test:terminal` | The panel against the fake Runner in WebKit (`TEST_CHROMIUM=1` for Chromium); a wrapped sign-in URL opened whole by a click, not by a drag, offered by the right-click menu |
 | `npm run test:home-checkouts` | Run in a home: a slow shell gets nothing before its prompt (the command shows once and runs), Paste types without running, a second Run reuses the idle shell, a busy shell is left alone |
+
+An approved interactive terminal shows who controls its keyboard. Use **Take control** to type, then **Return control to agent** to let the agent continue. In a shared terminal the agent can read output throughout. Private login terminals give the keyboard exclusively to the person.

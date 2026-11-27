@@ -146,6 +146,9 @@ exit 23`, "fixture", "literal $(false)",
 	if _, err := b.interactiveTerminalIO(ctx, e, "interactive_write", private.Status().ID, "unexpected", 0); err == nil {
 		t.Fatal("old client granted agent input")
 	}
+	if err := private.SetPersonControls(false); err == nil {
+		t.Fatal("private terminal permitted transfer")
+	}
 	if err := private.Write([]byte("fixture\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -185,6 +188,18 @@ exit 23`, "fixture", "literal $(false)",
 		}
 		offset = page.Offset
 		output.WriteString(page.Output)
+	}
+	if err := terminal.Write([]byte("wrong")); err == nil {
+		t.Fatal("person typed before takeover")
+	}
+	if err := terminal.SetPersonControls(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := call(e, "interactive_write", "wrong", 0); err == nil {
+		t.Fatal("agent typed after takeover")
+	}
+	if err := terminal.SetPersonControls(false); err != nil {
+		t.Fatal(err)
 	}
 	continued := &Execution{ID: "resumed", CollectionID: c.ID}
 	continued.Saved.ConversationID = e.ID

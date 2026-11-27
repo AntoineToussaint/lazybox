@@ -46,11 +46,11 @@ export function TerminalHandoffCard({ handoff, messageId }: { handoff: TerminalH
     requestTerminal(handoff.workspaceId, id);
     runAction('terminal.open');
   }
-  async function decide(accept: boolean) {
+  async function decide(accept: boolean, allowAgentInput = false) {
     setBusy(true);
     setError('');
     try {
-      const started = await api.decideTerminalHandoff({ handoffId: handoff.id, accept, allowAgentInput: accept && handoff.agentInput });
+      const started = await api.decideTerminalHandoff({ handoffId: handoff.id, accept, allowAgentInput: accept && allowAgentInput });
       if (accept) {
         setDecision('running');
         setTerminalId(started.id);
@@ -80,8 +80,9 @@ export function TerminalHandoffCard({ handoff, messageId }: { handoff: TerminalH
     {status === 'expired' && <p>The command did not run. Ask the agent to request approval again.</p>}
     {pending ? command : <details className="terminal-handoff-details"><summary>View command</summary>{command}</details>}
     {status === 'pending' && <>
-      {handoff.agentInput && <p>The agent can read output and type freely until this command exits. In a shell or interpreter it can run additional commands without asking again.</p>}
-      <div data-terminal-decision={messageId}><button className="primary" disabled={busy} onClick={() => void decide(true)}>{handoff.agentInput ? 'Run with agent input' : 'Run and take over'}</button>{' '}
+      {handoff.agentInput && <p>With agent input enabled, the agent starts with the keyboard. You can take control in the terminal. The agent can read output until this command exits. In a shell or interpreter it can run additional commands without asking again.</p>}
+      <div data-terminal-decision={messageId}><button className="primary" disabled={busy} onClick={() => void decide(true, handoff.agentInput)}>{handoff.agentInput ? 'Run with agent input' : 'Run and take over'}</button>{' '}
+      {handoff.agentInput && <button disabled={busy} onClick={() => void decide(true)}>Run privately</button>}
       <button disabled={busy} onClick={() => void decide(false)}>Decline</button></div>
     </>}
     {terminal && (status === 'running' || status === 'finished') && <button onClick={() => showTerminal(terminal)}>Show terminal</button>}

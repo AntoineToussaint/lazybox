@@ -67,7 +67,7 @@ work, Claude reviews Codex's. It is a conversation of its own in the
 workspace, briefed with the goal, the plan, the diff and the test runs; you
 can talk to it like any other.
 
-Standard reviews send findings to the author conversation automatically, including minor findings and nits. You can choose manual triage in **Settings → Review by another agent → Between rounds**.
+Standard reviews send findings to the author conversation automatically, including minor findings and nits. A review that finishes with no open findings sends the reviewer’s closing summary back to the same conversation. You can choose manual triage in **Settings → Review by another agent → Between rounds**.
 
 - **From the chat:** the header's **Review** (its tooltip names the reviewer),
   `/review` in the message box, or `] ] ⇧R` (⌘K *Review this workspace's
@@ -93,9 +93,10 @@ Standard reviews send findings to the author conversation automatically, includi
 - The author's conversation shows the review while it runs, then what it
   found, with **Open review**. When it ends with findings you have not sent,
   **Send N findings to Claude** sends them directly to the author and preserves your draft.
-- **The reviewer closes when its work is handed on.** A reviewer stays out
-  of the sidebar; open it from its review card or the review tray, and its
-  questions reach the Inbox. Once its review is over and every finding is
+- **The reviewer closes when its work is handed on.** The workspace sidebar shows the reviewer
+  indented beneath the conversation that requested it. Select that row to open
+  the transcript. Its questions reach the Inbox. Claude reviewers can file
+  findings directly without a plan-approval step. Once its review is over and every finding is
   sent or dismissed, sending ends and archives it. Untick **Close the reviewer after sending** in the review tray
   to keep it.
 - **Clean ✓** means nothing at major or above is open (a minor or a nit may
@@ -122,7 +123,9 @@ agent reviews, and the review's card says so in a quiet line.
 
 ### The reviewer runs the tests
 
-A reviewer's conversation is read-only, its shell included, so a test run
+Review conversations start in **Read-only**. In the reviewer chat, use the permissions picker or `/permissions` to select **Ask**, **Full access**, or return to **Read-only**. The change applies to this conversation. Codex applies the change live. Claude offers to restart between turns and resumes the same conversation with the selected tools.
+
+In **Read-only**, the shell is read-only too, so a test run
 there fails as soon as it writes a cache, a build or a temporary file ("read-only
 filesystem"). The brief tells every reviewer, in every template, to run tests,
 builds and UI gates through the Runner instead:

@@ -11,7 +11,7 @@ export function announceDeletion(entry: PendingDeletion, undo: () => Promise<voi
     tone: 'info',
     title: entry.sessionId ? 'Conversation moved to Recently deleted' : 'Workspace moved to Recently deleted',
     body: 'Undo here or from Recently deleted within five minutes.',
-    timeout: Math.min(60_000, Math.max(1, Number(entry.expiresAtUnixMillis) - Date.now())),
+    timeout: Math.min(5_000, Math.max(1, Number(entry.expiresAtUnixMillis) - Date.now())),
     button: { label: 'Undo', run: () => void undo().catch(reportUndoFailure) },
   });
 }
@@ -72,7 +72,7 @@ export function PendingDeletions() {
         const title = entry.sessionId ? entry.title : entry.workspaceName || entry.title || entry.workspaceId;
         const context = [kind, entry.sessionId && entry.workspaceName, ...entry.repositoryNames].filter(Boolean).join(' · ');
         return <li key={entry.id}>
-          <div className="deleted-item"><strong>{title || kind}</strong><small>{context}</small></div>
+          <div className="deleted-item"><strong title={title || kind}>{title || kind}</strong><small title={context}>{context}</small></div>
           {entry.failure ? <>
             <small role="status">Deletion failed. {entry.failure}</small>
             <button type="button" disabled={!!undoing} onClick={() => void undo(entry)} aria-label={`Dismiss deletion failure for ${title || kind}`}>Dismiss</button>

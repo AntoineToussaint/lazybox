@@ -14,9 +14,7 @@ it indexes every design document.
 
 V1 (the Rust TUI and daemon) lives in
 [lazybox-v1](https://github.com/AntoineToussaint/lazybox-v1). Nothing from V1
-is imported without the review in [REUSE_AUDIT.md](REUSE_AUDIT.md). The one
-admitted link is the snippet catalog helper in `tools/lazybox-snippets`, which
-links V1's `lazybox-config` library at a pinned revision.
+is imported without the review in [REUSE_AUDIT.md](REUSE_AUDIT.md).
 
 ## How to behave
 
@@ -115,7 +113,7 @@ apps/desktop/           Tauri host (its own Cargo workspace and lockfile)
 apps/web/               browser host and the phone app
 workers/claude-sdk/     Claude Agent SDK worker
 scripts/                launchers, release gates, UI suites
-tools/lazybox-snippets/ snippet catalog helper (links V1's lazybox-config)
+tools/lazybox-snippets/ snippet catalog helper
 contracts/              Buf compatibility baseline
 audits/                 dated audits; historical, not current guidance
 ```

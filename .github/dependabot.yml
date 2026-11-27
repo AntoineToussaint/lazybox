@@ -5,8 +5,6 @@
 #   - the codefly-dev Go modules: the generated Runner code (`make generate`,
 #     `make check-generated`) must match the Codefly CLI and go-grpc agent
 #     pinned in ci.yml and services/runner/service.codefly.yaml;
-#   - lazybox-config in tools/lazybox-snippets: a reviewed lazybox-v1 revision
-#     (REUSE_AUDIT.md);
 #   - the Node bundled into the app (scripts/release/node.json) and the CI
 #     Node version, which are not package manifests.
 version: 2
@@ -53,8 +51,6 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(deps)"
-    ignore:
-      - dependency-name: lazybox-config
     groups:
       cargo:
         update-types: [minor, patch]

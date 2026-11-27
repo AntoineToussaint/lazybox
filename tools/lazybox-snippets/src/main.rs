@@ -1,9 +1,8 @@
-//! Read-only catalog adapter. The V1 configuration library remains authoritative
-//! for profile paths, overrides, skill dispatch and delivered snippet bodies.
-use lazybox_config::Snippets;
-use serde::Serialize;
+mod catalog;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Entry {
     key: String,
     category: String,
@@ -14,50 +13,22 @@ struct Entry {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let directory = std::env::current_dir()?;
-    let catalog = Snippets::try_load_for_launch_dir(Some(&directory))?;
-    print!("{}", serialize_catalog(&catalog)?);
+    let profile = std::env::var("LAZYBOX_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".lazybox")
+        });
+    let entries = catalog::load(&profile, &std::env::current_dir()?)?;
+    print!("{}", serde_yaml::to_string(&entries)?);
     Ok(())
-}
-
-fn serialize_catalog(catalog: &Snippets) -> Result<String, serde_yaml::Error> {
-    let entries: Vec<_> = catalog
-        .all()
-        .map(|(key, snippet)| Entry {
-            key: key.to_owned(),
-            category: snippet.category.clone(),
-            description: snippet.description.clone(),
-            body: snippet.delivery_body(),
-            origin: snippet.origin.label().to_owned(),
-            next: snippet.next.clone(),
-        })
-        .collect();
-    serde_yaml::to_string(&entries)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[test]
-    fn export_preserves_canonical_delivery() {
-        let catalog = Snippets::builtin();
-        let yaml = serialize_catalog(&catalog).expect("serialize catalog");
-        let rows: Vec<serde_yaml::Value> = serde_yaml::from_str(&yaml).expect("read catalog");
-        assert_eq!(rows.len(), catalog.len());
-        assert!(!rows.is_empty());
-        for row in rows {
-            let key = row["key"].as_str().expect("key");
-            assert_eq!(
-                row["body"].as_str(),
-                Some(
-                    catalog
-                        .get(key)
-                        .expect("known key")
-                        .delivery_body()
-                        .as_str()
-                )
-            );
-            assert_eq!(row["origin"].as_str(), Some("built-in"));
-        }
+    fn locked_build_has_no_git_dependencies() {
+        assert!(!include_str!("../Cargo.lock").contains("source = \"git+"));
     }
 }

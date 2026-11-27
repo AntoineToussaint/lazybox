@@ -106,6 +106,25 @@ Monitor the checks for the latest PR head until they finish. If CI fails, inspec
 	_, _ = b.Reviews.UpdateRun(workspace, run.ID, func(r *reviews.Run) error { r.PRHandoffSent = true; return nil })
 }
 
+// The watcher delivers the saved summary even when a restart interrupted completion.
+func (b *Bench) sendReviewSummary(workspace string, run reviews.Run) {
+	source, err := b.Get(run.SourceSession)
+	if err == nil {
+		source, err = b.latest(source)
+	}
+	if err == nil {
+		err = b.sendLazyboxMessage(b.ctx, source, "review-summary-"+run.ID, run.PendingSummary, &agent.Origin{Kind: agent.OriginReviewFindings, Summary: "Review complete · no open findings", From: run.ReviewerLabel})
+	}
+	if b.ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		b.stopLoop(workspace, run.ID, "Could not deliver the review summary: "+err.Error())
+		return
+	}
+	_, _ = b.Reviews.UpdateRun(workspace, run.ID, func(r *reviews.Run) error { r.PendingSummary = ""; return nil })
+}
+
 // stopLoop ends a loop on an error, says why, and tells the person.
 func (b *Bench) stopLoop(workspace, id, why string) {
 	var run reviews.Run

@@ -70,7 +70,8 @@ var builtinBriefings = []builtinBriefing{
 		{version: 4, since: "lazybox run --check <criterion>", note: "When your Mission task's approved spec or a spec you bound (`lazybox delivery bind <spec-id>@<version>`) names criteria, run each check as `lazybox run --check <criterion> -- <command>`, and a step it depends on with `--needs <criterion>`."},
 		{version: 5, since: "uncommitted changes included", note: "A check's result counts for the exact files it ran on, uncommitted changes included: run the checks again after you commit."},
 		{version: 6, since: "lazybox delivery status", note: "Before you report work done, `lazybox delivery status` shows the delivery verdict and which criteria are still open."},
-		{version: 7, since: "lazybox review test --member", note: "When you are a reviewer, your shell is read-only: run tests, builds and gates with `lazybox review test --member <repository> -- <command>`. The Runner runs it in a disposable, writable checkout of the reviewed files and records the result in the review."},
+		{version: 7, since: "lazybox review test --member", note: "When reviewing in read-only mode, your shell is read-only: run tests, builds and gates with `lazybox review test --member <repository> -- <command>`. The Runner runs it in a disposable, writable checkout of the reviewed files and records the result in the review."},
+		{version: 8, since: "When reviewing in read-only mode", note: "Reviews start read-only. The person can change permissions in this conversation. Follow their selected mode when running commands or editing files."},
 	}},
 	{id: "documents", text: documentsBriefing, changes: []briefingChange{
 		{version: 1, since: "lazybox artifact put", note: "Publish plans, specs and reports you write for the person as Lazybox artifacts: `lazybox artifact put <file|-> --title \"…\" --kind plan|spec|report|notes|other`, and each revision as a new version with `--id ID`."},

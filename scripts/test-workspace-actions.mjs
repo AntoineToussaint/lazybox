@@ -67,9 +67,9 @@ try{
  assert.equal(!!scheduled.keepArtifacts,false);assert.equal(scheduled.stopSessions,true);assert.equal(scheduled.discardChanges,true);
  const undoNotice=page.getByText('Workspace moved to Recently deleted',{exact:true});
  await expect(undoNotice).toBeVisible();
- await page.clock.fastForward(30_000);
+ await page.clock.fastForward(4_000);
  await expect(undoNotice).toBeVisible();
- await page.clock.fastForward(30_001);
+ await page.clock.fastForward(1_001);
  await expect(undoNotice).toHaveCount(0);
  // Recently deleted survives a reload and Undo restores the actual workspace.
  await page.reload();
@@ -79,6 +79,11 @@ try{
  await trash.getByText('Recently deleted (1)').click();
  await expect(trash.getByRole('listitem')).toContainText('Beta release');
  await expect(trash.getByRole('listitem')).toContainText('Workspace · api · web');
+ for (const label of await trash.locator('.deleted-item > *').all()) {
+  await expect(label).toHaveCSS('white-space','nowrap');
+  await expect(label).toHaveCSS('text-overflow','ellipsis');
+  assert.equal(await label.evaluate(node => node.title || node.dataset.tooltipTitle),await label.innerText());
+ }
  await trash.getByRole('button',{name:'Undo deletion of Beta release'}).click();
  await expect(page.getByRole('navigation',{name:'Workspaces',exact:true})).toContainText('Beta release');
  await expect(trash).toHaveCount(0);

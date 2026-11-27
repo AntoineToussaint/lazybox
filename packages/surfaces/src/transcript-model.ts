@@ -120,6 +120,7 @@ export function appendTranscript(state: Transcript, record: JournalEvent): Trans
 }
 
 const RECENT = 80, ACTIVITY = 1024;
+const EMPTY_BYTES = new Uint8Array(0);
 /**
  * Fold a batch of records with one copy of each array, not one per record.
  * Replaying a long conversation is tens of thousands of streamed deltas; a
@@ -449,7 +450,12 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
     if (state.activity.length + activity.length > ACTIVITY) next.activityTruncated = true;
     next.activity = kept;
   }
-  next.recent = fresh.length >= RECENT ? fresh.slice(-RECENT) : [...state.recent, ...fresh].slice(-RECENT);
+  // Status, receipts and speech completion only consume the event metadata.
+  const recent = fresh.slice(-RECENT).map(record => {
+    const event = record.event;
+    return event ? { ...record, event: { ...event, text: '', providerDataJson: EMPTY_BYTES } } : record;
+  });
+  next.recent = [...state.recent.slice(Math.max(0, state.recent.length + recent.length - RECENT)), ...recent];
   return next;
 }
 /** How far back a tool result looks for its call: past the calls of a long parallel run. */
@@ -619,7 +625,14 @@ function saidBy(messages: readonly TranscriptMessage[], line: string, match: (me
 // Tool results can contain images or megabytes of logs. Keep a bounded display
 // projection while the Runner journal owns the original evidence.
 function boundedActivity(record:JournalEvent):JournalEvent {
- const event=record.event;if(!event||event.providerDataJson.length<=32768)return record;
+ const event=record.event;if(!event)return record;
+ const bytes=event.providerDataJson;
+ if(bytes.length<=32768){
+  // Protobuf bytes may be a view into the whole RPC response. Keeping one
+  // small tool entry must not pin the rest of its replay page.
+  if(bytes.buffer.byteLength===bytes.length)return record;
+  return {...record,event:{...event,providerDataJson:bytes.length?new Uint8Array(bytes):EMPTY_BYTES}};
+ }
  let raw:any;try{raw=JSON.parse(new TextDecoder().decode(event.providerDataJson));}catch{return {...record,event:{...event,providerDataJson:new Uint8Array()}};}
  const limit=(v:any,depth=0):any=>typeof v==='string'?v.length>4096?v.slice(0,4096)+'\n[Preview truncated]':v:depth>5?'[Nested content omitted]':Array.isArray(v)?v.slice(0,20).map(x=>limit(x,depth+1)):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).slice(0,30).map(([k,x])=>[k,limit(x,depth+1)])):v;
  let data=new TextEncoder().encode(JSON.stringify(limit(raw)));

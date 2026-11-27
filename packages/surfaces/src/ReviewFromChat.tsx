@@ -27,7 +27,7 @@ export function useChatReview({ session, sessionID, onError }: { session?: Sessi
   const runs = useWorkspaceReview(workspaceId).review?.runs;
   // A review conversation is never itself reviewed (its `/review` reviews the
   // work it reviews); an assistant has no work to review.
-  const asReviewer = runs?.find(run => run.reviewerSessionId === sessionID);
+  const asReviewer = runs?.find(run => run.reviewerSessionId === sessionID || run.reviewerSessionId === session?.conversationId);
   const isReviewer = !!asReviewer;
   const coding = !!session && (!session.purpose || session.purpose === 'coding');
   // One launcher per chat: the header's button, its ⋯ item and `/review`

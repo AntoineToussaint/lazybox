@@ -60,7 +60,7 @@ func TestDeleteWorktreesFencesStartsAndPreservesSourcesBranchesAndRetryIdentity(
 		t.Fatal("restart restored deleted workspace")
 	}
 }
-func TestDeletionWithIgnoredNodeModules(t *testing.T) {
+func TestDeletionWithIgnoredGeneratedDirectories(t *testing.T) {
 	ctx := context.Background()
 	repo := repoTest(t)
 	write := func(root, name, data string) {
@@ -73,7 +73,7 @@ func TestDeletionWithIgnoredNodeModules(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(repo.Path, ".gitignore", "node_modules/\n.env\n")
+	write(repo.Path, ".gitignore", "node_modules/\nbuild/\ndist/\ntarget/\ncoverage/\n.next/\n.cache/\n.env\n")
 	write(repo.Path, "packages/app/manifest", "app")
 	write(repo.Path, "node_modules/tracked", "original")
 	gitTest(t, repo.Path, "add", ".gitignore", "packages")
@@ -88,6 +88,10 @@ func TestDeletionWithIgnoredNodeModules(t *testing.T) {
 	inactive := func(string) bool { return false }
 	write(root, "node_modules/pkg/index.js", "installed")
 	write(root, "packages/app/node_modules/pkg/index.js", "installed")
+	for _, dir := range []string{"build", "dist", "target", "coverage", ".next", ".cache"} {
+		write(root, dir+"/output", "generated")
+		write(root, "packages/app/"+dir+"/output", "generated")
+	}
 	write(root, ".env", "local")
 	write(root, "node_modules/tracked", "edit")
 	check := func(reason string) {

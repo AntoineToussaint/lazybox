@@ -60,9 +60,13 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 		if err != nil {
 			return p, err
 		}
-		// Apply the dependency exclusion only to ignored files. Tracked changes
+		// Apply the generated-directory exclusions only to ignored files. Tracked changes
 		// and untracked dependencies still appear in the ordinary status above.
-		ignored, err := m.git(ctx, member.Path, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "--", ".", ":(exclude,glob)**/node_modules/**")
+		args := []string{"ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "--", "."}
+		for _, dir := range []string{"node_modules", "build", "dist", "target", "coverage", ".next", ".cache"} {
+			args = append(args, ":(exclude,glob)**/"+dir+"/**")
+		}
+		ignored, err := m.git(ctx, member.Path, args...)
 		if err != nil {
 			return p, err
 		}

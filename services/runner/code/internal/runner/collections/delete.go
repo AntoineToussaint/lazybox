@@ -56,32 +56,12 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 			}
 			return p, fmt.Errorf("%s: %w", member.Name, err)
 		}
-		changed, err := m.git(ctx, member.Path, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
+		reason, err := m.worktreeFileReason(ctx, member.Path)
+		if err == nil && reason == "" {
+			reason, err = m.unsavedHistory(ctx, member.Path)
+		}
 		if err != nil {
 			return p, err
-		}
-		// Apply the generated-directory exclusions only to ignored files. Tracked changes
-		// and untracked dependencies still appear in the ordinary status above.
-		args := []string{"ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "--", "."}
-		for _, dir := range []string{"node_modules", "build", "dist", "target", "coverage", ".next", ".cache"} {
-			args = append(args, ":(exclude,glob)**/"+dir+"/**")
-		}
-		ignored, err := m.git(ctx, member.Path, args...)
-		if err != nil {
-			return p, err
-		}
-		var reason string
-		switch {
-		case changed != "" && ignored != "":
-			reason = "uncommitted or untracked files and Git-ignored files"
-		case changed != "":
-			reason = "uncommitted or untracked files"
-		case ignored != "":
-			reason = "Git-ignored files"
-		default:
-			if reason, err = m.unsavedHistory(ctx, member.Path); err != nil {
-				return p, err
-			}
 		}
 		if reason != "" {
 			p.Dirty = append(p.Dirty, member.Name)
@@ -98,6 +78,32 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 		}
 	}
 	return p, nil
+}
+
+func (m *Manager) worktreeFileReason(ctx context.Context, path string) (string, error) {
+	changed, err := m.git(ctx, path, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
+	if err != nil {
+		return "", err
+	}
+	// Apply the generated-directory exclusions only to ignored files. Tracked changes
+	// and untracked dependencies still appear in the ordinary status above.
+	args := []string{"ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "--", "."}
+	for _, dir := range []string{"node_modules", "build", "dist", "target", "coverage", ".next", ".cache"} {
+		args = append(args, ":(exclude,glob)**/"+dir+"/**")
+	}
+	ignored, err := m.git(ctx, path, args...)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case changed != "" && ignored != "":
+		return "uncommitted or untracked files and Git-ignored files", nil
+	case changed != "":
+		return "uncommitted or untracked files", nil
+	case ignored != "":
+		return "Git-ignored files", nil
+	}
+	return "", nil
 }
 
 // inProgressMarkers are the Git administrative paths that exist while an

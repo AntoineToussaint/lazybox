@@ -32,7 +32,9 @@ GitHub API connection supplies repository discovery/import and issue/PR lists.
    blocks removal, the dialog identifies it. Commit or
    move changed, untracked, or ignored files, and finish or abort a rebase,
    merge, cherry-pick, revert or bisect, before removing the checkout.
-   Conversations and existing worktrees remain in place.
+   Ignored generated directories (`node_modules/`, `build/`, `dist/`, `target/`,
+   `coverage/`, `.next/`, and `.cache/`) are removed with the checkout at any depth.
+   Tracked edits inside them still block removal. Conversations and existing worktrees remain in place.
 
 **Connections & folders** expands inside the picker: connect GitHub or choose a
 folder to discover existing checkouts. There is no registration/import step and

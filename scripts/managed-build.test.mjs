@@ -36,6 +36,23 @@ test('both channels receive the fetched main revision and report independent res
   assert.match(lines.join('\n'), /Dev.*failed.*launcher refused/);
   assert.ok(lines.includes('[Working] staged ' + f.revision));
 });
+test('Working starts the archived staging script without installing dependencies in the archive', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.remote, 'scripts'));
+  await writeFile(join(f.remote, 'scripts/managed-build.mjs'), '// managed build fixture');
+  await writeFile(join(f.remote, 'scripts/environments.mjs'), `
+    import assert from 'node:assert/strict';
+    import { existsSync } from 'node:fs';
+    assert.equal(process.argv[2], 'stage');
+    assert.equal(existsSync('node_modules'), false);
+    process.send({ id: 'working-candidate', revision: process.env.LAZYBOX_BUILD_REVISION });
+  `);
+  f.git(f.remote, 'add', 'scripts');
+  f.git(f.remote, 'commit', '-m', 'stage fixture');
+  const messages = [];
+  await rebuild({ ...f, channel: 'working', report: message => messages.push(message) });
+  assert.ok(messages.some(message => message.includes('staged working-candidate')));
+});
 test('either standalone action runs only the requested channel', async t => {
   const f = await fixture(t), calls = [];
   const channels = {

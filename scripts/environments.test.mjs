@@ -123,14 +123,18 @@ test('promotion validates source and app, pins only the next launch, and leaves 
     await assert.rejects(promote(root, 'candidate'), /legacy|receipt/);
     assert.equal(await readFile(pointer, 'utf8'), pinned);
   }
-  await writeFile(join(candidate, 'release.json'), JSON.stringify(metadata));
+  // Working builds its own artifacts. Release gate receipts belong to v2 candidates.
+  const { gateReceipt, ...workingBuild } = metadata;
+  await writeFile(join(candidate, 'release.json'), JSON.stringify({ ...workingBuild, version: 3 }));
+  await promote(root, 'candidate');
+  const workingPointer = await readFile(pointer, 'utf8');
   await writeFile(join(candidate, 'source/workers/claude-sdk/dist/main.js'), '// unvalidated worker');
   await assert.rejects(promote(root, 'candidate'), /Compiled worker changed/);
-  assert.equal(await readFile(pointer, 'utf8'), pinned);
+  assert.equal(await readFile(pointer, 'utf8'), workingPointer);
   await writeFile(join(candidate, 'source/workers/claude-sdk/dist/main.js'), '// validated worker');
   await writeFile(join(candidate, 'Lazybox.app/binary'), 'unvalidated-app');
   await assert.rejects(promote(root, 'candidate'), /incomplete|changed/);
-  assert.equal(await readFile(pointer, 'utf8'), pinned);
+  assert.equal(await readFile(pointer, 'utf8'), workingPointer);
   for (const channel of ['working', 'dev']) {
     const paths = environmentPaths(root, channel);
     assert.equal(await readFile(join(paths.state, 'history.db'), 'utf8'), channel + '-history');

@@ -92,19 +92,14 @@ make working
 
 Staging copies source into a new release directory, excluding `.git`, `.cache`, private
 `runner.config.json`, `.env` files, dependencies and build output. It installs
-locked npm dependencies, runs the [shared release catalog](RELEASE_GATES.md),
-builds the native app, and records each gate result plus source, app and compiled
-worker checksums.
-It disables Codefly source watching in the candidate before validation/hashing;
-Working uses bundled assets and does not follow Dev source edits.
-It never reads the credential stores to populate another environment.
+locked npm dependencies once, builds the CLI, snippet helper, workers, web assets
+and native app, and records source, app and compiled-worker checksums. Working
+uses the frozen source with Codefly hot reload disabled.
 
-New candidates use metadata version 2. Promotion rejects partial/failed receipts,
-changed gate policy and older metadata without a complete receipt. Previously
-pinned version-1 builds keep their existing launch path; stage again to promote
-them under the new validation rules. Staging stops at the first failed gate and records remaining gates as not run.
-Use `make check-release` for a complete diagnostic run. A failing stage leaves only its diagnostic
-`gates.json` (its source, dependencies and app are removed) without promoting or starting anything.
+Working candidates use metadata version 3. Promotion verifies the built files.
+Version-2 candidates still require their release gate receipts. A pinned
+version-1 installation can still launch. Run `make check-release` separately
+for release qualification. A failed Working build leaves the current pin intact.
 Each stage first sweeps candidates earlier stages left without a `release.json` (failed, or
 interrupted before their own cleanup) down to their `gates.json`; the pinned release and the one
 before it are never touched.
@@ -326,15 +321,15 @@ reinstalling dependencies underneath a running development environment.
 
 In the Lazybox workspace Actions panel, run **Rebuild Dev**
 (`lazybox/rebuild-dev`) to build and launch Dev, or **Stage Working**
-(`lazybox/stage-working`) to validate a Working candidate. Each action
+(`lazybox/stage-working`) to build a Working candidate. Each action
 fast-forwards the configured repository home's clean `main` and uses its
 existing environment root. Run one action at a time so both can safely update
 the same checkout.
 
 Dev reports readiness when its Runner answers and the rebuilt desktop opens.
 If a launcher predates the managed shutdown receipt, close it yourself before
-the first managed rebuild. Stage Working checks a Git archive of the selected
-commit and prints the candidate ID when the checks pass. Promotion is separate.
+the first managed rebuild. Stage Working builds from a Git archive of the selected
+commit and prints the candidate ID when the build succeeds. Promotion is separate.
 
 An interrupted action can leave `managed-build.lock` in the environment root.
 Confirm the build has ended before moving that lock aside and retrying.

@@ -1,4 +1,3 @@
-import { createServer } from 'vite';
 import { spawn } from 'node:child_process';
 import { createServer as createHTTPServer } from 'node:http';
 import { realpath } from 'node:fs/promises';
@@ -29,6 +28,7 @@ export async function stopProcessGroup(child, graceMs = 1500, kill = (pid, signa
 // Vite owns UI watching and React refresh; Tauri owns native-shell rebuilding.
 // Bind first so both HTTP and HMR use the actual OS-assigned port.
 export async function startDesktopDevServer(source) {
+  const { createServer } = await import('vite');
   const watcher = uiWatcher();
   const nonce = randomBytes(18).toString('base64');
   source = await realpath(source);

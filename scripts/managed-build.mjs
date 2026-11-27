@@ -113,7 +113,6 @@ async function working({ home, root, revision, env }) {
     await mkdir(source);
     await git(home, 'archive', '--format=tar', '--output', archive, revision);
     await run(source, 'tar', ['-xf', archive]);
-    await run(source, 'make', ['deps']);
     const stage = spawn(process.execPath, ['scripts/environments.mjs', 'stage'], {
       cwd: source, env, stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
     });

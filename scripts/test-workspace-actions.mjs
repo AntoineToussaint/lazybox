@@ -135,7 +135,12 @@ for(const viewport of [{width:900,height:420},{width:390,height:640}]){
  await page.route('**/RemoveCollectionRepository',route=>route.fulfill({status:400,json:{code:'failed_precondition',message:'worktree contains changed files'}}),{times:1});
  await removeApi.click();
  await repositories.getByRole('button',{name:'Remove repository',exact:true}).click();
- await expect(repositories.getByRole('alert')).toContainText('worktree contains changed files');
+ await expect(repositories.getByRole('alert')).toHaveText('worktree contains changed files');
+ await expect(removeApi).toBeVisible();
+ const activeSessionMessage='Open "API review" in this workspace and choose End session, then retry repository removal';
+ await page.route('**/RemoveCollectionRepository',route=>route.fulfill({status:400,json:{code:'failed_precondition',message:activeSessionMessage}}),{times:1});
+ await repositories.getByRole('button',{name:'Remove repository',exact:true}).click();
+ await expect(repositories.getByRole('alert')).toHaveText(activeSessionMessage);
  await expect(removeApi).toBeVisible();
  await repositories.getByRole('button',{name:'Remove repository',exact:true}).click();
  await expect(removeApi).toHaveCount(0);

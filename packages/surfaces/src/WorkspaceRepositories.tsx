@@ -1,3 +1,4 @@
+import { ConnectError } from '@lazybox/client-core';
 import { useEffect, useRef, useState } from 'react';
 import type { Collection, Repository } from '@lazybox/protocol';
 import { DraggableDialog, DialogHeader } from './DraggableDialog';
@@ -34,7 +35,7 @@ export function WorkspaceRepositories({ workspace, onClose, onSaved, chooseRepos
       setRemoval(undefined);
       onSaved();
     } catch (error) {
-      setRemoveError(error instanceof Error ? error.message : String(error));
+      setRemoveError(ConnectError.from(error).rawMessage);
     } finally {
       setRemoving(false);
     }

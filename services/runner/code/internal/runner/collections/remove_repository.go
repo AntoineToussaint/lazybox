@@ -10,6 +10,15 @@ import (
 	"strings"
 )
 
+// ActiveRepositoryRemovalOwner identifies the execution fencing checkout removal.
+type ActiveRepositoryRemovalOwner struct {
+	ExecutionID string
+}
+
+func (e *ActiveRepositoryRemovalOwner) Error() string {
+	return fmt.Sprintf("End active workspace session %s before removing a repository.", e.ExecutionID)
+}
+
 // RemoveRepositoryMember removes a clean worktree from a ready workspace and
 // retains its branch and source repository. The manager lock fences attachment.
 // If provided, forgetRuntime clears checkout-specific runtime records after
@@ -30,7 +39,7 @@ func (m *Manager) RemoveRepositoryMember(ctx context.Context, id, name string, a
 	}
 	for _, owner := range c.OwnerExecutionIDs {
 		if active(owner) {
-			return Collection{}, errors.New("end active workspace sessions and commands before removing a repository")
+			return Collection{}, &ActiveRepositoryRemovalOwner{ExecutionID: owner}
 		}
 	}
 	root, err := filepath.EvalSymlinks(c.Root)

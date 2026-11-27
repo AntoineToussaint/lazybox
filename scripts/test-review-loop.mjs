@@ -113,6 +113,23 @@ try{
  await expect(tray.locator('.review-tray-list').getByRole('listitem').filter({hasText:'Errors are swallowed'})).toBeVisible();
  await sendAccepted(1);
  await expect(stuckRow).toContainText('Round 2 of 3 · Claude is fixing',{timeout:15000});
+ const unrelated={...author,id:'alpha-unrelated',workId:'alpha-unrelated',title:'Unrelated work',instructionsPending:false};
+ fixture.sessions.push(unrelated);
+ const unrelatedEvents=fixture.openEvents(unrelated.id);
+ unrelatedEvents.push({type:'operation_accepted',operationId:'unrelated-op',text:'Check the docs'});
+ unrelatedEvents.push({type:'message_delta',text:'UNRELATED_REPLY'});
+ unrelatedEvents.push({type:'turn_ended'});
+ const unrelatedPage=await browser.newPage({viewport:{width:1500,height:1000}});
+ await collectPageErrors(unrelatedPage, errors);
+ const reviewLoaded=unrelatedPage.waitForResponse(response=>response.url().endsWith('/ListReviewComments') && response.ok());
+ await unrelatedPage.goto(`http://127.0.0.1:${server.httpServer.address().port}/?view=workspace&collection=alpha&session=${unrelated.id}#token=${fixture.token}`);
+ const {runs:unrelatedRuns}=await (await reviewLoaded).json();
+ assert.ok(unrelatedRuns.some(run=>run.id===stuck.id && run.phase==='fixing'));
+ const unrelatedChat=unrelatedPage.locator('section.panel-chat:visible');
+ await expect(unrelatedChat.locator('.messages:visible')).toContainText('UNRELATED_REPLY');
+ await expect(unrelatedChat.getByRole('group',{name:"Review this conversation's work"}).getByRole('button',{name:'Review with Codex'})).toBeVisible();
+ await expect(unrelatedChat.getByRole('note',{name:'Review in progress'})).toHaveCount(0);
+ await unrelatedPage.close();
  fixture.authorFixed(stuck.id,4);
  fixture.finishReview(stuck.id); // the reviewer says nothing about it: still open
  await expect(stuckRow).toContainText('Stuck: the same blocker is still open after two fixes · needs you',{timeout:15000});

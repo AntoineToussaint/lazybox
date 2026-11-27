@@ -427,6 +427,7 @@ func (b *Bench) watchReviewWorkflows() {
 					continue
 				}
 				for _, run := range review.Runs {
+					b.deliverReviewAnswers(workspace, run)
 					if run.TemplateID == reviews.ReviewPRCITemplate && run.State == reviews.RunDone && run.ResultArtifact != "" && !run.PRHandoffSent && run.StopReason != reviews.StopError {
 						b.sendReviewPRHandoff(workspace, run)
 					}

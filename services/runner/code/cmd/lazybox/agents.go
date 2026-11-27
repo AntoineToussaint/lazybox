@@ -227,7 +227,7 @@ func (c *cli) printLineage(out *pb.AgentLineage) {
 	}
 	for _, ch := range out.Children {
 		line := fmt.Sprintf("  %-28s %-14s %-9s %-10s %s", truncate(ch.Title, 28), liveWord(ch), ch.Role, ch.Permission, ch.TaskStatus)
-		c.out("%s\n", strings.TrimRight(line, " "))
+		c.out("%s  %s\n", strings.TrimRight(line, " "), ch.ConversationId)
 		if ch.Reported {
 			c.out("    reported: %s\n", oneLine(ch.Report, 160))
 		} else if ch.LastMessage != "" {
@@ -283,7 +283,11 @@ func (c *cli) agentsSend(args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := got(cl.SendAgentMessage(c.ctx, connect.NewRequest(&pb.SendAgentMessageRequest{SessionId: me, To: positional[0], Text: text, OperationId: fmt.Sprintf("send-%d", c.now().UnixNano())})))
+	return c.sendLineageMessage(cl, me, positional[0], text)
+}
+
+func (c *cli) sendLineageMessage(cl *client, session, target, text string) error {
+	out, err := got(cl.SendAgentMessage(c.ctx, connect.NewRequest(&pb.SendAgentMessageRequest{SessionId: session, To: target, Text: text, OperationId: fmt.Sprintf("send-%d", c.now().UnixNano())})))
 	if err != nil {
 		return err
 	}

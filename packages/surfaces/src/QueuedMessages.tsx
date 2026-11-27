@@ -281,6 +281,10 @@ export function QueuedMessages({ session, queued, turnRunning, live, agentName, 
         steer={steer} agentName={agentName} stops={stops} sendNowKey={sendNowKey} delivery={delivery}/>)}
     </ul>}
     {!collapsed && queued.length > shown.length && <button type="button" className="queued-more" onClick={() => setShowAll(true)}>Show {queued.length - shown.length} more</button>}
+    {!collapsed && busy && steer && <p className="queued-note">
+      <strong>Steer</strong> adds instructions to the current turn. <strong>Send now</strong> interrupts it and starts the selected message next.
+      {session.capabilities?.subagents && shown.some(message => !message.origin && !message.editing) && <> <strong>Request delegation</strong> asks the agent to give this task to a sub-agent while it continues working.</>}
+    </p>}
     {!collapsed && busy && !steer && <p className="queued-note">{agentName} can’t take a message in the middle of a turn: <strong>Send now</strong>{sendNowKey ? ` (${sendNowKey})` : ''} stops its current step first, then sends yours.</p>}
   </section>;
 }

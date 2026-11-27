@@ -185,8 +185,10 @@ try{
  await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe('/usr/local/bin is missing');
 
  // /detail and /help do the real thing.
- // The box takes no keys while the send above is in flight, and empties once it is answered: type after that.
- await expect(message).toHaveValue('');await page.keyboard.type('/detail verbose');await page.keyboard.press('Enter');
+ // Type the next command immediately and submit it once the previous send is confirmed.
+ await expect(message).toHaveValue('');await page.keyboard.type('/detail verbose');
+ await expect(message.locator('xpath=ancestor::form').locator('.send-button')).toBeEnabled();
+ await page.keyboard.press('Enter');
  await expect(page.locator('.toast').filter({hasText:'Activity detail: Verbose'})).toBeVisible();
  await page.keyboard.type('/help');await page.keyboard.press('Enter');
  await expect(page.getByRole('dialog',{name:/Keyboard shortcuts/})).toBeVisible();

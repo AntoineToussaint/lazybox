@@ -36,18 +36,19 @@ export function useChatReview({ session, sessionID, onError }: { session?: Sessi
   const latest = useRef(onError); latest.current = onError;
   useEffect(() => { if (launcher.error) { latest.current(`Could not start the review: ${launcher.error}`); launcher.setError(''); } }, [launcher.error]);
   const shown = !!workspaceId && coding && !isReviewer && launcher.choices.length > 0;
-  // This conversation's review under way, newest first: the button follows it.
-  const running = launcher.activeFor({scope: 'changes'});
+  const conversationSessions = [sessionID, session?.conversationId, session?.previousExecutionId].filter(Boolean);
+  const active = runs?.filter(run => conversationSessions.includes(run.sourceSessionId) && reviewInProgress(run));
+  const running = active?.find(run => run.scope === 'changes' && !run.compare);
   const start = (choice?: ReviewerChoice, focus = '') => {
     if (launcher.unavailable) { showMenuNotice(launcher.unavailable); return; }
     const reviewer = choice || launcher.choices[0];
     if (!reviewer) return;
-    showMenuNotice(`Starting ${reviewer.label}’s review…`);
+    if (!launcher.activeFor({ scope: 'changes' })) showMenuNotice(`Starting ${reviewer.label}’s review…`);
     void launcher.start({ scope: 'changes' }, reviewer, focus);
   };
   // The review this conversation can cancel: the one it is the reviewer of, or its own newest one under way.
-  const underWay = asReviewer ? (reviewInProgress(asReviewer) ? asReviewer : undefined) : runs?.find(run => run.sourceSessionId === sessionID && reviewInProgress(run));
-  const visible = coding && !isReviewer ? runs?.filter(run => reviewInProgress(run) && (run.sourceSessionId === sessionID || run.scope !== 'turn')) : undefined;
+  const underWay = asReviewer ? (reviewInProgress(asReviewer) ? asReviewer : undefined) : active?.[0];
+  const visible = coding && !isReviewer ? active : undefined;
   const cancelling = useCancelReview(workspaceId);
   /** The ⋯ menu's items: Review (the button folds into it in a slim panel), and Cancel review while one is under way. */
   const menuItems: MenuItem[] = [

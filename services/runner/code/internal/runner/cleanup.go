@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -141,5 +142,15 @@ func (b *Bench) RemoveWorkspaceRepository(ctx context.Context, id, name string) 
 			}
 		})
 	}
-	return b.Collections.RemoveRepositoryMember(ctx, id, name, b.Active, forgetRuntime)
+	c, err := b.Collections.RemoveRepositoryMember(ctx, id, name, b.Active, forgetRuntime)
+	var owner *collections.ActiveRepositoryRemovalOwner
+	if errors.As(err, &owner) {
+		if execution, getErr := b.Get(owner.ExecutionID); getErr == nil {
+			title := firstOf(execution.Saved.DisplayTitle, execution.Engine.Snapshot().Title, execution.Saved.Title)
+			if title != "" {
+				return c, fmt.Errorf("Open %q in this workspace and choose End session, then retry repository removal", title)
+			}
+		}
+	}
+	return c, err
 }

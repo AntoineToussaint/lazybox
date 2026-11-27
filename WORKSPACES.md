@@ -28,7 +28,8 @@ GitHub API connection supplies repository discovery/import and issue/PR lists.
 5. To remove one, open the workspace’s **Manage repositories…** action and
    choose **Remove…** beside the checkout. Confirm to remove the clean
    worktree while keeping its local branch and repository library entry.
-   End active workspace sessions, terminals, and commands first. Commit or
+   End active workspace sessions, terminals, and commands first. If a session
+   blocks removal, the dialog identifies it. Commit or
    move changed, untracked, or ignored files, and finish or abort a rebase,
    merge, cherry-pick, revert or bisect, before removing the checkout.
    Conversations and existing worktrees remain in place.

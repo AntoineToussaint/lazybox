@@ -510,6 +510,9 @@ review's card and in the button's tooltip, and appended to its `detail`.
 is a section of the brief (`{{focus}}`, or before `{{report}}` when the
 template has no `{{focus}}`) and is kept on the run.
 
+The chat’s review status follows reviews of that conversation. The workspace review
+tray shows reviews across its conversations.
+
 **Where the reviewer shows.** The client opens the reviewer conversation as a
 background tab (`openReviewTab`, `workspace-model.ts openBesideChat`): a chat
 pinned to it, right after the tab of the chat that shows the reviewed

@@ -23,8 +23,10 @@ func TestRemoveRepositoryMemberPreservesFilesBranchAndWorkspace(t *testing.T) {
 	if _, err := m.Acquire(ctx, c.ID, "owner", inactive); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.RemoveRepositoryMember(ctx, c.ID, member.Name, func(string) bool { return true }, nil); err == nil {
-		t.Fatal("removed a checkout with an active owner")
+	_, err = m.RemoveRepositoryMember(ctx, c.ID, member.Name, func(string) bool { return true }, nil)
+	var blocker *ActiveRepositoryRemovalOwner
+	if !errors.As(err, &blocker) || blocker.ExecutionID != "owner" {
+		t.Fatalf("want active owner identified, got %v", err)
 	}
 	untracked := filepath.Join(member.Path, "local.txt")
 	if err := os.WriteFile(untracked, []byte("keep"), 0600); err != nil {

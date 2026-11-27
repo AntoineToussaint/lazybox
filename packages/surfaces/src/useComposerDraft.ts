@@ -40,6 +40,18 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
   const [uncertainSend, setUncertainSend] = useState('');
   const sendAttempt = useRef<SendAttempt | null>(null);
 
+  const followUp = useRef('');
+  const [followUpText, setFollowUpText] = useState('');
+  const setFollowUp = (text: string) => { followUp.current = text; setFollowUpText(text); };
+
+  const editFollowUp = (text: string) => {
+    setFollowUp(text);
+    try {
+      const pending = readDraft(viewState, sessionID);
+      writeDraft(viewState, sessionID, { ...pending, followUp: text });
+    } catch (error) { onError(`Could not save the next draft: ${String(error)}`); }
+  };
+
   const snippet = useRef<{key:string; text:string} | undefined>(undefined);
   const reviewDrafts = useRef<ReviewDraft[]>([]);
   const [restoring, setRestoring] = useState(false);
@@ -52,6 +64,7 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
       setFiles([]); setMissingFiles([]);
       snippet.current = draft.snippetKey ? {key:draft.snippetKey, text:draft.text} : undefined;
       reviewDrafts.current = draft.reviews || [];
+      setFollowUp(draft.followUp || '');
       setMessage(draft.text);
       setUncertainSend(draft.operationId);
       sendAttempt.current = null;
@@ -85,7 +98,7 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
       const refs = fileReferences(selected, text, missing, operationId);
       reviewDrafts.current = reviewDrafts.current.filter(r => text.includes(r.text));
       if (snippet.current?.text !== text || selected.length || missing.length) snippet.current = undefined;
-      writeDraft(viewState, destination, { snippetKey:snippet.current?.key, text, files: [...refs, ...missing], operationId, reviews: reviewDrafts.current });
+      writeDraft(viewState, destination, { followUp: followUp.current || undefined, snippetKey:snippet.current?.key, text, files: [...refs, ...missing], operationId, reviews: reviewDrafts.current });
       if (!viewState) return;
       const binary = selected.filter((_, i) => refs[i].blobId);
       const previous = saved.current;
@@ -100,5 +113,5 @@ export function useComposerDraft(viewState: ViewStateStore | undefined, sessionI
     } catch (e) { onError(`Could not save this window's draft: ${String(e)}`); }
   };
 
-  return { snippet, reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft };
+  return { followUp, followUpText, setFollowUp, editFollowUp, snippet, reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft };
 }

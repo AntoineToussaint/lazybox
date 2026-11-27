@@ -754,7 +754,7 @@ func (b *Bench) AskAgent(ctx context.Context, req AskRequest) (reviews.Ask, erro
 	}
 	matches := b.Reviews.RunsOf(e.ID, conversationOf(e))
 	var m *reviews.Match
-	to := strings.ToLower(strings.TrimSpace(req.To))
+	to := strings.TrimSpace(req.To)
 	for i := range matches {
 		x := matches[i]
 		if x.Workspace != e.CollectionID {
@@ -764,12 +764,20 @@ func (b *Bench) AskAgent(ctx context.Context, req AskRequest) (reviews.Ask, erro
 		if x.Role == reviews.RoleAuthor {
 			other, otherConversation = x.Run.ReviewerSession, x.Run.ReviewerConversation
 		}
-		switch {
-		case to == "author" && x.Role == reviews.RoleReviewer, to == "reviewer" && x.Role == reviews.RoleAuthor, to != "" && (to == other || to == otherConversation):
+		if to == x.Run.ID {
 			m = &x
-		}
-		if m != nil {
 			break
+		}
+		matchesRole := strings.EqualFold(to, "author") && x.Role == reviews.RoleReviewer ||
+			strings.EqualFold(to, "reviewer") && x.Role == reviews.RoleAuthor
+		if !matchesRole && (to == "" || to != other && to != otherConversation) {
+			continue
+		}
+		if m != nil && m.Run.Active() && x.Run.Active() {
+			return reviews.Ask{}, fmt.Errorf("%w: multiple active reviews match; ask by review id (%s or %s)", reviews.ErrAskRefused, m.Run.ID, x.Run.ID)
+		}
+		if m == nil || !m.Run.Active() && x.Run.Active() {
+			m = &x
 		}
 	}
 	if m == nil {
@@ -959,54 +967,53 @@ func (b *Bench) answerAsk(e *Execution, operation string, matches []reviews.Matc
 		if asker, err := b.Get(a.FromSession); err == nil {
 			b.recordExchange(asker, m.Run, line)
 		}
-		b.askNoteLater(m.Workspace, m.Run.ID, a)
 		return true
 	}
 	return false
 }
 
-// askNoteLater sends the reply into the asker's conversation unless a wait
-// collects it first.
-func (b *Bench) askNoteLater(workspace, runID string, a reviews.Ask) {
-	b.watchers.Add(1)
-	go func() {
-		defer b.watchers.Done()
-		timer := time.NewTimer(askNoteGrace)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-b.ctx.Done():
-			return
+// deliverReviewAnswers runs from the review reconciler. An unanswered delivery
+// survives shutdown in the review record and uses the same engine operation on retry.
+func (b *Bench) deliverReviewAnswers(workspace string, run reviews.Run) {
+	for _, a := range run.Asks {
+		if a.State != reviews.AskAnswered || a.Told || time.Since(time.Unix(a.AnsweredAt, 0)) < askNoteGrace {
+			continue
 		}
 		s := b.asks()
 		s.mu.Lock()
 		waiting := s.waiting[a.ID] > 0
 		s.mu.Unlock()
 		if waiting {
-			return
+			continue
 		}
-		var told reviews.Ask
-		var ok bool
-		_, _ = b.Reviews.Update(workspace, func(rv *reviews.Review) error {
-			if told, ok = reviews.TellAsk(rv, runID, a.ID); !ok {
-				return reviews.Unchanged
-			}
-			return nil
-		})
-		if !ok {
-			return
-		}
-		asker, err := b.Get(told.FromSession)
+		// A wait may have collected the answer since the reconciler loaded the run.
+		rv, err := b.Reviews.Load(workspace)
 		if err != nil {
-			return
+			continue
+		}
+		current, err := reviews.FindAsk(&rv, run.ID, a.ID, time.Now().Unix())
+		if err != nil || current.Told {
+			continue
+		}
+		asker, err := b.Get(a.FromSession)
+		if err != nil {
+			continue
 		}
 		if asker, err = b.latest(asker); err != nil || asker.Engine.Snapshot().Closed {
-			return
+			continue
 		}
-		note := fmt.Sprintf("[Lazybox] %s answered your question (%s):\n\n%s", told.ToLabel, quoteText(told.Question), told.Answer)
+		note := fmt.Sprintf("[Lazybox] %s answered your question (%s):\n\n%s", a.ToLabel, quoteText(a.Question), a.Answer)
 		ctx, cancel := context.WithTimeout(b.ctx, 10*time.Second)
-		defer cancel()
-		origin := &agent.Origin{Kind: agent.OriginAgentAnswer, Summary: fmt.Sprintf("%s answered %s: %s", told.ToLabel, told.FromLabel, told.Answer), From: told.ToLabel}
-		_ = b.sendLazyboxMessage(ctx, asker, "review-answer-"+strings.TrimPrefix(told.ID, "ask-"), note, origin)
-	}()
+		origin := &agent.Origin{Kind: agent.OriginAgentAnswer, Summary: fmt.Sprintf("%s answered %s: %s", a.ToLabel, a.FromLabel, a.Answer), From: a.ToLabel}
+		err = b.sendLazyboxMessage(ctx, asker, "review-answer-"+strings.TrimPrefix(a.ID, "ask-"), note, origin)
+		cancel()
+		if err == nil {
+			_, _ = b.Reviews.Update(workspace, func(rv *reviews.Review) error {
+				if _, ok := reviews.TellAsk(rv, run.ID, a.ID); !ok {
+					return reviews.Unchanged
+				}
+				return nil
+			})
+		}
+	}
 }

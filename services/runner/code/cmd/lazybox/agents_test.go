@@ -74,10 +74,10 @@ func TestAgentsVerbRunsALineage(t *testing.T) {
 	if out = r.cli(env, "", "agents", "ls"); out.code != 0 || !strings.Contains(out.stdout, "Orchestrating “Ship search”") || !strings.Contains(out.stdout, "Index the corpus") {
 		t.Fatalf("ls: %+v", out)
 	}
-	if out = r.cli(env, "", "agents", "send", "Index the corpus", "skip vendor/"); out.code != 0 || !strings.Contains(out.stdout, "Sent to “Index the corpus”") {
+	if out = r.cli(env, "", "send", childSession, "skip vendor/"); out.code != 0 || !strings.Contains(out.stdout, "Sent to “Index the corpus”") {
 		t.Fatalf("send: %+v", out)
 	}
-	if out = r.cli(kid, "", "agents", "send", "parent", "found the tokenizer"); out.code != 0 {
+	if out = r.cli(kid, "", "send", "parent", "found the tokenizer"); out.code != 0 {
 		t.Fatalf("child to parent: %+v", out)
 	}
 	if out = r.cli(kid, "", "agents", "ls"); !strings.Contains(out.stdout, "Started by “Orchestrator”") {
@@ -100,6 +100,9 @@ func TestAgentsVerbRunsALineage(t *testing.T) {
 	if out = r.cli(kid, "", "agents", "report", "indexed 1,204 files; go test passed"); out.code != 0 || !strings.Contains(out.stdout, "Reported") {
 		t.Fatalf("report: %+v", out)
 	}
+	if out = r.cli(kid, "", "agents", "report", "indexed 1,204 files; go test passed"); out.code != 0 {
+		t.Fatalf("retry the same report: %+v", out)
+	}
 	if out = r.cli(env, "", "agents", "wait", "Index the corpus", "--until", "reported", "--timeout", "5s"); out.code != 0 || !strings.Contains(out.stdout, "reported: indexed 1,204 files") {
 		t.Fatalf("wait: %+v", out)
 	}
@@ -114,7 +117,7 @@ func TestAgentsVerbRunsALineage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Tasks) != 1 || m.Tasks[0].Gate == "" || m.Tasks[0].Attempt.Role != "researcher" || len(m.Messages) < 3 {
+	if len(m.Tasks) != 1 || m.Tasks[0].Gate == "" || m.Tasks[0].Attempt.Role != "researcher" || len(m.Messages) != 3 {
 		t.Fatalf("mission: %+v", m)
 	}
 }

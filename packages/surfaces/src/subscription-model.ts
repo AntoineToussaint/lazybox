@@ -79,11 +79,15 @@ export type Comeback =
   | { kind: 'back' | 'due'; resetAt: number }
   | { kind: 'unknown' | 'sign-in' | 'billing' };
 
+function accountWindows(usage: Profile['availability']) {
+  return (usage?.windows || []).filter(w => !w.name.startsWith('model:') && !['seven_day_opus', 'seven_day_sonnet', 'seven_day_oauth_apps'].includes(w.name));
+}
+
 export function comeback(profile: Profile | undefined, now = Date.now()): Comeback {
   const usage = profile?.availability, state = usage?.state || 'unknown';
   if (state === 'auth_required') return { kind: 'sign-in' };
   if (state === 'billing_error') return { kind: 'billing' };
-  const full = (usage?.windows || []).filter(w => Number.isFinite(w.usedPercent) && w.usedPercent >= 100);
+  const full = accountWindows(usage).filter(w => Number.isFinite(w.usedPercent) && w.usedPercent >= 100);
   if (state !== 'exhausted' && state !== 'throttled' && !full.length) return { kind: 'available' };
   const resets = full.map(w => seconds(w.resetAt)).filter(Boolean);
   const resetAt = resets.length ? Math.max(...resets) : seconds(usage?.resetAt);
@@ -123,7 +127,7 @@ export type SubscriptionChoice = { id: string; provider: string; name: string; r
 /** A zero reset means a known limit with no recovery time. */
 function limitResets(profile: SubscriptionLike): number[] {
   const usage = profile.availability;
-  const resets = (usage?.windows || []).filter(usageWindow => usageWindow.usedPercent >= 100).map(usageWindow => seconds(usageWindow.resetAt));
+  const resets = accountWindows(usage).filter(usageWindow => usageWindow.usedPercent >= 100).map(usageWindow => seconds(usageWindow.resetAt));
   if (usage?.state === 'exhausted' || usage?.state === 'throttled') resets.push(seconds(usage.resetAt));
   return resets;
 }
@@ -154,7 +158,7 @@ export function subscriptionDetail(profile: SubscriptionLike, now: number): stri
     return back ? `${label} · ${back}` : label;
   }
   if (resets.length) return 'Reset elapsed · usage unconfirmed';
-  const used = Math.max(-1, ...(usage?.windows || []).map(w => Number.isFinite(w.usedPercent) ? w.usedPercent : -1));
+  const used = Math.max(-1, ...accountWindows(usage).map(w => Number.isFinite(w.usedPercent) ? w.usedPercent : -1));
   const prefix = rank === 0 ? 'Available' : 'Ready';
   return used >= 0 ? `${prefix} · ${Math.min(99, Math.round(used))}% used` : prefix;
 }

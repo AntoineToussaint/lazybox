@@ -52,7 +52,7 @@ try{
  await expect(chat.getByRole('region',{name:'What the agent is doing'})).toBeVisible();
  await expect(strip).toHaveCount(0);
  // While the agent works, the message box says what ↵ and Send now's key do.
- await expect(hint).toHaveText(`↵ queues · ${nowKey} sends now`);
+ await expect(hint).toHaveText(`↵ queues for later · Send now (${nowKey}) interrupts the current turn`);
  // The session poll lags the stream (frozen here): the strip shows the message from the stream, at once.
  f.freezeSession(claude.id);
  await composer.fill('Use port 4000 instead, 3000 is taken.');await composer.press('Enter');
@@ -179,7 +179,7 @@ try{
  await composer.fill('Also log the port it picked.');await composer.press('Enter');
  await expect(strip).toBeVisible({timeout:5000});
  await expect(strip.locator('.queued-head [role=status]')).toHaveText(/^Queued — Codex is busy \(Running a command/);
- await expect(strip.locator('.queued-note')).toHaveCount(0);
+ await expect(strip.locator('.queued-note')).toContainText('Steer adds instructions to the current turn.');
  await agentSays(chat,codex,'Codex is reading the server logs.');
  await expect(youSaid(chat,'Also log the port it picked.')).toHaveCount(0);
  await page.screenshot({path:'.cache/queued-codex.png'});
@@ -192,6 +192,7 @@ try{
  await expect(youSaid(chat,'Also log the port it picked.').locator('.message-tag')).toHaveText('steered');await expect(chat.getByRole('article',{name:'You, steered: Also log the port it picked.'})).toHaveCount(1);await expect(youSaid(chat,'Also log the port it picked.').locator('.eyebrow')).toHaveCount(0);await page.mouse.move(0,0);await youSaid(chat,'Also log the port it picked.').screenshot({path:'.cache/message-own-steered.png'});
 
  await composer.fill('Inspect the error path independently');await composer.press('Enter');
+ await expect(strip.locator('.queued-note')).toContainText('Request delegation asks the agent to give this task to a sub-agent');
  await strip.getByRole('button',{name:'Request delegation'}).click();
  await expect.poll(()=>deliveries().at(-1)).toEqual({operationId:sentAs('Inspect the error path independently'),how:'delegate'});
  assert.equal(codex.interrupted,undefined);
@@ -207,7 +208,7 @@ try{
  claude.capabilities={...claude.capabilities,steer:true};
  await open(claude);
  await expect(strip.locator('.queued-head [role=status]')).toHaveText(/^2 messages queued — Claude is busy/,{timeout:5000});
- await expect(strip.locator('.queued-note')).toHaveCount(0);
+ await expect(strip.locator('.queued-note')).toContainText('Steer adds instructions to the current turn.');
  const claudeSteer=strip.getByRole('listitem').first().getByRole('button',{name:'Steer'});
  await expect(claudeSteer).toHaveAttribute('title','Give Claude this message now, inside the running turn, without stopping it');
  await claudeSteer.click();
@@ -232,14 +233,41 @@ try{
  }, {times:1});
  await composer.fill('Thanks, that is all.');await composer.press(sendNowKey);
  try {
-   await expect(composer).toHaveAttribute('readonly','');
+   await expect(composer).toHaveValue('');
+   await composer.pressSequentially('Follow-up before receipt');
    await composer.press(sendNowKey);
    await expect(page.getByRole('alert').filter({hasText:'Still sending your previous message'})).toHaveCount(0);
  } finally { releaseReceipt(); }
  await expect.poll(()=>sentAs('Thanks, that is all.')).toBeTruthy();
- await expect(composer).toHaveValue('');
+ await expect(chat.locator('.send-button')).toBeEnabled();
+ await expect(composer).toHaveValue('Follow-up before receipt');
+ assert.equal(sentAs('Follow-up before receipt'), undefined);
+ await composer.fill('');
  assert.equal(f.mutations.filter(m => m.method === 'Apply' && m.body.message?.text === 'Thanks, that is all.').length, 1);
  assert.equal(deliveries().length,delivered,'no Send now');assert.equal(codex.interrupted,undefined,'nothing interrupted');
+ // Click Send, lose the receipt, then retry after reload with both drafts intact.
+ let failSend;
+ const failedReceipt = new Promise(resolve => { failSend = resolve; });
+ let firstOperation;
+ await page.route('**/Apply', async route => {
+   firstOperation = route.request().postDataJSON().operationId;
+   await failedReceipt;
+   await route.fulfill({json:{error:'Receipt unavailable',delivery:'failed'}});
+ }, {times:1});
+ await composer.fill('Retry the original');
+ await chat.locator('.send-button').click();
+ try {
+   await expect(composer).toBeFocused();
+   await expect(composer).toHaveValue('');
+   await composer.pressSequentially('Keep this next draft');
+ } finally { failSend(); }
+ await expect(composer).toHaveValue('Retry the original');
+ await open(codex);
+ await expect(composer).toHaveValue('Retry the original');
+ await composer.press('Enter');
+ await expect.poll(()=>sentAs('Retry the original')).toBe(firstOperation);
+ await expect(composer).toHaveValue('Keep this next draft');
+ await composer.fill('');
  // A custom send shortcut takes precedence over the default newline key.
  await page.getByRole('button',{name:'Settings',exact:true}).click();
  await page.getByRole('tab',{name:'Shortcuts'}).click();
@@ -252,6 +280,7 @@ try{
  busy(codex,'codex');channels[codex.id].push({type:'turn_started'});
  for (const text of ['Shift queue first', 'Shift queue second', 'Shift queue third']) {
    await composer.fill(text);
+   await expect(chat.locator('.send-button')).toBeEnabled();
    await composer.press('Shift+Enter');
    await expect.poll(() => sentAs(text)).toBeTruthy();
    await expect(composer).toHaveValue('');

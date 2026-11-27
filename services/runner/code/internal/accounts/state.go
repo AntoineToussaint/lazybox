@@ -97,14 +97,14 @@ func (s *State) Clear(id string) error {
 	old, ok := s.observations[id]
 	full := false
 	for _, window := range old.Windows {
-		full = full || window.UsedPercent >= 100
+		full = full || window.AccountWide() && window.UsedPercent >= 100
 	}
 	if !ok || (old.State != "exhausted" && old.State != "throttled" && !(old.State == "available" && full)) {
 		return ErrNotLimited
 	}
 	cleared := agent.AccountObservation{State: "available", Email: old.Email, Plan: old.Plan, ObservedAt: time.Now().UnixMilli()}
 	for _, window := range old.Windows {
-		if window.UsedPercent < 100 {
+		if !window.AccountWide() || window.UsedPercent < 100 {
 			cleared.Windows = append(cleared.Windows, window)
 		}
 	}
@@ -193,7 +193,7 @@ func (s *State) RotationCapacity(id string, now time.Time) Capacity {
 		return Unavailable
 	}
 	for _, window := range value.Windows {
-		if window.UsedPercent >= 100 {
+		if window.AccountWide() && window.UsedPercent >= 100 {
 			if window.ResetAt <= 0 || window.ResetAt > unix {
 				return Unavailable
 			}

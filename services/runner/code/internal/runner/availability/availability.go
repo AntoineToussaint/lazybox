@@ -415,7 +415,7 @@ func subscription(p accounts.Profile, seen agent.AccountObservation, env []strin
 	s := Subscription{ProfileID: p.ID, Label: p.Label, Managed: p.Managed, Isolation: p.Isolation, ResetAt: seen.ResetAt}
 	// A limit lasts until every window at 100% has reset.
 	for _, w := range seen.Windows {
-		if w.UsedPercent >= 100 && w.ResetAt > s.ResetAt {
+		if w.AccountWide() && w.UsedPercent >= 100 && w.ResetAt > s.ResetAt {
 			s.ResetAt = w.ResetAt
 		}
 	}

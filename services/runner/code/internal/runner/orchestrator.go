@@ -638,7 +638,7 @@ func (b *Bench) sendAgentMessage(ctx context.Context, c orchestrationCaller, to,
 	}
 	reply := "lazybox agents send parent \"…\""
 	if relation == "child" {
-		reply = fmt.Sprintf("lazybox agents send %q \"…\"", senderTitle)
+		reply = fmt.Sprintf("lazybox agents send %q \"…\"", c.conversation)
 	}
 	body := header + "\n\n" + quoteText(strings.TrimSpace(text)) + "\n\nReply with `" + reply + "` if it needs an answer."
 	// The receiver's transcript shows it as an event from the sender, never as the person's.
@@ -712,12 +712,24 @@ func (b *Bench) ReportAgentTask(ctx context.Context, session, summary string) (L
 		return LineageView{}, fmt.Errorf("%w: say what you did and how you checked it", work.ErrRefused)
 	}
 	actor := work.Actor{Kind: work.ActorAgent, Role: c.parent.Attempt.Role, Conversation: c.conversation, Execution: c.e.ID}
-	if _, err := b.Work.Report(c.parent.Mission.ID, c.parent.Task.ID, actor, "", summary); err != nil {
-		return LineageView{}, err
+	task := c.parent.Task
+	_, waiting := task.OpenGate()
+	reports := task.Reports
+	if !waiting || len(reports) == 0 || reports[len(reports)-1].Seq < c.parent.Attempt.StartSeq ||
+		reports[len(reports)-1].Actor.Conversation != c.conversation || reports[len(reports)-1].Summary != summary {
+		state, err := b.Work.Report(c.parent.Mission.ID, task.ID, actor, "", summary)
+		if err != nil {
+			return LineageView{}, err
+		}
+		reports = state.Task(task.ID).Reports
 	}
-	// Telling the parent is a courtesy: a full rate window does not undo the report.
-	_, _ = b.sendAgentMessage(ctx, c, "parent", summary, "", "report")
 	b.orch().broadcast()
+	// The task is already awaiting acceptance. Retrying its notification uses
+	// the original report sequence even if the previous receipt was lost.
+	key := fmt.Sprintf("report-notification-%d", reports[len(reports)-1].Seq)
+	if _, err = b.sendAgentMessage(ctx, c, "parent", summary, key, "report"); err != nil {
+		return LineageView{}, fmt.Errorf("report saved, parent notification unconfirmed; retry the same report: %w", err)
+	}
 	return b.agentTree(ctx, c.e, 0)
 }
 

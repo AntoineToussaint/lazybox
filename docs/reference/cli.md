@@ -49,7 +49,7 @@ computers](../guides/remote-computers.md)):
 | --- | --- |
 | `lazybox ls [--all]` | Workspaces, their conversations and agents, with live state (needs input, failed, working, review, idle, ended). `--all` covers every registered Runner. |
 | `lazybox inbox [--all]` | What needs you, in order — needs input › failed › working › ready for review — with the `approve` / `deny` line for each pending approval. |
-| `lazybox send <conversation> [text\|-]` | Send a message (text from arguments, or stdin with `-` or a pipe). An ended conversation is resumed first. `--steer` steers the running turn. |
+| `lazybox send <conversation> [text\|-]` | Send a message (text from arguments, or stdin with `-` or a pipe). From a person’s CLI, an ended conversation resumes first and `--steer` steers the running turn. From an agent, this sends a labelled message to a direct child or to `parent`. |
 | `lazybox approve <request\|conversation>` / `deny …` | Answer a pending approval, by request id, or by conversation when it has exactly one. Questions are answered in the app. |
 | `lazybox stop <conversation\|command> [--agent ID] [--end]` | Interrupt the running turn; `--agent` stops one sub-agent; `--end` ends the conversation (resumable). A command id cancels that command. |
 | `lazybox wait <conversation> --until idle\|needs-input [--timeout 30m]` | Block until reached (exit 0); exit 5 on timeout; exit 1 if the turn failed. |

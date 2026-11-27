@@ -1,6 +1,9 @@
 package agent
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Status is observed execution state. Done means a provider turn completed;
 // it does not accept a work item or close the conversation.
@@ -52,6 +55,12 @@ type UsageWindow struct {
 	UsedPercent     float64 `json:"usedPercent"`
 	ResetAt         int64   `json:"resetAt,omitempty"`
 }
+
+// AccountWide reports whether this window can constrain the whole subscription.
+func (w UsageWindow) AccountWide() bool {
+	return !strings.HasPrefix(w.Name, "model:") && w.Name != "seven_day_sonnet" && w.Name != "seven_day_opus" && w.Name != "seven_day_oauth_apps"
+}
+
 type AccountObservation struct {
 	Email             string        `json:"email,omitempty"`
 	Windows           []UsageWindow `json:"windows,omitempty"`

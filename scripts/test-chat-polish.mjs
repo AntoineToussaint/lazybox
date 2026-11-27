@@ -134,7 +134,7 @@ try{
  // Text another panel adds while a send is in flight (Quote in reply) waits for it: the send no longer erases it.
  f.sessions[0].applyDelayMs=1500;
  await message.fill('And the timeout.');await message.press('Enter');
- await expect(message).toHaveAttribute('aria-disabled','true');await expect(message).toBeFocused();
+ await expect(message).toHaveValue('');await expect(message).toBeEditable();await expect(message).toBeFocused();
  await chat.getByText('Let me look at the test and the CI logs.').click({button:'right'});
  await page.getByRole('menuitem',{name:'Quote in reply'}).click();
  await expect(message).toHaveValue(/^> Let me look at the test and the CI logs\./,{timeout:8000});

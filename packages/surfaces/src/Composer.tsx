@@ -100,8 +100,8 @@ export function Composer({ workingTurn, textarea, fileInput, agentName, embedded
   // A pasted image (a screenshot, say) attaches like a dropped file; a large
   // text paste becomes a box; a short one stays a native paste.
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    // Read-only while a send is in flight: nothing joins the message, as text or as a box.
-    if (sending) { event.preventDefault(); return; }
+    // A plain-text paste belongs to the next draft while attachments are in flight.
+    if (sending && !pastedFiles(event.clipboardData).length) return;
     const pasted = pastedFiles(event.clipboardData);
     if (!pasted.length) {
       const text = event.clipboardData.getData('text/plain');
@@ -136,7 +136,7 @@ export function Composer({ workingTurn, textarea, fileInput, agentName, embedded
     ? '' : ' · Shift+Enter for a new line';
   // While the agent works, a message queues behind its turn; Send now's key (⌘↵) stops the turn for it.
   const sendNowKey = bindings(keymap['chat.send-now'])[0];
-  const busyHint = workingTurn && sendNowKey ? `${displayBinding(sendKey).join(' ')} queues · ${displayBinding(sendNowKey).join(' ')} sends now` : '';
+  const busyHint = workingTurn && sendNowKey ? `${displayBinding(sendKey).join(' ')} queues for later · Send now (${displayBinding(sendNowKey).join(' ')}) interrupts the current turn` : '';
   const dictateKey = bindings(keymap['voice.dictate'])[0];
   const dictateHint = dictateKey ? `Dictate · hold ${displayBinding(dictateKey).join(' ')} to talk, tap it ${isLoneModifier(dictateKey) ? 'twice ' : ''}to keep listening` : 'Dictate';
   // Sending while listening (↵, ⌘↵, Send) waits for the last words, then sends through this same form.
@@ -169,11 +169,7 @@ export function Composer({ workingTurn, textarea, fileInput, agentName, embedded
       className={dictation.active ? 'is-dictating' : undefined}
       aria-busy={dictation.active || undefined}
       onChange={e => { if (folded) setEditingSnippet(true); const text = e.currentTarget.value; lastInput.current = text; dictation.takeOver(); onChange(text); }}
-      // Read-only, not disabled, while a send is in flight: WebKit blurs a
-      // disabled field, and the box would lose the keyboard after every send.
       disabled={!canCompose}
-      readOnly={sending}
-      aria-disabled={sending || undefined}
       {...vim.textareaProps}
       {...slash?.textareaProps}
       onKeyDown={keyDown}

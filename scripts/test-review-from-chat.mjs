@@ -89,7 +89,11 @@ try{
  // 3. The review card brings its tab to the front: no second panel, the work's tab kept.
  const chatTabs=await tabs().filter({has:page.locator('[data-kind=chat]')}).count();
  const nav=page.getByRole('navigation',{name:'Workspaces'});
- await expect(nav.getByText('Review · Changes · Codex',{exact:true})).toHaveCount(0);
+ const child = nav.locator('[data-review-child]').filter({hasText:first.title});
+ await expect(child).toBeVisible();
+ await child.getByRole('button').first().click();
+ await expect(activeTab().filter({hasText:'Review · Codex'})).toHaveCount(1);
+ await nav.getByText('Harden the handler',{exact:true}).first().click();
  await chat().getByRole('group',{name:'Codex review'}).getByRole('button',{name:'Open conversation'}).click();
  await expect(activeTab().filter({hasText:'Review · Codex'})).toHaveCount(1);
  await expect(tabs()).toHaveCount(await tabs().count());

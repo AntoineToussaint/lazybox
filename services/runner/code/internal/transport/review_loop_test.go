@@ -283,3 +283,18 @@ func TestPersistedReviewAnswerReachesAsker(t *testing.T) {
 		t.Fatalf("recovered answer: %+v", op)
 	}
 }
+
+func TestDefaultReviewReturnsCleanSummaryToAuthor(t *testing.T) {
+	f := newReviewFixture(t)
+	_, err := f.client.StartReview(f.owner, &pb.StartReviewRequest{CollectionId: f.mine.Id, SourceSessionId: f.conversation.ID, Scope: "turn", Turn: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied(t, f.codex, "What to review")
+	f.codex.Session.Events <- agent.Event{Type: "message_delta", Text: "I checked the handler."}
+	f.codex.Session.Events <- agent.Event{Type: "turn_ended", Status: "completed"}
+	summary := applied(t, f.claude, "Review complete · no open findings")
+	if !strings.Contains(summary.Text, "I checked the handler.") {
+		t.Fatal(summary.Text)
+	}
+}

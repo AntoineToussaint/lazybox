@@ -12,8 +12,8 @@ A conversation's `purpose` names its type, as it always has, so saved
 conversations keep loading. The Runner sends the resolved type with each
 session (`Session.agent_type`, an `AgentType`), and clients read it rather
 than matching purposes. A Runner from before types sends none. A client
-then uses the purpose to keep companions and reviewers out of the sidebar while
-including their requests in the inbox. Help, planning and summary stay in their side panels.
+then uses the purpose to identify companions and reviewers. Their requests
+reach the inbox. Reviewers with known lineage appear beneath their authors in the sidebar. Help, planning and summary stay in their side panels.
 
 ## The built-in types
 

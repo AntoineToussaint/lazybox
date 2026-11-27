@@ -116,3 +116,6 @@
 .deleted-item{display:grid;gap:3px;min-width:0}
 .recently-deleted small{color:var(--text-muted)}
 .recently-deleted small[role=status]{grid-column:1/-1}
+
+.conversation-row[data-review-child]{margin-inline-start:1rem;position:relative}
+.conversation-row[data-review-child]::before{content:'';position:absolute;inset-inline-start:-.65rem;top:0;height:50%;width:.55rem;border-inline-start:1px solid currentColor;border-bottom:1px solid currentColor;opacity:.45;pointer-events:none}

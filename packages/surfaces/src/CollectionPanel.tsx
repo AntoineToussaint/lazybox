@@ -389,7 +389,7 @@ function WorkspaceList({
           const rows = index.sessions.filter(
             (s) => s.collectionId === collection.id && isListed(s) && !reviewParent(s) && !isArchivedAway(s),
           );
-          const reviews = index.sessions.filter(s => s.collectionId === collection.id && reviewParent(s) && !isArchivedAway(s));
+          const reviews = index.sessions.filter(s => s.collectionId === collection.id && reviewParent(s));
           const reviewsOf = (author: typeof rows[number]) => reviews.filter(s => {
             const parent = reviewParent(s);
             return parent && (parent === author.id || parent === author.conversationId);
@@ -434,10 +434,10 @@ function WorkspaceList({
               />
               {single && reviewsOf(single).length > 0 && (
                 <div className="workspace-conversations">
-                  <ConversationList sessions={reviewsOf(single)} compact collectionId={collection.id} target={target} onTarget={onTarget}/>
+                  <ConversationList sessions={reviewsOf(single)} nestedReviews compact collectionId={collection.id} target={target} onTarget={onTarget}/>
                 </div>
               )}
-              {rows.length > 1 && !folded.includes(collection.id) && (
+              {!single && rows.length > 0 && (rows.length === 1 || !folded.includes(collection.id)) && (
                 <div className="workspace-conversations">
                   <ConversationList
                     order={collection.conversationOrder}

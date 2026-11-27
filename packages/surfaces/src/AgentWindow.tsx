@@ -487,7 +487,8 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const firstPrompt = transcript.partial ? '' : conversation.find(m => m.type === 'operation_accepted' && !m.origin)?.text || '';
   // An assistant conversation is about Lazybox, not the workspace's branches: its header names none.
   const branch = assistant ? undefined : branchSummary(workspace);
-  const modelLabel = [sessionModelLabel(session, transcript.reportedModel), session?.effort].filter(Boolean).join(' · ');
+  const selectedModel = transcript.selectedModel || session?.selectedModel;
+  const modelLabel = [selectedModel || sessionModelLabel(session, transcript.reportedModel), session?.effort].filter(Boolean).join(' · ');
   const accountName = sessionAccountLabel(session, activeProfile);
   const profileList = info?.profiles;
   const nameFor = useCallback((id: string) => subscriptionName(profileList?.find(p => p.id === id), id), [profileList]);
@@ -688,7 +689,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const provider = activeProfile?.provider || session?.provider || launcher.provider;
   const slash = useSlashCommands({
     api, viewState, enabled: mode === 'agent' && !!sessionID, session, sessionID, agentName, provider, catalog: transcript.catalog,
-    model: transcript.reportedModel || session?.model || '', conversation, shellBlock: !!codeRuns && !!lastShellBlock, detail: activity.detail,
+    model: selectedModel || transcript.reportedModel || session?.model || '', conversation, shellBlock: !!codeRuns && !!lastShellBlock, detail: activity.detail,
     subscriptions: (profileList || []).filter(p => p.provider === provider).length, canCompose, message,
     setText: (text, key) => { draftSnippet.current = key ? {key, text} : undefined; setMessage(text); setUncertainSend(''); sendAttempt.current = null; persistDraft(text, files, missingFiles); },
     textarea: composer, front: activity.current, onError: setError, reviewLauncher: chatReview.launcher,

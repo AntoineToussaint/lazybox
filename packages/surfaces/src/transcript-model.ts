@@ -52,7 +52,7 @@ function reviewNote(data: Record<string, unknown>, finished: boolean): ReviewNot
   return { review: text('review'), workspace: text('workspace'), reviewerSession: text('reviewerSession'), reviewerLabel: text('reviewerLabel') || 'Reviewer', scopeLabel: text('scopeLabel'), blockers: count('blockers'), majors: count('majors'), minors: count('minors'), nits: count('nits'), finished, ...(state ? { state } : {}) };
 }
 /** `requests`: what each question or approval asked, to say how it was answered. */
-export type Transcript = { messages: TranscriptMessage[]; recent: JournalEvent[]; activity: JournalEvent[]; activityTruncated: boolean; cursor: bigint; appendToLast: boolean; reportedPermission?: string; reportedModel:string; lastObservedModel?: string; reportedContext?: TranscriptMessage['promptContext']; subagents: Subagents; requests: Record<string, RequestNote>; /** The agent's slash commands and models (`command_catalog`). */ catalog: CommandCatalog;
+export type Transcript = { messages: TranscriptMessage[]; recent: JournalEvent[]; activity: JournalEvent[]; activityTruncated: boolean; cursor: bigint; appendToLast: boolean; reportedPermission?: string; reportedModel:string; selectedModel?: string; lastObservedModel?: string; reportedContext?: TranscriptMessage['promptContext']; subagents: Subagents; requests: Record<string, RequestNote>; /** The agent's slash commands and models (`command_catalog`). */ catalog: CommandCatalog;
   /** Send now stopped the turn in progress, which has not ended yet. */
   sendingNow?: boolean;
   /** The agent's turn is running (or a switch of subscription started one): a message accepted now waits in the queue. */
@@ -249,7 +249,7 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
     // A command run (a model or permission switch, a compaction) is one quiet line.
     const ran = commandLine(event.type, event.text, event.status, event.type === 'compacted' ? providerData(event.providerDataJson) : {});
     if (ran) {
-      if (event.type === 'model_changed') next.reportedModel = event.text;
+      if (event.type === 'model_changed') { next.selectedModel = event.text; next.reportedModel = event.text; }
       add({ id: record.cursor.toString(), type: 'command', text: ran, turnId: event.turnId, ...(event.type === 'compacted' && {compaction: true}) });
       next.appendToLast = false;
       continue;

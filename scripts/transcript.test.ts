@@ -63,6 +63,7 @@ test('prompt metadata retains the last root observation at acceptance across jou
  add('operation_accepted', 'First observation');
  add('context', '', {model: 'second', used: 0, capacity: 300});
  add('operation_accepted', 'Second observation');
+ assert.equal(state.selectedModel, 'requested-for-next-turn', 'old-turn usage preserves the composer selection');
  assert.deepEqual(state.messages.filter(m => m.type === 'operation_accepted').map(m => [m.promptModel, m.promptContext]), [
   [undefined, undefined],
   ['first', {used: 20, capacity: 100}],

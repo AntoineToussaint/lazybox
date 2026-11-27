@@ -160,6 +160,7 @@ type Config struct {
 }
 
 type Execution struct {
+	modelChange               sync.Mutex // Preserve provider acceptance order in history and the model_changed journal.
 	Continuation              sync.Mutex
 	activity                  sync.Mutex
 	Engine                    SessionRuntime

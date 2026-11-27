@@ -143,6 +143,8 @@ func (b *Bench) restart(ctx context.Context, e *Execution) (*Execution, error) {
 // Asked for during a turn, the change waits for that turn to end (the
 // adapters apply it to the next one), and the conversation says so.
 func (b *Bench) SetModelAndEffort(ctx context.Context, e *Execution, operationID, model, effort string) (agent.Receipt, error) {
+	e.modelChange.Lock()
+	defer e.modelChange.Unlock()
 	if err := agent.ValidEffort(e.Profile.Provider, effort); err != nil {
 		return agent.Receipt{}, err
 	}
@@ -172,6 +174,8 @@ func (b *Bench) SetModelAndEffort(ctx context.Context, e *Execution, operationID
 // switch live: the agent is ended between turns and the same provider
 // conversation resumes in a new agent started with that model.
 func (b *Bench) RestartWithModelAndEffort(ctx context.Context, e *Execution, model, effort string) (*Execution, error) {
+	e.modelChange.Lock()
+	defer e.modelChange.Unlock()
 	if err := agent.ValidEffort(e.Profile.Provider, effort); err != nil {
 		return nil, err
 	}

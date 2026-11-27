@@ -42,7 +42,7 @@ const settingsApprovals = new SettingsApprovals();
 // The agent's own slash commands and models, said once per change.
 const catalog = new CommandCatalog();
 // The model of the following turns: a change during a turn waits for it to end.
-const models = new ModelSwitch((model, effort) => effort ? session!.applyFlagSettings({ model, effortLevel: effort }) : session!.setModel(model), (model, error) => process.stderr.write(`model ${model} not applied: ${errorText(error)}\n`));
+const models = new ModelSwitch((model, effort) => effort ? session!.applyFlagSettings({ model, effortLevel: effort }) : session!.setModel(model), (model, error) => event({ type: 'provider_notice', text: `Could not switch to ${model}: ${errorText(error)}` }));
 const sayCatalog = (value: ReturnType<CommandCatalog['fromChanged']>) => { if (value) event({ ...value, sessionId: reference }); };
 const send = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n');
 const event = (value: unknown) => send({ method: 'event', params: value });
@@ -161,7 +161,7 @@ async function receive(q: Query) {
       // conversation. Account limits still count. Only the interrupted turn.
       if (!interrupts.pass(normalized)) continue;
       // A model change that waited for this turn applies before the next one is sent.
-      if (normalized.type === 'turn_ended') void models.turnEnded();
+      if (normalized.type === 'turn_ended' && (!normalized.agentId || normalized.agentId === 'root')) void models.turnEnded();
       if (reportContext && normalized.type === 'context' && (!normalized.agentId || normalized.agentId === 'root')) {
         reportContext(normalized.data);
       } else {
@@ -197,6 +197,7 @@ async function handle(request: Request) {
     if (!session) throw new Error('session not opened');
     switch (request.method) {
       case 'message': {
+        await models.beforeMessage();
         deliver(messageContent(p));
         models.turnStarted();
         interrupts.delivered();

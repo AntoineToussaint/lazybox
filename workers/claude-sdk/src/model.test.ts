@@ -48,3 +48,30 @@ test('the queued model change carries reasoning effort to the next turn', async 
   await models.turnEnded();
   assert.deepEqual(applied, [{ model: 'sonnet', effort: 'high' }]);
 });
+
+test('the next prompt waits for the deferred SDK model acknowledgement', async () => {
+  let acknowledge!: () => void;
+  const models = new ModelSwitch(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+  models.turnStarted();
+  await models.change('sonnet');
+  const finished = models.turnEnded();
+  let delivered = false;
+  const message = models.beforeMessage().then(() => { delivered = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(delivered, false);
+  acknowledge();
+  await Promise.all([finished, message]);
+  assert.equal(delivered, true);
+});
+
+test('refused idle selection preserves the prior model; deferred failure blocks delivery until corrected', async () => {
+  const models = new ModelSwitch(async model => { if (model === 'unknown') throw new Error('unsupported model'); });
+  await assert.rejects(models.change('unknown'), /unsupported/);
+  await models.beforeMessage();
+  models.turnStarted();
+  await models.change('unknown');
+  await models.turnEnded();
+  await assert.rejects(models.beforeMessage(), /unsupported/);
+  await models.change('sonnet');
+  await models.beforeMessage();
+});

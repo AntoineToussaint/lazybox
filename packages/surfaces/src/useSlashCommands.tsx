@@ -184,7 +184,20 @@ export function useSlashCommands(o: Options) {
 
   // ---- Running ---------------------------------------------------------
   // A model switch that restarts the agent: asked once, and, during a turn, done when it ends.
-  const [restart, setRestart] = useState<{ model: string; effort: string; label: string; queued: boolean }>();
+  const [restart, setRestart] = useState<{ sessionId: string; model: string; effort: string; label: string; queued: boolean }>();
+  const [retry, setRetry] = useState<{ sessionId: string; original: string; selection: string; label: string }>();
+  const [retrying, setRetrying] = useState(false);
+  const retryTurn = async () => {
+    if (!retry || retrying || retry.sessionId !== sessionID) return;
+    setRetrying(true);
+    try {
+      const receipt = await api.apply({ sessionId: retry.sessionId, operationId: crypto.randomUUID(), operation: { case: 'retryTurn',
+        value: { originalOperationId: retry.original, modelOperationId: retry.selection } } });
+      if (receipt.delivery === 'failed') throw new Error(receipt.error || 'Could not retry the turn.');
+      setRetry(undefined);
+    } catch (e) { latest.current.onError(humanError(e)); }
+    finally { setRetrying(false); }
+  };
   const [tracking, setTracking] = useState<Tracking>();
   const notice = (text: string) => showMenuNotice(text);
   const switchModel = async (value: string) => {
@@ -198,17 +211,21 @@ export function useSlashCommands(o: Options) {
     if ((!effort || current.effort === effort) && (choice?.current || sameModel({ value: model, displayName: modelName(model), description: '' }, latest.current.model))) { setRestart(undefined); notice(`Already on ${label}`); return; }
     if (current.capabilities?.liveModel) {
       try {
-        await api.apply({ sessionId: id, operationId: crypto.randomUUID(), operation: { case: 'model', value: { model, effort } } });
+        const selection = crypto.randomUUID();
+        const receipt = await api.apply({ sessionId: id, operationId: selection, operation: { case: 'model', value: { model, effort } } });
+        if (receipt.delivery === 'failed') throw new Error(receipt.error || 'The agent refused the model change.');
+        if (latest.current.sessionID !== id) return;
+        setRetry(current.busy && current.retryableOperationId ? { sessionId: id, original: current.retryableOperationId, selection, label } : undefined);
         setRestart(undefined);
-        if (current.busy) notice(`${label} from the next turn; this one finishes on the model it started with`);
+        if (current.busy && !current.retryableOperationId) notice(`${label} from the next turn; this one finishes on the model it started with`);
       } catch (e) { onError(humanError(e)); }
       return;
     }
     if (!current.capabilities?.resume) { onError(`${latest.current.agentName} cannot change models during a conversation. Start a new conversation with ${label}.`); return; }
-    setRestart({ model, effort, label, queued: false });
+    setRestart({ sessionId: id, model, effort, label, queued: false });
   };
   // A restart asked for during a turn runs once the turn ends.
-  useEffect(() => { if (restart?.queued && session && !session.busy && !session.closed) void restartWithModel(restart.model, restart.effort); }, [restart, session?.busy, session?.closed]);
+  useEffect(() => { if (restart?.queued && restart.sessionId === sessionID && session && !session.busy && !session.closed) void restartWithModel(restart.model, restart.effort); }, [restart, sessionID, session?.busy, session?.closed]);
   const restartWithModel = async (model: string, effort: string) => {
     setRestart(undefined);
     try {
@@ -434,8 +451,13 @@ export function useSlashCommands(o: Options) {
   const menuElement = menu && <div ref={menuBox} style={{ display: 'contents' }}><SlashMenu menu={menu} selected={selected} sessionId={sessionID} agentName={o.agentName}
     onSelect={select} onChoose={index => choose(index)} onClose={() => { setDismissed(true); if (stash.current !== null) finish(); latest.current.textarea.current?.focus(); }}/></div>;
   const above = menuElement;
-  const prompt: ReactNode = restart ? <ModelRestartPrompt provider={provider} agentName={o.agentName} label={restart.label} busy={!!session?.busy} queued={restart.queued} returnTo={o.textarea}
-    onRestart={() => { if (session?.busy) setRestart({ ...restart, queued: true }); else void restartWithModel(restart.model, restart.effort); }} onCancel={() => setRestart(undefined)}/> : null;
+  const prompt: ReactNode = restart && restart.sessionId === sessionID ? <ModelRestartPrompt provider={provider} agentName={o.agentName} label={restart.label} busy={!!session?.busy} queued={restart.queued} returnTo={o.textarea}
+    onRestart={() => { if (session?.busy) setRestart({ ...restart, queued: true }); else void restartWithModel(restart.model, restart.effort); }} onCancel={() => setRestart(undefined)}/> : retry && retry.sessionId === sessionID && session?.busy && session.retryableOperationId === retry.original ?
+    <div className="restart-permission restart-model" role="group" aria-label="Model change during a turn">
+      <span>{retry.label} is selected for the next turn. You can stop this turn and resend its original prompt and attachments.</span>
+      <button disabled={retrying} onClick={() => void retryTurn()}>Stop and retry with {retry.label}</button>
+      <button disabled={retrying} onClick={() => setRetry(undefined)}>Finish current turn</button>
+    </div> : null;
   const dialogs: ReactNode = tracking && workspaceId && <>
     {tracking.kind === 'track' && <TrackArtifactDialog collectionId={workspaceId} content={tracking.message.text}
       source={{ kind: 'message', sessionId: sessionID, conversationId: session?.conversationId, messageId: tracking.message.id, turnId: tracking.message.turnId }} existing={tracking.existing}

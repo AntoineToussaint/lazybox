@@ -385,6 +385,33 @@ try{
  await expect.poll(()=>applies().at(-1)?.body.message?.text).toBe(partialInterrupt);
  await expect(codexMessage).toHaveValue('');
 
+ // Choose a model from the composer while a specific user prompt is running.
+ const runningCodex=f.sessions.find(session=>session.id==='codex-session');
+ Object.assign(runningCodex,{busy:true,status:'running',retryableOperationId:'active-prompt'});
+ await page.reload();
+ await expect(codexMessage).toBeEnabled();
+ const chooseWhileRunning=async model=>{
+   await codexMessage.click();
+   await page.keyboard.type('/model '+model);
+   await page.keyboard.press('Enter');
+ };
+ const choice=codexChat.getByRole('group',{name:'Model change during a turn'});
+ await page.route('**/Apply',route=>route.fulfill({json:{delivery:'failed',error:'Model unavailable on this subscription'}}),{times:1});
+ await chooseWhileRunning('astra');
+ await expect(codexChat.getByText('Model unavailable on this subscription',{exact:false}).first()).toBeVisible();
+ await expect(choice).toBeHidden();
+ await chooseWhileRunning('astra');
+ await choice.getByRole('button',{name:'Finish current turn'}).click();
+ assert.equal(applies().some(m=>m.body.retryTurn),false);
+ await chooseWhileRunning('luna');
+ await expect(choice).toBeVisible();
+ const selection=applies().findLast(m=>m.body.model)?.body.operationId;
+ await choice.getByRole('button',{name:/Stop and retry/}).click();
+ await expect.poll(()=>applies().findLast(m=>m.body.retryTurn)?.body.retryTurn).toEqual({
+   originalOperationId:'active-prompt',modelOperationId:selection,
+ });
+ await expect(choice).toBeHidden();
+
  // The ⋯ menu says what is current: Full access is selected (pressed, not greyed out), and the provider's
  // Default is the current model when the conversation names none. Twelve models: the first few, then More.
  await go(`${base}/?view=workspace&collection=beta&session=codex-default-session#token=${f.token}`);

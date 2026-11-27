@@ -127,7 +127,7 @@ func wireAgentType(purpose string) *pb.AgentType {
 func wireSession(e *runner.Execution) *pb.Session {
 	s := e.Engine.Snapshot()
 	c := s.Capabilities
-	w := &pb.Session{Id: s.ID, ProfileId: s.Profile, ProviderReference: s.Reference, GatewayId: s.GatewayID, Busy: s.Busy, Closed: s.Closed, Fault: s.Fault, Queued: uint32(s.Queued), WorkId: e.WorkID, PreviousExecutionId: e.Previous, CollectionId: e.CollectionID, WorkingDirectory: e.Cwd, Purpose: e.Purpose, Status: string(s.Status), Account: wireAccount(s.Account), ActivityTruncated: s.ActivityTruncated, RotationProfileIds: e.Options.RotationProfiles, Capabilities: &pb.Capabilities{Images: c.Images, Files: c.Files, Questions: c.Questions, Approvals: c.Approvals, Steer: c.Steer, Resume: c.Resume, PendingResume: c.PendingResume, ProfileIsolation: c.ProfileIsolation, Subagents: c.Subagents, LivePermission: c.LivePermission, StopAgent: c.StopAgent, LiveModel: c.LiveModel}}
+	w := &pb.Session{RetryableOperationId: s.RetryableOperationID, Id: s.ID, ProfileId: s.Profile, ProviderReference: s.Reference, GatewayId: s.GatewayID, Busy: s.Busy, Closed: s.Closed, Fault: s.Fault, Queued: uint32(s.Queued), WorkId: e.WorkID, PreviousExecutionId: e.Previous, CollectionId: e.CollectionID, WorkingDirectory: e.Cwd, Purpose: e.Purpose, Status: string(s.Status), Account: wireAccount(s.Account), ActivityTruncated: s.ActivityTruncated, RotationProfileIds: e.Options.RotationProfiles, Capabilities: &pb.Capabilities{Images: c.Images, Files: c.Files, Questions: c.Questions, Approvals: c.Approvals, Steer: c.Steer, Resume: c.Resume, PendingResume: c.PendingResume, ProfileIsolation: c.ProfileIsolation, Subagents: c.Subagents, LivePermission: c.LivePermission, StopAgent: c.StopAgent, LiveModel: c.LiveModel}}
 	w.ConversationId = e.Saved.ConversationID
 	w.AgentType = wireAgentType(e.Purpose)
 	w.ForkedFromSessionId, w.ForkedFromCursor = e.Saved.ForkedFrom, e.Saved.ForkCursor
@@ -436,6 +436,18 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 			return nil, rpcError(err)
 		}
 		return &pb.Receipt{OperationId: receipt.ID, Delivery: receipt.Delivery, ProviderId: receipt.ProviderID, Error: receipt.Error}, nil
+	case *pb.ApplyRequest_RetryTurn:
+		live, ok := e.Engine.(interface {
+			RetryTurn(context.Context, string, string) (agent.Receipt, error)
+		})
+		if !ok {
+			return nil, rpcError(agent.ErrUnsupported)
+		}
+		r, err := live.RetryTurn(ctx, o.RetryTurn.OriginalOperationId, o.RetryTurn.ModelOperationId)
+		if err != nil {
+			return nil, grpcError(codes.FailedPrecondition, err)
+		}
+		return &pb.Receipt{OperationId: r.ID, Delivery: r.Delivery, Error: r.Error}, nil
 	case *pb.ApplyRequest_Model:
 		receipt, err := s.Bench.SetModelAndEffort(ctx, e, p.OperationId, o.Model.GetModel(), o.Model.GetEffort())
 		if err != nil {
@@ -1178,7 +1190,8 @@ func (s *Service) sessionView(ctx context.Context, e *runner.Execution) (*pb.Ses
 	view := wireSession(e)
 	view.InstructionsPending = !view.Closed && s.Bench.BriefingUpdate(e).Text != ""
 	view.Provider = e.Profile.Provider
-	view.Model = e.Options.Model
+	view.SelectedModel = record.Options.Model
+	view.Model = record.Options.Model
 	if s.Bench.Telemetry != nil {
 		model, err := s.Bench.Telemetry.LatestModel(ctx, e.ID)
 		if err != nil {

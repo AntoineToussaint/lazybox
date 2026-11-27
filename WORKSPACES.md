@@ -1146,7 +1146,7 @@ Git checks and worktree removal for a deletion run outside the shared
 workspace registry lock. Other workspaces remain readable during cleanup.
 
 Deleting a workspace or conversation moves it out of the normal lists for
-five minutes. The **Undo** notification is visible for one minute. Open
+five minutes. The **Undo** notification is visible for five seconds. Open
 **Recently deleted** at the bottom of the Workspaces sidebar to undo during the rest of the
 five-minute window. The Runner persists the deadline, and
 existing files, messages and running processes stay in place during that

@@ -7,6 +7,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/net/idna"
 )
 
 // Site policy. The Runner decides which sites an agent may open without
@@ -20,7 +23,10 @@ var ErrBlocked = errors.New("blocked")
 // Origin is scheme://host[:port] of an http(s) URL, with the default port
 // left out, lower case.
 func Origin(u *url.URL) string {
-	host := strings.ToLower(u.Hostname())
+	host, err := canonicalHost(u.Hostname())
+	if err != nil {
+		return ""
+	}
 	port := u.Port()
 	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
 		port = ""
@@ -92,6 +98,13 @@ func ParseURL(raw string, blockedHosts []string, loopbackPorts func() []int) (*u
 // case. A host whose last label is a number but which
 // is no IPv4 address is refused, as a browser refuses it.
 func canonicalHost(host string) (string, error) {
+	if len(host) != utf8.RuneCountInString(host) {
+		ascii, err := idna.Lookup.ToASCII(host)
+		if err != nil {
+			return "", fmt.Errorf("%w: invalid international hostname", ErrBlocked)
+		}
+		host = ascii
+	}
 	host = strings.ToLower(strings.Trim(host, "[]"))
 	if strings.Contains(host, ":") {
 		if net.ParseIP(host) == nil {
@@ -277,7 +290,7 @@ func privateIP(ip net.IP) bool {
 // optional :port) or a wildcard (*.example.com, which also covers
 // example.com). A pasted URL is reduced to its site.
 func NormalizeSite(entry string) (string, error) {
-	entry = strings.ToLower(strings.TrimSpace(entry))
+	entry = strings.TrimSpace(entry)
 	if strings.Contains(entry, "://") {
 		u, err := url.Parse(entry)
 		if err != nil || u.Host == "" {
@@ -294,6 +307,10 @@ func NormalizeSite(entry string) (string, error) {
 	}
 	if name == "" || strings.ContainsAny(name, "/*?#@ ") || len(entry) > 253 {
 		return "", fmt.Errorf("%q is not a site: use a host such as example.com or *.example.com", entry)
+	}
+	name, err = canonicalHost(name)
+	if err != nil {
+		return "", err
 	}
 	if !strings.Contains(name, ".") && name != "localhost" {
 		return "", fmt.Errorf("%q is not a site: use a full host name such as example.com", entry)
@@ -313,8 +330,8 @@ func NormalizeSite(entry string) (string, error) {
 // SiteMatches reports whether an allow-list entry covers the site of u.
 func SiteMatches(entry string, u *url.URL) bool {
 	if base, ok := strings.CutPrefix(entry, "*."); ok {
-		host := strings.ToLower(u.Hostname())
-		return host == base || strings.HasSuffix(host, "."+base)
+		host, err := canonicalHost(u.Hostname())
+		return err == nil && (host == base || strings.HasSuffix(host, "."+base))
 	}
 	return entry == Site(u)
 }

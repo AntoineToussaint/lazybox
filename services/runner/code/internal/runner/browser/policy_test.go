@@ -37,7 +37,7 @@ func TestParseURLJudgesHostsAsABrowserReadsThem(t *testing.T) {
 		}
 	}
 	for raw, want := range map[string]string{
-		"https://İ.example.com/":     "https://%C4%B0.example.com/",
+		"https://İ.example.com/":     "https://xn--i-9bb.example.com/",
 		"https://example.com/":       "https://example.com/",
 		"https://deadbeef/":          "https://deadbeef/",
 		"https://example.com./":      "https://example.com./",
@@ -62,5 +62,16 @@ func TestPublicSiteSkipsPreviewLookup(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInternationalSiteGrantMatchesNavigation(t *testing.T) {
+	raw := "https://İ.example.com/"
+	grant, err := NormalizeSite(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant != "xn--i-9bb.example.com" || !SiteMatches(grant, mustURL(raw)) || SiteMatches(grant, mustURL("https://i.example.com/")) {
+		t.Fatalf("incorrect site grant %q", grant)
 	}
 }

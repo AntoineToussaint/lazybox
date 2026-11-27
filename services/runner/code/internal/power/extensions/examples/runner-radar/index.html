@@ -13,9 +13,10 @@
 </head>
 <body class="workflow">
 <header><h1>Runner Radar</h1><p id="scope">Runner</p></header>
-<label class="state-filter">Show <select id="state">
+<label class="state-filter">Show <select aria-label="Blocked state" id="state">
   <option value="all">All blocked</option><option value="needs-input">Needs input</option><option value="failed">Failed</option>
 </select></label>
+<label class="state-filter">Order <select aria-label="Order" id="order"><option value="oldest">Oldest first</option><option value="newest">Newest first</option></select></label>
 <p id="notice" role="status">Loading…</p>
 <ul id="rows" aria-label="Blocked conversations"></ul>
 <nav id="history-pages" aria-label="Conversation history" hidden>

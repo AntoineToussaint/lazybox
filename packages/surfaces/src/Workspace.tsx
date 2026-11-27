@@ -1127,7 +1127,9 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
       void host.arrangeWindows!(choice).catch(error => setError(String(error)));
     } : undefined,
     onReviewLayout: workspaceOpen && !locked && !narrow ? setImporting : undefined,
-    onReviewDiskCleanup: () => runInShell('command dev-cleaner --sizes --verbose --skip procs', true),
+    onReviewDiskCleanup: scope => runInShell(scope === 'go'
+      ? 'command dev-cleaner --only go --caches-only --gentle --plain --verbose'
+      : 'command dev-cleaner --verbose --skip procs', true),
     workspaceId: workspaceID, openMission: host?.openMission, chooseRepositoryFolder: host?.chooseRepositoryFolder, collections, error: catalogError, loaded: catalogLoaded, refresh: refreshCatalog,
     onWorkspaceCreated: (id: string) => beginConversation(id, undefined, true),
     onNewConversation: beginConversation, onShowSession: showSession,

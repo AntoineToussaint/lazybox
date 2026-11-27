@@ -1,6 +1,8 @@
 package power
 
 import (
+	"bytes"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"io"
@@ -89,6 +91,12 @@ func startContentServer(ext *Extensions) (*contentServer, error) {
 
 func (c *contentServer) close() { _ = c.server.Close() }
 
+// The first bundled Disk Cleanup page predates direct report navigation.
+// Match its exact contents so locally authored entry pages keep working.
+//
+//go:embed extensions/legacy/disk-cleanup-v1-index.html
+var legacyDiskEntry []byte
+
 // runtimeFiles are Lazybox's own files under _lazybox/.
 var runtimeFiles = map[string]string{
 	"shell.html":         "text/html; charset=utf-8",
@@ -96,6 +104,7 @@ var runtimeFiles = map[string]string{
 	"shell.css":          "text/css; charset=utf-8",
 	"lazybox.js":         "text/javascript; charset=utf-8",
 	"lazybox.css":        "text/css; charset=utf-8",
+	"disk-report.js":     "text/javascript; charset=utf-8",
 	"workflow.js":        "text/javascript; charset=utf-8",
 	"attention-pages.js": "text/javascript; charset=utf-8",
 }
@@ -137,7 +146,7 @@ func (c *contentServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			report := c.ext.diskReport
 			c.ext.mu.Unlock()
 
-			_, _ = io.WriteString(w, report.page())
+			_, _ = io.WriteString(w, report.pageWithAvailable(availableHomeSpace()))
 			return
 		}
 		kind, known := runtimeFiles[name]
@@ -177,6 +186,13 @@ func (c *contentServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxExtensionFileBytes {
 		http.NotFound(w, r)
 		return
+	}
+	if s.Extension == "disk-cleanup" && clean == "index.html" && HasGrant(s.Grants, GrantDiskScan) && info.Size() == int64(len(legacyDiskEntry)) {
+		data := make([]byte, len(legacyDiskEntry))
+		if _, err := f.ReadAt(data, 0); err == nil && bytes.Equal(data, legacyDiskEntry) {
+			http.Redirect(w, r, "_lazybox/disk-report.html", http.StatusTemporaryRedirect)
+			return
+		}
 	}
 	h.Set("Content-Type", kind)
 	h.Set("Content-Security-Policy", ExtensionPolicy(s.Base, s.Hosts))

@@ -14,7 +14,9 @@ function render() {
   if (!blocked) return;
   const state = stateFilter.value;
   const visible = state === 'all' ? blocked : blocked.filter(item => item.state === state);
-  workflow.list(visible.map(item => {
+  const direction = document.getElementById('order').value === 'newest' ? -1 : 1;
+  const ordered = [...visible].sort((a, b) => a.at && b.at ? direction * (a.at - b.at) : Number(!!b.at) - Number(!!a.at));
+  workflow.list(ordered.map(item => {
     const failed = item.state === 'failed';
     const action = workflow.button(failed ? 'Inspect failure' : 'Respond', () => lazybox.conversations.show(item.sessionId));
     const age = elapsed(item.at);
@@ -36,10 +38,10 @@ function render() {
     state === 'failed' ? 'No failed conversations on this history page.' : 'No conversations need input on this history page.');
 }
 
+document.getElementById('order').addEventListener('change', render);
 stateFilter.addEventListener('change', render);
 const refresh = attentionPages(({ items }) => {
-  blocked = items.filter(item => item.state === 'needs-input' || item.state === 'failed')
-    .sort((a, b) => (a.at || Infinity) - (b.at || Infinity));
+  blocked = items.filter(item => item.state === 'needs-input' || item.state === 'failed');
   render();
 }, error => workflow.say(error.message));
 workflow.poll(5000, refresh);

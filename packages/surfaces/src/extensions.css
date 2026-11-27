@@ -137,5 +137,6 @@ button.extension-chip{cursor:pointer}
 .extension-access summary { cursor: pointer; color: var(--text-muted); }
 .extension-access[open] .extension-summary { margin-block: 6px; }
 
-.disk-cleanup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 10px; border-bottom: 1px solid var(--line-subtle); }
-.disk-cleanup-actions span { flex: 1 1 20ch; color: var(--text-secondary); font-size: calc(12px * var(--text-scale)); }
+.disk-cleanup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 14px clamp(14px, 3vw, 32px); border-bottom: 1px solid var(--line-subtle); }
+.disk-cleanup-actions > div { flex: 1 1 28ch; }
+.disk-cleanup-actions p { margin: 3px 0 0; color: var(--text-secondary); font-size: calc(12px * var(--text-scale)); }

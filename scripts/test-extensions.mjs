@@ -138,7 +138,10 @@ async function scenario(browser, scheme, full) {
   await expect(frameEl).toHaveAttribute('sandbox', 'allow-scripts');
   const board = page.frameLocator('iframe.extension-frame').frameLocator('iframe');
   await expect(board.getByRole('region', { name: 'Needs you' }).getByRole('button', { name: /Pick the database/ })).toBeVisible();
-  await expect(board.getByRole('heading', { name: /1 need you/ })).toBeVisible();
+  await board.getByLabel('Unread only').check();
+  await expect(board.locator('.card:not(:has(.unread))')).toHaveCount(0);
+  await board.getByLabel('Unread only').uncheck();
+  await expect(board.getByRole('heading', { name: /1 needs you/ })).toBeVisible();
   const boardFrame = await inner(page);
   if (full) {
     await page.route('**/ListHistory', async route => {
@@ -268,6 +271,9 @@ async function scenario(browser, scheme, full) {
     const interview = page.getByRole('dialog',{name:'Teach Clone Me'});
     await interview.getByRole('button',{name:'I prefer explicit errors.'}).click();
     await expect(interview.getByLabel('How do you like code structured?')).toHaveValue('I prefer explicit errors.');
+    await interview.getByLabel('Apply suggestion to').selectOption('askWhen');
+    await interview.getByRole('button',{name:'I prefer explicit errors.'}).click();
+    await expect(interview.getByLabel('Which decisions should agents bring to you?')).toHaveValue(/I prefer explicit errors/);
     await interview.getByRole('button',{name:'Learn from recent conversations'}).click();
     await interview.getByLabel('How should agents test error paths?', { exact: true }).fill('Use table-driven tests.');
     await interview.getByRole('combobox', { name: 'Save answer under for How should agents test error paths?' }).selectOption('testing');
@@ -304,25 +310,7 @@ async function scenario(browser, scheme, full) {
     await palette.getByRole('option', { name: /Extensions settings/ }).click();
     await expect(extensions).toHaveAttribute('aria-current', 'page');
     await shot('settings');
-    await f.extensions.handle('InstallExampleExtension', { example: 'disk-cleanup' });
-    await f.extensions.handle('ApproveExtension', { id: 'disk-cleanup', grants: ['scan:disk'] });
-    f.runnerSettings.notices = ['disk-pressure-critical'];
-    await page.evaluate(() => window.dispatchEvent(new Event('lazybox-settings-saved')));
-    await page.getByRole('status', { name: 'Disk space is critically low on this Runner' }).getByRole('button', { name: 'Open Disk Cleanup' }).click();
-    const cleanup = page.frameLocator('iframe.extension-frame').frameLocator('iframe');
-    await expect(page.getByRole('button', { name: 'Restore layout' }).first()).toBeVisible();
-    await expect(page.locator('.page-layout .panel-agents')).toBeHidden();
-    await expect(page.locator('.page-layout .panel-chat')).toBeHidden();
-    await expect(cleanup.getByText('Waiting for the first scan.')).toBeVisible();
-    const beforeReview = new Set(f.terminals.keys());
-    await page.getByRole('button', { name: 'Review and clean…' }).click();
-    const reviewTerminal = () => [...f.terminals.values()].find(t => !beforeReview.has(t.id) && t.place === 'user-home');
-    await expect.poll(() => reviewTerminal()?.input.join('')).toBe('command dev-cleaner --sizes --verbose --skip procs\r');
-    assert.equal(reviewTerminal().collectionId, 'alpha');
-    await expect(page.locator('.panel-terminal:visible').getByRole('tab', { name: '~', exact: true })).toHaveAttribute('aria-selected', 'true');
-    await page.getByRole('button', { name: 'Restore layout' }).first().click();
-    await expect(page.locator('.page-layout .panel-agents')).toBeVisible();
-    f.runnerSettings.notices = [];
+
   }
   // WebKit reports the malicious frame's refused top navigation on the page; nothing else may fail.
   await drainPageErrors(errors);
@@ -330,9 +318,49 @@ async function scenario(browser, scheme, full) {
   await context.close();
 }
 
+async function diskCleanup(browser) {
+  const page = await browser.newPage();
+  await page.goto(url);
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeEnabled();
+  await f.extensions.handle('InstallExampleExtension', { example: 'disk-cleanup' });
+  await f.extensions.handle('ApproveExtension', { id: 'disk-cleanup', grants: ['scan:disk'] });
+  f.runnerSettings.notices = ['disk-pressure-critical'];
+  await page.evaluate(() => window.dispatchEvent(new Event('lazybox-settings-saved')));
+  await page.getByRole('status', { name: 'Disk space is critically low on this Runner' }).getByRole('button', { name: 'Open Disk Cleanup' }).click();
+  const cleanup = page.frameLocator('iframe.extension-frame').frameLocator('iframe');
+  await expect(page.getByRole('button', { name: 'Restore layout' }).first()).toBeVisible();
+  await expect(page.locator('.page-layout .panel-agents')).toBeHidden();
+  await expect(page.locator('.page-layout .panel-chat')).toBeHidden();
+  await expect(cleanup.getByText('Waiting for the first scan.')).toBeVisible();
+  await f.extensions.showSampleDiskReport();
+  await page.getByRole('button', { name: 'Reload the extension' }).click();
+  await expect(cleanup.getByText('28.0 GiB available now')).toBeVisible();
+  const targets = cleanup.getByRole('listitem');
+  await cleanup.getByLabel('At least 1 GiB').check();
+  await expect(targets).toHaveCount(1);
+  await expect(targets.first()).toContainText('Unused container images');
+  await cleanup.getByLabel('Find a cache or path').fill('caches/build');
+  await expect(cleanup.getByText('0 of 3 targets shown')).toBeVisible();
+  await cleanup.getByLabel('At least 1 GiB').uncheck();
+  await expect(targets.first()).toContainText('Build cache');
+  const beforeReview = new Set(f.terminals.keys());
+  await expect(page.getByRole('button', { name: 'Review all targets…' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Clean Go caches…' }).click();
+  const reviewTerminal = () => [...f.terminals.values()].find(t => !beforeReview.has(t.id) && t.place === 'user-home');
+  await expect.poll(() => reviewTerminal()?.input.join('')).toBe('command dev-cleaner --only go --caches-only --gentle --plain --verbose\r');
+  assert.equal(reviewTerminal().collectionId, 'alpha');
+  await expect(page.locator('.panel-terminal:visible').getByRole('tab', { name: '~', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('button', { name: 'Restore layout' }).first().click();
+  await expect(page.locator('.page-layout .panel-agents')).toBeVisible();
+  f.runnerSettings.notices = [];
+  await page.close();
+  await f.extensions.handle('RemoveExtension', { id: 'disk-cleanup' });
+}
+
 let browser;
 try {
   browser = await webkit.launch();
+  await diskCleanup(browser);
   await scenario(browser, 'dark', true);
   await scenario(browser, 'light', false);
   const page = await browser.newPage();
@@ -376,12 +404,15 @@ try {
   const live = page.locator('.account-notice').filter({ hasText: 'Review results' });
   await expect(live).toBeVisible();
   await expect(live.locator('small')).toContainText('Reminders ·');
-  await live.getByRole('button', { name: 'Done' }).click();
+  await live.getByRole('button', { name: 'Snooze 15 min' }).click();
+  await expect(live).toBeHidden();
   await page.goto('about:blank');
   await page.clock.install({ time: new Date(Date.now() + 16 * 60000) });
   await page.goto(url);
   const due = page.locator('.account-notice').filter({ hasText: 'Check the build' });
   await expect(due).toBeVisible();
+  await expect(live).toBeVisible();
+  await live.getByRole('button', { name: 'Done' }).click();
   await due.getByRole('button', { name: 'Done' }).click();
   await f.extensions.handle('SetExtensionEnabled', { id: 'reminders', enabled: false });
   await page.reload();
@@ -398,6 +429,7 @@ try {
   }
   const preview = await installPanel('Preview Desk');
   await expect(preview.getByRole('button', { name: 'Review repository setup' }).first()).toBeVisible();
+  await expect(preview.getByRole('listitem').filter({ hasText: 'Setup needs approval' }).first()).toContainText('1 missing file');
   await preview.getByLabel('Ready previews only').check();
   await expect(preview.getByText('No previews are ready.')).toBeVisible();
   await preview.getByLabel('Ready previews only').uncheck();
@@ -406,6 +438,12 @@ try {
   await expect(preview.getByText('No matching items.')).toBeVisible();
   await filter.fill('');
   await expect(preview.getByRole('listitem').first()).toBeVisible();
+  const failedService = f.runtimeFor('alpha').actions.find(action => action.member === 'api');
+  const previousRun = failedService.runState;
+  failedService.runState = { state: 'failed', commandId: 'failed-preview-command' };
+  await preview.getByRole('button', { name: 'Refresh' }).click();
+  await expect(preview.getByRole('button', { name: 'Inspect failure log' })).toBeVisible();
+  failedService.runState = previousRun;
   const manageService = preview.getByRole('button', { name: 'Show in Actions' }).first();
   await expect(manageService).toBeVisible();
   await manageService.click();
@@ -416,8 +454,14 @@ try {
   await preview.getByRole('button', { name: 'Refresh' }).click();
   await expect.poll(reads).toBeGreaterThan(before);
   const mailbox = await installPanel('Mailbox');
+  await mailbox.getByLabel('Repository', {exact:true}).selectOption('acme/web');
+  await expect(mailbox.getByRole('listitem')).toHaveCount(1);
+  await expect(mailbox.getByRole('listitem')).toContainText('acme/web');
+  await mailbox.getByLabel('Repository', {exact:true}).selectOption('');
   await mailbox.getByRole('button', { name: 'Needs you 1' }).click();
   await expect(mailbox.getByRole('listitem')).toHaveCount(1);
+  await expect(mailbox.getByRole('searchbox', { name: 'Filter list' })).toBeHidden();
+  await expect(mailbox.getByRole('button', { name: 'Open on GitHub: Review the retry policy' })).toBeVisible();
   await expect(mailbox.getByRole('listitem')).toContainText('Review the retry policy');
   await mailbox.getByRole('button', { name: 'All unread 2' }).click();
   await expect(mailbox.getByRole('listitem')).toHaveCount(2);
@@ -443,11 +487,15 @@ try {
   const releases = await installPanel('Release Watch');
   await expect(releases.getByRole('listitem').first()).toContainText('Production');
   await expect(releases.getByRole('button', { name: 'Review deployment' })).toBeVisible();
+  await releases.getByLabel('Release activity filter').selectOption('failures');
+  await expect(releases.getByRole('button', {name:'Review deployment'})).toHaveCount(0);
   await releases.getByRole('button', { name: 'Inspect Build' }).click();
   await expect.poll(() => page.evaluate(() => window.__workflowUrl)).toBe('https://github.com/acme/api/actions/runs/72');
   await releases.getByRole('button', { name: 'Inspect External CI' }).click();
   await expect.poll(() => page.evaluate(() => window.__workflowUrl)).toBe('https://github.com/acme/api/pull/72/checks');
   const bootstrap = await installPanel('Workspace Bootstrap');
+  await bootstrap.getByLabel('Include idle services').check();
+  await expect(bootstrap.getByRole('button', {name:'Open in Actions'}).first()).toBeVisible();
   await bootstrap.getByLabel(/Needs attention only/).check();
   await expect(bootstrap.getByRole('listitem')).toHaveCount(1);
   await expect(bootstrap.getByRole('listitem')).toContainText('1 missing file');
@@ -458,12 +506,23 @@ try {
   await expect(interrupted).toContainText('Stopped');
   await expect(interrupted.getByRole('button', { name: 'Inspect stopped setup' })).toBeVisible();
   const radar = await installPanel('Runner Radar');
-  await radar.getByRole('combobox').selectOption('needs-input');
+  await radar.getByLabel('Order').selectOption('newest');
+  await radar.getByLabel('Blocked state').selectOption('needs-input');
   await expect(radar.getByRole('button', { name: 'Respond' }).first()).toBeVisible();
   f.artifacts.agentPut({ collectionId: 'alpha', sessionId: 'alpha-session', kind: 'notes', title: 'Handoff checklist', content: 'Verify deployment.' });
   f.tracked.trackingError = 'GitHub connection unavailable';
   const handoff = await installPanel('Handoff Brief');
   const include = handoff.getByRole('button', { name: 'Include Handoff checklist' });
+  await expect(include).toHaveAttribute('aria-pressed', 'true');
+  await page.route('**/ListArtifacts', route => route.request().headers().authorization?.startsWith('Bearer lbx-ext.')
+    ? route.fulfill({ status: 503, json: { code: 'unavailable', message: 'Fixture offline' } }) : route.continue());
+  await handoff.getByRole('button', { name: 'Refresh' }).click();
+  await expect(handoff.getByText(/Showing the last loaded artifacts/)).toBeVisible();
+  await expect(include).toBeVisible();
+  await page.unroute('**/ListArtifacts');
+  await handoff.getByRole('button', { name: 'Clear selection' }).click();
+  await expect(include).toHaveAttribute('aria-pressed', 'false');
+  await handoff.getByRole('button', { name: 'Include all sources' }).click();
   await expect(include).toHaveAttribute('aria-pressed', 'true');
   await include.click();
   await expect(include).toHaveAttribute('aria-pressed', 'false');

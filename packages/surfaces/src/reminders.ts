@@ -29,6 +29,13 @@ export function createReminder(storage: Storage, root: string, owner: string, te
   return id;
 }
 
+export function snoozeReminder(storage: Storage, root: string, owner: string, id: string) {
+  const row = listReminders(storage, root, owner).find(reminder => reminder.id === id);
+  if (!row || row.due > Date.now()) return;
+  storage.setItem(key(root, owner, id), JSON.stringify({ ...row, due: Date.now() + 15 * 60_000 }));
+  window.dispatchEvent(new Event(remindersChanged));
+}
+
 export function removeReminder(storage: Storage, root: string, owner: string, id: string, notify = true) {
   storage.removeItem(key(root, owner, id));
   if (notify) window.dispatchEvent(new Event(remindersChanged));

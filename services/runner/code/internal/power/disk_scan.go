@@ -13,6 +13,8 @@ import (
 	"sort"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/AntoineToussaint/lazybox/services/runner/code/internal/atomicfile"
 )
 
@@ -46,13 +48,17 @@ func diskSize(bytes int64) string {
 
 var diskPage = template.Must(template.New("disk").Funcs(template.FuncMap{"size": diskSize}).Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Disk Cleanup</title>
-<link rel="stylesheet" href="lazybox.css"><script src="lazybox.js" defer></script></head>
-<body class="workflow"><header><h1>Disk Cleanup</h1><p>Runner storage</p><a href="disk-report.html">Reload saved report</a></header>
+<link rel="stylesheet" href="lazybox.css"><script src="lazybox.js" defer></script><script src="disk-report.js" defer></script></head>
+<body class="workflow disk-report"><header><h1>Runner storage</h1><p>Home volume</p><a href="disk-report.html">Refresh space</a></header>
+{{if .Available}}<section aria-label="Current disk space"><h2>{{size .Available}} available now</h2>{{if .Change}}<p>{{.Change}}</p>{{end}}</section>{{end}}
 {{if .Message}}<p role="status">{{.Message}}</p>{{else}}
-<section aria-label="Disk space"><h2>{{size .Scan.Disk.Free}} free of {{size .Scan.Disk.Total}}</h2>
+<section aria-label="Disk space" data-pressure="{{.Scan.Pressure}}"><p>At the last scan</p>{{if eq .Scan.Pressure "critical"}}<strong class="pressure">Critically low space</strong>{{else if eq .Scan.Pressure "tight"}}<strong class="pressure">Low disk space</strong>{{end}}<h2>{{size .Scan.Disk.Free}} free of {{size .Scan.Disk.Total}}</h2>
 <meter aria-label="Free disk space" value="{{.Scan.Disk.Free}}" min="0" max="{{.Scan.Disk.Total}}"></meter>
 <p class="muted">Scanned <time datetime="{{.At}}">{{.Scanned}}</time></p></section>
-<h2>Cleanup candidates{{if .Scan.Targets}} · {{len .Scan.Targets}}{{end}}</h2>{{if .Scan.Targets}}<ul>{{range .Scan.Targets}}<li><strong>{{.Label}}</strong><small><code>{{.Path}}</code></small><output>{{if .Bytes}}{{size .Bytes}}{{else}}Size unknown{{end}}</output></li>{{end}}</ul>{{else}}<p>No disk cleanup candidates.</p>{{end}}{{end}}
+<h2>Cleanup candidates{{if .Scan.Targets}} · {{len .Scan.Targets}}{{end}}</h2>{{if .Scan.Targets}}
+<div id="target-filters" hidden><input type="search" id="target-query" aria-label="Find a cache or path" placeholder="Find a cache or path…">
+<label><input type="checkbox" id="large-only"> At least 1 GiB</label><p role="status" id="match-count"></p></div>
+<ul id="targets">{{range .Scan.Targets}}<li data-bytes="{{if .Bytes}}{{.Bytes}}{{end}}"><strong>{{.Label}}</strong><small><code>{{.Path}}</code></small><output>{{if .Bytes}}{{size .Bytes}}{{else}}Size unknown{{end}}</output></li>{{end}}</ul>{{else}}<p>No disk cleanup candidates.</p>{{end}}{{end}}
 </body></html>`))
 
 type diskResult struct {
@@ -90,18 +96,47 @@ func runDiskScan(ctx context.Context) diskResult {
 	return diskResult{Scan: s, At: time.Now().UTC()}
 }
 
-func (r diskResult) page() string {
+// availableHomeSpace samples the same home volume that dev-cleaner reports.
+func availableHomeSpace() *int64 {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	var stat unix.Statfs_t
+	if unix.Statfs(home, &stat) != nil {
+		return nil
+	}
+	free := int64(stat.Bavail * uint64(stat.Bsize))
+	return &free
+}
+
+func (r diskResult) page() string { return r.pageWithAvailable(nil) }
+
+func (r diskResult) pageWithAvailable(available *int64) string {
+	var change string
+	if available != nil && !r.At.IsZero() && r.Error == "" && r.Scan.Disk.Total > 0 {
+		switch difference := *available - r.Scan.Disk.Free; {
+		case difference > 0:
+			change = diskSize(difference) + " more free since the scan"
+		case difference < 0:
+			change = diskSize(-difference) + " less free since the scan"
+		default:
+			change = "Free space unchanged since the scan"
+		}
+	}
 	message := r.Error
 	if message == "" && r.At.IsZero() {
 		message = "Waiting for the first scan."
 	}
 	var body bytes.Buffer
 	if err := diskPage.Execute(&body, struct {
-		At      string
-		Scanned string
-		Message string
-		Scan    diskScan
-	}{r.At.Format(time.RFC3339), r.At.UTC().Format("Jan 2, 2006 at 15:04 UTC"), message, r.Scan}); err != nil {
+		Available *int64
+		Change    string
+		At        string
+		Scanned   string
+		Message   string
+		Scan      diskScan
+	}{available, change, r.At.Format(time.RFC3339), r.At.UTC().Format("Jan 2, 2006 at 15:04 UTC"), message, r.Scan}); err != nil {
 		return "Could not display the disk report."
 	}
 	return body.String()

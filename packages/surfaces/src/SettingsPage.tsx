@@ -482,6 +482,13 @@ export function SettingsPage({ initialAddSubscription = false, onOpenExtensionPa
         <label>Status <select aria-label="Subscription status" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}>{['All statuses', 'Available', 'Limited', 'Resetting', 'Sign-in required', 'Billing issue', 'Not checked'].map(value => <option key={value}>{value}</option>)}</select></label>
         <label>Sort by <select aria-label="Sort subscriptions by" value={cardOrder} onChange={event => setCardOrder(event.target.value)}>{['Availability', 'Earliest limit reset', 'Name'].map(value => <option key={value}>{value}</option>)}</select></label>
       </div>}
+      {runnerSettings?.automaticSwitchingProviders.map(provider => {
+        if (provider === 'claude' && !runnerSettings.claudeSubscriptionSignIn) return null;
+        const included = profiles.filter(p => p.provider === provider && p.isolation === 'environment' && !p.tokenImported && !excluded.includes(p.id));
+        return <p key={provider} className="usage-note">{provider === 'codex' ? 'Codex' : 'Claude'} automatic switching · {included.length} saved {included.length === 1 ? 'account' : 'accounts'} included.
+          {included.length === 0 && ' Include a saved account to provide a destination.'}
+          {included.length === 1 && ' This account has no other included account to switch to.'}</p>;
+      })}
       {profiles.length > 0 && !visibleGroups.length && <p role="status">No subscriptions match this status.</p>}
       <ProviderGroups groups={visibleGroups} className="subscription-grid">{items => items.map(profile => <SubscriptionCard key={profile.id} profile={profile} now={now} refreshing={refreshing.has(profile.id)} error={refreshErrors[profile.id]} onRefresh={() => void updateUsage(profile)} onRename={() => setRenaming(profile)}
         footer={profile.tokenImported ? <span className="subscription-imported"><small className="subscription-gated" title="Lazybox no longer imports subscription tokens: Anthropic does not allow apps to store Claude.ai credentials. Sign in again, or use an API key.">Imported token; not recommended</small><button type="button" className="quiet" onClick={() => setRemoving(profile)}>Remove</button></span>

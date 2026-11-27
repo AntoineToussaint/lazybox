@@ -119,6 +119,14 @@ async function scenario(browser, scheme, full) {
   // ---- The lists, ranked, with the share of the period.
   await expect(board.locator('#by-model .row')).toHaveCount(new Set(inWeek.map(b => b.model)).size);
   await expect(board.locator('#by-workspace .row')).toHaveCount(2);
+  const findUsage = board.getByRole('searchbox', {name:'Find usage by conversation or workspace'});
+  const firstBar = board.locator('#chart-svg .col').first();
+  const barBeforeSearch = await firstBar.elementHandle();
+  await findUsage.fill('no matching conversation');
+  assert.ok(await barBeforeSearch.evaluate(bar => bar.isConnected), 'conversation search should preserve the spend chart');
+  await barBeforeSearch.dispose();
+  await expect(board.getByText('No matching conversations in this period')).toBeVisible();
+  await findUsage.fill('');
   await expect(board.locator('#by-conversation .row').first()).toContainText(conversations.find(c => c.id === topId).title);
   await expect(board.locator('#by-conversation .row').first()).toContainText(`${Math.round(topUsd / week * 100)}%`);
 

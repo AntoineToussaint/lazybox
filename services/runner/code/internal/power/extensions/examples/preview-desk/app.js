@@ -20,14 +20,23 @@ function render() {
     const show = (label, kind, target) => workflow.button(label, () => lazybox.runtime.show(workspaceId, kind, target));
     const actions = [];
     if (service.preview) actions.push(show('Open preview', 'preview', service.id));
+    if (service.hasLog && service.state === 'failed') {
+      const inspect = show('Inspect failure log', 'logs', service.id);
+      inspect.classList.add('primary');
+      actions.push(inspect);
+    }
     if (!service.preview) actions.push(show('Show in Actions', 'service', service.id));
-    if (service.hasLog) actions.push(show('Open logs', 'logs', service.id));
-    if (setups.some(setup => setup.member === service.member && setup.pendingApproval)) {
+    if (service.hasLog && service.state !== 'failed') actions.push(show('Open logs', 'logs', service.id));
+    const setup = setups.find(item => item.member === service.member);
+    const detail = [service.member, service.port && 'Port ' + service.port];
+    if (setup && (setup.pendingApproval || setup.missing || ['failed', 'stopped'].includes(setup.state))) {
+      if (setup.pendingApproval) detail.push('Setup needs approval');
+      if (setup.missing) detail.push(setup.missing + (setup.missing === 1 ? ' missing file' : ' missing files'));
+      if (setup.state === 'failed' || setup.state === 'stopped') detail.push('Setup ' + setup.state);
       actions.push(show('Review repository setup', 'setup', service.member));
     }
     if (service.preview) actions[0].classList.add('primary');
-    const detail = [service.member, service.port && 'Port ' + service.port].filter(Boolean).join(' · ');
-    const row = workflow.row(service.id, service.name, detail, ...actions);
+    const row = workflow.row(service.id, service.name, detail.filter(Boolean).join(' · '), ...actions);
     const status = document.createElement('span');
     status.className = 'service-state';
     status.textContent = labels[service.state] || service.state;

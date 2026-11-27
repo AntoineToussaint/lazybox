@@ -37,8 +37,9 @@ func TestDiskReportPreview(t *testing.T) {
 		{Label: "Temporary downloads", Path: "~/Downloads/tmp"},
 	}
 	report := diskResult{At: time.Date(2026, 6, 12, 10, 30, 0, 0, time.UTC), Scan: scan}
-	html := report.page()
-	for _, text := range []string{"23.0 GiB free of 256.0 GiB", "Cleanup candidates · 3", "620.0 MiB", "Size unknown"} {
+	free := int64(28 << 30)
+	html := report.pageWithAvailable(&free)
+	for _, text := range []string{"28.0 GiB available now", "5.0 GiB more free since the scan", "23.0 GiB free of 256.0 GiB", "Low disk space", "Cleanup candidates · 3", "620.0 MiB", "Size unknown"} {
 		if !strings.Contains(html, text) {
 			t.Errorf("missing %q", text)
 		}

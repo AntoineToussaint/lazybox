@@ -17,11 +17,7 @@ Rust per `rust-toolchain.toml`), plus:
 - `cargo-nextest`, which `make check-desktop` runs the Rust tests under, at
   the version `.config/nextest.toml` requires or later
   (`cargo install --locked cargo-nextest@0.9.152`, or
-  `brew install cargo-nextest`); `make install-check` reports it;
-- network access on the first `make dev`: Dev and Working build the snippet
-  helper (`tools/lazybox-snippets`), and Cargo fetches the library it links
-  from the public [lazybox-v1](https://github.com/AntoineToussaint/lazybox-v1)
-  at a pinned revision.
+  `brew install cargo-nextest`); `make install-check` reports it.
 
 ```sh
 make deps            # locked npm dependencies (npm ci); again after package-lock.json changes
@@ -117,7 +113,7 @@ scripts/release/        make release and make install (build.mjs, install.mjs)
 packaging/              the release's Tauri overlay, disk image and cask templates
 docs/                   the user documentation (also the docs site and the app's Help)
 docs-site/              the docs site (VitePress)
-tools/lazybox-snippets/ the snippet catalog helper (links V1's lazybox-config)
+tools/lazybox-snippets/ the snippet catalog helper
 contracts/              the Buf compatibility baseline
 audits/                 dated audits: history, not current guidance
 ```

@@ -1331,9 +1331,9 @@ normal mode the arrows keep their Vim meaning.
 The existing message/receipt and resume paths own delivery and retry identity.
 
 The Runner's `snippets.Catalog` seam has a command adapter. The shipped
-`lazybox-snippets` helper (`tools/lazybox-snippets`) links V1's `lazybox-config` Rust library, pinned to a lazybox-v1 revision, so built-in
-content, profile paths, global/launch-directory overrides and skill-backed bodies
-remain authoritative in one place. It is read-only. `snippetCommand` and
+`lazybox-snippets` helper (`tools/lazybox-snippets`) ships its built-in catalog
+from `builtin.yaml`, applies global and launch-directory overrides in order,
+and resolves skill-backed bodies. It is read-only. `snippetCommand` and
 `snippetDirectory` in Runner configuration can select another compatible adapter
 and launch-directory layer. An unconfigured adapter produces a visible error.
 The native Dev launcher builds the helper; staged Working releases contain a frozen

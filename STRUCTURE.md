@@ -40,7 +40,7 @@ V2 is a Codefly workspace. The first implemented service is the **Runner**, crea
   apps/desktop/                     bundled React surface and independent Tauri Cargo workspace
   workers/claude-sdk/                pinned supported TypeScript SDK worker
   scripts/                          viewer, browser checks, generation drift check
-  tools/lazybox-snippets/           snippet catalog helper linking V1's lazybox-config
+  tools/lazybox-snippets/           snippet catalog helper
 ```
 
 The desktop host implements local agent and native console windows. The iPhone, Hub, and shared work packages remain planning placeholders. The local test bench does not implement Hub membership, distributed scheduling, or a shared work graph.

@@ -1,6 +1,6 @@
 [package]
 name = "lazybox-snippets"
-description = "Read-only snippet catalog adapter: V1's lazybox-config library behind the Runner's snippet command seam."
+description = "Read-only snippet catalog for the Lazybox Runner."
 version = "0.0.0"
 license = "Apache-2.0"
 edition = "2024"
@@ -14,9 +14,5 @@ name = "lazybox-snippets"
 path = "src/main.rs"
 
 [dependencies]
-# V1's configuration library stays authoritative for built-in snippets, profile
-# paths, launch-directory overrides and skill-backed bodies (WORKSPACES.md).
-# Pinned to a lazybox-v1 commit; bump the revision deliberately.
-lazybox-config = { git = "https://github.com/AntoineToussaint/lazybox-v1", rev = "28a9a73d1a44e7797d1285597257123a1db0a13f" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

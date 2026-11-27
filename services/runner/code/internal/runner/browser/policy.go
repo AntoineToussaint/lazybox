@@ -23,7 +23,7 @@ var ErrBlocked = errors.New("blocked")
 // Origin is scheme://host[:port] of an http(s) URL, with the default port
 // left out, lower case.
 func Origin(u *url.URL) string {
-	host, err := canonicalHost(u.Hostname())
+	host, err := asciiHostname(u.Hostname())
 	if err != nil {
 		return ""
 	}
@@ -98,14 +98,10 @@ func ParseURL(raw string, blockedHosts []string, loopbackPorts func() []int) (*u
 // case. A host whose last label is a number but which
 // is no IPv4 address is refused, as a browser refuses it.
 func canonicalHost(host string) (string, error) {
-	if len(host) != utf8.RuneCountInString(host) {
-		ascii, err := idna.Lookup.ToASCII(host)
-		if err != nil {
-			return "", fmt.Errorf("%w: invalid international hostname", ErrBlocked)
-		}
-		host = ascii
+	host, err := asciiHostname(strings.Trim(host, "[]"))
+	if err != nil {
+		return "", err
 	}
-	host = strings.ToLower(strings.Trim(host, "[]"))
 	if strings.Contains(host, ":") {
 		if net.ParseIP(host) == nil {
 			return "", fmt.Errorf("%w: %s is not a valid address", ErrBlocked, host)
@@ -286,6 +282,29 @@ func privateIP(ip net.IP) bool {
 	return cgnat.Contains(ip)
 }
 
+// Browser URL parsing uses non-transitional UTS 46 without strict DNS label checks.
+var browserIDNA = idna.New(idna.MapForLookup(), idna.Transitional(false), idna.BidiRule(), idna.StrictDomainName(false), idna.CheckHyphens(false))
+
+func asciiHostname(host string) (string, error) {
+	if len(host) == utf8.RuneCountInString(host) {
+		return strings.ToLower(host), nil
+	}
+	ascii, err := browserIDNA.ToASCII(host)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid international hostname", ErrBlocked)
+	}
+	return strings.ToLower(ascii), nil
+}
+
+// Old settings may contain Unicode grant keys. Keep an unconvertible legacy
+// entry inert and removable; ParseURL still rejects it during navigation.
+func savedSiteName(name string) string {
+	if ascii, err := asciiHostname(name); err == nil {
+		return ascii
+	}
+	return name
+}
+
 // NormalizeSite validates an allow-list entry: a host (example.com, with an
 // optional :port) or a wildcard (*.example.com, which also covers
 // example.com). A pasted URL is reduced to its site.
@@ -308,10 +327,7 @@ func NormalizeSite(entry string) (string, error) {
 	if name == "" || strings.ContainsAny(name, "/*?#@ ") || len(entry) > 253 {
 		return "", fmt.Errorf("%q is not a site: use a host such as example.com or *.example.com", entry)
 	}
-	name, err = canonicalHost(name)
-	if err != nil {
-		return "", err
-	}
+	name = savedSiteName(name)
 	if !strings.Contains(name, ".") && name != "localhost" {
 		return "", fmt.Errorf("%q is not a site: use a full host name such as example.com", entry)
 	}
@@ -319,7 +335,7 @@ func NormalizeSite(entry string) (string, error) {
 		if wild {
 			return "", fmt.Errorf("%q: a wildcard site takes no port", entry)
 		}
-		return name + ":" + port, nil
+		return net.JoinHostPort(name, port), nil
 	}
 	if wild {
 		return "*." + name, nil

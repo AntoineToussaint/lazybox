@@ -805,3 +805,14 @@ func TestFailedConversationGrantCanBeRetried(t *testing.T) {
 		t.Fatal("retry failed")
 	}
 }
+
+func TestLegacyUnicodeConversationGrant(t *testing.T) {
+	m := newManager(t)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.saved[alice.Conversation] = savedConv{Granted: []string{"bücher.example:80"}}
+	b := m.browserLocked(alice)
+	if !m.allowedLocked(b, mustURL("https://xn--bcher-kva.example:80/")) || m.allowedLocked(b, mustURL("https://xn--bcher-kva.example/")) {
+		t.Fatal("legacy site grant lost its hostname or port")
+	}
+}

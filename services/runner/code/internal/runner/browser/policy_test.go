@@ -66,6 +66,16 @@ func TestPublicSiteSkipsPreviewLookup(t *testing.T) {
 }
 
 func TestInternationalSiteGrantMatchesNavigation(t *testing.T) {
+	for entry, want := range map[string]string{
+		"example.123":             "example.123",
+		"[::ffff:127.0.0.1]:3000": "[::ffff:127.0.0.1]:3000",
+		"[::ffff:127.0.0.1]":      "[::ffff:127.0.0.1]",
+		"é-.example.com":          "xn----9fa.example.com",
+	} {
+		if got, err := NormalizeSite(entry); err != nil || got != want {
+			t.Errorf("%q normalized to %q, %v", entry, got, err)
+		}
+	}
 	raw := "https://İ.example.com/"
 	grant, err := NormalizeSite(raw)
 	if err != nil {

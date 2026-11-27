@@ -229,7 +229,13 @@ func (m *Manager) browserLocked(c Caller) *conv {
 		s := m.saved[c.Conversation]
 		b = &conv{id: c.Conversation, status: "closed", controller: "agent", freely: s.Freely, stopped: s.Stopped, lastURL: s.LastURL, granted: map[string]bool{}, watchers: map[*Watcher]struct{}{}, changed: make(chan struct{})}
 		for _, site := range s.Granted {
-			b.granted[site] = true
+			// The stored key has no scheme. Preserve its port, even 80 or 443.
+			name, port, hasPort := strings.Cut(site, ":")
+			key := savedSiteName(name)
+			if hasPort {
+				key += ":" + port
+			}
+			b.granted[key] = true
 		}
 		if b.stopped {
 			b.status, b.problem = "stopped", "You stopped this browser."

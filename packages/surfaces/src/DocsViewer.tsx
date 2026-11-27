@@ -1,3 +1,4 @@
+import { isNavigationBack } from './navigation-back';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react';
 import { DraggableDialog, DialogHeader } from './DraggableDialog';
 import { Icon } from './Icons';
@@ -41,8 +42,19 @@ export function DocsViewer({ initial = 'README.md', onClose }: { /** The page to
     const element = target.anchor ? pane.querySelector<HTMLElement>(`[id="${CSS.escape(target.anchor)}"]`) : null;
     if (element) element.scrollIntoView({ block: 'start' }); else pane.scrollTop = 0;
   }, [page, target]);
-  const go = (next: DocTarget) => { setHistory(h => [...h, target]); setTarget(next); setQuery(''); setNotice(''); };
-  const back = () => setHistory(h => { if (!h.length) return h; setTarget(h[h.length - 1]); return h.slice(0, -1); });
+  const go = (next: DocTarget) => {
+    setQuery(''); setNotice('');
+    if (next.path === target.path && next.anchor === target.anchor) return;
+    setHistory(h => [...h, target]);
+    setTarget(next);
+  };
+  const back = () => {
+    const previous = history.at(-1);
+    if (!previous) { onClose(); return; }
+    setQuery(''); setNotice('');
+    setTarget(previous);
+    setHistory(history.slice(0, -1));
+  };
   const doc = useMemo<RichDocument | undefined>(() => page && {
     link: href => {
       const resolved = resolveDocLink(page.path, href, path => !!pages?.some(p => p.path === path));
@@ -60,13 +72,30 @@ export function DocsViewer({ initial = 'README.md', onClose }: { /** The page to
   }, [pages]);
   const onKey = (event: KeyboardEvent) => {
     if (event.key === '/' && !(event.target instanceof HTMLInputElement)) { event.preventDefault(); search.current?.focus(); }
-    if ((event.altKey || event.metaKey) && event.key === 'ArrowLeft') { event.preventDefault(); back(); }
   };
+  // Following a link replaces the focused node. The next key can target the
+  // document body even while this dialog is still the active modal.
+  useEffect(() => {
+    const node = dialog.current;
+    if (!node) return;
+    const doc = node.ownerDocument;
+    const keydown = (event: globalThis.KeyboardEvent) => {
+      if (!node.open || (doc.activeElement !== doc.body && !node.contains(doc.activeElement))) return;
+      const legacyBack = event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey && event.key === 'ArrowLeft';
+      if (!isNavigationBack(event) && !legacyBack) return;
+      if (event.key === 'ArrowLeft' && event.target instanceof HTMLInputElement) return;
+      event.preventDefault();
+      event.stopPropagation();
+      back();
+    };
+    doc.addEventListener('keydown', keydown, true);
+    return () => doc.removeEventListener('keydown', keydown, true);
+  });
   return <DraggableDialog ref={dialog} className="docs-viewer" aria-labelledby="docs-title" onKeyDown={onKey}
     onCancel={event => { event.preventDefault(); if (query) setQuery(''); else onClose(); }} onClose={onClose} onDismiss={onClose}>
     <DialogHeader>
       <h2 id="docs-title">Documentation</h2>
-      <button className="docs-back" disabled={!history.length} aria-label="Back" title="Back (⌥←)" onClick={back}><Icon name="back" size={14}/></button>
+      <button className="docs-back" aria-label="Back" title="Back (Alt+← or ⌘[)" onClick={back}><Icon name="back" size={14}/></button>
       <label className="docs-search"><Icon name="search" size={13}/><input ref={search} type="search" placeholder="Search the docs  /" aria-label="Search the documentation" value={query} onChange={e => setQuery(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter' && hits?.[0]) go({ path: hits[0].page.path, anchor: '' }); }}/></label>
       <button aria-label="Close documentation" onClick={onClose}>×</button>

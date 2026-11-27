@@ -256,6 +256,8 @@ the agent goes on.
 
 ## Follow what it does
 
+Scroll up to read an earlier turn while the agent works. Scroll down to read later turns in order. Drag the scrollbar to the bottom, press End in the transcript, or choose **Jump to latest** to follow the newest reply.
+
 - **The header** names the conversation and says how it is going. The title
   is a few words the agent gives it when its first turn ends (turn this off in
   Settings → Agents & workspaces → *Name conversations after their first

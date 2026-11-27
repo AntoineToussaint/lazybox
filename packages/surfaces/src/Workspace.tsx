@@ -1,3 +1,4 @@
+import { isNavigationBack } from './navigation-back';
 import { useDisplayDetail } from './display-detail';
 import { agentIcon, agentTitle } from './providers';
 import { PendingFocus, trackFocus } from './pending-focus';
@@ -286,7 +287,12 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
     title: target => conversationTitle(info?.sessions.find(session => session.id === target.sessionId)) || 'Conversation',
     announce: text => dock.current?.announce(text), error: setError,
   });
-  const select = (requested: RunnerTarget, mode: 'preview' | 'tab' = 'preview') => {
+  const restorePageSelection = (destination: WorkspacePage, target: ViewTarget) => {
+    if (sameConversation(destination.selection, target)) return destination;
+    if (!target.sessionId || !shownPanels(destination).some(isChatTab)) return { ...destination, selection: target };
+    return openConversation(destination, target, { mode: openModeFor('preview', tabsOn) }, () => crypto.randomUUID()).page;
+  };
+  const select = (requested: RunnerTarget, mode: 'preview' | 'tab' = 'preview', restorePage?: string) => {
     if (switched(requested)) return;
     const target = localTarget(requested);
     if (target.collectionId !== workspaceID) {
@@ -301,7 +307,11 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         // The conversation asked for shows as a single click shows it: its tab, else the preview tab.
         // A page the person left without a chat stays as it is, with the conversation selected.
         const shows = (page: WorkspacePage) => (mode === 'tab' || shownPanels(page).some(isChatTab)) ? openConversation(page, target, { mode: openModeFor(mode, tabsOn) }, () => crypto.randomUUID()).page : { ...page, selection: target };
-        if (target.sessionId) next = { ...next, pages: next.pages.map(page => page.id === next.selectedPage ? shows(page) : page) };
+        if (restorePage && next.pages.some(p => p.id === restorePage)) next = { ...next, selectedPage: restorePage };
+        if (target.sessionId || restorePage) next = { ...next, pages: next.pages.map(page => {
+          if (page.id !== next.selectedPage) return page;
+          return restorePage ? restorePageSelection(page, target) : shows(page);
+        }) };
         // Switching workspace never moves the dividers: the target keeps its own
         // pages and panels, but takes the current split sizes wherever its
         // arrangement matches (the sidebar has one fixed width everywhere).
@@ -309,8 +319,8 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
         next = repairLayout(next, agentsChoice.current, previews);
         viewState?.setItem(`${viewState.key}:active-workspace`, target.collectionId);
         setWorkspaceID(target.collectionId); current.current = next; setLayout(next); setLocked(!!unreadable); setEditing(false); setConfiguring(false); setError(unreadable);
-      } catch (error) { setError(`Could not open workspace layout: ${String(error)}`); }
-      return;
+        return true;
+      } catch (error) { setError(`Could not open workspace layout: ${String(error)}`); return false; }
     }
     // Another conversation (or the workspace's start) shows in its tab or the preview tab; the same one keeps its tab.
     const live = livePage();
@@ -326,6 +336,58 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   useEffect(() => {
     if (onTargetChange) void Promise.resolve(onTargetChange(page.selection)).catch(error => setError(String(error)));
   }, [onTargetChange, page.selection.collectionId, page.selection.sessionId, page.selection.commandId]);
+  // Only changes of destination enter this window's history.
+  const activeSettingsTab = settings ? settingsTab : undefined;
+  const place = useMemo(() => ({
+    workspaceID, pageId: page.id, sessionId: page.selection.sessionId, surface, settingsTab: activeSettingsTab
+  }), [workspaceID, page.id, page.selection.sessionId, surface, activeSettingsTab]);
+  const [trail, setTrail] = useState<(typeof place)[]>([]);
+  const lastPlace = useRef<typeof place | undefined>(place);
+  useLayoutEffect(() => {
+    const from = lastPlace.current;
+    if (from && from !== place) setTrail(previous => [...previous.slice(-99), from]);
+    lastPlace.current = place;
+  }, [place]);
+  // Skip deleted destinations. A page in another workspace is resolved against
+  // its saved layout on arrival; its selected page is the fallback.
+  const backIndex = trail.findLastIndex(entry => {
+    if (entry.workspaceID && catalogLoaded && !collections.some(c => c.id === entry.workspaceID)) return false;
+    if (entry.sessionId && info && !info.sessions.some(s => s.id === entry.sessionId)) return false;
+    if (entry.workspaceID === workspaceID && !layout.pages.some(p => p.id === entry.pageId)) return false;
+    return entry.workspaceID !== workspaceID || entry.pageId !== place.pageId || entry.sessionId !== place.sessionId ||
+      entry.surface !== surface || entry.settingsTab !== activeSettingsTab;
+  });
+  const canGoBack = backIndex >= 0;
+  const goBack = () => {
+    const previous = trail[backIndex];
+    if (!previous) return;
+    const target = { collectionId: previous.workspaceID, sessionId: previous.sessionId, commandId: '' };
+    if (previous.workspaceID !== workspaceID) {
+      if (!select(target, 'preview', previous.pageId)) return;
+    } else {
+      const destination = layout.pages.find(p => p.id === previous.pageId) || page;
+      const restored = restorePageSelection(destination, target);
+      if (destination.id !== page.id || restored !== destination) {
+        const pages = restored === destination ? layout.pages : layout.pages.map(p => p.id === restored.id ? restored : p);
+        if (!commit({ ...layout, selectedPage: restored.id, pages })) return;
+      }
+    }
+    // Restoring an entry consumes it; the trip back is not another visit.
+    lastPlace.current = undefined;
+    setTrail(trail.slice(0, backIndex));
+    if (previous.settingsTab) setSettingsTab(previous.settingsTab);
+    setSurface(previous.surface);
+  };
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (!canGoBack || !isNavigationBack(event) || document.querySelector('dialog[open]')) return;
+      if (event.altKey && (event.target as HTMLElement)?.closest?.('input, textarea, [contenteditable=true], .monaco-editor, .xterm')) return;
+      event.preventDefault();
+      goBack();
+    };
+    window.addEventListener('keydown', keydown);
+    return () => window.removeEventListener('keydown', keydown);
+  });
   // Putting the console away is a choice that holds: hidden or closed by the
   // person, it stays that way through later runs, until they open it again.
   // Remembered per workspace, so a reload does not undo it.
@@ -1092,7 +1154,7 @@ function WorkspaceView({ modules, fixedWorkspaceId, viewState, initialTarget = e
   return <WorkbenchContext.Provider value={missionOpen ? undefined : workbench}><main className="workspace-shell" data-workspace-details={display.workspaceDetails}>
     <LeaderMenu hint={keyboardHint}/>
     <CommandCenter viewState={viewState} navigator={navigator}/>
-    <WorkspaceHeader app={fixedWorkspaceId ? undefined : host?.app} pages={layout.pages} selectedPage={page.id} missions={missionOpen} onOpenMissions={showMissionsPage} settings={settings} pending={!!pending} fixedWorkspace={!!fixedWorkspaceId} navigatorOpen={navigatorOpen}
+    <WorkspaceHeader onBack={canGoBack ? goBack : undefined} app={fixedWorkspaceId ? undefined : host?.app} pages={layout.pages} selectedPage={page.id} missions={missionOpen} onOpenMissions={showMissionsPage} settings={settings} pending={!!pending} fixedWorkspace={!!fixedWorkspaceId} navigatorOpen={navigatorOpen}
       collections={collections} selection={missionOpen ? emptyTarget() : page.selection} viewState={viewState} workspaceID={missionOpen ? '' : workspaceID} info={info} terminalReady={terminalReady} canShowNewSession={canShowNewSession}
       editing={editing} canOpenWorkspaceWindow={!!workspaceID && !!host?.openWorkspace && !fixedWorkspaceId}
       layoutMenu={workspaceOpen && !narrow && <>

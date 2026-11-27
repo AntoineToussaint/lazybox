@@ -82,31 +82,40 @@ async function scenario(browser, scheme, full) {
   await page.getByRole('button', { name: 'New Extensions panel', exact: true }).click();
   const panel = page.locator('.extension-home, .extension-panel').first();
   if (full) {
-    await expect(panel.getByRole('heading', { name: 'Available to install' })).toBeVisible();
+    await expect(panel.getByRole('list', { name: 'Extension catalog' })).toBeVisible();
     await expect(panel.getByText('Agent board', { exact: true })).toBeVisible();
     await expect(panel.getByText('Mischief', { exact: true })).toBeVisible(); // waiting for approval
     const search = panel.getByRole('searchbox', {name:'Search extensions'});
     const category = panel.getByRole('combobox', {name:'Extension category'});
-    const installedOnly = panel.getByRole('checkbox', { name: 'Installed only' });
-    await installedOnly.check();
-    await expect(panel.getByRole('heading', { name: 'Available to install' })).toHaveCount(0);
-    await installedOnly.uncheck();
+    const status = panel.getByRole('combobox', { name: 'Installation status' });
+    const catalog = panel.getByRole('list', { name: 'Extension catalog' });
+    await status.selectOption('installed');
+    await expect(catalog.getByRole('listitem', { name: 'Mischief' })).toBeVisible();
+    await expect(catalog.getByRole('button', {name:'Install', exact:true})).toHaveCount(0);
+    await status.selectOption('available');
+    await expect(catalog.getByRole('listitem', { name: 'Mischief' })).toHaveCount(0);
+    await expect(catalog.locator(':scope > li')).toHaveCount(13);
+    await status.selectOption('all');
     await search.fill('coding style');
     await expect(panel.getByText('Clone Me',{exact:true})).toBeVisible();
     await category.selectOption('Code & documentation');
     await expect(panel.getByText('No matching extensions.',{exact:false})).toBeVisible();
     await panel.getByRole('button',{name:'Clear filters'}).click();
-    const preview = panel.locator('details').filter({has:page.getByLabel('Preview Agent board')});
-    await preview.locator('summary').click();
-    await expect(preview.locator('figure img')).toBeVisible();
-    await preview.locator('summary').click();
+    const previewButton = catalog.getByRole('button', {name: 'Preview Agent board'});
+    await previewButton.click();
+    const preview = page.getByRole('dialog', {name: 'Preview Agent board'});
+    await expect(preview.locator('img')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(preview).toHaveCount(0);
+    await expect(previewButton).toBeFocused();
+    await expect(catalog.getByRole('listitem', {name:'Clone Me'})).toBeInViewport();
     await shot('home');
     await panel.locator('li', { hasText: 'Agent board' }).getByRole('button', { name: 'Install' }).click();
   } else {
     // Approved already (the Runner keeps it): show the board, from the panel's own picker if it shows another.
     const picker = page.getByRole('combobox', { name: 'Extension panel' });
     if (await picker.count()) await picker.selectOption({ label: 'Agent board' });
-    else await panel.locator('.extension-tile', { hasText: 'Agent board' }).click();
+    else await panel.getByRole('button', { name: 'Open Agent board' }).click();
   }
 
   // ---- The approval sheet: exactly what it may do, in words.
@@ -237,7 +246,7 @@ async function scenario(browser, scheme, full) {
     const card = page.getByRole('listitem', { name: 'Mischief' });
     await expect(card).toContainText('On');
     await expect(page.getByRole('listitem', { name: 'Agent board' })).toContainText('See what needs you');
-    const clone = page.getByRole('list',{name:'Available extensions'}).locator('li').filter({has:page.getByText('Clone Me',{exact:true})});
+    const clone = page.getByRole('list',{name:'Extension catalog'}).locator('li').filter({has:page.getByText('Clone Me',{exact:true})});
     await clone.getByRole('button',{name:'Install',exact:true}).click();
     await page.getByRole('dialog',{name:'Allow Clone Me?'}).getByRole('button',{name:'Allow and turn on'}).click();
     await page.getByRole('button',{name:'Teach Clone Me'}).click();
@@ -272,9 +281,6 @@ async function scenario(browser, scheme, full) {
     await expect(extensions).toHaveAttribute('aria-current', 'page');
     await expect(page.getByRole('listitem', { name: 'Mischief' })).toContainText('Off');
     await expect(page.getByRole('listitem', { name: 'Mischief' }).getByRole('button', { name: /^Open / })).toHaveCount(0);
-    await page.getByRole('button', { name: 'Browse panels' }).click();
-    await page.getByRole('button', { name: 'Manage extensions', exact: true }).click();
-    await expect(extensions).toHaveAttribute('aria-current', 'page');
     await page.getByRole('listitem', { name: 'Agent board' }).getByRole('button', { name: 'Open Agent board' }).click();
     await expect(page.frameLocator('iframe.extension-frame').frameLocator('iframe').getByRole('region', { name: 'Needs you' })).toBeVisible();
     await page.keyboard.press('Meta+k');

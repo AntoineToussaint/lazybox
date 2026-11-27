@@ -49,6 +49,56 @@ async function run(name,engine){
   await expect.poll(gap,{message:'Sending should return to the latest turn'}).toBeLessThan(3);
   channel.push({type:'operation_accepted',text:'Continue from here'});channel.push({type:'message_delta',text:'LATEST_SENT_TURN'});await expect(pane).toContainText('LATEST_SENT_TURN');await expect.poll(gap).toBeLessThan(3);
 
+  await pane.getByRole('button',{name:'Show earlier messages'}).evaluate(button=>button.click());
+  const expandedRows=await pane.locator('[data-message-id]').count();
+  // While detached, incoming turns sit beyond the rendered window. Reaching
+  // its bottom with the wheel should land on the real end and stay there.
+  await pane.evaluate(node=>{node.scrollTop=node.scrollHeight-node.clientHeight-300;node.dispatchEvent(new Event('scroll'));});
+  await expect(latest).toBeVisible();
+  for(let n=0;n<8;n++){
+   channel.push({type:'operation_accepted',text:'New question '+n});
+   channel.push({type:'message_delta',text:'Answer while reading '+n+' '+ 'detail '.repeat(100)});
+  }
+  await expect(pane.getByRole('button',{name:'Show later messages'})).toBeVisible();
+  await pane.hover();
+  await page.mouse.wheel(0,20000);
+  await expect(pane).toContainText('Answer while reading 7');
+  await expect.poll(gap,{message:'Reaching the bottom of a detached window must settle at the newest turn'}).toBeLessThan(3);
+  await expect(latest).toBeHidden();
+  assert.ok(await pane.locator('[data-message-id]').count()>=expandedRows,'A wheel gesture should not collapse the expanded scroll range');
+
+  // Dragging the native scrollbar maps a fixed track to a fixed scroll range.
+  // Prefetching another page before the thumb reaches the end changes that
+  // mapping underneath the pointer. Headless WebKit has an overlay scrollbar;
+  // Chromium exercises the native scrollbar, with the same movement in both.
+  await page.addStyleTag({content:'.messages::-webkit-scrollbar{width:16px}.messages::-webkit-scrollbar-track{background:#eee}.messages::-webkit-scrollbar-thumb{background:#777;min-height:40px;border:0}.messages::-webkit-scrollbar-button{display:none;width:0;height:0}'});
+  await pane.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await pane.evaluate(node=>{node.scrollTop=node.scrollHeight-node.clientHeight*3;node.dispatchEvent(new Event('scroll'));});
+  await expect(latest).toBeVisible();
+  for(let n=0;n<8;n++){
+   channel.push({type:'operation_accepted',text:'Question during thumb drag '+n});
+   channel.push({type:'message_delta',text:'Reply during thumb drag '+n+' '+'more '.repeat(100)});
+  }
+  await expect(pane.getByRole('button',{name:'Show later messages'})).toBeVisible();
+  const track=await pane.evaluate(node=>{
+   const rect=node.getBoundingClientRect(),height=node.clientHeight,max=node.scrollHeight-height;
+   const size=Math.max(40,height*height/node.scrollHeight);
+   const y=gap=>rect.top+(max-gap)/max*(height-size)+size/2;
+   return {x:rect.right-Math.max(3,(node.offsetWidth-node.clientWidth)/2),from:y(max-node.scrollTop),near:y(height/2),end:rect.bottom-1,height:node.scrollHeight,native:node.offsetWidth>node.clientWidth};
+  });
+  if(name==='chromium')assert.ok(track.native,'exercise the native scrollbar');
+  await page.mouse.move(track.x,track.from);await page.mouse.down();
+  await page.mouse.move(track.x,track.near,{steps:6});
+  if(!track.native)await pane.evaluate(node=>{node.scrollTop=node.scrollHeight-1.5*node.clientHeight;});
+  await pane.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await pane.evaluate(node=>node.scrollHeight),track.height,'Do not resize the thumb partway through a scrollbar drag');
+  await page.mouse.move(track.x,track.end,{steps:4});
+  if(!track.native)await pane.evaluate(node=>{node.scrollTop=node.scrollHeight;});
+  await page.mouse.up();
+  await expect(pane).toContainText('Reply during thumb drag 7');
+  await expect.poll(gap,{message:'Dragging to the very end follows the actual latest message'}).toBeLessThan(3);
+  await expect(latest).toBeHidden();
+
   // A compositor correction during an upward key scroll is not a new
   // downward input, even when both positions are within the follow threshold.
   await pane.evaluate(node=>{
@@ -147,10 +197,6 @@ async function run(name,engine){
   await expect(latest,'ArrowUp stops following').toBeVisible();await settle('ArrowUp');
   await page.keyboard.press('Home');await holds('Home mid-stream');
   await latest.click();await follows('The Latest pill after Home');
-  // Fix the browser-owned thumb geometry for the drag. Native themes have
-  // different minimum thumb sizes and arrow buttons; guessing 20px can hit
-  // the bottom arrow instead of the thumb on Linux.
-  await page.addStyleTag({content:'.messages::-webkit-scrollbar{width:16px}.messages::-webkit-scrollbar-track{background:#eee}.messages::-webkit-scrollbar-thumb{background:#777;min-height:40px;border:0}.messages::-webkit-scrollbar-button{display:none;width:0;height:0}'});
   await expect.poll(gap).toBeLessThan(3);
   // The custom scrollbar changes the pane's content width. Wait until the
   // prompt rail has consumed that resize before sampling the drag geometry.
@@ -190,6 +236,24 @@ async function run(name,engine){
   // Quiet activity can leave even a full transcript window shorter than the pane.
   for(let i=0;i<100;i++){channel.push({type:'operation_accepted',text:'Short prompt '+i});channel.push({type:'message_delta',text:'Short reply '+i});}
   await expect(pane).toContainText('Short reply 99');
+  // A slow downward wheel reaches the prefetch zone before the bottom.
+  // With uniform rows, an additional page should leave the thumb's size
+  // steady and let the reader continue through every intermediate reply.
+  await pane.evaluate(node=>{node.scrollTop=node.scrollHeight-3*node.clientHeight;node.dispatchEvent(new Event('scroll'));});
+  await expect(latest).toBeVisible();
+  for(let i=100;i<120;i++){channel.push({type:'operation_accepted',text:'Short prompt '+i});channel.push({type:'message_delta',text:'Short reply '+i});}
+  await expect(pane.getByRole('button',{name:'Show later messages'})).toBeVisible();
+  const savedHeight=await pane.evaluate(node=>node.scrollHeight);
+  const height=await pane.evaluate(node=>node.clientHeight);
+  for(let step=0;step<5 && !(await pane.textContent()).includes('Short reply 100');step++){
+   await wheel(Math.round(height/3));
+   await pane.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  }
+  await expect(pane).toContainText('Short reply 100');
+  assert.ok(Math.abs(await pane.evaluate(node=>node.scrollHeight)-savedHeight)<height/2,'Paging through uniform rows must not double the scroll range');
+  await expect(latest).toBeVisible();
+  await latest.click();
+
   const compact=await page.addStyleTag({content:'.messages-content .message:not(:last-of-type){display:none}'});
   channel.push({type:'operation_accepted',text:'Latest prompt after compact activity'});
   channel.push({type:'message_delta',text:'FINAL_VISIBLE_LINE'});
@@ -198,6 +262,18 @@ async function run(name,engine){
   await expect(pane).toContainText('FINAL_VISIBLE_LINE');
   await expect(latest).toBeHidden();
   await compact.evaluate(node=>node.remove());
+  await pane.evaluate(node=>{node.scrollTop=node.scrollHeight-node.clientHeight-250;node.dispatchEvent(new Event('scroll'));});
+  await expect(latest).toBeVisible();
+  channel.push({type:'operation_accepted',text:'Follow a compact window'});
+  channel.push({type:'message_delta',text:'KEYBOARD_TAIL'});
+  await expect(pane.getByRole('button',{name:'Show later messages'})).toBeVisible();
+  const folded=await page.addStyleTag({content:'.messages-content .message{display:none}'});
+  await expect.poll(gap).toBeLessThan(2);
+  await pane.focus();await page.keyboard.press('ArrowDown');
+  await expect(latest,'A down key at the end of a compact window must follow even when no scroll event fires').toBeHidden();
+  await folded.evaluate(node=>node.remove());
+  await expect(pane).toContainText('KEYBOARD_TAIL');
+  await expect.poll(gap).toBeLessThan(3);
   await page.screenshot({path:`/tmp/lazybox-chat-scroll-${name}.png`});
   await drainPageErrors(errors);assert.deepEqual(errors,[]);
   console.log(`PASS ${name}: true bottom after late header, resize and Mermaid; reading held mid-stream against wheel, PageUp, Home, ArrowUp and a scrollbar drag; Latest pill, End, wheel to bottom and send resume following; layout shifts above the viewport keep the reading position.`);

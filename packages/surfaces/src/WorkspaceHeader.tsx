@@ -22,7 +22,7 @@ import type { ViewTarget, WorkspacePage } from './workspace-model';
  * page's own actions.
  */
 const PHONE = '(max-width: 479px)';
-export function WorkspaceHeader({ app, pages, selectedPage, missions, onOpenMissions, settings, pending, fixedWorkspace, navigatorOpen, collections, selection, viewState, workspaceID, info, terminalReady, canShowNewSession, editing, layoutMenu, canOpenWorkspaceWindow, onOpenNavigator, onSelectPage, extensionsOpen, onManageExtensions, onOpenSettings, onOpenAttention, onShowChanges, onBrowseFiles, onShowTerminal, onNewConversation, onOpenRunner, onOpenWorkspaceWindow, onToggleEditing, onToggleConfiguring, onShowModule }: {
+export function WorkspaceHeader({ onBack, app, pages, selectedPage, missions, onOpenMissions, settings, pending, fixedWorkspace, navigatorOpen, collections, selection, viewState, workspaceID, info, terminalReady, canShowNewSession, editing, layoutMenu, canOpenWorkspaceWindow, onOpenNavigator, onSelectPage, extensionsOpen, onManageExtensions, onOpenSettings, onOpenAttention, onShowChanges, onBrowseFiles, onShowTerminal, onNewConversation, onOpenRunner, onOpenWorkspaceWindow, onToggleEditing, onToggleConfiguring, onShowModule }: {
   /** The desktop app, for its update notice (absent in a browser and in workspace windows). */
   app?: AppHost;
   pages: WorkspacePage[];
@@ -48,6 +48,7 @@ export function WorkspaceHeader({ app, pages, selectedPage, missions, onOpenMiss
   canOpenWorkspaceWindow: boolean;
   onOpenNavigator(): void;
   onSelectPage(id: string): void;
+  onBack?: () => void;
   extensionsOpen: boolean;
   onManageExtensions(): void;
   onOpenSettings(): void;
@@ -86,6 +87,7 @@ export function WorkspaceHeader({ app, pages, selectedPage, missions, onOpenMiss
       {/* Which Lazybox this window is, unmistakably, when it is not the release app: Dev's and Working's windows look alike otherwise. */}
       {channel && <span className="brand-channel" data-channel={channel.toLowerCase()} title={`This window is Lazybox ${channel}: it shows ${channel}'s Runner`}>{channel}</span>}
     </div>
+    <button className="icon-button" disabled={!onBack} onClick={onBack} aria-label="Go back" title="Back (Alt+← or ⌘[)"><Icon name="back"/></button>
     <nav aria-label="Pages">
       {!fixedWorkspace && <button className={missions ? 'selected' : ''} aria-current={missions ? 'page' : undefined} onClick={onOpenMissions}>Missions</button>}
       {missions ? <button onClick={() => onSelectPage(selectedPage)}>Workspaces</button> : pages.map(value => <button key={value.id} disabled={pending} className={!settings && value.id === selectedPage ? 'selected' : ''} aria-current={!settings && value.id === selectedPage ? 'page' : undefined} onClick={() => onSelectPage(value.id)}>{value.name}</button>)}

@@ -5,5 +5,5 @@ description: Learn your coding preferences from recent conversations and an inte
 author: Lazybox
 category: Agents & conversations
 keywords: [coding style, preferences, answer questions]
-caption: Coding-style interview with a suggested preference.
+caption: Choose Teach Clone Me after enabling it, review the suggested preferences, then save the ones your agents should use.
 grants: [answer:preferences]

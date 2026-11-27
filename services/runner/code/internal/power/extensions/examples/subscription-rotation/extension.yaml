@@ -14,7 +14,7 @@
 # approving switch:claude: https://code.claude.com/docs/en/legal-and-compliance
 lazybox: 1
 category: Monitoring & costs
-caption: Access requested by Subscription rotation.
+caption: Choose Manage rotation accounts after enabling it to select which accounts can take over.
 keywords: [accounts, quota]
 name: Subscription rotation
 version: 1.0.0

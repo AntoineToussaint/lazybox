@@ -34,26 +34,6 @@ button.extension-chip{cursor:pointer}
 
 /* Home: what can be shown, what waits, examples. */
 .extension-home{display:flex;flex-direction:column;gap:18px;height:100%;min-height:0;overflow:auto;padding:16px;box-sizing:border-box;font-size:calc(13px * var(--text-scale))}
-.extension-home>section{min-width:0}
-.extension-home h3{margin:0 0 8px;font-size:calc(11px * var(--text-scale));font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted)}
-.extension-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(200px,100%),1fr));gap:8px;margin:0;padding:0;list-style:none}
-.extension-tile{display:flex;align-items:center;gap:10px;width:100%;padding:10px;border:1px solid var(--line-subtle);border-radius:10px;background:var(--surface-raised);color:var(--text);text-align:left;cursor:pointer}
-.extension-tile:hover{border-color:var(--line-strong);background:var(--surface-hover)}
-.extension-tile span:last-child{display:flex;flex-direction:column;gap:2px;min-width:0}
-.extension-tile strong{font-weight:600;color:var(--text-strong)}
-.extension-tile small,.extension-row-text small{color:var(--text-muted);font-size:calc(12px * var(--text-scale));overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.extension-rows{display:grid;grid-template-columns:minmax(0,1fr);margin:0;padding:0;list-style:none;border:1px solid var(--line-subtle);border-radius:10px;background:var(--surface-raised)}
-.extension-rows>li{display:flex;align-items:center;gap:10px;min-width:0;padding:8px 10px}
-.extension-rows>li>button{flex:none;white-space:nowrap}
-.extension-rows>li+li{border-top:1px solid var(--line-subtle)}
-.extension-rows .extension-mark{width:28px;height:28px}
-.extension-rows>li.is-broken .extension-mark{background:var(--danger-bg);color:var(--danger);border-color:var(--danger-line-subtle)}
-.extension-row-text{display:flex;flex-direction:column;gap:1px;flex:1;min-width:0}
-.extension-row-text strong{font-weight:500;color:var(--text-strong)}
-.extension-home-footer{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-top:auto;padding-top:12px;border-top:1px solid var(--line-subtle);color:var(--text-muted);font-size:calc(12px * var(--text-scale))}
-.extension-home-footer code{font-family:var(--font-mono);font-size:calc(11px * var(--text-scale));color:var(--text-secondary)}
-.extension-manage{align-self:flex-end;display:inline-flex;align-items:center;gap:6px}
-
 /* The approval sheet. */
 .extension-approval{width:min(560px,calc(100vw - 32px));font-family:var(--font-ui);font-size:calc(13px * var(--text-scale))}
 .extension-approval>[data-dialog-drag-handle]{justify-content:flex-start}
@@ -119,12 +99,40 @@ button.extension-chip{cursor:pointer}
 .extension-search { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
 .extension-search input[type=search] { flex: 1 1 12rem; min-width: 0; }
 .extension-search select { width: auto; max-width: 100%; }
-.extension-search label { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
-.extension-search label input[type=checkbox] { width: auto; margin: 0; }
-.extension-listing small { color: var(--text-subtle); }
-.extension-listing summary { cursor: pointer; width: fit-content; color: var(--text-muted); font-size: calc(12px * var(--text-scale)); }
-.extension-listing figure { margin: 4px 0; }
-.extension-listing figure img { max-width: 100%; height: auto; }
+.extension-listing { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 6px 10px; }
+.extension-listing small { color: var(--text-subtle); line-height: 1.4; }
+.extension-category { grid-column: 1 / -1; }
+.extension-listing .extension-thumbnail {
+  width: 80px; aspect-ratio: 4 / 3; padding: 0; overflow: hidden; cursor: zoom-in;
+  border: 1px solid var(--line); border-radius: 5px; background: var(--surface-sunken);
+}
+.extension-thumbnail img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.extension-preview-dialog { max-width: min(90vw, 850px); }
+.extension-preview-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.extension-preview-dialog figure { margin: 0; }
+.extension-preview-dialog figure img { display: block; max-width: 100%; max-height: 68vh; margin: auto; object-fit: contain; }
+.extension-preview-dialog figcaption { margin-top: 8px; color: var(--text-muted); }
 .clone-interview, .clone-interview label { display: grid; gap: 6px; }
 .clone-interview { gap: 12px; }
 .clone-interview label:has(input) { display: block; }
+
+.extension-gallery {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+  gap: 12px;
+  padding: 0;
+}
+.extension-gallery .extension-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+
+.extension-gallery .extension-card-body { width: 100%; }
+.extension-access summary { cursor: pointer; color: var(--text-muted); }
+.extension-access[open] .extension-summary { margin-block: 6px; }

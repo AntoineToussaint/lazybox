@@ -125,7 +125,7 @@ try{
  await page.getByRole('tab',{name:'Subscriptions'}).click();
  await expect(page.getByRole('switch',{name:'Automatic switching'})).toHaveCount(0);
  await page.getByRole('tab',{name:'Extensions'}).click();
- const examples=page.getByRole('list',{name:'Available extensions'});
+ const examples=page.getByRole('list',{name:'Extension catalog'});
  await examples.getByRole('listitem').filter({hasText:'Subscription rotation'}).getByRole('button',{name:'Install'}).click();
  const sheet=page.getByRole('dialog',{name:'Allow Subscription rotation?'});
  await expect(sheet).toContainText('It has no panel and runs no code: Lazybox follows its account policy.');
@@ -137,7 +137,7 @@ try{
  await page.screenshot({path:'.cache/claude-compliance-rotation-sheet.png'});
  await sheet.getByRole('button',{name:'Allow and turn on'}).click();
  await expect(sheet).toHaveCount(0);
- const card=page.getByRole('list',{name:'Your extensions'}).getByRole('listitem',{name:'Subscription rotation'});
+ const card=page.getByRole('list',{name:'Extension catalog'}).getByRole('listitem',{name:'Subscription rotation'});
  await expect(card).toContainText('On');
  await expect(card.getByRole('note')).toContainText('Anthropic’s terms may not allow');
  assert.deepEqual(f.mutations.findLast(m=>m.method==='ApproveExtension').body.grants,['switch:codex','switch:claude']);

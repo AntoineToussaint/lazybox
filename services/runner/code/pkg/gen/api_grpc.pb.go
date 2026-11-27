@@ -137,6 +137,7 @@ const (
 	RunnerService_ListTerminals_FullMethodName                = "/lazybox.bench.v1.RunnerService/ListTerminals"
 	RunnerService_WatchTerminal_FullMethodName                = "/lazybox.bench.v1.RunnerService/WatchTerminal"
 	RunnerService_WriteTerminal_FullMethodName                = "/lazybox.bench.v1.RunnerService/WriteTerminal"
+	RunnerService_SetTerminalControl_FullMethodName           = "/lazybox.bench.v1.RunnerService/SetTerminalControl"
 	RunnerService_ResizeTerminal_FullMethodName               = "/lazybox.bench.v1.RunnerService/ResizeTerminal"
 	RunnerService_CloseTerminal_FullMethodName                = "/lazybox.bench.v1.RunnerService/CloseTerminal"
 	RunnerService_RestartRunner_FullMethodName                = "/lazybox.bench.v1.RunnerService/RestartRunner"
@@ -489,6 +490,7 @@ type RunnerServiceClient interface {
 	ListTerminals(ctx context.Context, in *ListTerminalsRequest, opts ...grpc.CallOption) (*ListTerminalsResponse, error)
 	WatchTerminal(ctx context.Context, in *WatchTerminalRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TerminalEvent], error)
 	WriteTerminal(ctx context.Context, in *WriteTerminalRequest, opts ...grpc.CallOption) (*TerminalStatus, error)
+	SetTerminalControl(ctx context.Context, in *SetTerminalControlRequest, opts ...grpc.CallOption) (*TerminalStatus, error)
 	ResizeTerminal(ctx context.Context, in *ResizeTerminalRequest, opts ...grpc.CallOption) (*TerminalStatus, error)
 	CloseTerminal(ctx context.Context, in *TerminalRequest, opts ...grpc.CallOption) (*TerminalStatus, error)
 	// Owner only. Asks the launcher that supervises this Runner to start it
@@ -2035,6 +2037,16 @@ func (c *runnerServiceClient) WriteTerminal(ctx context.Context, in *WriteTermin
 	return out, nil
 }
 
+func (c *runnerServiceClient) SetTerminalControl(ctx context.Context, in *SetTerminalControlRequest, opts ...grpc.CallOption) (*TerminalStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TerminalStatus)
+	err := c.cc.Invoke(ctx, RunnerService_SetTerminalControl_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *runnerServiceClient) ResizeTerminal(ctx context.Context, in *ResizeTerminalRequest, opts ...grpc.CallOption) (*TerminalStatus, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TerminalStatus)
@@ -3483,6 +3495,7 @@ type RunnerServiceServer interface {
 	ListTerminals(context.Context, *ListTerminalsRequest) (*ListTerminalsResponse, error)
 	WatchTerminal(*WatchTerminalRequest, grpc.ServerStreamingServer[TerminalEvent]) error
 	WriteTerminal(context.Context, *WriteTerminalRequest) (*TerminalStatus, error)
+	SetTerminalControl(context.Context, *SetTerminalControlRequest) (*TerminalStatus, error)
 	ResizeTerminal(context.Context, *ResizeTerminalRequest) (*TerminalStatus, error)
 	CloseTerminal(context.Context, *TerminalRequest) (*TerminalStatus, error)
 	// Owner only. Asks the launcher that supervises this Runner to start it
@@ -4173,6 +4186,9 @@ func (UnimplementedRunnerServiceServer) WatchTerminal(*WatchTerminalRequest, grp
 }
 func (UnimplementedRunnerServiceServer) WriteTerminal(context.Context, *WriteTerminalRequest) (*TerminalStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method WriteTerminal not implemented")
+}
+func (UnimplementedRunnerServiceServer) SetTerminalControl(context.Context, *SetTerminalControlRequest) (*TerminalStatus, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetTerminalControl not implemented")
 }
 func (UnimplementedRunnerServiceServer) ResizeTerminal(context.Context, *ResizeTerminalRequest) (*TerminalStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResizeTerminal not implemented")
@@ -6629,6 +6645,24 @@ func _RunnerService_WriteTerminal_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunnerServiceServer).WriteTerminal(ctx, req.(*WriteTerminalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_SetTerminalControl_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetTerminalControlRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).SetTerminalControl(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_SetTerminalControl_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).SetTerminalControl(ctx, req.(*SetTerminalControlRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -9237,6 +9271,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "WriteTerminal",
 			Handler:    _RunnerService_WriteTerminal_Handler,
+		},
+		{
+			MethodName: "SetTerminalControl",
+			Handler:    _RunnerService_SetTerminalControl_Handler,
 		},
 		{
 			MethodName: "ResizeTerminal",

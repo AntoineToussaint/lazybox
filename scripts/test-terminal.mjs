@@ -301,6 +301,12 @@ try {
  await stale.getByRole('button',{name:'Run and take over'}).click();
  await expect(stale).toContainText('Check the terminal and conversation history');
  await expect(stale).not.toContainText('did not run');
+ chatEvents.push({...handoff,requestId:'private-choice',terminalAgentInput:true});
+ const privateChoice=page.getByRole('article',{name:'Interactive command'}).last();
+ await privateChoice.getByRole('button',{name:'Run privately'}).click();
+ await expect(screen).toHaveAttribute('data-terminal-id','interactive-private-choice');
+ await expect(panel.getByText(/Private terminal ·/)).toBeVisible();
+ await expect(panel.getByRole('button',{name:'Return control to agent'})).toHaveCount(0);
  chatEvents.push({...handoff,requestId:'agent-input',terminalAgentInput:true,providerDataJson:Buffer.from(JSON.stringify(['example','deploy'])).toString('base64')});
  const shared=page.getByRole('article',{name:'Interactive command'}).last();
  await expect(shared.locator('pre')).toHaveText('example deploy');
@@ -313,6 +319,15 @@ try {
  await expect(shared).toContainText('Interactive command running');
  // The shell exits on the Runner before its final status reaches the terminal view.
  await expect(screen).toHaveAttribute('data-terminal-id','interactive-agent-input');
+ await expect(panel.getByText('Agent controls the keyboard')).toBeVisible();
+ await screen.click();
+ await page.keyboard.type('blocked');
+ await panel.getByRole('button',{name:'Take control'}).click();
+ await expect(panel.getByText('You control the keyboard')).toBeVisible();
+ await page.keyboard.type('mine');
+ await expect.poll(()=>fixture.terminals.get('interactive-agent-input').input.join('')).toBe('mine');
+ await panel.getByRole('button',{name:'Return control to agent'}).click();
+ await expect(panel.getByText('Agent controls the keyboard')).toBeVisible();
  const lateResize=page.waitForResponse(response=>response.url().endsWith('/ResizeTerminal') && response.request().postDataJSON().terminalId==='interactive-agent-input');
  await page.route('**/ResizeTerminal',async route=>{
    if(route.request().postDataJSON().terminalId==='interactive-agent-input')fixture.terminals.get('interactive-agent-input').done=true;

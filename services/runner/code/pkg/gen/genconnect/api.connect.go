@@ -380,6 +380,9 @@ const (
 	// RunnerServiceWriteTerminalProcedure is the fully-qualified name of the RunnerService's
 	// WriteTerminal RPC.
 	RunnerServiceWriteTerminalProcedure = "/lazybox.bench.v1.RunnerService/WriteTerminal"
+	// RunnerServiceSetTerminalControlProcedure is the fully-qualified name of the RunnerService's
+	// SetTerminalControl RPC.
+	RunnerServiceSetTerminalControlProcedure = "/lazybox.bench.v1.RunnerService/SetTerminalControl"
 	// RunnerServiceResizeTerminalProcedure is the fully-qualified name of the RunnerService's
 	// ResizeTerminal RPC.
 	RunnerServiceResizeTerminalProcedure = "/lazybox.bench.v1.RunnerService/ResizeTerminal"
@@ -966,6 +969,7 @@ type RunnerServiceClient interface {
 	ListTerminals(context.Context, *connect.Request[gen.ListTerminalsRequest]) (*connect.Response[gen.ListTerminalsResponse], error)
 	WatchTerminal(context.Context, *connect.Request[gen.WatchTerminalRequest]) (*connect.ServerStreamForClient[gen.TerminalEvent], error)
 	WriteTerminal(context.Context, *connect.Request[gen.WriteTerminalRequest]) (*connect.Response[gen.TerminalStatus], error)
+	SetTerminalControl(context.Context, *connect.Request[gen.SetTerminalControlRequest]) (*connect.Response[gen.TerminalStatus], error)
 	ResizeTerminal(context.Context, *connect.Request[gen.ResizeTerminalRequest]) (*connect.Response[gen.TerminalStatus], error)
 	CloseTerminal(context.Context, *connect.Request[gen.TerminalRequest]) (*connect.Response[gen.TerminalStatus], error)
 	// Owner only. Asks the launcher that supervises this Runner to start it
@@ -2011,6 +2015,12 @@ func NewRunnerServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(runnerServiceMethods.ByName("WriteTerminal")),
 			connect.WithClientOptions(opts...),
 		),
+		setTerminalControl: connect.NewClient[gen.SetTerminalControlRequest, gen.TerminalStatus](
+			httpClient,
+			baseURL+RunnerServiceSetTerminalControlProcedure,
+			connect.WithSchema(runnerServiceMethods.ByName("SetTerminalControl")),
+			connect.WithClientOptions(opts...),
+		),
 		resizeTerminal: connect.NewClient[gen.ResizeTerminalRequest, gen.TerminalStatus](
 			httpClient,
 			baseURL+RunnerServiceResizeTerminalProcedure,
@@ -2853,6 +2863,7 @@ type runnerServiceClient struct {
 	listTerminals                *connect.Client[gen.ListTerminalsRequest, gen.ListTerminalsResponse]
 	watchTerminal                *connect.Client[gen.WatchTerminalRequest, gen.TerminalEvent]
 	writeTerminal                *connect.Client[gen.WriteTerminalRequest, gen.TerminalStatus]
+	setTerminalControl           *connect.Client[gen.SetTerminalControlRequest, gen.TerminalStatus]
 	resizeTerminal               *connect.Client[gen.ResizeTerminalRequest, gen.TerminalStatus]
 	closeTerminal                *connect.Client[gen.TerminalRequest, gen.TerminalStatus]
 	restartRunner                *connect.Client[gen.RestartRunnerRequest, gen.RestartRunnerResponse]
@@ -3558,6 +3569,11 @@ func (c *runnerServiceClient) WatchTerminal(ctx context.Context, req *connect.Re
 // WriteTerminal calls lazybox.bench.v1.RunnerService.WriteTerminal.
 func (c *runnerServiceClient) WriteTerminal(ctx context.Context, req *connect.Request[gen.WriteTerminalRequest]) (*connect.Response[gen.TerminalStatus], error) {
 	return c.writeTerminal.CallUnary(ctx, req)
+}
+
+// SetTerminalControl calls lazybox.bench.v1.RunnerService.SetTerminalControl.
+func (c *runnerServiceClient) SetTerminalControl(ctx context.Context, req *connect.Request[gen.SetTerminalControlRequest]) (*connect.Response[gen.TerminalStatus], error) {
+	return c.setTerminalControl.CallUnary(ctx, req)
 }
 
 // ResizeTerminal calls lazybox.bench.v1.RunnerService.ResizeTerminal.
@@ -4388,6 +4404,7 @@ type RunnerServiceHandler interface {
 	ListTerminals(context.Context, *connect.Request[gen.ListTerminalsRequest]) (*connect.Response[gen.ListTerminalsResponse], error)
 	WatchTerminal(context.Context, *connect.Request[gen.WatchTerminalRequest], *connect.ServerStream[gen.TerminalEvent]) error
 	WriteTerminal(context.Context, *connect.Request[gen.WriteTerminalRequest]) (*connect.Response[gen.TerminalStatus], error)
+	SetTerminalControl(context.Context, *connect.Request[gen.SetTerminalControlRequest]) (*connect.Response[gen.TerminalStatus], error)
 	ResizeTerminal(context.Context, *connect.Request[gen.ResizeTerminalRequest]) (*connect.Response[gen.TerminalStatus], error)
 	CloseTerminal(context.Context, *connect.Request[gen.TerminalRequest]) (*connect.Response[gen.TerminalStatus], error)
 	// Owner only. Asks the launcher that supervises this Runner to start it
@@ -5429,6 +5446,12 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(runnerServiceMethods.ByName("WriteTerminal")),
 		connect.WithHandlerOptions(opts...),
 	)
+	runnerServiceSetTerminalControlHandler := connect.NewUnaryHandler(
+		RunnerServiceSetTerminalControlProcedure,
+		svc.SetTerminalControl,
+		connect.WithSchema(runnerServiceMethods.ByName("SetTerminalControl")),
+		connect.WithHandlerOptions(opts...),
+	)
 	runnerServiceResizeTerminalHandler := connect.NewUnaryHandler(
 		RunnerServiceResizeTerminalProcedure,
 		svc.ResizeTerminal,
@@ -6385,6 +6408,8 @@ func NewRunnerServiceHandler(svc RunnerServiceHandler, opts ...connect.HandlerOp
 			runnerServiceWatchTerminalHandler.ServeHTTP(w, r)
 		case RunnerServiceWriteTerminalProcedure:
 			runnerServiceWriteTerminalHandler.ServeHTTP(w, r)
+		case RunnerServiceSetTerminalControlProcedure:
+			runnerServiceSetTerminalControlHandler.ServeHTTP(w, r)
 		case RunnerServiceResizeTerminalProcedure:
 			runnerServiceResizeTerminalHandler.ServeHTTP(w, r)
 		case RunnerServiceCloseTerminalProcedure:
@@ -7100,6 +7125,10 @@ func (UnimplementedRunnerServiceHandler) WatchTerminal(context.Context, *connect
 
 func (UnimplementedRunnerServiceHandler) WriteTerminal(context.Context, *connect.Request[gen.WriteTerminalRequest]) (*connect.Response[gen.TerminalStatus], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.WriteTerminal is not implemented"))
+}
+
+func (UnimplementedRunnerServiceHandler) SetTerminalControl(context.Context, *connect.Request[gen.SetTerminalControlRequest]) (*connect.Response[gen.TerminalStatus], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("lazybox.bench.v1.RunnerService.SetTerminalControl is not implemented"))
 }
 
 func (UnimplementedRunnerServiceHandler) ResizeTerminal(context.Context, *connect.Request[gen.ResizeTerminalRequest]) (*connect.Response[gen.TerminalStatus], error) {

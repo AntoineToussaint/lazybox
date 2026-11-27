@@ -241,6 +241,9 @@ func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt,
 		return r, err
 	}
 	err = json.Unmarshal(result, &r)
+	if err == nil && op.Kind == agent.Message && r.Delivery == agent.ModelRequiredFault {
+		return r, agent.ErrModelRequired
+	}
 	r.ID = op.ID
 	return r, err
 }

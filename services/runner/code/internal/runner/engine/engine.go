@@ -23,7 +23,8 @@ type accepted struct {
 	adopted bool
 }
 type Snapshot struct {
-	Title string `json:"title,omitempty"`
+	RetryableOperationID string `json:"-"`
+	Title                string `json:"title,omitempty"`
 	// Opening is the conversation's first message, bounded: what a generated
 	// title and the fallback title are made from.
 	Opening      string             `json:"opening,omitempty"`
@@ -106,8 +107,10 @@ type Engine struct {
 	messageOpen bool
 	// hooks observe the main agent's turns; turnOp is the message whose turn
 	// is running, or "" when it began before this engine (an adopted turn).
-	hooks  TurnHooks
-	turnOp string
+	hooks            TurnHooks
+	turnOp           string
+	turnInput        agent.Operation
+	modelOperationID string
 	// queuedAt is when each queued message was accepted.
 	queuedAt map[string]time.Time
 	// stop: Lazybox asked the provider to stop a turn (Stop, Send now), keyed
@@ -227,6 +230,9 @@ func QueuedMessages(queue []agent.Operation, at map[string]time.Time) []QueuedMe
 
 func (e *Engine) snapshotLocked() Snapshot {
 	s := e.state
+	if s.Busy && e.turnInput.Kind == agent.Message && e.turnInput.Origin == nil && e.turnOp == e.turnInput.ID {
+		s.RetryableOperationID = e.turnOp
+	}
 	s.Queued = len(e.queue)
 	s.QueuedMessages = QueuedMessages(e.queue, e.queuedAt)
 	s.Pending = map[string]agent.Event{}
@@ -350,6 +356,11 @@ func (e *Engine) apply(ctx context.Context, op agent.Operation, interruptChildre
 		e.opMu.Lock()
 		defer e.opMu.Unlock()
 	}
+	return e.applySerialized(ctx, op, interruptChildren, false)
+}
+
+// Non-interrupt callers hold opMu, which also serializes queue dispatch.
+func (e *Engine) applySerialized(ctx context.Context, op agent.Operation, interruptChildren, first bool) (agent.Receipt, error) {
 	op.Origin = op.Origin.Bounded()
 	// The attached instruction update is decided by the Runner, not the client,
 	// so a client retrying the same operation is recognized without it.
@@ -475,10 +486,14 @@ func (e *Engine) apply(ctx context.Context, op agent.Operation, interruptChildre
 	}
 	e.rememberLocked(op.ID, accepted{fingerprint: fingerprint, receipt: r})
 	if op.Kind == agent.Message {
-		if agent.TurnFault(e.state.Fault) {
+		if agent.TurnFault(e.state.Fault) && e.state.Fault != agent.ModelRequiredFault {
 			e.state.Fault = ""
 		}
-		e.queue = append(e.queue, op)
+		if first {
+			e.queue = append([]agent.Operation{op}, e.queue...)
+		} else {
+			e.queue = append(e.queue, op)
+		}
 		if e.queuedAt == nil {
 			e.queuedAt = map[string]time.Time{}
 		}
@@ -530,6 +545,13 @@ func (e *Engine) apply(ctx context.Context, op agent.Operation, interruptChildre
 		// the request still waits, and the person can answer it again.
 		delete(e.responses, op.RequestID)
 	}
+	if op.Kind == agent.Model && err == nil && r.Delivery != "failed" {
+		e.modelOperationID = op.ID
+		if e.state.Fault == agent.ModelRequiredFault {
+			e.state.Fault = ""
+			go e.dispatch()
+		}
+	}
 	if op.Kind == agent.Interrupt && rootStopFailed {
 		// Not stopped: the turn goes on, and an error in it is an error.
 		e.stop.forget(stopped)
@@ -543,6 +565,43 @@ func (e *Engine) apply(ctx context.Context, op agent.Operation, interruptChildre
 	// correlated event can remove the pending request from the registry.
 	e.mu.Unlock()
 	return r, err
+}
+
+// RetryTurn keeps the original input (including images) and holds dispatch until
+// it is first in the queue. An old dialog cannot stop a different turn.
+func (e *Engine) RetryTurn(ctx context.Context, original, modelOperation, attempt string) (agent.Receipt, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.Receipt{}, err
+	}
+	if original == "" || modelOperation == "" || attempt == "" || len(attempt) > 128 {
+		return agent.Receipt{}, errors.New("turn and model selection required")
+	}
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	e.mu.Lock()
+	key := sha256.Sum256([]byte(modelOperation + "\x00" + original))
+	id := fmt.Sprintf("model-retry-%x", key)
+	if prior, ok := e.ops[id]; ok {
+		e.mu.Unlock()
+		return prior.receipt, nil
+	}
+	input := e.turnInput
+	if !e.state.Busy || e.state.Closed || e.state.Fault != "" || e.turnOp != original || input.ID != original || input.Kind != agent.Message || input.Origin != nil || e.modelOperationID != modelOperation {
+		e.mu.Unlock()
+		return agent.Receipt{}, errors.New("the active prompt or selected model has changed")
+	}
+	if len(e.queue) >= 64 {
+		e.mu.Unlock()
+		return agent.Receipt{}, errors.New("message queue is full")
+	}
+	e.mu.Unlock()
+	stopID := fmt.Sprintf("model-stop-%x", sha256.Sum256([]byte(id+"\x00"+attempt)))
+	stop, err := e.applySerialized(ctx, agent.Operation{ID: stopID, Kind: agent.Interrupt}, false, false)
+	if err != nil || stop.Delivery == "failed" {
+		return stop, err
+	}
+	input.ID = id
+	return e.applySerialized(ctx, input, false, true)
 }
 
 // Ways DeliverQueued delivers a queued message.
@@ -830,7 +889,7 @@ func (e *Engine) dispatch() {
 	// kicked from many places (each message accepted, each turn's end), and
 	// a kick from before the refusal can run after it: holding the queue is
 	// the fault's to say, never the kick's timing.
-	if agent.TurnFault(e.state.Fault) && e.state.Fault != agent.DeliveryRejectedFault && e.queue[0].Kind == agent.Message {
+	if agent.TurnFault(e.state.Fault) && e.state.Fault != agent.DeliveryRejectedFault && e.state.Fault != agent.ModelRequiredFault && e.queue[0].Kind == agent.Message {
 		e.state.Fault = ""
 	}
 	if e.state.Fault != "" {
@@ -848,6 +907,7 @@ func (e *Engine) dispatch() {
 		e.responses[op.RequestID] = true
 	}
 	e.turnOp = op.ID
+	e.turnInput = op
 	before := e.hooks.Before
 	e.mu.Unlock()
 	if before != nil && op.Kind == agent.Message {
@@ -865,7 +925,14 @@ func (e *Engine) dispatch() {
 		e.mu.Unlock()
 		return
 	}
-	if errors.Is(err, agent.ErrTurnRunning) {
+	if errors.Is(err, agent.ErrTurnRunning) || errors.Is(err, agent.ErrModelRequired) {
+		if errors.Is(err, agent.ErrModelRequired) {
+			e.state.Busy = false
+			if e.state.Fault == "" {
+				e.state.Fault = agent.ModelRequiredFault
+			}
+			e.stop.undelivered()
+		}
 		// Not sent: the agent is in a turn this engine did not start. The
 		// message keeps its place, first in line, and goes when that turn
 		// ends (its turn_ended dispatches); the conversation is busy until
@@ -878,6 +945,7 @@ func (e *Engine) dispatch() {
 			e.queuedAt[op.ID] = queuedAt
 		}
 		e.turnOp = ""
+		e.turnInput = agent.Operation{}
 		e.persistDurableLocked()
 		e.mu.Unlock()
 		return
@@ -886,6 +954,7 @@ func (e *Engine) dispatch() {
 	e.appendLocked(map[string]any{"type": "receipt", "receipt": r})
 	if err != nil {
 		e.state.Busy = false
+		e.turnInput = agent.Operation{}
 		// Its turn never starts: a stop that waited for it has nothing to stop.
 		e.stop.undelivered()
 		// A fault said meanwhile (the stream from the agent was lost) says
@@ -1117,6 +1186,7 @@ func (e *Engine) receive() {
 		turn := ""
 		if ev.Type == "turn_ended" && rootEvent {
 			after, turn, e.turnOp = e.hooks.After, e.turnOp, ""
+			e.turnInput = agent.Operation{}
 		}
 		var tool func(agent.Event)
 		if ev.Type == "tool_activity" {

@@ -220,6 +220,23 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onClean
   const [status, setStatus] = useState<TerminalStatus>(terminal);
   const [connection, setConnection] = useState('Connecting');
   const id = terminal.id;
+  const [keyboard, setKeyboard] = useState(terminal.keyboardControl);
+  const [transferring, setTransferring] = useState(false);
+  useEffect(() => { setKeyboard(terminal.keyboardControl); }, [terminal]);
+  const watching = keyboard === 'agent';
+  const watchRef = useRef(watching);
+  watchRef.current = watching;
+  useEffect(() => { if (xterm.current) xterm.current.options.disableStdin = watching; }, [watching]);
+  async function transfer() {
+    setTransferring(true);
+    try {
+      const result = await api.setTerminalControl({ terminalId: id, personControls: watching });
+      setKeyboard(result.keyboardControl);
+      onError('');
+      if (result.keyboardControl === 'person') xterm.current?.focus();
+    } catch (error) { onError(String(error)); }
+    finally { setTransferring(false); }
+  }
   // The shell outlives a Runner restart, so its view does too: requests use the
   // window's current client, and the stream picks up from its offset.
   const client = useRef(api); client.current = api;
@@ -227,7 +244,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onClean
     const element = host.current; if (!element) return;
     // A right-click keeps the selection for the Lazybox menu instead of selecting a word.
     const font = codeFont(getAppearance());
-    const view = new Terminal({ theme: terminalTheme(getAppearance()), fontFamily: font.family, fontSize: font.size, lineHeight: 1.15, cursorBlink: true, scrollback: 5000, allowProposedApi: false, rightClickSelectsWord: false });
+    const view = new Terminal({ disableStdin: watchRef.current, theme: terminalTheme(getAppearance()), fontFamily: font.family, fontSize: font.size, lineHeight: 1.15, cursorBlink: true, scrollback: 5000, allowProposedApi: false, rightClickSelectsWord: false });
     xterm.current = view;
     const selectionListener = view.onSelectionChange(() => setHasSelection(view.hasSelection()));
     const fit = new FitAddon(); view.loadAddon(fit); view.open(element);
@@ -277,7 +294,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onClean
       } catch (error) { if (!signal.aborted && !done) onError(`Terminal input failed: ${String(error)}`); pending = []; }
       finally { sending = false; }
     };
-    const send = (data: Uint8Array) => { if (done) return; pending.push(data); void flush(); };
+    const send = (data: Uint8Array) => { if (done || watchRef.current) return; pending.push(data); void flush(); };
     const input = view.onData(data => {
       // A person who started typing owns this prompt.
       if (initialCommand) initialCommand.current = undefined;
@@ -354,6 +371,11 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onClean
   }, [id]);
   return <div className="terminal-view">
     {error && <div className="error" role="alert">{error}</div>}
+    {keyboard && !status.done && !terminal.done && <div className="terminal-control">
+      <span role="status"><strong>{watching ? 'Agent controls the keyboard' : 'You control the keyboard'}</strong>
+        <small>{keyboard === 'private' ? 'Private terminal · Enter any requested input here.' : 'The agent can read terminal output.'}</small></span>
+      {keyboard !== 'private' && <button disabled={transferring} onClick={() => void transfer()}>{watching ? 'Take control' : 'Return control to agent'}</button>}
+    </div>}
     <div ref={host} className="terminal-host" data-testid="terminal" data-terminal-id={id} onContextMenu={contextMenu('terminal', (): MenuItem[] => {
       const view = xterm.current, selection = view?.getSelection() || '';
       const live = !status.done;
@@ -361,7 +383,7 @@ function TerminalView({ api, terminal, initialCommand, focusRef, onSize, onClean
       return [
         ...(link ? [...linkMenuItems(link), 'separator' as const] : []),
         { label: 'Copy', icon: 'copy', shortcut: 'Mod+C', disabled: !selection && 'Select text in the terminal first', run: () => copyText(selection) },
-        { label: 'Paste', icon: 'paste', shortcut: 'Mod+V', disabled: !live && 'The shell has ended', run: async () => {
+        { label: 'Paste', icon: 'paste', shortcut: 'Mod+V', disabled: watching ? 'Take control to paste' : !live && 'The shell has ended', run: async () => {
           let text = '';
           try { text = await navigator.clipboard.readText(); } catch { showMenuNotice(`Paste with ${navigator.platform.includes('Mac') ? '⌘V' : 'Ctrl+V'}: the clipboard is not readable here`); return; }
           view?.paste(text); view?.focus();

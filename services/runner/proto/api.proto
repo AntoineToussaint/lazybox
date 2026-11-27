@@ -230,6 +230,7 @@ service RunnerService {
   rpc ListTerminals(ListTerminalsRequest) returns (ListTerminalsResponse);
   rpc WatchTerminal(WatchTerminalRequest) returns (stream TerminalEvent);
   rpc WriteTerminal(WriteTerminalRequest) returns (TerminalStatus);
+  rpc SetTerminalControl(SetTerminalControlRequest) returns (TerminalStatus);
   rpc ResizeTerminal(ResizeTerminalRequest) returns (TerminalStatus);
   rpc CloseTerminal(TerminalRequest) returns (TerminalStatus);
   // Owner only. Asks the launcher that supervises this Runner to start it
@@ -1477,6 +1478,10 @@ message Session {
   // What kind of agent this is, as the Runner defines it from its purpose
   // (agent/types.go): where it is shown, what reaches the inbox, how it ends.
   AgentType agent_type = 46;
+  // Original user input the Runner still holds for the active turn.
+  string retryable_operation_id = 47;
+  // Selected for following turns, independently of observed provider telemetry.
+  string selected_model = 48;
 }
 // AgentType is one kind of agent: a coding agent, a reviewer, an artifact
 // companion, an Ask Lazybox assistant. Clients read these instead of
@@ -1825,6 +1830,7 @@ message ApplyRequest {
     ListMcpServers list_mcp_servers = 13;
     CompactContext compact_context = 14;
     ListProviderCatalog list_provider_catalog = 15;
+    RetryTurn retry_turn = 16;
   }
 }
 // Lists the running agent’s MCP servers without starting a turn.
@@ -2263,6 +2269,8 @@ message TerminalStatus {
   // The shell waits at a prompt, in the folder it started in, with nothing
   // running: a window may type a command into it rather than open another.
   bool idle = 22;
+  // For interactive commands: agent, person (shared output), or private.
+  string keyboard_control = 23;
 }
 message ListTerminalsRequest {
   string collection_id = 1;
@@ -4706,3 +4714,14 @@ message ArrangeConversationsRequest {
 }
 
 message SaveSnippetRequest { string yaml = 1; }
+
+// Stop and replay the identified user input after an accepted model switch.
+message RetryTurn {
+  string original_operation_id = 1;
+  string model_operation_id = 2;
+}
+
+message SetTerminalControlRequest {
+  string terminal_id = 1;
+  bool person_controls = 2;
+}

@@ -468,6 +468,10 @@ func (r rejected) Unwrap() error        { return r.error }
 // is still in a turn the engine did not know of (one a previous Runner
 // started). Nothing was sent: the engine keeps the message first in line,
 // counts the conversation busy, and delivers it when that turn ends.
+const ModelRequiredFault = "model_required"
+
+var ErrModelRequired = errors.New("select a working model to deliver the queued prompt")
+
 var ErrTurnRunning = errors.New("the agent is still in a turn")
 
 // DeliveryRejectedFault is the fault of a conversation whose message the

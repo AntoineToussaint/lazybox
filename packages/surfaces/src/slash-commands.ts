@@ -369,6 +369,8 @@ export function sameModel(model: ProviderModel, current: string): boolean {
   if (!current) return false;
   const c = current.trim().toLowerCase(), said = modelName(current).toLowerCase();
   const value = model.value.toLowerCase(), name = model.displayName.toLowerCase();
+  // Two pinned snapshots can have the same display name.
+  if (/-\d{8}(?:\[1m\])?$/.test(value) && /-\d{8}(?:\[1m\])?$/.test(c)) return value === c;
   if (value === c || name === c || name === said || modelName(model.value).toLowerCase() === said) return true;
   // An alias of the current model ("opus", listed as "Opus"): resolveModel would
   // take it for this model. A name with its own version ("Fable 5.1") must match it.

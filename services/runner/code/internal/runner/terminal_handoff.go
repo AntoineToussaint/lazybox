@@ -198,7 +198,7 @@ func (b *Bench) interactiveTerminalIO(ctx context.Context, e *Execution, action,
 		if len(input) == 0 {
 			return nil, errors.New("terminal input is empty")
 		}
-		if err := t.Write([]byte(input)); err != nil {
+		if err := t.WriteAgent([]byte(input)); err != nil {
 			return nil, err
 		}
 		return map[string]int{"written": len(input)}, nil

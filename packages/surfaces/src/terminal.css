@@ -32,3 +32,6 @@
 .terminal-handoff-directory summary { cursor: pointer; }
 
 .terminal-view .terminal-send-selection{position:absolute;bottom:28px;right:14px;z-index:2;display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface-raised);color:var(--text)}
+
+.terminal-control{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--line)}
+.terminal-control small{display:block;color:var(--text-muted)}

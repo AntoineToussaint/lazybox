@@ -50,3 +50,109 @@ func TestModelSwitchNeedsTheCapabilityAndAValidName(t *testing.T) {
 		t.Fatalf("switch delivered as %+v", op)
 	}
 }
+
+func TestRetryTurnPreservesPromptAndQueueOrder(t *testing.T) {
+	ctx := contextFor(t)
+	e, s := bench(t, false)
+	e.mu.Lock()
+	e.state.Capabilities.LiveModel = true
+	e.mu.Unlock()
+	send := func(op agent.Operation) {
+		t.Helper()
+		if _, err := e.Apply(ctx, op); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := agent.Operation{ID: "original", Kind: agent.Message, Text: "inspect image", Images: []agent.Image{{MediaType: "image/png", Data: "YQ=="}}}
+	send(input)
+	applied(t, s)
+	s.Events <- agent.Event{Type: "turn_started"}
+	await(t, e, "turn_started")
+	if e.Snapshot().RetryableOperationID != input.ID {
+		t.Fatal("missing retry target")
+	}
+	send(agent.Operation{ID: "queued", Kind: agent.Message, Text: "afterwards"})
+	send(agent.Operation{ID: "selection", Kind: agent.Model, Model: "sonnet"})
+	if applied(t, s).Kind != agent.Model {
+		t.Fatal("model selection delayed behind queue")
+	}
+	for _, pair := range [][2]string{{"stale", "selection"}, {"original", "obsolete"}} {
+		if _, err := e.RetryTurn(ctx, pair[0], pair[1], "attempt"); err == nil {
+			t.Fatal("stale retry accepted")
+		}
+	}
+	released := make(chan struct{})
+	close(released)
+	s.Hold(agent.Interrupt, released, errors.New("interrupt refused"))
+	if _, err := e.RetryTurn(ctx, input.ID, "selection", "attempt1"); err == nil {
+		t.Fatal("expected stop refusal")
+	}
+	s.Hold(agent.Interrupt, released, nil)
+	if _, err := e.RetryTurn(ctx, input.ID, "selection", "attempt2"); err != nil {
+		t.Fatal(err)
+	}
+	if applied(t, s).Kind != agent.Interrupt {
+		t.Fatal("missing interrupt")
+	}
+	if _, err := e.RetryTurn(ctx, input.ID, "selection", "attempt2"); err != nil {
+		t.Fatal(err)
+	}
+	s.Events <- agent.Event{Type: "turn_ended", Status: "interrupted"}
+	retry := applied(t, s)
+	if retry.ID == input.ID || retry.Text != input.Text || len(retry.Images) != 1 || retry.Images[0] != input.Images[0] {
+		t.Fatalf("unexpected retry: %+v", retry)
+	}
+	s.Events <- agent.Event{Type: "turn_ended"}
+	if applied(t, s).ID != "queued" {
+		t.Fatal("follow-up displaced or retry duplicated")
+	}
+}
+
+func TestRejectedModelRetainsPromptUntilCorrected(t *testing.T) {
+	e, s := bench(t, false)
+	ctx := contextFor(t)
+	e.mu.Lock()
+	e.state.Capabilities.LiveModel = true
+	e.mu.Unlock()
+	released := make(chan struct{})
+	close(released)
+	s.Hold(agent.Message, released, agent.ErrModelRequired)
+	input := agent.Operation{ID: "held", Kind: agent.Message, Text: "try again", Images: []agent.Image{{MediaType: "image/png", Data: "YQ=="}}}
+	if _, err := e.Apply(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "model required", func() bool {
+		state := e.Snapshot()
+		return state.Fault == agent.ModelRequiredFault && !state.Busy && state.Queued == 1
+	})
+	s.Hold(agent.Message, released, nil)
+	if _, err := e.Apply(ctx, agent.Operation{ID: "correct", Kind: agent.Model, Model: "sonnet"}); err != nil {
+		t.Fatal(err)
+	}
+	if applied(t, s).Kind != agent.Model {
+		t.Fatal("queued prompt bypassed model change")
+	}
+	got := applied(t, s)
+	if got.ID != input.ID || got.Text != input.Text || len(got.Images) != 1 || got.Images[0] != input.Images[0] {
+		t.Fatal("lost held input")
+	}
+}
+
+func TestModelRefusalPreservesConcurrentTransportFault(t *testing.T) {
+	e, s := bench(t, false)
+	release := make(chan struct{})
+	s.Hold(agent.Message, release, agent.ErrModelRequired)
+	if _, err := e.Apply(contextFor(t), agent.Operation{ID: "message", Kind: agent.Message, Text: "hold"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "dispatch started", func() bool { return e.Snapshot().Busy })
+	e.mu.Lock()
+	const fault = "provider stream ended: disconnected"
+	e.state.Fault = fault
+	e.mu.Unlock()
+	close(release)
+	eventually(t, "queued after refusal", func() bool { return e.Snapshot().Queued == 1 })
+	if got := e.Snapshot().Fault; got != fault {
+		t.Fatalf("transport fault replaced with %q", got)
+	}
+}

@@ -118,6 +118,8 @@ leave out.
 
 ### Home checkouts and your terminal
 
+- **Interactive terminal control** See who has the keyboard, take over from the agent, or return control. Choose Run privately for a sign-in.
+
 - **Review interactive commands** Read the command with shell quoting and expand its working directory to inspect the full path.
 - **Terminals stay through a Runner restart** An open terminal keeps its tab, its screen and its scrollback when the Runner restarts on a new port or with a new credential, and goes on where it was.
 - **Take over an interactive command** When Codex or Claude needs you to sign in, review the command in chat and run it in the workspace terminal. The agent resumes when it exits.
@@ -129,6 +131,8 @@ leave out.
 - **Agents know where it is** Agents are told each repository's home, that it is yours, to use it rather than a temporary clone, and to hand logins back to you in so many words. lazybox repos and lazybox repo home api print the paths.
 
 ### Chat and Send now
+
+- **Switch models mid-turn** Let the current reply finish or stop and resend its original prompt and attachments on the newly selected model.
 
 - **Follow the newest reply** Scrolling to the bottom resumes following when new turns arrived while you were reading earlier messages.
 

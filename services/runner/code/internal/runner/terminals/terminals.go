@@ -51,6 +51,7 @@ type Spec struct {
 	// Place is "" in the workspace; "repository-home" (RepositoryID's home
 	// checkout) or "user-home" for a shell started outside it, at Cwd
 	// (runner/homes.go). Directory is then "".
+	PersonControls    bool   `json:"personControls,omitempty"`
 	AgentConversation string `json:"agentConversation,omitempty"`
 	Place             string `json:"place,omitempty"`
 	RepositoryID      string `json:"repositoryId,omitempty"`
@@ -151,7 +152,8 @@ type keyedStart struct {
 }
 
 type Terminal struct {
-	m *Manager
+	inputMu sync.Mutex // Order keyboard transfers with writes to the PTY.
+	m       *Manager
 	// key is the request key that started it, if any.
 	key string
 	// hostID is the session host running the shell, fixed at start.
@@ -714,8 +716,61 @@ func (t *Terminal) live() (*sessionhost.Client, error) {
 	return t.host, nil
 }
 
-// Write sends keyboard input to the shell.
+// KeyboardControl describes who can type in an interactive command.
+func (s Spec) KeyboardControl() string {
+	if s.Place != InteractiveCommandPlace {
+		return ""
+	}
+	if s.AgentConversation == "" {
+		return "private"
+	}
+	if s.PersonControls {
+		return "person"
+	}
+	return "agent"
+}
+
+// SetPersonControls transfers the keyboard only for a previously shared PTY.
+func (t *Terminal) SetPersonControls(person bool) error {
+	t.inputMu.Lock()
+	defer t.inputMu.Unlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s := t.status
+	if s.Done || t.detaching || t.host == nil {
+		return errors.New("terminal has exited")
+	}
+	if s.Spec.AgentConversation == "" || s.Spec.Place != InteractiveCommandPlace {
+		return errors.New("this terminal is private")
+	}
+	if s.Spec.PersonControls == person {
+		return nil
+	}
+	s.Spec.PersonControls = person
+	if err := t.m.save(record{ID: s.ID, Host: t.hostID, Spec: s.Spec, CreatedAt: s.CreatedAt}); err != nil {
+		return err
+	}
+	t.status.Spec.PersonControls = person
+	return nil
+}
+
+// Write sends the person's keyboard input to the shell.
 func (t *Terminal) Write(data []byte) error {
+	return t.writeInput(data, false)
+}
+
+func (t *Terminal) WriteAgent(data []byte) error { return t.writeInput(data, true) }
+
+func (t *Terminal) writeInput(data []byte, agent bool) error {
+	t.inputMu.Lock()
+	defer t.inputMu.Unlock()
+	control := t.Status().Spec.KeyboardControl()
+	if agent && control != "agent" {
+		return errors.New("the person controls this terminal; wait for them to return control")
+	}
+	if !agent && control == "agent" {
+		return errors.New("the agent controls this terminal; take control before typing")
+	}
 	if len(data) > sessionhost.InputLimit {
 		return errors.New("terminal input exceeds 64 KiB")
 	}

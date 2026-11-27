@@ -366,3 +366,37 @@ func TestShellFallsBackToASystemShell(t *testing.T) {
 		}
 	}
 }
+
+func TestInteractiveKeyboardSurvivesAdoption(t *testing.T) {
+	dir := private(t)
+	first := manager(t, dir)
+	defer first.Close()
+	spec := shellSpec(t, dir)
+	spec.Place, spec.AgentConversation = InteractiveCommandPlace, "conversation"
+	terminal, err := first.Start(spec, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := terminal.SetPersonControls(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Detach(); err != nil {
+		t.Fatal(err)
+	}
+	second := manager(t, dir)
+	defer second.Close()
+	adopted, err := second.Get(terminal.Status().ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.Status().Spec.KeyboardControl() != "person" {
+		t.Fatal("lost keyboard ownership on adoption")
+	}
+	if err := adopted.WriteAgent([]byte("unexpected")); err == nil {
+		t.Fatal("agent could type after adoption")
+	}
+	if err := adopted.Write([]byte("echo adopted-$((2+2))\n")); err != nil {
+		t.Fatal(err)
+	}
+	until(t, adopted, 0, "adopted-4")
+}

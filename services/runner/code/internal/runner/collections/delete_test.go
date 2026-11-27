@@ -78,7 +78,7 @@ func TestDeletionWithIgnoredGeneratedDirectories(t *testing.T) {
 	write(repo.Path, "node_modules/tracked", "original")
 	gitTest(t, repo.Path, "add", ".gitignore", "packages")
 	gitTest(t, repo.Path, "add", "-f", "node_modules/tracked")
-	gitTest(t, repo.Path, "commit", "-m", "dependency fixture")
+	gitTest(t, repo.Path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "dependency fixture")
 	m := newTest(t, t.TempDir(), repo)
 	c, err := m.Create(ctx, "dependencies", specTest(repo.ID))
 	if err != nil {
@@ -122,7 +122,7 @@ func TestDeletionReportsIgnoredFilesWithCleanGitStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitTest(t, repo.Path, "add", ".gitignore")
-	gitTest(t, repo.Path, "commit", "-m", "ignore cache")
+	gitTest(t, repo.Path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "ignore cache")
 	m := newTest(t, t.TempDir(), repo)
 	c, err := m.Create(ctx, "ignored", specTest(repo.ID))
 	if err != nil {

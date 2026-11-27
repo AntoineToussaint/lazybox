@@ -79,7 +79,7 @@ export function ConversationList({ collectionId = '', target, onTarget, compact 
     return () => { control.abort(); clearInterval(timer); };
   }, [api, pageCount, collectionId, search, allWorkspaces, revision, supplied]);
   const open = (session: Session) => onTarget({ collectionId: session.collectionId, sessionId: session.id, commandId: '' });
-  const matching = (supplied || mergeConversations(history, info?.sessions || [])).filter(session => !deleted.has(session.id) && (allWorkspaces || session.collectionId === collectionId) && (allWorkspaces || nestedReviews || !isArchivedAway(session)) && (!search.trim() || session.title.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())));
+  const matching = (supplied || mergeConversations(history, info?.sessions || [])).filter(session => !deleted.has(session.id) && (allWorkspaces || session.collectionId === collectionId) && (allWorkspaces || !isArchivedAway(session)) && (!search.trim() || session.title.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())));
   // Pinned first, in the order they were pinned; the rest keep their order.
   const visible = [...matching.filter(isPinned).sort((a, b) => pinnedAt(a) - pinnedAt(b)), ...matching.filter(session => !isPinned(session))];
   const rows = visible.map(session => ({id: session.conversationId || session.id, session}));

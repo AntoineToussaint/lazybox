@@ -104,6 +104,11 @@ try{
  await expect(activeTab().filter({hasText:'Harden the handler'})).toHaveCount(1);
  await expect(reviewTabs()).toHaveCount(1);
 
+ // Sending the completed review archives its reviewer. The author remains in the sidebar.
+ Object.assign(first,{closed:true,archivedAtUnixMillis:String(Date.now())});
+ await expect(child).toHaveCount(0,{timeout:20000});
+ await expect(nav.getByText(author.title,{exact:true}).first()).toBeVisible();
+
  // 4. `/review <focus>`: the default reviewer, with what to look at; the person stays in the composer.
  await box().click();await page.keyboard.type('/review the error path of Handle');
  await page.keyboard.press('Enter');

@@ -389,7 +389,7 @@ function WorkspaceList({
           const rows = index.sessions.filter(
             (s) => s.collectionId === collection.id && isListed(s) && !reviewParent(s) && !isArchivedAway(s),
           );
-          const reviews = index.sessions.filter(s => s.collectionId === collection.id && reviewParent(s));
+          const reviews = index.sessions.filter(s => s.collectionId === collection.id && reviewParent(s) && !isArchivedAway(s));
           const reviewsOf = (author: typeof rows[number]) => reviews.filter(s => {
             const parent = reviewParent(s);
             return parent && (parent === author.id || parent === author.conversationId);

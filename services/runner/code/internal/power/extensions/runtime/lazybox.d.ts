@@ -89,17 +89,17 @@ declare namespace Lazybox {
         setups: { member: string; pendingApproval: boolean; state: string; copied: number; missing: number }[];
       }>;
       /** show:runtime + read:runtime — opens an approved workspace UI, where a person may act. */
-      show(workspaceId: string, kind: 'preview' | 'setup' | 'logs', target: string): Promise<{ shown: true }>;
+      show(workspaceId: string, kind: 'preview' | 'setup' | 'logs' | 'service', target: string): Promise<{ shown: true }>;
     };
     /** show:github — opens a GitHub issue, pull request or Actions run. */
     github: { open(url: string): Promise<{ shown: true }> };
     /** read:releases — deployments for workspace repositories. */
     releases: { list(): Promise<{ items: { id: string; repository: string; environment: string; reason: string; url: string }[]; truncated: boolean }> };
     /** read:pulls — metadata for tracked pull requests. */
-    pulls: { list(workspaceId?: string): Promise<{ truncated: boolean; pulls: { conversationId: string; key: string; title: string; repository: string; number: number; status: string; detail: string; workspaceId: string; sessionId: string; url: string; checkUrl: string; checks: string }[]; error: string }> };
+    pulls: { list(workspaceId?: string): Promise<{ truncated: boolean; pulls: { conversationId: string; key: string; title: string; repository: string; number: number; status: string; detail: string; workspaceId: string; sessionId: string; url: string; checkUrl: string; checks: string; failingChecks: { name: string; url: string }[] }[]; error: string }> };
     artifacts: {
       /** read:artifacts — titles and IDs, without contents. */
-      list(workspaceId: string): Promise<{ artifacts: { id: string; title: string; kind: string }[] }>;
+      list(workspaceId: string): Promise<{ truncated: boolean; artifacts: { id: string; title: string; kind: string }[] }>;
       /** draft:artifact — opens a review dialog in the selected workspace. */
       draft(workspaceId: string, content: string): Promise<{ shown: true }>;
     };
@@ -114,7 +114,7 @@ declare namespace Lazybox {
       remove(id: string): Promise<void>;
     };
     /** read:attention — what needs the person, as the Inbox shows it. */
-    attention: { list(): Promise<{ items: AttentionItem[]; counts: Record<AttentionState, number> }> };
+    attention: { list(options?: { offset?: number }): Promise<{ items: AttentionItem[]; counts: Record<AttentionState, number>; hasMore: boolean }> };
     /** read:commands — a conversation's command runs, never their output. */
     commands: { list(sessionId: string): Promise<{ commands: Command[] }> };
     /** read:missions */

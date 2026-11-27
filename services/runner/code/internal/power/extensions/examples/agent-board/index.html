@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="_lazybox/lazybox.css">
 <link rel="stylesheet" href="board.css">
 <script src="_lazybox/lazybox.js"></script>
+<script src="_lazybox/attention-pages.js" defer></script>
 <script src="board.js" defer></script>
 </head>
 <body>
@@ -23,5 +24,10 @@
 <p id="no-matches" role="status" hidden></p>
 <p class="notice" id="notice" role="status" hidden></p>
 <main id="board" class="board" aria-label="Conversations by what they need"></main>
+<nav id="history-pages" aria-label="Conversation history" hidden>
+  <button type="button" data-newer>Newer conversations</button>
+  <output></output>
+  <button type="button" data-older>Older conversations</button>
+</nav>
 </body>
 </html>

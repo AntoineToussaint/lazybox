@@ -9,7 +9,7 @@ category: Agents & conversations
 caption: Find conversations that need a reply and open one from its card.
 keywords: [kanban, attention]
 name: Agent board
-version: 1.0.0
+version: 1.1.0
 description: Every conversation as a card, in a column of what it needs from you.
 author: Lazybox
 panels:

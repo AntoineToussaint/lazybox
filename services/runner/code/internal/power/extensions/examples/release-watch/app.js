@@ -25,7 +25,12 @@ workflow.poll(20000, async () => {
       seen.add(identity);
       const actions = [];
       const failed = pull.checks === 'failure' || pull.status === 'checks-failed';
-      if (failed && pull.checkUrl) actions.push(workflow.button('Open failing check', () => lazybox.github.open(pull.checkUrl)));
+      if (failed) {
+        const failures = pull.failingChecks || [{ name: '', url: pull.checkUrl }];
+        for (const check of failures) {
+          if (check.url) actions.push(workflow.button(check.name ? 'Inspect ' + check.name : 'Open failing check', () => lazybox.github.open(check.url)));
+        }
+      }
       if (pull.url) actions.push(workflow.button('Open pull request', () => lazybox.github.open(pull.url)));
       if (pull.sessionId) actions.push(workflow.button('Open conversation', () => lazybox.conversations.show(pull.sessionId)));
       const row = workflow.row(identity, pull.title || identity, [identity, pull.detail].filter(Boolean).join(' · '), ...actions);

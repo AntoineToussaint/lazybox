@@ -3,7 +3,7 @@ category: Workspace tools
 caption: Open a running service or follow its command log.
 keywords: [services, logs]
 name: Preview Desk
-version: 1.0.0
+version: 1.1.0
 description: See service status, previews and logs for the selected workspace.
 author: Lazybox
 panels:

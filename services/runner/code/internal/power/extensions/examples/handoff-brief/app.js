@@ -1,6 +1,7 @@
 const decisions = document.getElementById('decisions');
 const next = document.getElementById('next');
 const draft = document.getElementById('draft');
+const sourceStatus = document.getElementById('source-status');
 let selected;
 
 const label = text => text.replace(/[\r\n]+/g, ' ').replace(/[\\`*_{}\[\]<>()#!|]/g, '\\$&');
@@ -36,17 +37,28 @@ workflow.poll(10000, async () => {
     selected = undefined;
     draft.disabled = true;
     excluded.clear();
+    sourceStatus.hidden = true;
     decisions.value = '';
     next.value = '';
     if (workspace) workflow.list([], 'Loading workspace sources…');
   }
   if (!workspace) return;
-  const [{ pulls }, { artifacts }] = await Promise.all([lazybox.pulls.list(workspace.id), lazybox.artifacts.list(workspace.id)]);
+  const [pullResult, artifactResult] = await Promise.allSettled([lazybox.pulls.list(workspace.id), lazybox.artifacts.list(workspace.id)]);
+  const pulls = pullResult.status === 'fulfilled' ? pullResult.value.pulls : [];
+  const artifacts = artifactResult.status === 'fulfilled' ? artifactResult.value.artifacts : [];
+  const warnings = [];
+  const pullError = pullResult.status === 'rejected' ? pullResult.reason.message : pullResult.value.error;
+  if (pullError) warnings.push('Pull request tracking: ' + pullError);
+  if (artifactResult.status === 'rejected') warnings.push('Could not load artifacts: ' + artifactResult.reason.message);
+  if (pullResult.value?.truncated) warnings.push('Showing the first ' + pulls.length + ' pull requests.');
+  if (artifactResult.value?.truncated) warnings.push('Showing the first ' + artifacts.length + ' artifacts.');
+  sourceStatus.textContent = warnings.join(' ');
+  sourceStatus.hidden = !warnings.length;
   selected = { workspace, pulls, artifacts };
   workflow.list([
     ...pulls.map(pull => sourceRow('pull:' + pull.key, pull.title, [pull.repository + ' #' + pull.number, pull.detail].filter(Boolean).join(' · '))),
     ...artifacts.map(artifact => sourceRow('artifact:' + artifact.id, artifact.title, 'Artifact · ' + artifact.kind)),
-  ], 'No tracked pull requests or artifacts in this workspace.');
+  ], warnings.length ? '' : 'No tracked pull requests or artifacts in this workspace.');
   draft.disabled = false;
 });
 

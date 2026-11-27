@@ -217,6 +217,10 @@ leave out.
 
 ### Extensions
 
+- **Find work beyond the first page** Agent board and Runner Radar can browse older conversations. Cost dashboard includes workspaces beyond the first twenty, Mailbox shows the notifications returned by the Runner, and Release Watch can open individual failed checks. Preview Desk can open the Actions controls for an idle service.
+- **Clean selected disk items** Disk Cleanup can open a fresh interactive scan on the Runner. Select the items to remove, confirm, and see what the cleaner actually removed.
+- **Keep workflow evidence and sources visible** Archive reviews and Clone Me can recover the initiating prompt after large tool output. Handoff Brief identifies unavailable or incomplete sources, and Workspace Bootstrap lists stopped setup scripts under Needs attention.
+
 - **Browse every extension in one catalog** Open Extensions to see installed and available plugins, preview their interfaces, review access, and open an enabled panel.
 
 - **Panels you add** An extension is a panel you write in HTML, JavaScript and CSS. It runs in a sandbox and does only what you allow, which Lazybox shows you in words first; the Agent board and the Cost dashboard are examples.

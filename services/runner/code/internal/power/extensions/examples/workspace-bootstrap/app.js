@@ -30,11 +30,11 @@ workflow.poll(5000, async () => {
     const detail = ['Repository setup'];
     if (setup.missing) detail.push(setup.missing + (setup.missing === 1 ? ' missing file' : ' missing files'));
     if (setup.copied) detail.push(setup.copied + (setup.copied === 1 ? ' file copied' : ' files copied'));
-    const failed = setup.state === 'failed';
+    const failed = setup.state === 'failed', stopped = setup.state === 'stopped';
     const state = setup.pendingApproval ? 'Needs approval' : failed ? 'Failed' :
-      setup.missing ? 'Missing files' : setup.state === 'succeeded' ? 'Complete' : setup.state;
-    const tone = failed ? 'danger' : setup.pendingApproval || setup.missing ? 'warn' : setup.state === 'succeeded' ? 'ok' : 'muted';
-    const label = setup.pendingApproval ? 'Review setup' : failed ? 'Inspect failed setup' : setup.missing ? 'Inspect missing files' : 'Open setup';
+      stopped ? 'Stopped' : setup.missing ? 'Missing files' : setup.state === 'succeeded' ? 'Complete' : setup.state;
+    const tone = failed ? 'danger' : setup.pendingApproval || stopped || setup.missing ? 'warn' : setup.state === 'succeeded' ? 'ok' : 'muted';
+    const label = setup.pendingApproval ? 'Review setup' : failed ? 'Inspect failed setup' : stopped ? 'Inspect stopped setup' : setup.missing ? 'Inspect missing files' : 'Open setup';
     return entry('setup:' + setup.member, setup.member, detail.join(' · '), state, tone, [show(label, 'setup', setup.member)]);
   });
   for (const service of services) {

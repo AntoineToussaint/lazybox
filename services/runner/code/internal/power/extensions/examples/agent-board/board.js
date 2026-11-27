@@ -80,6 +80,7 @@ function render(result) {
   const parts = [];
   if (counts['needs-input']) parts.push(counts['needs-input'] + ' need you');
   if (counts.failed) parts.push(counts.failed + ' failed');
+  if (counts.review) parts.push(counts.review + ' ready for review');
   if (counts.working) parts.push(counts.working + ' working');
   summary.textContent = parts.join(' · ') || 'Nothing needs you';
   summary.title = summary.textContent;
@@ -107,7 +108,7 @@ board.addEventListener('keydown', event => {
 document.getElementById('next').addEventListener('click', () => lazybox.run('attention.next').catch(error => say(error.message)));
 document.getElementById('inbox').addEventListener('click', () => lazybox.run('inbox.open').catch(error => say(error.message)));
 
-lazybox.every(3000, async () => {
-  try { render(await lazybox.attention.list()); say(''); }
-  catch (error) { say(error.code === 'not-granted' ? 'This board may not read what needs you; allow it in Settings → Extensions.' : error.message); }
+const refresh = attentionPages(result => { render(result); say(''); }, error => {
+  say(error.code === 'not-granted' ? 'This board may not read what needs you; allow it in Settings → Extensions.' : error.message);
 });
+lazybox.every(3000, refresh);

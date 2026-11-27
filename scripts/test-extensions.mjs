@@ -320,6 +320,8 @@ async function scenario(browser, scheme, full) {
 
 async function diskCleanup(browser) {
   const page = await browser.newPage();
+  const errors = [];
+  await collectPageErrors(page, errors);
   await page.goto(url);
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeEnabled();
   await f.extensions.handle('InstallExampleExtension', { example: 'disk-cleanup' });
@@ -353,6 +355,8 @@ async function diskCleanup(browser) {
   await page.getByRole('button', { name: 'Restore layout' }).first().click();
   await expect(page.locator('.page-layout .panel-agents')).toBeVisible();
   f.runnerSettings.notices = [];
+  await drainPageErrors(errors);
+  assert.deepEqual(errors, [], 'no page errors in Disk Cleanup');
   await page.close();
   await f.extensions.handle('RemoveExtension', { id: 'disk-cleanup' });
 }

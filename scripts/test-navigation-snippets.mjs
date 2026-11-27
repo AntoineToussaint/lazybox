@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { startRunnerFixture } from "./fixtures/runner-ui.mjs";
 import { collectPageErrors, drainPageErrors } from "./fixtures/page-errors.mjs";
 const f = await startRunnerFixture();
+f.openEvents(f.sessions[0].id);
 Object.assign(f.library[0], {
   name: "handbook",
   gitIdentity: "github:acme/handbook",
@@ -155,6 +156,10 @@ try {
   await expect(message).toHaveValue("");
   const starts = f.mutations.filter(m => m.method === "StartReview");
   assert.equal(starts.length, 2);
+  assert.equal(starts[0].body.focus, "Review the current change carefully.");
+  const reviewCard = page.locator(".review-card:visible").last();
+  await expect(reviewCard).toContainText("Snippet: review");
+  await expect(reviewCard).not.toContainText(starts[0].body.focus);
   assert.ok(starts[0].body.requestKey);
   assert.equal(starts[0].body.requestKey, starts[1].body.requestKey);
   assert.deepEqual(f.reviewOf("alpha").runs.map(r => r.reviewerSessionId), [firstReviewer]);

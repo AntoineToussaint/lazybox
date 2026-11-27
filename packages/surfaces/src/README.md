@@ -89,7 +89,7 @@ Saved snippet text in drafts and sent prompts appears as a named chip. Hover, fo
 
 After a successful pull request Inbox action, its button gives way to a delivery receipt and a ten-second auto-dismiss countdown. Dismiss closes it immediately. Failed actions remain available to retry.
 
-Prompt Details shows the acceptance time, last provider-reported model and last reported context. Missing measurements are labeled unreported. An inserted review snippet retains its review action in the draft across reload. Pasting the same text creates an ordinary message. The Review tray records selected findings as sent when the Runner acknowledges the message.
+Prompt Details shows the acceptance time, last provider-reported model and last reported context. Missing measurements are labeled unreported. Review cards show the snippet name while the reviewer receives the full instructions. An inserted review snippet retains its review action in the draft across reload. Pasting the same text creates an ordinary message. The Review tray records selected findings as sent when the Runner acknowledges the message.
 
 For Codex replies with a turn boundary, **Ask a side question…** opens a separate conversation through that turn. The question goes to the child. The dialog identifies whether its files come from a checkpoint or the current workspace.
 

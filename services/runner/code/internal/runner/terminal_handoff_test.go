@@ -35,7 +35,7 @@ func TestInteractiveCommandHandsPTYToOwner(t *testing.T) {
 	defer spool.Close()
 	e := &Execution{
 		ID: "fixture-execution", Cwd: c.Root, CollectionID: c.ID, spool: spool,
-		Options: accounts.Options{Permission: "yolo"},
+		Options: accounts.Options{Permission: "ask"},
 		Env:     []string{"PATH=/usr/bin:/bin", "LAZYBOX_V2_ENDPOINT=private", "FIXTURE=present"},
 	}
 	type response struct {
@@ -63,8 +63,12 @@ exit 23`, "fixture", "literal $(false)",
 		if err != nil {
 			t.Fatal(err)
 		}
+		wantStatus := "pending"
+		if e.Options.Permission == "yolo" {
+			wantStatus = "running"
+		}
 		var ev agent.Event
-		if err := json.Unmarshal(record.Value, &ev); err != nil || ev.Type != "terminal_handoff" || ev.Status != "pending" {
+		if err := json.Unmarshal(record.Value, &ev); err != nil || ev.Type != "terminal_handoff" || ev.Status != wantStatus {
 			t.Fatalf("expected handoff request, got %s (%v)", record.Value, err)
 		}
 		return ev, done
@@ -77,7 +81,7 @@ exit 23`, "fixture", "literal $(false)",
 		t.Fatalf("approval in another conversation: %v", ids)
 	}
 	if len(b.Terminals.List(c.ID)) != 0 {
-		t.Fatal("approval must precede launch, including in full access")
+		t.Fatal("approval must precede launch")
 	}
 	if _, err := b.DecideTerminalHandoff(pending.RequestID, false, false); err != nil {
 		t.Fatal(err)
@@ -155,8 +159,23 @@ exit 23`, "fixture", "literal $(false)",
 	if result := <-legacy; result.err != nil || result.body != `{"exitCode":23}` {
 		t.Fatalf("private fallback: %+v", result)
 	}
-	pending, shared := start(8, true)
-	terminal, err = b.DecideTerminalHandoff(pending.RequestID, true, true)
+	e.Options.Permission = "yolo"
+	running, autoPrivate := start(8, false)
+	private, err = b.Terminals.Get(running.Text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.interactiveTerminalIO(ctx, e, "interactive_read", running.Text, "", 0); err == nil {
+		t.Fatal("agent could read the private Full Access terminal")
+	}
+	if err := private.Write([]byte("fixture\n")); err != nil {
+		t.Fatal(err)
+	}
+	if result := <-autoPrivate; result.err != nil || result.body != `{"exitCode":23}` {
+		t.Fatalf("private Full Access command: %+v", result)
+	}
+	running, shared := start(10, true)
+	terminal, err = b.Terminals.Get(running.Text)
 	if err != nil {
 		t.Fatal(err)
 	}

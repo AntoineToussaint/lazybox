@@ -140,6 +140,13 @@ func TestReadSessionTailPagesAndRefusals(t *testing.T) {
 	if uint64(len(seen)) != e.Retained() {
 		t.Fatalf("pages read %d of %d records", len(seen), e.Retained())
 	}
+	forward, err := service.ReadSessionTail(ctx, &pb.ReadSessionTailRequest{SessionId: e.ID, FromCursor: 2, Before: e.Retained() + 1, MaxBytes: 1})
+	if err != nil || forward.Start != 2 || len(forward.Events) != 1 || forward.Events[0].Cursor != 2 {
+		t.Fatalf("oversized forward page: %v, %v", forward, err)
+	}
+	if _, err = service.ReadSessionTail(ctx, &pb.ReadSessionTailRequest{SessionId: e.ID, FromCursor: 2, Turns: 1}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("forward turn alignment: got %v", err)
+	}
 	if _, err = service.ReadSessionTail(ctx, &pb.ReadSessionTailRequest{SessionId: e.ID, Before: e.Retained() + 5}); status.Code(err) != codes.OutOfRange {
 		t.Fatalf("a cursor past the timeline: %v, want OutOfRange", err)
 	}

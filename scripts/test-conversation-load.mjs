@@ -47,6 +47,25 @@ const timing=()=>{
  requestAnimationFrame(frame);
 };
 const order=text=>[...text.matchAll(/ANSWER_END_(\d+)/g)].map(m=>Number(m[1]));
+async function checkEveryTurn(pane){
+ // The reader mounts a sliding window. Check every window for ordering
+ // and duplicates, and check their union for missing turns.
+ const seenTurns=new Set();
+ let previousFirst=turns-1;
+ for(let step=0;step<40;step++){
+  const visible=order(await pane.innerText());
+  assert.deepEqual(visible,[...new Set(visible)].sort((a,b)=>a-b),'turns appear once and in order in each window');
+  assert.ok(visible.length && visible[0]<=previousFirst && visible.at(-1)>=previousFirst,
+   `new history window [${visible[0]}, ${visible.at(-1)}] must overlap the previous first turn ${previousFirst}`);
+  assert.equal(visible.length,visible.at(-1)-visible[0]+1,'no missing turn inside the window');
+  previousFirst=visible[0];
+  for(const turn of visible)seenTurns.add(turn);
+  if(visible.includes(0))break;
+  await pane.evaluate(node=>{node.scrollTop=0;node.dispatchEvent(new Event('scroll'));});
+  await pane.page().waitForTimeout(120);
+ }
+ assert.deepEqual([...seenTurns].sort((a,b)=>a-b),Array.from({length:turns},(_,i)=>i),'every turn was reachable');
+}
 try{
  await server.listen();await mkdir('.cache',{recursive:true});browser=await chromium.launch({headless:true});
  const open=async(collection,session)=>{
@@ -107,15 +126,9 @@ try{
  assert.ok(back<budget,`switching back took ${back} ms`);
 
  // ── Earlier history: scrolling up brings it, in order, each turn once.
- for(let step=0;step<40&&!order(await pane.innerText()).includes(0);step++){
-  await pane.evaluate(node=>{node.scrollTop=0;node.dispatchEvent(new Event('scroll'));});
-  await page.waitForTimeout(120);
- }
- const shown=order(await pane.innerText());
- assert.deepEqual(shown,Array.from({length:turns},(_,i)=>i),'every turn once, oldest first');
+ await checkEveryTurn(pane);
  await expect(chat.getByRole('button',{name:/Show earlier messages/})).toHaveCount(0);
- // Exercise the composer with every earlier turn mounted. Measure the input
- // task through its next frame, excluding Playwright's keyboard round trip.
+ // Measure typing with the history window full.
  const draft=chat.getByRole('textbox',{name:'Message',exact:true});
  await draft.focus();
  const samples=[];
@@ -128,7 +141,7 @@ try{
   samples.push(await page.evaluate(()=>window.__typingFrame));
  }
  await expect(draft).toHaveValue('long conversation');
- console.log('Fully mounted composer input to next frame (ms)',{median:median(samples),max:Math.max(...samples)});
+ console.log('Full history window composer input to next frame (ms)',{median:median(samples),max:Math.max(...samples)});
  await drainPageErrors(errors);assert.deepEqual(errors,[]);
  await page.close();
 
@@ -146,13 +159,8 @@ try{
  await restart.waitForTimeout(600);f.runner.down=false;f.tailReadDelayMs=0;
  await expect(view).toContainText('LIVE_AFTER_RESTART',{timeout:15000});
  await expect(restart.getByRole('button',{name:/Show earlier messages/})).toBeVisible({timeout:30000});
- for(let step=0;step<40&&!order(await view.innerText()).includes(0);step++){
-  await view.evaluate(node=>{node.scrollTop=0;node.dispatchEvent(new Event('scroll'));});
-  await restart.waitForTimeout(120);
- }
- const text=await view.innerText();
- assert.deepEqual(order(text),Array.from({length:turns},(_,i)=>i),'after the restart, every turn once, oldest first');
- assert.equal(text.split('LIVE_AFTER_RESTART').length-1,1,'the live record once');
+ assert.equal((await view.innerText()).split('LIVE_AFTER_RESTART').length-1,1,'the live record once');
+ await checkEveryTurn(view);
  await restart.screenshot({path:'.cache/conversation-load.png'});
  await drainPageErrors(restartErrors);assert.deepEqual(restartErrors,[]);
  console.log(`PASS conversation load: the last turn of a ${fast.events.length}-record conversation shows ${tailMs} ms after the window first reads it (the full replay: ${replayMs} ms; budget ${budget} ms; tail cursors and independent history loading asserted); scrolling up brings every earlier turn in order, once; switching back to it reads nothing it holds (${back} ms); a Runner restart while its earlier history loads loses and repeats nothing. Fixture only.`);

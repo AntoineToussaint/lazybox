@@ -13233,7 +13233,11 @@ type ReadSessionTailRequest struct {
 	// About how many bytes of journal the page may hold; 0 selects the Runner's
 	// default (1 MiB). A turn larger than this is cut to its latest records.
 	// At least one record is returned when any precedes `before`.
-	MaxBytes      uint32 `protobuf:"varint,4,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	MaxBytes uint32 `protobuf:"varint,4,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	// When positive, read forward starting at this cursor (inclusive), stopping
+	// before the exclusive upper bound or at max_bytes. Includes at least the
+	// first available record, even if it exceeds the budget. Use with turns=0.
+	FromCursor    uint64 `protobuf:"varint,5,opt,name=from_cursor,json=fromCursor,proto3" json:"from_cursor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13296,9 +13300,16 @@ func (x *ReadSessionTailRequest) GetMaxBytes() uint32 {
 	return 0
 }
 
+func (x *ReadSessionTailRequest) GetFromCursor() uint64 {
+	if x != nil {
+		return x.FromCursor
+	}
+	return 0
+}
+
 type ReadSessionTailResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Contiguous and ascending, from `start` up to just before `before`. Each
+	// Contiguous and ascending, from `start` through the last record that fit. Each
 	// record's `retained` is the response's.
 	Events []*JournalEvent `protobuf:"bytes,1,rep,name=events,proto3" json:"events,omitempty"`
 	// The cursor of the first record: 1 when nothing precedes the page.
@@ -41242,13 +41253,15 @@ const file_api_proto_rawDesc = "" +
 	"\areceipt\x18\x04 \x01(\v2\x19.lazybox.bench.v1.ReceiptR\areceipt\x12#\n" +
 	"\rmetadata_json\x18\x05 \x01(\fR\fmetadataJson\x12\x1a\n" +
 	"\bretained\x18\x06 \x01(\x04R\bretained\x12\x1c\n" +
-	"\theartbeat\x18\a \x01(\bR\theartbeat\"\x82\x01\n" +
+	"\theartbeat\x18\a \x01(\bR\theartbeat\"\xa3\x01\n" +
 	"\x16ReadSessionTailRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x16\n" +
 	"\x06before\x18\x02 \x01(\x04R\x06before\x12\x14\n" +
 	"\x05turns\x18\x03 \x01(\rR\x05turns\x12\x1b\n" +
-	"\tmax_bytes\x18\x04 \x01(\rR\bmaxBytes\"\x83\x01\n" +
+	"\tmax_bytes\x18\x04 \x01(\rR\bmaxBytes\x12\x1f\n" +
+	"\vfrom_cursor\x18\x05 \x01(\x04R\n" +
+	"fromCursor\"\x83\x01\n" +
 	"\x17ReadSessionTailResponse\x126\n" +
 	"\x06events\x18\x01 \x03(\v2\x1e.lazybox.bench.v1.JournalEventR\x06events\x12\x14\n" +
 	"\x05start\x18\x02 \x01(\x04R\x05start\x12\x1a\n" +

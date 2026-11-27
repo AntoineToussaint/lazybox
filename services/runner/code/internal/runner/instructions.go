@@ -63,11 +63,6 @@ func (b *Bench) permissionAllowed(e *Execution, mode string, exitPlan bool) erro
 	if agent.IsAssistant(e.Purpose) {
 		return errors.New("assistant conversations are read-only")
 	}
-	if mode != "read-only" && b.Reviews != nil {
-		if match, ok := b.Reviews.ReviewerRun(e.ID, conversationOf(e)); ok && match.Run.TemplateID != "" {
-			return errors.New("this review template requires read-only permissions")
-		}
-	}
 	if mode == "yolo" && e.Options.Workflow == "plan" && !exitPlan {
 		return errors.New("YOLO is incompatible with plan mode")
 	}

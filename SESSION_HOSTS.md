@@ -149,6 +149,11 @@ notices in the conversation.
   cleanly, which tells a reader to stop following. A `ReadSessionTail` page a
   restart interrupts is read again from the next Runner: journals keep their
   cursors across restarts, and their turn index is rebuilt as they open.
+  The client opens the latest turns with a backward read, then rebuilds in
+  order with an inclusive `from_cursor` and an exclusive `before`. Each
+  forward page includes the next record even when it alone exceeds the byte
+  budget. A client connected to a backward-only Runner can replay through
+  `WatchEvents` from its last folded cursor.
 - Cancelling a hosted process's context stops it, exactly as for a local pipe.
   Only an explicit `Detach`, or the Runner dying outright, leaves it running.
 - A command's connection to its host that ends without the host saying why

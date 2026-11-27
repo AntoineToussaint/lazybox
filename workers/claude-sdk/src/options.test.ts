@@ -100,3 +100,11 @@ test('reviewers keep native read-only enforcement and never enter the plan appro
   assert.equal(reviewer.strictMcpConfig, true);
   assert.deepEqual(reviewer.tools, ['Read', 'Glob', 'Grep', 'Bash', 'AskUserQuestion']);
 });
+
+test('restarting a reviewer in the selected mode restores its native tools', () => {
+  for (const permission of ['ask', 'yolo']) {
+    const options = nativeOptions({ cwd: '/fixture', purpose: 'reviewer', permission }, {});
+    assert.equal(options.permissionMode, permission === 'ask' ? 'default' : 'bypassPermissions');
+    assert.equal(options.tools, undefined);
+  }
+});

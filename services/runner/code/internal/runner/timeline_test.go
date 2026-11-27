@@ -259,4 +259,39 @@ func TestTailReadsAcrossAContinuedConversation(t *testing.T) {
 	if !slices.Contains(sequences(page), offset+starts[0]) {
 		t.Fatal("the second attempt's turn start is not at its timeline cursor")
 	}
+	// Spend the remaining page budget in the successor journal.
+	budget := first.spool.Span(offset-1, offset) + second.spool.Span(0, 1)
+	forward, _, _, err := timeline.ForwardPage(offset, 0, budget)
+	if err != nil || !slices.Equal(sequences(forward), []uint64{offset, offset + 1}) {
+		t.Fatalf("forward across successor: %v, %v", sequences(forward), err)
+	}
+
+}
+
+func TestForwardPagesRespectBothCursorsAndByteBudget(t *testing.T) {
+	b, e, _ := openTimelineBench(t)
+	conversation(t, b, e, 4, strings.Repeat("x", 2048))
+	timeline, err := b.OpenTimeline(e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := e.spool.Count() - 1
+	for first := uint64(2); first <= end; {
+		page, start, _, err := timeline.ForwardPage(first, end+1, 512)
+		if err != nil || start != first || len(page) == 0 {
+			t.Fatalf("page at %d: start %d, length %d, error %v", first, start, len(page), err)
+		}
+		for _, r := range page {
+			if r.Sequence != first || first > end {
+				t.Fatalf("unexpected cursor %d, wanted %d", r.Sequence, first)
+			}
+			first++
+		}
+		if len(page) > 1 && e.spool.Span(start-1, first-1) > 512 {
+			t.Fatal("multi-record page exceeds budget")
+		}
+		if first <= end && e.spool.Span(start-1, first) <= 512 {
+			t.Fatal("another record would fit")
+		}
+	}
 }

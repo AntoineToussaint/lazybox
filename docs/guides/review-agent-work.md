@@ -123,7 +123,9 @@ agent reviews, and the review's card says so in a quiet line.
 
 ### The reviewer runs the tests
 
-A reviewer's conversation is read-only, its shell included, so a test run
+Review conversations start in **Read-only**. In the reviewer chat, use the permissions picker or `/permissions` to select **Ask**, **Full access**, or return to **Read-only**. The change applies to this conversation. Codex applies the change live. Claude offers to restart between turns and resumes the same conversation with the selected tools.
+
+In **Read-only**, the shell is read-only too, so a test run
 there fails as soon as it writes a cache, a build or a temporary file ("read-only
 filesystem"). The brief tells every reviewer, in every template, to run tests,
 builds and UI gates through the Runner instead:

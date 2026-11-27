@@ -23,12 +23,16 @@ type ExecutionOptions = {
  */
 export const connectorsOff = { setting: { disableClaudeAiConnectors: true } satisfies Settings, env: { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' } };
 
+export function readOnlyReviewer(purpose?: string, permission?: string) {
+  return purpose === 'reviewer' && permission !== 'ask' && permission !== 'yolo';
+}
+
 /** Resolved startup options; authentication remains in the selected environment. */
 export function nativeOptions(o: ExecutionOptions, env: NodeJS.ProcessEnv): Options {
   const options = baseOptions(o, env);
   // The browser asks the person per site, download and sign-in itself; a
   // prompt per click on top would teach them to click through.
-  if (o.browser && o.purpose !== 'help' && o.purpose !== 'reviewer') {
+  if (o.browser && o.purpose !== 'help' && !readOnlyReviewer(o.purpose, o.permission)) {
     const permissions = options.settings && typeof options.settings === 'object' ? (options.settings as { permissions?: Record<string, string[]> }).permissions || {} : {};
     options.settings = { ...(typeof options.settings === 'object' ? options.settings : {}), permissions: { ...permissions, allow: [...(permissions.allow || []), browserRule] } };
   }
@@ -41,7 +45,7 @@ function baseOptions(o: ExecutionOptions, env: NodeJS.ProcessEnv): Options {
   const permission: Partial<Options> =
     // The help assistant's only tools are Lazybox's settings: reading them is
     // allowed, and every update asks, whatever the Runner permission says.
-    o.purpose === 'reviewer' ? {
+    readOnlyReviewer(o.purpose, o.permission) ? {
       permissionMode: 'default', strictMcpConfig: true,
       // Keep native read-only shell inspection. A saved Bash allow rule must
       // never bypass the reviewer's denial of commands that require permission.

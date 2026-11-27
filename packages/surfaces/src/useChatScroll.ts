@@ -28,8 +28,9 @@ const editable=(target:EventTarget|null)=>target instanceof HTMLElement&&(target
  * while a reply streams in, and only moving back to the bottom (or Jump to
  * latest, or sending) resumes it. Scrolls the reader did not make, such as the
  * browser clamping after a resize or our own pinning, never change it. */
-export function useChatScroll(reader:ConversationReader,messages:readonly {id:string}[],pendingCount:number|undefined){
+export function useChatScroll(reader:ConversationReader,messages:readonly {id:string}[],pendingCount:number|undefined,shown:boolean){
  const paneRef=useRef<HTMLDivElement>(null),contentRef=useRef<HTMLDivElement>(null);
+ const waitingForAnchor=useRef(false);
  const following=useRef(reader.view.following);
  const [followingLatest,setFollowingLatest]=useState(reader.view.following);
  const [visibleMessages,setVisibleMessages]=useState(reader.view.visibleMessages);
@@ -68,6 +69,7 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  // diagram rendering in an earlier message, or a tool group folding.
  const anchor=useRef<{node:Element;offset:number}|undefined>(undefined);
  const capture=(pane:HTMLDivElement)=>{
+  if(waitingForAnchor.current)return;
   anchor.current=undefined;
   const rect=pane.getBoundingClientRect(),top=rect.top;
   const hit=pane.ownerDocument.elementFromPoint(rect.left+pane.clientWidth/2,top+1);
@@ -90,19 +92,19 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
    }
   }
   reader.view.anchorId='';
-  // Descend into the row across the top edge, so a change above the viewport
-  // inside one long message is caught too.
-  let parent:Element|null|undefined=contentRef.current;
-  for(let depth=0;parent&&depth<6;depth++){
-   let next:Element|undefined;
-   for(const node of parent.children){const box=node.getBoundingClientRect();if(box.bottom>top&&box.height>0){next=node;anchor.current={node,offset:box.top-top};if(box.top>=top)return;break;}}
-   parent=next;
-  }
  };
  const restore=(pane:HTMLDivElement)=>{
-  const held=anchor.current;if(!held?.node.isConnected)return;
-  const shift=held.node.getBoundingClientRect().top-pane.getBoundingClientRect().top-held.offset;
+  const held=anchor.current;
+  // Replaying a turn or rendering rich text can replace the element the
+  // reader was looking at. Its message ID survives the DOM replacement.
+  const live=held&&contentRef.current?.contains(held.node);
+  const node=live?held.node:reader.view.anchorId&&contentRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(reader.view.anchorId)}"]`);
+  if(!node)return false;
+  const offset=live?held.offset:reader.view.anchorOffset;
+  const shift=node.getBoundingClientRect().top-pane.getBoundingClientRect().top-offset;
   if(Math.abs(shift)>=1)place(pane,pane.scrollTop+shift);
+  if(!live)capture(pane);
+  return true;
  };
  const pin=(pane:HTMLDivElement)=>{place(pane,pane.scrollHeight);measure(pane);};
  // A move up and away from the bottom in a pane that kept its size is no
@@ -138,8 +140,10 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   ? pane.scrollHeight<=pane.clientHeight+1&&range.current.visibleMessages<limit
   : pane.scrollTop<=1||(canPageAhead('up')&&pane.scrollTop<Math.max(400,pane.clientHeight)));
  useLayoutEffect(()=>{
+  if(!shown)return;
   following.current=reader.view.following;setFollowingLatest(reader.view.following);setVisibleMessages(reader.view.visibleMessages);setEndId(reader.view.endId);
   const pane=paneRef.current,content=contentRef.current;if(!pane||!content)return;
+  waitingForAnchor.current=!!reader.view.anchorId&&!reader.view.following&&reader.snapshot.loading;
   place(pane,reader.view.following?pane.scrollHeight:reader.view.scrollTop);measure(pane);
   if(!reader.view.following){
    const row=reader.view.anchorId&&content.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(reader.view.anchorId)}"]`);
@@ -160,6 +164,7 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   // The reader's intent arrives before the scroll it causes. Stopping on it
   // means a delta rendered in between cannot pin the pane back down.
   const intend=(direction:Intent['direction'],ms:number,distance=0)=>{
+   waitingForAnchor.current=false;
    intent.current={direction,until:performance.now()+ms,bottom:direction==='down'&&pane.scrollTop+distance>=pane.scrollHeight-pane.clientHeight-FOLLOW_THRESHOLD};
    if(direction==='up'&&following.current&&pane.scrollTop>0){setFollowing(false);capture(pane);}
   };
@@ -192,8 +197,8 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   // A held pointer or finger (the scrollbar, a selection, a swipe) makes every
   // scroll the reader's, and so does the momentum after it. Touch is followed
   // by its own events: the browser cancels the pointer once a finger pans.
-  const press=(event:PointerEvent)=>{if(event.pointerType!=='touch'&&event.button===0){pressed.current='pointer';intent.current=undefined;}};
-  const touch=()=>{pressed.current='touch';};
+  const press=(event:PointerEvent)=>{if(event.pointerType!=='touch'&&event.button===0){waitingForAnchor.current=false;pressed.current='pointer';intent.current=undefined;}};
+  const touch=()=>{waitingForAnchor.current=false;pressed.current='touch';};
   const release=(ms:number)=>{if(!pressed.current)return;intent.current={direction:'any',until:performance.now()+ms,touch:pressed.current==='touch'};pressed.current=undefined;};
   const releasePointer=(event:PointerEvent)=>{if(event.pointerType!=='touch')release(150);},releaseTouch=()=>release(1500);
   // A scrollbar drag may end without a pointerup reaching the page.
@@ -202,16 +207,26 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   window.addEventListener('keydown',key);window.addEventListener('pointerup',releasePointer);window.addEventListener('pointercancel',releasePointer);window.addEventListener('pointermove',hover);
   window.addEventListener('touchend',releaseTouch);window.addEventListener('touchcancel',releaseTouch);
   return()=>{
-   resize.disconnect();reader.view.scrollTop=pane.scrollTop;reader.view.following=following.current;
+   resize.disconnect();anchor.current=undefined;
+   if(!waitingForAnchor.current)reader.view.scrollTop=lastTop.current;
+   reader.view.following=following.current;
    pane.removeEventListener('wheel',wheel);pane.removeEventListener('pointerdown',press);pane.removeEventListener('touchstart',touch);
    window.removeEventListener('keydown',key);window.removeEventListener('pointerup',releasePointer);window.removeEventListener('pointercancel',releasePointer);window.removeEventListener('pointermove',hover);
    window.removeEventListener('touchend',releaseTouch);window.removeEventListener('touchcancel',releaseTouch);
   };
- },[reader,setFollowing]);
+ },[reader,setFollowing,shown]);
  useLayoutEffect(()=>{
-  const pane=paneRef.current;if(!pane)return;
+  const pane=paneRef.current;if(!shown||!pane)return;
+  if(waitingForAnchor.current){
+   const row=reader.view.anchorId&&contentRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(reader.view.anchorId)}"]`);
+   if(!row&&reader.snapshot.loading)return;
+   waitingForAnchor.current=false;
+   if(row)place(pane,pane.scrollTop+row.getBoundingClientRect().top-pane.getBoundingClientRect().top-reader.view.anchorOffset);
+   else place(pane,reader.view.scrollTop);
+   measure(pane);capture(pane);
+  }
   if(pinAfterTrim.current){pinAfterTrim.current=false;if(following.current)pin(pane);}
-  else if(prependHeight.current!==undefined){if(following.current)pin(pane);else if(anchor.current?.node.isConnected)restore(pane);else place(pane,pane.scrollTop+pane.scrollHeight-prependHeight.current);prependHeight.current=undefined;measure(pane);capture(pane);}
+  else if(prependHeight.current!==undefined){if(following.current)pin(pane);else if(!restore(pane))place(pane,pane.scrollTop+pane.scrollHeight-prependHeight.current);prependHeight.current=undefined;measure(pane);capture(pane);}
   else if(following.current)follow(pane);
   reader.view.visibleMessages=visibleMessages;reader.view.endId=endId;
   if(reveal.current&&revealNow())return;
@@ -221,7 +236,7 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
    const frame=requestAnimationFrame(()=>{if(nearTop(pane))loadEarlier(pane);});
    return()=>cancelAnimationFrame(frame);
   }
- },[reader,messages,visibleMessages,endId,pendingCount,loadEarlier]);
+ },[reader,messages,visibleMessages,endId,pendingCount,loadEarlier,shown]);
  const loadLater=useCallback((scrolling:boolean)=>{
   const pane=paneRef.current;
   const {messages,end,visibleMessages}=range.current;
@@ -249,7 +264,16 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
  },[reader]);
  const showLater=()=>loadLater(false);
  const onScroll=(event:UIEvent<HTMLDivElement>)=>{
-  const pane=event.currentTarget,top=pane.scrollTop,moved=top-lastTop.current,movedUp=readerMovedUp(pane);lastTop.current=top;
+  if(!shown)return;
+  const pane=event.currentTarget,top=pane.scrollTop,moved=top-lastTop.current,movedUp=readerMovedUp(pane);
+  if(waitingForAnchor.current){
+   // Ignore our own placement and layout clamps. A real move in the
+   // preview (including find-in-page or a native scrollbar) supersedes
+   // the saved position even while the Runner is unavailable.
+   if(Math.abs(moved)<1||resized(pane)||dimensions.current.content!==pane.scrollHeight)return;
+   waitingForAnchor.current=false;
+  }
+  lastTop.current=top;
   const gap=pane.scrollHeight-top-pane.clientHeight;
   // Paging preserves the visible row while reading. Once the reader reaches
   // the bottom, preserving that row would move them back into history.
@@ -277,7 +301,7 @@ export function useChatScroll(reader:ConversationReader,messages:readonly {id:st
   if(nearTop(pane))loadEarlier(pane);
  };
  const goToTail=(count=INITIAL_MESSAGES)=>{
-  intent.current=undefined;pressed.current=undefined;anchor.current=undefined;
+  waitingForAnchor.current=false;intent.current=undefined;pressed.current=undefined;anchor.current=undefined;
   reveal.current=undefined;prependHeight.current=undefined;
   setFollowing(true);
   if(paneRef.current)pin(paneRef.current);

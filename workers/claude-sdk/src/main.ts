@@ -2,7 +2,7 @@ import { forkSession, query, createSdkMcpServer, tool, type McpServerConfig, typ
 import { z } from 'zod';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
-import { nativeOptions } from './options.js';
+import { readOnlyReviewer, nativeOptions } from './options.js';
 import { TurnInterrupts, interruptTurn } from './interrupt.js';
 import { exitAfter, readStream } from './stream.js';
 import { readQuota } from './usage.js';
@@ -81,7 +81,7 @@ export function mcpServers(purpose: string, browser = false, call: typeof callRu
     file: z.string().describe('Workspace-relative repository/path'), startLine: z.number().int().positive(), endLine: z.number().int().positive().optional(),
     severity: z.enum(['blocker', 'major', 'minor', 'nit']), title: z.string(), body: z.string(), key: z.string().optional(),
   }, async args => ({ content: [{ type: 'text', text: await call('lazybox_review_finding', args) }] }));
-  return { lazybox: createSdkMcpServer({ name: 'lazybox', version: '0.1.0', tools: [commandTool, reviewFinding] }), ...(browser && purpose !== 'reviewer' ? { [browserServerName]: browserServer(call) } : {}) };
+  return { lazybox: createSdkMcpServer({ name: 'lazybox', version: '0.1.0', tools: [commandTool, reviewFinding] }), ...(browser ? { [browserServerName]: browserServer(call) } : {}) };
 }
 
 async function open(options: any) {
@@ -100,10 +100,10 @@ async function open(options: any) {
   asks = asksBySettings(native);
   session = query({ prompt: input(), options: {
     ...native,
-    mcpServers: mcpServers(options.purpose, options.browser === true),
+    mcpServers: mcpServers(options.purpose, options.browser === true && !readOnlyReviewer(options.purpose, permission)),
     canUseTool: async (name, original, context): Promise<PermissionResult> => {
       if (name === 'mcp__lazybox__review_finding') return { behavior: 'allow', updatedInput: original };
-      if (options.purpose === 'reviewer' && name !== 'AskUserQuestion') {
+      if (readOnlyReviewer(options.purpose, permission) && name !== 'AskUserQuestion') {
         const decision = reviewToolDecision(name, original.action);
         if (decision === 'allow') return { behavior: 'allow', updatedInput: original };
         if (decision === 'deny') return { behavior: 'deny', message: 'Review is read-only. Use the available file inspection tools and report any missing evidence.' };
@@ -219,8 +219,8 @@ async function handle(request: Request) {
       case 'permission': {
         const mode = p.permission;
         if (!['ask', 'read-only', 'yolo'].includes(mode)) throw new Error('permission must be ask, read-only or yolo');
-        if (reviewer && mode !== 'read-only') throw new Error('Reviewers require read-only access');
-        const native = reviewer ? 'default' : mode === 'read-only' ? 'plan' : mode === 'yolo' ? 'bypassPermissions' : 'default';
+        if (reviewer) throw new Error('Restart this reviewer to change its tool permissions');
+        const native = mode === 'read-only' ? 'plan' : mode === 'yolo' ? 'bypassPermissions' : 'default';
         // Bypass mode needs a flag set at launch; without it, 'default' plus the
         // approvals granted above gives the same result.
         let applied = native;

@@ -25,6 +25,7 @@ type session struct {
 	// keeps running across Runner restarts, so this is what the worker that is
 	// actually running reported, not what this Runner's worker build supports.
 	features []string
+	reviewer bool
 	// noted: an unreadable worker line was already recorded once.
 	noted bool
 }
@@ -128,7 +129,7 @@ func (a Adapter) Open(ctx context.Context, o agent.Open) (agent.Session, error) 
 		p.Close()
 		return nil, errors.New("Claude worker did not create a separate conversation")
 	}
-	return &session{p: p, ref: response.Reference, ctx: ctx, tools: o.Tools, features: response.Features}, nil
+	return &session{p: p, ref: response.Reference, ctx: ctx, tools: o.Tools, reviewer: o.Purpose == agent.Reviewer, features: response.Features}, nil
 }
 func attach(ctx context.Context, o agent.Open) (agent.Session, error) {
 	var state durable
@@ -145,7 +146,7 @@ func attach(ctx context.Context, o agent.Open) (agent.Session, error) {
 			return nil, err
 		}
 	}
-	return &session{p: p, ref: o.Host.Attach.Reference, ctx: ctx, tools: o.Tools, features: state.Features}, nil
+	return &session{p: p, ref: o.Host.Attach.Reference, ctx: ctx, tools: o.Tools, reviewer: o.Purpose == agent.Reviewer, features: state.Features}, nil
 }
 
 func (s *session) DurableState() json.RawMessage {
@@ -183,10 +184,13 @@ func (s *session) unreadable(m jsonl.Message, err error) (agent.Event, bool) {
 func (s *session) Detach() error     { return s.p.Detach() }
 func (s *session) Reference() string { s.mu.Lock(); defer s.mu.Unlock(); return s.ref }
 func (s *session) Capabilities() agent.Capabilities {
-	return agent.Capabilities{Images: true, Files: true, Questions: true, Approvals: true, Resume: true, Subagents: true, Steer: s.has("steer"), LivePermission: s.has("permission"), StopAgent: s.has("stop_agent"), LiveModel: s.has("model"), ProfileIsolation: "environment credentials; shared keychain isolation unverified"}
+	return agent.Capabilities{Images: true, Files: true, Questions: true, Approvals: true, Resume: true, Subagents: true, Steer: s.has("steer"), LivePermission: s.has("permission") && !s.reviewer, StopAgent: s.has("stop_agent"), LiveModel: s.has("model"), ProfileIsolation: "environment credentials; shared keychain isolation unverified"}
 }
 func (s *session) Apply(ctx context.Context, op agent.Operation) (agent.Receipt, error) {
 	r := agent.Receipt{ID: op.ID}
+	if op.Kind == agent.Permission && s.reviewer {
+		return r, agent.ErrUnsupported
+	}
 	// Steer hands the message to the running turn: Claude Code folds it in
 	// between two steps (the worker's steer.ts). A worker started before
 	// steering existed cannot; the message then waits for the turn to end.

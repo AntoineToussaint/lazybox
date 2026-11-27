@@ -727,6 +727,12 @@ func requestID(raw json.RawMessage) string {
 	return "n:" + string(raw)
 }
 
+func (s *session) readOnlyReview() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.purpose == agent.Reviewer && s.permission != "ask" && s.permission != "yolo"
+}
+
 // fullAccess is the person's current choice, including a change made mid-turn.
 func (s *session) fullAccess() bool {
 	s.mu.Lock()
@@ -834,7 +840,7 @@ func (s *session) read() {
 				}
 				switch m.Method {
 				case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", permissionsMethod:
-					if s.purpose == agent.Reviewer {
+					if s.readOnlyReview() {
 						reply, err := nativeResponse(m.Method, m.Params, agent.Operation{Decision: "decline"})
 						if err == nil {
 							err = s.p.Reply(m.ID, reply)
@@ -858,7 +864,7 @@ func (s *session) read() {
 						_ = s.p.Reject(m.ID, "unknown dynamic tool")
 						return
 					}
-					if s.purpose == agent.Reviewer && call.Tool == agent.CommandTool && !agent.ReviewCommandAllowed(call.Arguments) {
+					if s.readOnlyReview() && (agent.BrowserTool(call.Tool) || call.Tool == agent.CommandTool && !agent.ReviewCommandAllowed(call.Arguments)) {
 						s.replyTool(m.ID, id, "Review is read-only. Inspect files with native read-only tools.", false)
 						return
 					}

@@ -183,7 +183,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // the Runner, and a workspace's tabs, each streaming, took them all: every
   // other read of the window (its review, its sessions) then waited forever.
   const shown = useContext(PanelShownContext);
-  const transcript = useTranscript(api, sessionID, !!info && shown);
+  const transcript = useTranscript(api, sessionID, !!info, shown);
   const [branchSelection, setBranchSelection] = useState<{ message: TranscriptMessage; source: string; sideQuestion?: boolean }>();
   const branchMessage = branchSelection?.source === sessionID ? branchSelection.message : undefined;
   const preview = useRestartPreview(api, sessionID, branchMessage);
@@ -196,7 +196,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   useMarkViewed(session, mode === 'agent');
   const workspace = useSessionWorkspace(api, session?.collectionId || collectionId, !!info, revision);
   const { recent: events, messages: conversation, status: stream } = transcript;
-  const scroll = useChatScroll(transcript.reader, conversation, session?.pending.length);
+  const scroll = useChatScroll(transcript.reader, conversation, session?.pending.length, shown);
   const { jumpToLatest } = scroll;
   const [error, setError] = useState('');
   const { followUp, followUpText, setFollowUp, editFollowUp, snippet: draftSnippet, reviewDrafts, restoring, message, setMessage, files, setFiles, missingFiles, setMissingFiles, uncertainSend, setUncertainSend, sendAttempt, persistDraft } = useComposerDraft(viewState, sessionID, setError);
@@ -851,8 +851,9 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {fileLinks.element}
           {slash.dialogs}
           {chatReview.dialog}
-          {chatReview.asReviewer && <div className="reviewer-notice" role="note" aria-label="Read-only review">
-            <span><strong>Read-only review</strong> · Use the author conversation to apply findings and merge.</span>
+          {chatReview.asReviewer && <div className="reviewer-notice" role="note" aria-label="Review permissions">
+            <strong>{session?.permission === 'yolo' ? 'Full access' : session?.permission === 'ask' ? 'Ask for approval' : 'Read only'}</strong>
+            {slash.pickPermissions && <button type="button" onClick={slash.pickPermissions}>Change permissions</button>}
             {embedded && <><button type="button" onClick={() => showConversation({ collectionId: chatReview.workspaceId, sessionId: chatReview.asReviewer!.sourceSessionId })}>Open author conversation</button>
               <button type="button" onClick={() => showReview({ collectionId: chatReview.workspaceId, reviewId: chatReview.asReviewer!.id })}>Review tray</button></>}
           </div>}

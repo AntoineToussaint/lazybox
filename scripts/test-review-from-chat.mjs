@@ -226,12 +226,19 @@ try{
   await lastCard().getByRole('button',{name:'Open conversation'}).click();
   await expect(chat().locator('.chat-heading')).toContainText(`Review · Changes · ${run.reviewerLabel}`);
   await expect(chat().locator('.messages:visible')).toContainText(`Asked ${run.reviewerLabel} to review Claude's work`);
-  await expect(chat().getByRole('note',{name:'Read-only review'})).toBeVisible();
+  await expect(chat().getByRole('note',{name:'Review permissions'})).toBeVisible();
   await chat().locator('.chat-heading').getByLabel('Session actions',{exact:true}).click();
  };
  const backToWork=async()=>{await page.getByRole('navigation',{name:'Workspaces'}).getByText('Harden the handler',{exact:true}).first().click();await expect(chat().locator('.messages:visible')).toContainText('REPLY_ONE');};
  await openReviewer(viaMenu);
  await page.keyboard.press('Escape');
+ const permissions=chat().getByRole('note',{name:'Review permissions'});
+ await expect(permissions).toContainText('Read only');
+ for(const label of ['Ask for approval','Full access','Read only']){
+  await permissions.getByRole('button',{name:'Change permissions'}).click();
+  await chat().getByRole('listbox',{name:'/permissions choices'}).getByRole('option',{name:new RegExp(label)}).click();
+  await expect(permissions).toContainText(label);
+ }
  await chat().getByRole('button',{name:'Open author conversation',exact:true}).click();
  await expect(chat().locator('.messages:visible')).toContainText('REPLY_ONE');
  await openReviewer(viaMenu);

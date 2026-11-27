@@ -816,3 +816,23 @@ func TestLegacyUnicodeConversationGrant(t *testing.T) {
 		t.Fatal("legacy site grant lost its hostname or port")
 	}
 }
+
+func TestPreviewRefreshFailureStopsBeforeWorkerNavigation(t *testing.T) {
+	m := newManager(t, func(c *Config) {
+		c.LoopbackPorts = func(context.Context, string) []int { return nil }
+	})
+	ctx := context.Background()
+	m.mu.Lock()
+	b := m.browserLocked(alice)
+	m.mu.Unlock()
+	if err := m.ensureOpen(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	params := map[string]any{"action": "navigate", "browser": b.id, "url": "http://localhost:5173"}
+	if _, err := m.act(ctx, b, params); err == nil || !strings.Contains(err.Error(), "refresh workspace preview ports") {
+		t.Fatalf("failed refresh returned %v", err)
+	}
+	if _, exists := params["previewPorts"]; exists {
+		t.Fatal("failed refresh supplied a replacement policy")
+	}
+}

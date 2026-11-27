@@ -389,6 +389,7 @@ try{
 
  // Choose a model from the composer while a specific user prompt is running.
  const runningCodex=f.sessions.find(session=>session.id==='codex-session');
+ f.openEvents('codex-session').push({type:'usage',agentId:'root',providerDataJson:data({model:'gpt-6-luna'})});
  Object.assign(runningCodex,{busy:true,status:'running',retryableOperationId:'active-prompt'});
  await page.reload();
  await expect(codexMessage).toBeEnabled();
@@ -403,6 +404,7 @@ try{
  await expect(codexChat.getByText('Model unavailable on this subscription',{exact:false}).first()).toBeVisible();
  await expect(choice).toBeHidden();
  await chooseWhileRunning('astra');
+ await expect(codexChat.locator('.chat-heading .chat-model')).toHaveAttribute('title',/gpt-6-luna/i);
  await choice.getByRole('button',{name:'Finish current turn'}).click();
  assert.equal(applies().some(m=>m.body.retryTurn),false);
  await chooseWhileRunning('luna');

@@ -77,17 +77,24 @@ func TestRetryTurnPreservesPromptAndQueueOrder(t *testing.T) {
 		t.Fatal("model selection delayed behind queue")
 	}
 	for _, pair := range [][2]string{{"stale", "selection"}, {"original", "obsolete"}} {
-		if _, err := e.RetryTurn(ctx, pair[0], pair[1]); err == nil {
+		if _, err := e.RetryTurn(ctx, pair[0], pair[1], "attempt"); err == nil {
 			t.Fatal("stale retry accepted")
 		}
 	}
-	if _, err := e.RetryTurn(ctx, input.ID, "selection"); err != nil {
+	released := make(chan struct{})
+	close(released)
+	s.Hold(agent.Interrupt, released, errors.New("interrupt refused"))
+	if _, err := e.RetryTurn(ctx, input.ID, "selection", "attempt1"); err == nil {
+		t.Fatal("expected stop refusal")
+	}
+	s.Hold(agent.Interrupt, released, nil)
+	if _, err := e.RetryTurn(ctx, input.ID, "selection", "attempt2"); err != nil {
 		t.Fatal(err)
 	}
 	if applied(t, s).Kind != agent.Interrupt {
 		t.Fatal("missing interrupt")
 	}
-	if _, err := e.RetryTurn(ctx, input.ID, "selection"); err != nil {
+	if _, err := e.RetryTurn(ctx, input.ID, "selection", "attempt2"); err != nil {
 		t.Fatal(err)
 	}
 	s.Events <- agent.Event{Type: "turn_ended", Status: "interrupted"}
@@ -98,5 +105,35 @@ func TestRetryTurnPreservesPromptAndQueueOrder(t *testing.T) {
 	s.Events <- agent.Event{Type: "turn_ended"}
 	if applied(t, s).ID != "queued" {
 		t.Fatal("follow-up displaced or retry duplicated")
+	}
+}
+
+func TestRejectedModelRetainsPromptUntilCorrected(t *testing.T) {
+	e, s := bench(t, false)
+	ctx := contextFor(t)
+	e.mu.Lock()
+	e.state.Capabilities.LiveModel = true
+	e.mu.Unlock()
+	released := make(chan struct{})
+	close(released)
+	s.Hold(agent.Message, released, agent.ErrModelRequired)
+	input := agent.Operation{ID: "held", Kind: agent.Message, Text: "try again", Images: []agent.Image{{MediaType: "image/png", Data: "YQ=="}}}
+	if _, err := e.Apply(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "model required", func() bool {
+		state := e.Snapshot()
+		return state.Fault == agent.ModelRequiredFault && !state.Busy && state.Queued == 1
+	})
+	s.Hold(agent.Message, released, nil)
+	if _, err := e.Apply(ctx, agent.Operation{ID: "correct", Kind: agent.Model, Model: "sonnet"}); err != nil {
+		t.Fatal(err)
+	}
+	if applied(t, s).Kind != agent.Model {
+		t.Fatal("queued prompt bypassed model change")
+	}
+	got := applied(t, s)
+	if got.ID != input.ID || got.Text != input.Text || len(got.Images) != 1 || got.Images[0] != input.Images[0] {
+		t.Fatal("lost held input")
 	}
 }

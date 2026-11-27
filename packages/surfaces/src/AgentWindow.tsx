@@ -507,7 +507,11 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // An assistant conversation is about Lazybox, not the workspace's branches: its header names none.
   const branch = assistant ? undefined : branchSummary(workspace);
   const selectedModel = transcript.selectedModel || session?.selectedModel;
-  const modelLabel = [selectedModel || sessionModelLabel(session, transcript.reportedModel), session?.effort].filter(Boolean).join(' · ');
+  const observedModel = transcript.lastObservedModel || (session?.modelReported ? session.model : '');
+  const pendingModel = selectedModel && selectedModel !== observedModel && (session?.busy || session?.fault === 'model_required' || transcript.lastObservedModel);
+  const displayModel = pendingModel ? observedModel || 'Model unreported' : selectedModel || sessionModelLabel(session, transcript.reportedModel);
+  const modelLabel = [displayModel, !pendingModel && session?.effort].filter(Boolean).join(' · ');
+  const composerModelLabel = [selectedModel || displayModel, session?.effort, pendingModel ? (session?.fault === 'model_required' ? 'unavailable' : 'selected for next turn') : ''].filter(Boolean).join(' · ');
   const accountName = sessionAccountLabel(session, activeProfile);
   const profileList = info?.profiles;
   const nameFor = useCallback((id: string) => subscriptionName(profileList?.find(p => p.id === id), id), [profileList]);
@@ -845,7 +849,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
             sending={sending} canCompose={canCompose} canAttach={canAttach} canSend={canSend}
             permissionPrompt={<>{restartTo && <PermissionRestartPrompt mode={restartTo} restarting={permissionRestarting} busy={!!session?.busy} returnTo={composer} onRestart={() => void restartWithPermission(restartTo)} onCancel={() => setRestartTo('')}/>}{slash.prompt}</>}
             slash={sending ? undefined : slash}
-            info={session ? <ComposerInfo permission={session.permission} reportedPermission={transcript.reportedPermission} agentName={agentName} modelLabel={modelLabel} modelRequested={!!session.model && !session.modelReported && !transcript.reportedModel} sessionID={sessionID} onPickModel={session.closed ? undefined : slash.models.pick} onPickPermissions={slash.pickPermissions}/> : undefined}
+            info={session ? <ComposerInfo permission={session.permission} reportedPermission={transcript.reportedPermission} agentName={agentName} modelLabel={composerModelLabel} modelRequested={!!session.model && !session.modelReported && !transcript.reportedModel} sessionID={sessionID} onPickModel={session.closed ? undefined : slash.models.pick} onPickPermissions={slash.pickPermissions}/> : undefined}
             onSubmit={send}
             onChange={text => {
               if (sendingRef.current) {

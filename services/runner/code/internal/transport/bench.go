@@ -438,12 +438,12 @@ func (s *Service) apply(ctx context.Context, r *pb.ApplyRequest, origin *agent.O
 		return &pb.Receipt{OperationId: receipt.ID, Delivery: receipt.Delivery, ProviderId: receipt.ProviderID, Error: receipt.Error}, nil
 	case *pb.ApplyRequest_RetryTurn:
 		live, ok := e.Engine.(interface {
-			RetryTurn(context.Context, string, string) (agent.Receipt, error)
+			RetryTurn(context.Context, string, string, string) (agent.Receipt, error)
 		})
 		if !ok {
 			return nil, rpcError(agent.ErrUnsupported)
 		}
-		r, err := live.RetryTurn(ctx, o.RetryTurn.OriginalOperationId, o.RetryTurn.ModelOperationId)
+		r, err := live.RetryTurn(ctx, o.RetryTurn.OriginalOperationId, o.RetryTurn.ModelOperationId, p.OperationId)
 		if err != nil {
 			return nil, grpcError(codes.FailedPrecondition, err)
 		}

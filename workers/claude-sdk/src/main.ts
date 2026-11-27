@@ -197,7 +197,10 @@ async function handle(request: Request) {
     if (!session) throw new Error('session not opened');
     switch (request.method) {
       case 'message': {
-        await models.beforeMessage();
+        try { await models.beforeMessage(); } catch (error) {
+          reply(request.id, { delivery: 'model_required', error: errorText(error) });
+          break;
+        }
         deliver(messageContent(p));
         models.turnStarted();
         interrupts.delivered();

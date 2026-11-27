@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
+import { Drawing } from './Drawing';
 import { conversationName } from './conversation-model';
 import { ComposerAttachment } from './AttachmentThumbnail';
 import { ErrorBox } from './AttachmentBox';
@@ -128,6 +129,7 @@ export function Composer({ workingTurn, textarea, fileInput, agentName, embedded
       if (Number.isInteger(from) && from !== index) attachments.move(from, index);
     },
   });
+  const [drawing, setDrawing] = useState<{ session: string; file?: File }>();
   const sendLabel = sending ? 'Sending…' : workingTurn ? 'Queue follow-up' : 'Send message';
 
   const sendKeys = bindings(keymap['chat.send']);
@@ -140,10 +142,18 @@ export function Composer({ workingTurn, textarea, fileInput, agentName, embedded
   const dictateKey = bindings(keymap['voice.dictate'])[0];
   const dictateHint = dictateKey ? `Dictate · hold ${displayBinding(dictateKey).join(' ')} to talk, tap it ${isLoneModifier(dictateKey) ? 'twice ' : ''}to keep listening` : 'Dictate';
   // Sending while listening (↵, ⌘↵, Send) waits for the last words, then sends through this same form.
-  return <form className="composer" onSubmit={event => { if (dictation.finishAndSend()) { event.preventDefault(); return; } onSubmit(event); }}>
+  return <>{drawing?.session === sessionID && drawing && canAttach && <Drawing file={drawing.file} onMask={drawing.file && !drawing.file.name.endsWith('.excalidraw.png') ? mask => {
+    if (!attachments.select([mask])) throw new Error('The edit mask exceeds the conversation’s attachment limits.');
+    setDrawing(undefined);
+  } : undefined} onClose={() => setDrawing(undefined)} onAttach={file => {
+    const index = drawing.file?.name.endsWith('.excalidraw.png') ? files.indexOf(drawing.file) : -1;
+    const accepted = index >= 0 ? attachments.replace(index, file) : attachments.select([file]);
+    if (!accepted) throw new Error('This drawing exceeds the conversation’s attachment limits.');
+    setDrawing(undefined);
+  }}/>}<form className="composer" onSubmit={event => { if (dictation.finishAndSend()) { event.preventDefault(); return; } onSubmit(event); }}>
     {(files.length > 0 || attachments.rejected.length > 0) && <ul className="attached-files" aria-label="Attached files" aria-live="polite">
       {files.map((file, i) => <ComposerAttachment key={fileKey(file, i, files)} file={file} disabled={sending} item={{ ...boxDrag(i), ...(dragged === i ? { 'data-dragging': true } : {}) }}
-        onRemove={() => attachments.remove(i)}
+        onAnnotate={canAttach ? () => setDrawing({ session: sessionID, file }) : undefined} onRemove={() => attachments.remove(i)}
         onMove={files.length > 1 ? by => attachments.move(i, Math.max(0, Math.min(files.length - 1, i + by))) : undefined}
         onReplace={next => attachments.replace(i, next)} onInline={text => attachments.inline(i, text)}/>)}
       {attachments.rejected.map((file, i) => <ErrorBox key={`rejected-${i}-${file.name}`} name={file.name} reason={file.reason} onDismiss={() => attachments.dismiss(i)}/>)}
@@ -186,6 +196,7 @@ export function Composer({ workingTurn, textarea, fileInput, agentName, embedded
       {onOpenPromptHistory && <button type="button" className="icon-button" aria-label="Prompt history" title="Prompt history · ↑ and ↓ recall sent prompts" disabled={sending} onClick={onOpenPromptHistory}><Icon name="history"/></button>}
       <button type="button" className="icon-button" aria-label="Snippets" title={`Snippets · ${keymap['snippets.open']}`} disabled={!canCompose || sending} onClick={onOpenSnippets}><Icon name="snippets"/></button>
       <button type="button" className="attachment" aria-label={embedded ? 'Attach files' : undefined} disabled={!canAttach} onClick={() => fileInput.current?.click()}>{embedded ? <><Icon name="attach"/> <span className="attachment-label">Attach</span></> : '+ Attach files'}</button>
+      <button type="button" disabled={!canAttach} onClick={() => setDrawing({ session: sessionID })}>Draw</button>
       <input ref={fileInput} hidden aria-label="Attach files" type="file" multiple onChange={e => { onSelectFiles(e.target.files); e.target.value = ''; }}/>
       <small className="composer-hint keyboard-hint">{vim.mode === 'insert' ? `${busyHint || `${sendKey} to send`} · Esc for normal mode` : vim.mode ? vim.hint : busyHint || `${sendKey} to send${newlineHint}`}</small>
       {!interruptInBar && (!embedded || session?.busy) && <button type="button" onClick={onInterrupt} disabled={!session?.busy || session.closed}>Interrupt</button>}
@@ -194,5 +205,5 @@ export function Composer({ workingTurn, textarea, fileInput, agentName, embedded
         <button className="primary send-button" aria-label={sendLabel} disabled={!canSend}>{embedded ? <Icon name="send" size={18}/> : sendLabel}</button>
       </div>
     </div>
-  </form>;
+  </form></>;
 }

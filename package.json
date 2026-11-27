@@ -183,6 +183,10 @@
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vite": "8.3.8",
+    "vite-plugin-static-copy": "4.1.1",
     "vitepress": "2.0.0-alpha.21"
+  },
+  "overrides": {
+    "@radix-ui/react-tabs@1.0.2": "1.2.1"
   }
 }

@@ -13,6 +13,7 @@
 // .cache/artifact-reader-<view>-<width>-<scheme>.png. Fixture only; Chromium
 // (print to PDF is Chromium's).
 import { createServer } from './fixtures/vite-cache.mjs';
+import { drawingAssets } from './drawing-assets.mjs';
 import react from '@vitejs/plugin-react';
 import { chromium, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
@@ -56,7 +57,7 @@ const htmlSource = '<!doctype html><html><head><style>h2 { color: rgb(12, 34, 56
   '<iframe src="https://example.invalid/frame"></iframe></body></html>';
 const html = fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, title: 'Deploy preview', format: 'html', content: htmlSource });
 fixture.artifacts.agentPut({ collectionId: 'alpha', sessionId: session.id, artifactId: html.id, content: htmlSource.replace('Latency', 'Throughput') });
-const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
+const server = await createServer({ ...testViteCache(import.meta.url), configFile: false, logLevel: 'error', root: fileURLToPath(new URL('../apps/web', import.meta.url)), plugins: [react(), drawingAssets()], server: { host: '127.0.0.1', port: 0, proxy: { '/lazybox.bench.v1.RunnerService/': { target: fixture.url } } } });
 let browser;
 try {
   await server.listen(); await mkdir('.cache', { recursive: true });
@@ -535,6 +536,38 @@ try {
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   await expect(page.locator('.artifact-print-sheet')).toHaveCount(0);
   assert.equal(await page.title(), previousTitle);
+  await article.getByRole('button', { name: 'Annotate', exact: true }).click();
+  const drawing = page.getByRole('dialog', { name: 'Drawing editor' });
+  await drawing.getByRole('button', { name: 'Attach drawing' }).click();
+  await chat.getByRole('combobox', { name: 'Conversation' }).selectOption(session.id);
+  await expect(draft).toHaveValue(/--version 2[\s\S]*Annotated Mermaid diagram:/);
+  await expect(chat.getByRole('button', { name: 'Annotate diagram.excalidraw.png' })).toBeVisible();
+
+  const fresh = await browser.newContext();
+  const freshPage = await fresh.newPage();
+  await collectPageErrors(freshPage, errors);
+  await freshPage.goto(standalone);
+  await freshPage.getByRole('button', { name: 'Annotate', exact: true }).click();
+  await freshPage.getByRole('button', { name: 'Attach drawing' }).click();
+  const newChat = freshPage.getByRole('complementary', { name: 'Agent companion' });
+  const firstDraft = newChat.getByRole('textbox', { name: 'Message', exact: true });
+  await expect(newChat.getByRole('combobox', { name: 'Conversation' })).toHaveValue('');
+  await expect(newChat.getByRole('status').filter({ hasText: 'diagram.excalidraw.png' })).toBeVisible();
+  await newChat.getByRole('button', { name: /^Start Claude/ }).click();
+  await expect(firstDraft).toHaveValue(/--version 2[\s\S]*Annotated Mermaid diagram:/);
+  await expect(newChat.getByRole('button', { name: 'Annotate diagram.excalidraw.png' })).toBeVisible();
+  const drawingLaunch = fixture.mutations.findLast(call => call.method === 'OpenAssistant');
+  assert.doesNotMatch(drawingLaunch.body.context || '', /Annotated Mermaid diagram/);
+  const companionId = await newChat.getByRole('combobox', { name: 'Conversation' }).inputValue();
+  const messages = () => fixture.mutations.filter(call => call.method === 'Apply' && call.body.sessionId === companionId && call.body.message);
+  assert.equal(messages().length, 0);
+  await firstDraft.press('Enter');
+  await expect.poll(() => messages().length).toBe(1);
+  const firstMessage = messages()[0].body.message;
+  assert.equal(firstMessage.text.split('Annotated Mermaid diagram:').length, 2);
+  assert.deepEqual(firstMessage.attachments.map(file => file.name), ['diagram.excalidraw.png']);
+  assert.equal(Buffer.from(firstMessage.attachments[0].data, 'base64').subarray(1, 4).toString(), 'PNG');
+  await fresh.close();
   await context.close();
 
   // The Artifacts panel: kind icons, author and time, and the "updated since you looked" dot.

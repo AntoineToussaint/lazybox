@@ -29,7 +29,7 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
   const [sessionId, setSessionId] = useState<string>();
   const [requested, setRequested] = useState('');
   const [chatKey, setChatKey] = useState(0);
-  const [pending, setPending] = useState<{ text: string; explicit: boolean }>();
+  const [pending, setPending] = useState<{ text: string; explicit: boolean; files?: File[] }>();
   const lastDiscussed = useRef<{ sessionId: string; reference: string }>(undefined);
   const pane = useRef<HTMLElement>(null);
   const documentPane = useRef<HTMLDivElement>(null);
@@ -83,7 +83,7 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
     setSessionId(id);
   };
   const followSession = (id: string) => {
-    if (!sessionId) setPending(undefined);
+    if (!sessionId) setPending(value => value?.files?.length ? value : undefined);
     const last = lastDiscussed.current;
     if (last && last.sessionId === sessionId) last.sessionId = id;
     rememberSession(id);
@@ -92,15 +92,15 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
     if (id !== sessionId) setChatKey(key => key + 1);
     rememberSession(id);
   };
-  const discuss = (_artifact: Artifact, reference: string, explicit: boolean) => {
+  const discuss = (_artifact: Artifact, reference: string, explicit: boolean, files?: File[]) => {
     let id = sessionId;
     if (id === undefined) {
       id = '';
       try { id = companionStore?.getItem(companionStore.key + ':conversation') ?? id; } catch { /* session storage is optional */ }
       resolveSession(id);
     }
-    if (chatOpen || lastDiscussed.current?.sessionId !== id || lastDiscussed.current.reference !== reference) {
-      setPending(previous => previous?.text === reference ? previous : { text: appendToDraft(previous?.text || '', reference), explicit: explicit || !!previous?.explicit });
+    if (files?.length || chatOpen || lastDiscussed.current?.sessionId !== id || lastDiscussed.current.reference !== reference) {
+      setPending(previous => previous?.text === reference && !files?.length ? previous : { text: appendToDraft(previous?.text || '', reference), files: [...previous?.files || [], ...files || []], explicit: explicit || !!previous?.explicit });
       lastDiscussed.current = { sessionId: id, reference };
     }
     showChat();
@@ -131,9 +131,12 @@ export function ArtifactCompanion({ collectionId, artifactId, viewState, ...page
           <button type="button" className="icon-button" aria-label="Close agent companion" onClick={closeChat}><Icon name="close" size={14}/></button>
         </header>
         {requested && <p className="artifact-chat-pending" role="status">Opening conversation…</p>}
+        {!requested && !sessionId && !!pending?.files?.length && <p role="status">
+          First message draft: {pending.files.map(file => file.name).join(', ')}. Start a conversation to review and send.
+        </p>}
         {!requested && <PanelShownContext.Provider value={shown && chatOpen}>
           <ChatPanel key={chatKey} embedded collectionId={collectionId} viewState={companionStore}
-            purpose={sessionId ? undefined : 'artifact'} assistantContext={pending?.text ?? lastDiscussed.current?.reference}
+            purpose={sessionId ? undefined : 'artifact'} assistantContext={pending?.files?.length ? '' : pending?.text ?? lastDiscussed.current?.reference}
             initialSessionId={sessionId} onSessionChange={followSession} showCommands={false}
             draftAddition={sessionId ? pending : undefined} onDraftAdded={() => setPending(undefined)}/>
         </PanelShownContext.Provider>}

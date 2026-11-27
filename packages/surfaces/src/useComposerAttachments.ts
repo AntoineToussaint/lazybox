@@ -34,8 +34,8 @@ export function useComposerAttachments({ draft, limits, canAttach, textarea, ses
   const caret = (at: number) => requestAnimationFrame(() => { const node = textarea.current; if (node) { node.focus(); node.setSelectionRange(at, at); } });
 
   /** Files chosen, dropped or pasted: those that fit are attached, the rest become error boxes. */
-  const select = (selected: FileList | File[] | null) => {
-    if (!bounds) return;
+  const select = (selected: FileList | File[] | null, text = message) => {
+    if (!bounds) return false;
     const incoming = Array.from(selected || []);
     // A file a reloaded draft names, chosen again, takes its place.
     const remaining = [...missingFiles];
@@ -48,10 +48,11 @@ export function useComposerAttachments({ draft, limits, canAttach, textarea, ses
     // Keep the selected bytes; the Runner deduplicates by content.
     const { accepted, rejected: over } = admitFiles([...files, ...remaining], incoming, bounds);
     setRejected(current => [...current, ...over]);
-    if (!accepted.length && remaining.length === missingFiles.length) return;
+    if (!accepted.length && remaining.length === missingFiles.length) { if (text !== message) persistDraft(text, files, remaining); return false; }
     const next = [...files, ...accepted];
     if (fresh) { setUncertainSend(''); sendAttempt.current = null; }
-    setFiles(next); setMissingFiles(remaining); onError(''); persistDraft(message, next, remaining, fresh ? '' : uncertainSend);
+    setFiles(next); setMissingFiles(remaining); onError(''); persistDraft(text, next, remaining, fresh ? '' : uncertainSend);
+    return accepted.length === incoming.length;
   };
 
   /**
@@ -88,7 +89,15 @@ export function useComposerAttachments({ draft, limits, canAttach, textarea, ses
     files, rejected, select, pasteText, undoPaste, inline,
     remove: (index: number) => changed(files.filter((_, i) => i !== index)),
     move: (from: number, to: number) => changed(moveItem(files, from, to)),
-    replace: (index: number, file: File) => { inheritKey(files[index], file); changed(files.map((current, i) => i === index ? file : current)); },
+    replace: (index: number, file: File) => {
+      if (!bounds) return false;
+      const others = files.filter((_, position) => position !== index);
+      const { rejected: over } = admitFiles([...others, ...missingFiles], [file], bounds);
+      if (over.length) { setRejected(current => [...current, ...over]); return false; }
+      inheritKey(files[index], file);
+      changed(files.map((current, i) => i === index ? file : current));
+      return true;
+    },
     dismiss: (index: number) => setRejected(current => current.filter((_, i) => i !== index)),
     /** After a send: the error boxes went with the message that left them out. */
     clearRejected: () => { setRejected([]); pasteUndo.current = null; },

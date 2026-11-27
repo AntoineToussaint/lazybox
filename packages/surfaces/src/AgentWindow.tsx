@@ -118,7 +118,7 @@ export type AgentWindowProps = {
   onOpenHandoff?: OpenHandoffConversation;
   onChatTitle?(title: PanelTitle): void;
   /** Text from a colocated panel, held until this chat’s draft is ready. */
-  draftAddition?: { text: string };
+  draftAddition?: { text: string; files?: File[] };
   onDraftAdded?(): void;
   onSessionChange?: (sessionId: string, collectionId?: string) => void;
   onOpenViewer?: (sessionId: string, commandId: string) => void | Promise<void>;
@@ -227,7 +227,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const limited = !!sessionLimit(session);
   // After a provider error ends a turn, the next message continues the conversation.
   const continuesAfterError = !!session && !session.closed && turnFault(session.fault);
-  const canSend = canCompose && (!session?.fault || canResumeOnSend || limited || continuesAfterError) && !sending && missingFiles.length === 0 && (!!message.trim() || files.length > 0);
+  const canSend = canCompose && !draftAddition?.files?.length && (!session?.fault || canResumeOnSend || limited || continuesAfterError) && !sending && missingFiles.length === 0 && (!!message.trim() || files.length > 0);
 
   // A run handed over from a terminal joins the draft, after anything already
   // typed, and the cursor goes to its end: the person adds a line and sends.
@@ -256,11 +256,14 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   // this render has not seen it yet, and saving now survives this view
   // remounting. While a send is in flight the text waits: the send empties the
   // box when it is confirmed, and would erase it (and the draft it retries).
-  const appendPanelDraft = (text: string, reviews?: typeof reviewDrafts.current) => {
+  const appendPanelDraft = (text: string, reviews?: typeof reviewDrafts.current, incoming?: File[]) => {
     if (reviews) reviewDrafts.current.push(...reviews);
     const current = viewState ? readDraft(viewState, sessionID).text : message;
     const next = current + (current.trim() ? '\n\n' : '') + text;
-    setMessage(next); persistDraft(next, files, missingFiles); setUncertainSend(''); sendAttempt.current = null;
+    setMessage(next);
+    if (incoming?.length && canAttach) boxes.select(incoming, next);
+    else { persistDraft(next, files, missingFiles); if (incoming?.length) setError('This conversation cannot accept drawing attachments.'); }
+    setUncertainSend(''); sendAttempt.current = null;
     requestAnimationFrame(() => { const node = composer.current; if (node) { node.focus(); node.setSelectionRange(node.value.length, node.value.length); } });
   };
   const draftReady = shown && canCompose && !sending;
@@ -268,8 +271,12 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
   const lastDraftAddition = useRef<typeof draftAddition>(undefined);
   useEffect(() => {
     if (session?.id !== sessionID || !draftReady || !draftAddition || lastDraftAddition.current === draftAddition) return;
+    if (draftAddition.files?.length && !canAttach) {
+      if (info && session && !session.capabilities?.files) setError('Choose a conversation that accepts files to send this drawing.');
+      return;
+    }
     lastDraftAddition.current = draftAddition;
-    appendPanelDraft(draftAddition.text);
+    appendPanelDraft(draftAddition.text, undefined, draftAddition.files);
     onDraftAdded?.();
   });
 
@@ -293,7 +300,7 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
     // ⌘↵ (chat.send-now) submits this same form, after dictation's last words
     // settle when it was listening: the message it sends goes now.
     const now = !snippetText && Date.now() - sendNowAt.current < 15_000; sendNowAt.current = 0;
-    if (sendingRef.current || sending) return false;
+    if (sendingRef.current || sending || draftAddition?.files?.length) return false;
     // `/command`: Lazybox's runs here, an unknown one asks first; the agent's goes on as the prompt.
     if (!snippetText && !files.length && !missingFiles.length && slash.intercept(message)) return false;
     const text = snippetText ?? message;

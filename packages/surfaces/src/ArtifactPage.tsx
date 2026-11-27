@@ -16,6 +16,7 @@ import { extractToc, readingMinutes, tocOutline, withoutRepeatedTitle } from './
 import { DocumentBody, RenderedDiff, TableOfContents, useScrollSpy } from './ArtifactReader';
 import { openArtifact, revealMessage } from './artifact-events';
 import { OTHER_ARTIFACTS_POLL_MS, retiredStamp, useArtifacts } from './useArtifacts';
+import { DiagramAnnotation } from './Drawing';
 import { composeInConversation } from './compose';
 import { useLibrary } from './home-checkouts';
 import { placeFor, type HomeTarget } from './home-run';
@@ -43,7 +44,7 @@ type Props = {
   onBack?(): void;
   /** In a workspace: show a conversation (source message, Send to agent). */
   onShowSession?(target: ViewTarget): void;
-  onDiscuss?(artifact: Artifact, reference: string, explicit: boolean): void;
+  onDiscuss?(artifact: Artifact, reference: string, explicit: boolean, files?: File[]): void;
   chatOpen?: boolean;
   /** The conversation the page is beside, for Send to agent. */
   conversationId?: string;
@@ -413,21 +414,25 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
       : agentReference(artifact, currentText ?? '', 1200, shown);
     return excerpt ? `${reference}Selected excerpt:\n${excerpt.split('\n').map(line => `> ${line}`).join('\n')}\n\n` : reference;
   };
-  const sendToAgent = (brief?: string) => {
+  const sendToAgent = (brief?: string, files?: File[]) => {
     const text = brief ?? discussionReference(!!onDiscuss);
     if (onDiscuss) {
       if (!discussionVersion && shown) {
         setDiscussionVersion(shown);
         setSelected(shown);
       }
-      onDiscuss(artifact, text, !!brief || !!excerpt);
+      onDiscuss(artifact, text, !!brief || !!excerpt, files);
       return;
     }
     if (conversationId && onShowSession) {
-      composeInConversation({ sessionId: conversationId, text });
+      composeInConversation({ sessionId: conversationId, text, files, api });
       onShowSession({ collectionId, sessionId: conversationId, commandId: '' });
       say(`Added to the message box of “${conversationTitle || 'the conversation'}”. Review it and send.`);
     } else void copy(text, `Copied. Paste into a conversation in ${collection?.name || 'this workspace'}.`);
+  };
+  const annotateDiagram = (file: File, source: string) => {
+    const version = pinnedArtifactReference(artifact, shown);
+    sendToAgent(version + '\n\nAnnotated Mermaid diagram:\n' + source, [file]);
   };
   const pick = (number: number) => { setSelected(number === latestNumber ? 0 : number); setBase(0); };
   const compare = (number: number) => { pick(number); setView('changes'); if (!wide) setHistoryOpen(false); };
@@ -567,10 +572,10 @@ function ArtifactDocument({ collectionId, artifactId, summary, collection, onBac
                   agentReference(artifact, '', 0, shown) + 'Work through the items marked todo in this revision. Check the latest version before starting each item and record completed work using the same item IDs.'
                 )}>{onDiscuss || (conversationId && onShowSession) ? 'Draft remaining tasks in chat' : 'Copy remaining tasks brief'}</button>}
               </div>}
-              <div key={`${artifact.id}:${shown}:${view}`} ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <ArtifactSource content={content ?? ''} language={structured ? 'json' : Preview ? 'html' : 'markdown'}
+              <DiagramAnnotation.Provider value={onDiscuss || (conversationId && onShowSession) ? annotateDiagram : undefined}><div key={`${artifact.id}:${shown}:${view}`} ref={documentRef} className="artifact-document">{reading === undefined ? <p role="status" className="module-empty">Loading v{shown}…</p> : view === 'source' ? <ArtifactSource content={content ?? ''} language={structured ? 'json' : Preview ? 'html' : 'markdown'}
                 version={shown} latest={latestNumber} editable={!!collection && collection.state !== 'deleted' && collection.state !== 'deleting' && !artifact.retired && !artifact.trackedPath} saving={republishing}
                 draft={sourceDraft} onDraft={setSourceDraft} onPick={setSelected}
-                onSave={(body, expectedVersion) => saveRevision(body, 'Saved a new version.', expectedVersion)}/> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : roadmap ? <RoadmapDocument plan={roadmap} headings={headings} scroller={scroller} onReviewShell={reviewShell}/> : <DocumentBody markdown={reading} sections={fieldDocument?.sections} headings={headings} scroller={scroller} onReviewShell={reviewShell}/>}</div>
+                onSave={(body, expectedVersion) => saveRevision(body, 'Saved a new version.', expectedVersion)}/> : artifact.kind === 'todo-list' && content ? <TodoList content={content} disabled={republishing || shown !== latestNumber || !!artifact.retired || !!artifact.trackedPath} onSave={body => void saveRevision(body, 'Updated TODO list.')}/> : Preview ? <Preview source={reading}/> : roadmap ? <RoadmapDocument plan={roadmap} headings={headings} scroller={scroller} onReviewShell={reviewShell}/> : <DocumentBody markdown={reading} sections={fieldDocument?.sections} headings={headings} scroller={scroller} onReviewShell={reviewShell}/>}</div></DiagramAnnotation.Provider>
             </div>
             {view === 'document' && outline.length > 0 && <aside className="doc-toc-rail"><TableOfContents entries={outline} active={active} scroller={scroller}/></aside>}
           </div>

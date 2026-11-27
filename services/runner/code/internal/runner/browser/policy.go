@@ -7,6 +7,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/net/idna"
 )
 
 // Site policy. The Runner decides which sites an agent may open without
@@ -20,7 +23,10 @@ var ErrBlocked = errors.New("blocked")
 // Origin is scheme://host[:port] of an http(s) URL, with the default port
 // left out, lower case.
 func Origin(u *url.URL) string {
-	host := strings.ToLower(u.Hostname())
+	host, err := asciiHostname(u.Hostname())
+	if err != nil {
+		return ""
+	}
 	port := u.Port()
 	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
 		port = ""
@@ -43,7 +49,7 @@ func Site(u *url.URL) string {
 // ParseURL accepts an absolute http or https URL an agent asked for. Anything
 // else (file:, javascript:, data:, a Lazybox origin) is refused with a reason
 // the agent can act on.
-func ParseURL(raw string, blockedHosts []string, loopbackPorts []int) (*url.URL, error) {
+func ParseURL(raw string, blockedHosts []string, loopbackPorts func() []int) (*url.URL, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, errors.New("a URL is required")
@@ -92,7 +98,10 @@ func ParseURL(raw string, blockedHosts []string, loopbackPorts []int) (*url.URL,
 // case. A host whose last label is a number but which
 // is no IPv4 address is refused, as a browser refuses it.
 func canonicalHost(host string) (string, error) {
-	host = strings.ToLower(strings.Trim(host, "[]"))
+	host, err := asciiHostname(strings.Trim(host, "[]"))
+	if err != nil {
+		return "", err
+	}
 	if strings.Contains(host, ":") {
 		if net.ParseIP(host) == nil {
 			return "", fmt.Errorf("%w: %s is not a valid address", ErrBlocked, host)
@@ -176,7 +185,7 @@ func ipv4Number(label string) (uint64, bool) {
 // checkHost refuses Lazybox's own addresses, loopback except a workspace
 // preview's port, and private networks. Names are checked as written; the
 // browser service also checks what they resolve to.
-func checkHost(u *url.URL, blockedHosts []string, loopbackPorts []int) error {
+func checkHost(u *url.URL, blockedHosts []string, loopbackPorts func() []int) error {
 	host, err := canonicalHost(u.Hostname())
 	if err != nil {
 		return err
@@ -194,7 +203,7 @@ func checkHost(u *url.URL, blockedHosts []string, loopbackPorts []int) error {
 		}
 	}
 	if isLoopbackName(host) {
-		for _, p := range loopbackPorts {
+		for _, p := range loopbackPorts() {
 			if fmt.Sprint(p) == port {
 				return nil
 			}
@@ -273,11 +282,34 @@ func privateIP(ip net.IP) bool {
 	return cgnat.Contains(ip)
 }
 
+// Browser URL parsing uses non-transitional UTS 46 without strict DNS label checks.
+var browserIDNA = idna.New(idna.MapForLookup(), idna.Transitional(false), idna.BidiRule(), idna.StrictDomainName(false), idna.CheckHyphens(false))
+
+func asciiHostname(host string) (string, error) {
+	if len(host) == utf8.RuneCountInString(host) {
+		return strings.ToLower(host), nil
+	}
+	ascii, err := browserIDNA.ToASCII(host)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid international hostname", ErrBlocked)
+	}
+	return strings.ToLower(ascii), nil
+}
+
+// Old settings may contain Unicode grant keys. Keep an unconvertible legacy
+// entry inert and removable; ParseURL still rejects it during navigation.
+func savedSiteName(name string) string {
+	if ascii, err := asciiHostname(name); err == nil {
+		return ascii
+	}
+	return name
+}
+
 // NormalizeSite validates an allow-list entry: a host (example.com, with an
 // optional :port) or a wildcard (*.example.com, which also covers
 // example.com). A pasted URL is reduced to its site.
 func NormalizeSite(entry string) (string, error) {
-	entry = strings.ToLower(strings.TrimSpace(entry))
+	entry = strings.TrimSpace(entry)
 	if strings.Contains(entry, "://") {
 		u, err := url.Parse(entry)
 		if err != nil || u.Host == "" {
@@ -295,6 +327,7 @@ func NormalizeSite(entry string) (string, error) {
 	if name == "" || strings.ContainsAny(name, "/*?#@ ") || len(entry) > 253 {
 		return "", fmt.Errorf("%q is not a site: use a host such as example.com or *.example.com", entry)
 	}
+	name = savedSiteName(name)
 	if !strings.Contains(name, ".") && name != "localhost" {
 		return "", fmt.Errorf("%q is not a site: use a full host name such as example.com", entry)
 	}
@@ -302,7 +335,7 @@ func NormalizeSite(entry string) (string, error) {
 		if wild {
 			return "", fmt.Errorf("%q: a wildcard site takes no port", entry)
 		}
-		return name + ":" + port, nil
+		return net.JoinHostPort(name, port), nil
 	}
 	if wild {
 		return "*." + name, nil
@@ -313,8 +346,8 @@ func NormalizeSite(entry string) (string, error) {
 // SiteMatches reports whether an allow-list entry covers the site of u.
 func SiteMatches(entry string, u *url.URL) bool {
 	if base, ok := strings.CutPrefix(entry, "*."); ok {
-		host := strings.ToLower(u.Hostname())
-		return host == base || strings.HasSuffix(host, "."+base)
+		host, err := canonicalHost(u.Hostname())
+		return err == nil && (host == base || strings.HasSuffix(host, "."+base))
 	}
 	return entry == Site(u)
 }

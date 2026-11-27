@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { browserRequestHeading, browserRequestOf, decisionRows, pageOrigin, type DecisionRow } from './browser-model';
 import { Icon } from './Icons';
-import { CardHead, editable, Kbd, useChatKeys, useInitialFocus } from './request-parts';
+import { CardHead, editable, focusDecision, Kbd, useChatKeys, useInitialFocus } from './request-parts';
 import type { RequestCardProps } from './RequestCards';
 
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
@@ -22,12 +22,12 @@ export function BrowserRequestCard({ request, api, onError, position, agentName 
   const [done, setDone] = useState('');
   const card = useRef<HTMLElement>(null);
   const busy = useRef(false);
-  const decide = async (row: DecisionRow, why = '') => {
+  const decide = async (row: Pick<DecisionRow, 'decision'> | { decision: 'browse_freely' }, why = '') => {
     if (busy.current) return;
     busy.current = true; setMode('sending');
     try {
       await api.decideBrowserRequest({ requestId: view.id, decision: row.decision, reason: why });
-      setDone(row.decision === 'deny' ? `Denied · ${agent} is told` : row.decision === 'workspace' ? `Allowed in this workspace · ${view.host}` : row.decision === 'conversation' ? `Allowed for this conversation · ${view.host}` : 'Allowed once');
+      setDone(row.decision === 'browse_freely' ? 'Full browser access enabled for this conversation' : row.decision === 'deny' ? `Denied · ${agent} is told` : row.decision === 'workspace_previews' ? 'Allowed registered localhost previews in this workspace' : row.decision === 'workspace' ? `Allowed in this workspace · ${view.host}` : row.decision === 'conversation' ? `Allowed for this conversation · ${view.host}` : 'Allowed once');
       setMode('done');
     } catch (e) { onError(String(e)); setMode(row.decision === 'deny' ? 'denying' : 'ask'); }
     finally { busy.current = false; }
@@ -48,11 +48,9 @@ export function BrowserRequestCard({ request, api, onError, position, agentName 
   useChatKeys(card, onKey);
   useInitialFocus(card);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.repeat || editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      const buttons = [...card.current!.querySelectorAll<HTMLButtonElement>('.decision-row:not(:disabled)')];
-      const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-      buttons[(at + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      focusDecision(event.currentTarget, event.key);
       event.preventDefault(); return;
     }
     if (onKey(event)) event.preventDefault();
@@ -67,7 +65,7 @@ export function BrowserRequestCard({ request, api, onError, position, agentName 
       <span className="mono" title={view.url}>{view.url}</span>
     </p>}
     {view.reason && <p className="repository-reason"><span>Why</span>{view.reason}</p>}
-    {view.kind === 'site' && view.permission === 'yolo' && <p className="browser-request-note"><Icon name="shield" size={12}/>Full access still asks before a new site. Allow sites in advance in Settings → Browser.</p>}
+    {view.kind === 'site' && view.permission === 'yolo' && <p className="browser-request-note"><Icon name="shield" size={12}/>Full access is on for files and commands. Choose how this conversation can browse.</p>}
     {view.kind === 'sign_in' && <p className="browser-request-note"><Icon name="lock" size={12}/>The form holds a password. {agent} never types passwords; this one was typed into the page. Allowing submits it once.</p>}
     {view.kind === 'download' && <p className="browser-request-note"><Icon name="download" size={12}/>The file is saved for {agent} to read. Nothing is opened or run.</p>}
     {mode === 'denying' || (mode === 'sending' && reason) ? <form className="deny-reason" onSubmit={event => { event.preventDefault(); deny(); }}>
@@ -85,6 +83,9 @@ export function BrowserRequestCard({ request, api, onError, position, agentName 
         <span className="decision-text"><span>{row.label}</span><small>{row.detail}</small></span>
         {keys && <Kbd>{row.key.toUpperCase()}</Kbd>}
       </button>)}
+      {view.kind === 'site' && <button type="button" className="decision-row" disabled={mode !== 'ask'} onClick={() => void decide({ decision: 'browse_freely' })}>
+        <span className="decision-text"><span>Allow and enable full browser access</span><small>Open new sites in this conversation without asking. Downloads and sign-ins still ask. Change this in the Agent browser menu.</small></span>
+      </button>}
     </div>}
   </article>;
 }

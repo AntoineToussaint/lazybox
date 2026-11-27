@@ -60,6 +60,8 @@ test('a browser request reads as what the agent wants, with the choices it offer
   assert.equal(site.host, 'docs.example.com');
   assert.equal(browserRequestHeading(site, 'Claude'), 'Claude wants to open docs.example.com');
   assert.deepEqual(decisionRows(site, 'Claude').map(r => [r.decision, r.key]), [['once', 'y'], ['conversation', 'c'], ['workspace', 'a'], ['deny', 'n']]);
+  const preview = browserRequestOf(event({ kind: 'site', url: 'http://localhost:50471/auth/sign-in', collectionId: 'ws-1' }));
+  assert.equal(decisionRows(preview, 'Codex').find(row => row.key === 'a')?.decision, 'workspace_previews');
   const download = browserRequestOf(event({ id: 'b2', kind: 'download', url: 'https://example.com/r.pdf', origin: 'https://example.com', fileName: 'report.pdf' }));
   assert.equal(browserRequestHeading(download, 'Claude'), 'Claude wants to download report.pdf');
   assert.deepEqual(decisionRows(download, 'Claude').map(r => r.decision), ['once', 'deny']);

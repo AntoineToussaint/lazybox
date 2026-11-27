@@ -7,7 +7,7 @@ export const isSettingsUpdate = (tool: unknown) => tool === 'mcp__lazybox_settin
 
 const fields: Record<string, { label: string; values?: Record<string, string> }> = {
   naming: { label: 'Suggested workspace names', values: { repositories: 'Repository names', generated: 'Memorable generated names' } },
-  permission: { label: 'Default permissions', values: { '': 'Current CLI settings', ask: 'Ask for approval', 'read-only': 'Read only', yolo: 'Full access · no approval prompts' } },
+  permission: { label: 'Default permissions', values: { '': 'Current CLI settings', ask: 'Ask for approval', 'read-only': 'Read only', yolo: 'Full access · edit files and run commands' } },
   context: { label: 'Lazybox context for every new agent' },
   claudeContext: { label: 'Additional Claude context' },
   codexContext: { label: 'Additional Codex context' },

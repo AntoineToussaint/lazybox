@@ -94,3 +94,5 @@ Prompt Details shows the acceptance time, last provider-reported model and last 
 For Codex replies with a turn boundary, **Ask a side question…** opens a separate conversation through that turn. The question goes to the child. The dialog identifies whether its files come from a checkpoint or the current workspace.
 
 The Inbox sends a reaction for the displayed observation and destination. Updated Runners store the acknowledgement so another device or a retry can retrieve it. If the Runner stops between dispatch and saving its receipt, it reports the outcome as unknown and prevents an automatic second dispatch. Feedback requiring a person stays in the Inbox until dismissed. Dismissals from older clients without a Runner and observation identity may appear again.
+
+Browser, repository and conversation requests offer a separate conversation Full access action when the agent supports it. The original request remains available to answer. Browser site requests also offer full browser access for navigation in that conversation.

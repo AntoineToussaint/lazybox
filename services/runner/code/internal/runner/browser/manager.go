@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -228,7 +229,13 @@ func (m *Manager) browserLocked(c Caller) *conv {
 		s := m.saved[c.Conversation]
 		b = &conv{id: c.Conversation, status: "closed", controller: "agent", freely: s.Freely, stopped: s.Stopped, lastURL: s.LastURL, granted: map[string]bool{}, watchers: map[*Watcher]struct{}{}, changed: make(chan struct{})}
 		for _, site := range s.Granted {
-			b.granted[site] = true
+			// The stored key has no scheme. Preserve its port, even 80 or 443.
+			name, port, hasPort := strings.Cut(site, ":")
+			key := savedSiteName(name)
+			if hasPort {
+				key += ":" + port
+			}
+			b.granted[key] = true
 		}
 		if b.stopped {
 			b.status, b.problem = "stopped", "You stopped this browser."
@@ -249,18 +256,23 @@ func (m *Manager) browserLocked(c Caller) *conv {
 }
 
 // persistLocked records b's lasting choices.
-func (m *Manager) persistLocked(b *conv) {
+func (m *Manager) persistLocked(b *conv) error {
 	s := savedConv{Freely: b.freely, Stopped: b.stopped, LastURL: b.lastURL}
 	for site := range b.granted {
 		s.Granted = append(s.Granted, site)
 	}
 	slices.Sort(s.Granted)
+	next := maps.Clone(m.saved)
 	if s.Freely || s.Stopped || s.LastURL != "" || len(s.Granted) > 0 {
-		m.saved[b.id] = s
+		next[b.id] = s
 	} else {
-		delete(m.saved, b.id)
+		delete(next, b.id)
 	}
-	_ = writePrivate(filepath.Join(m.cfg.Root, "conversations.json"), m.saved)
+	if err := writePrivate(filepath.Join(m.cfg.Root, "conversations.json"), next); err != nil {
+		return err
+	}
+	m.saved = next
+	return nil
 }
 
 // Forget closes a deleted conversation's browser and drops its records.
@@ -642,6 +654,7 @@ func (m *Manager) pageLocked(b *conv, page PageState) {
 func (m *Manager) serve(p *jsonl.Process, msg jsonl.Message) {
 	var r struct {
 		Browser  string `json:"browser"`
+		Port     int    `json:"port"`
 		URL      string `json:"url"`
 		Origin   string `json:"origin"`
 		FileName string `json:"fileName"`
@@ -652,6 +665,10 @@ func (m *Manager) serve(p *jsonl.Process, msg jsonl.Message) {
 	}
 	m.mu.Lock()
 	b := m.browsers[r.Browser]
+	var workspace string
+	if b != nil {
+		workspace = b.workspace
+	}
 	m.mu.Unlock()
 	if b == nil {
 		_ = p.Reply(msg.ID, map[string]any{"allow": false, "reason": "no such browser"})
@@ -659,10 +676,13 @@ func (m *Manager) serve(p *jsonl.Process, msg jsonl.Message) {
 	}
 	ctx := m.ctx
 	switch msg.Method {
+	case "preview_port":
+		allowed := r.Port > 0 && r.Port <= 65535 && slices.Contains(m.cfg.LoopbackPorts(ctx, workspace), r.Port)
+		_ = p.Reply(msg.ID, map[string]any{"allow": allowed})
 	case "site":
-		u, err := url.Parse(r.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-			_ = p.Reply(msg.ID, map[string]any{"allow": false, "reason": "not a web page"})
+		u, err := m.parseURL(ctx, workspace, r.URL)
+		if err != nil {
+			_ = p.Reply(msg.ID, map[string]any{"allow": false, "reason": err.Error()})
 			return
 		}
 		// The service asks only about navigations the person did not make: one
@@ -775,8 +795,15 @@ func (m *Manager) profileDir(b *conv) (string, error) {
 
 // allowedLocked: the agent may open u without asking.
 func (m *Manager) allowedLocked(b *conv, u *url.URL) bool {
+	return b.once == Origin(u) || m.siteGrantedLocked(b, u)
+}
+
+func (m *Manager) siteGrantedLocked(b *conv, u *url.URL) bool {
 	s := &m.settings.current
-	if s.DefaultPermission == PermissionAllow || b.freely || b.once == Origin(u) || b.granted[Site(u)] {
+	if s.DefaultPermission == PermissionAllow || b.freely || b.granted[Site(u)] {
+		return true
+	}
+	if strings.ToLower(u.Hostname()) == "localhost" && slices.Contains(s.WorkspaceSites[b.workspace], localhostPreviews) {
 		return true
 	}
 	for _, entry := range append(slices.Clone(s.AllowedSites), s.WorkspaceSites[b.workspace]...) {
@@ -796,6 +823,12 @@ func (m *Manager) ask(ctx context.Context, b *conv, r Request) answer {
 	r.Created = m.cfg.Now()
 	m.mu.Lock()
 	r.Session, r.Conversation, r.Workspace, r.Permission, r.Agent = b.session, b.id, b.workspace, b.permission, b.agent
+	if r.Kind == "site" {
+		if u, err := url.Parse(r.URL); err == nil && m.siteGrantedLocked(b, u) {
+			m.mu.Unlock()
+			return answer{allow: true}
+		}
+	}
 	count := 0
 	for _, other := range m.requests {
 		if other.conv == b.id {
@@ -841,6 +874,34 @@ func (m *Manager) denyLocked(conversation, reason string) {
 	}
 }
 
+func (m *Manager) setFreelyLocked(b *conv, freely bool) error {
+	previous := b.freely
+	b.freely = freely
+	if err := m.persistLocked(b); err != nil {
+		b.freely = previous
+		return err
+	}
+	return nil
+}
+
+// resolveSiteGrantsLocked wakes visits already waiting when the person expands a grant.
+func (m *Manager) resolveSiteGrantsLocked() {
+	for id, request := range m.requests {
+		if request.Kind != "site" {
+			continue
+		}
+		b := m.browsers[request.conv]
+		u, err := url.Parse(request.URL)
+		if b != nil && err == nil && m.siteGrantedLocked(b, u) {
+			delete(m.requests, id)
+			request.answer <- answer{allow: true}
+			m.changedLocked(b)
+		}
+	}
+}
+
+const localhostPreviews = "localhost:*"
+
 // Decide answers a request: a site once, for the conversation, always for the
 // workspace, or deny; a download or a sign-in once or deny.
 func (m *Manager) Decide(id, decision, reason string) (State, error) {
@@ -852,8 +913,12 @@ func (m *Manager) Decide(id, decision, reason string) (State, error) {
 	}
 	b := m.browsers[r.conv]
 	valid := []string{"once", "deny"}
+	u, _ := url.Parse(r.URL)
 	if r.Kind == "site" {
-		valid = append(valid, "conversation", "workspace")
+		if b != nil && b.workspace != "" && u != nil && strings.ToLower(u.Hostname()) == "localhost" {
+			valid = append(valid, "workspace_previews")
+		}
+		valid = append(valid, "conversation", "workspace", "browse_freely")
 	}
 	if !slices.Contains(valid, decision) {
 		return State{}, fmt.Errorf("decision must be one of %s for a %s request", strings.Join(valid, ", "), r.Kind)
@@ -861,25 +926,36 @@ func (m *Manager) Decide(id, decision, reason string) (State, error) {
 	if len([]rune(reason)) > 1000 {
 		return State{}, errors.New("reason is too long")
 	}
-	u, _ := url.Parse(r.URL)
 	if r.Kind == "site" && u != nil && b != nil {
+		if decision == "workspace" && b.workspace == "" {
+			decision = "conversation"
+		}
 		switch decision {
+		case "browse_freely":
+			if err := m.setFreelyLocked(b, true); err != nil {
+				return State{}, err
+			}
 		case "once":
 			b.once = r.Origin
 		case "conversation":
-			b.granted[Site(u)] = true
-			m.persistLocked(b)
-		case "workspace":
-			if b.workspace == "" {
-				b.granted[Site(u)] = true
-				m.persistLocked(b)
-				break
+			site := Site(u)
+			if !b.granted[site] {
+				b.granted[site] = true
+				if err := m.persistLocked(b); err != nil {
+					delete(b.granted, site)
+					return State{}, err
+				}
 			}
+		case "workspace", "workspace_previews":
 			if _, err := m.settings.update(func(s *Settings) {
 				if s.WorkspaceSites == nil {
 					s.WorkspaceSites = map[string][]string{}
 				}
-				s.WorkspaceSites[b.workspace] = append(s.WorkspaceSites[b.workspace], Site(u))
+				site := Site(u)
+				if decision == "workspace_previews" {
+					site = localhostPreviews
+				}
+				s.WorkspaceSites[b.workspace] = append(s.WorkspaceSites[b.workspace], site)
 			}); err != nil {
 				return State{}, err
 			}
@@ -887,6 +963,9 @@ func (m *Manager) Decide(id, decision, reason string) (State, error) {
 	}
 	delete(m.requests, id)
 	r.answer <- answer{allow: decision != "deny", reason: strings.TrimSpace(reason)}
+	if r.Kind == "site" && decision != "once" && decision != "deny" {
+		m.resolveSiteGrantsLocked()
+	}
 	if b == nil {
 		return State{Conversation: r.conv}, nil
 	}

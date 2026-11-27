@@ -275,13 +275,17 @@ func (m *Manager) run(ctx context.Context, b *conv, action string, a toolArgs) (
 	return r.Text, r.Image, nil
 }
 
+func (m *Manager) parseURL(ctx context.Context, workspace, raw string) (*url.URL, error) {
+	return ParseURL(raw, m.cfg.BlockedHosts, func() []int { return m.cfg.LoopbackPorts(ctx, workspace) })
+}
+
 // permitted checks a URL the agent asked for and, for a site not allowed
 // yet, asks the person.
 func (m *Manager) permitted(ctx context.Context, b *conv, raw, reason string) (*url.URL, error) {
 	m.mu.Lock()
 	workspace := b.workspace
 	m.mu.Unlock()
-	u, err := ParseURL(raw, m.cfg.BlockedHosts, m.cfg.LoopbackPorts(ctx, workspace))
+	u, err := m.parseURL(ctx, workspace, raw)
 	if err != nil {
 		if errors.Is(err, ErrBlocked) {
 			m.mu.Lock()
@@ -366,10 +370,20 @@ func (m *Manager) ensureOpen(ctx context.Context, b *conv) error {
 // act sends one action to the service and records the page it left.
 func (m *Manager) act(ctx context.Context, b *conv, params map[string]any) (actResult, error) {
 	m.mu.Lock()
-	p := m.proc
+	p, workspace := m.proc, b.workspace
 	m.mu.Unlock()
 	if p == nil {
 		return actResult{}, errors.New("the browser closed; open it again with browser_open")
+	}
+	// A preview can restart on another port while the Chromium page stays open.
+	if raw, ok := params["url"].(string); ok {
+		if u, err := url.Parse(raw); err == nil && isLoopbackName(strings.ToLower(u.Hostname())) {
+			ports := m.cfg.LoopbackPorts(ctx, workspace)
+			if ports == nil {
+				return actResult{}, errors.New("could not refresh workspace preview ports; retry the navigation")
+			}
+			params["previewPorts"] = ports
+		}
 	}
 	call, cancel := context.WithTimeout(ctx, actTimeout)
 	defer cancel()
@@ -477,8 +491,13 @@ func (m *Manager) Control(ctx context.Context, c Caller, action, raw string) (St
 	case "browse_freely", "ask_sites":
 		freely := action == "browse_freely"
 		if b.freely != freely {
-			b.freely = freely
-			m.persistLocked(b)
+			if err := m.setFreelyLocked(b, freely); err != nil {
+				m.mu.Unlock()
+				return State{}, err
+			}
+			if freely {
+				m.resolveSiteGrantsLocked()
+			}
 			summary := agentName + " opens any site in this conversation"
 			if !freely {
 				summary = agentName + " asks before each new site again"
@@ -495,7 +514,7 @@ func (m *Manager) Control(ctx context.Context, c Caller, action, raw string) (St
 		params := map[string]any{"browser": b.id, "actor": "person", "action": action}
 		summary := map[string]string{"back": "You went back", "forward": "You went forward", "reload": "You reloaded the page"}[action]
 		if action == "navigate" {
-			u, err := ParseURL(raw, m.cfg.BlockedHosts, m.cfg.LoopbackPorts(ctx, workspace))
+			u, err := m.parseURL(ctx, workspace, raw)
 			if err != nil {
 				return State{}, err
 			}

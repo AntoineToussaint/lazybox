@@ -115,7 +115,7 @@ export const mouseButton = (button: number): 'left' | 'middle' | 'right' => butt
 // ───────────── Requests ─────────────
 
 export type BrowserRequestKind = 'site' | 'download' | 'sign_in';
-export type BrowserRequestView = { id: string; kind: BrowserRequestKind; url: string; origin: string; host: string; reason: string; fileName: string; permission: string; agentName: string };
+export type BrowserRequestView = { workspace: string; id: string; kind: BrowserRequestKind; url: string; origin: string; host: string; reason: string; fileName: string; permission: string; agentName: string };
 const text = (value: unknown) => typeof value === 'string' ? value : '';
 /** A pending "browser_request" entry, its provider data read. */
 export function browserRequestOf(request: AgentEvent): BrowserRequestView {
@@ -123,7 +123,7 @@ export function browserRequestOf(request: AgentEvent): BrowserRequestView {
   const kind = (['site', 'download', 'sign_in'] as const).find(k => k === data.kind) || 'site';
   const url = text(data.url), origin = text(data.origin);
   const host = pageOrigin(origin || url)?.host || origin || url;
-  return { id: text(data.id) || request.requestId, kind, url, origin, host, reason: text(data.reason), fileName: text(data.fileName), permission: text(data.permission), agentName: text(data.agentName) };
+  return { workspace: text(data.collectionId), id: text(data.id) || request.requestId, kind, url, origin, host, reason: text(data.reason), fileName: text(data.fileName), permission: text(data.permission), agentName: text(data.agentName) };
 }
 /** The request in one line, for the inbox and the status: "Open example.com". */
 export function browserRequestSummary(request: AgentEvent): string {
@@ -138,7 +138,7 @@ export function browserRequestHeading(view: BrowserRequestView, agent: string): 
   if (view.kind === 'sign_in') return `${agent} wants to sign in on ${view.host || 'this site'}`;
   return `${agent} wants to open ${view.host || 'a site'}`;
 }
-export type BrowserDecision = 'once' | 'conversation' | 'workspace' | 'deny';
+export type BrowserDecision = 'once' | 'conversation' | 'workspace' | 'workspace_previews' | 'deny';
 export type DecisionRow = { decision: BrowserDecision; label: string; detail: string; key: string; tone: 'allow' | 'always' | 'deny' };
 /** The choices a request offers, with their keys. */
 export function decisionRows(view: BrowserRequestView, agent: string): DecisionRow[] {
@@ -149,7 +149,9 @@ export function decisionRows(view: BrowserRequestView, agent: string): DecisionR
   return [
     { decision: 'once', label: 'Allow once', detail: `This visit to ${host}`, key: 'y', tone: 'allow' },
     { decision: 'conversation', label: 'Allow for this conversation', detail: `${host}, until this conversation ends`, key: 'c', tone: 'always' },
-    { decision: 'workspace', label: 'Always allow in this workspace', detail: `Every conversation here; remove it in Settings → Browser`, key: 'a', tone: 'always' },
+    view.workspace && /^localhost(?::[0-9]+)?$/.test(host)
+      ? { decision: 'workspace_previews', label: 'Always allow workspace previews', detail: 'Registered localhost previews in this workspace, even when their ports change', key: 'a', tone: 'always' }
+      : { decision: 'workspace', label: 'Always allow in this workspace', detail: `Every conversation here; remove it in Settings → Browser`, key: 'a', tone: 'always' },
     deny,
   ];
 }

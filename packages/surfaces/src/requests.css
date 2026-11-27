@@ -140,3 +140,6 @@ button.danger:hover{background:var(--danger-line)}
 .start-edit .row{display:flex;gap:8px;justify-content:flex-end;align-items:center}
 .start-edit-hint{margin-right:auto;color:var(--text-subtle)}
 @media (max-width:640px){.start-edit-hint{display:none}}
+
+.request-access-action { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin-block: .5rem 1rem; }
+.request-access-action small { color: var(--text-muted); }

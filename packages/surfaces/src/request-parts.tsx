@@ -20,7 +20,7 @@ export function useChatKeys(card: React.RefObject<HTMLElement | null>, onKey: (e
   useEffect(() => {
     const listen = (event: KeyboardEvent) => {
       const node = card.current;
-      if (!node || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || editable(event.target)) return;
+      if (!node || event.repeat || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || editable(event.target)) return;
       if (node.contains(event.target as Node) || document.querySelector('dialog[open]')) return;
       const chat = node.closest('.messages');
       const inChat = event.target === document.body ? front.current() : !!chat && chat.contains(event.target as Node);
@@ -50,6 +50,14 @@ export function useInitialFocus(card: React.RefObject<HTMLElement | null>, field
     if (node.closest('.messages')?.querySelector('.request') !== node) return;
     ((field && node.querySelector<HTMLElement>(field)) || node).focus({ preventScroll: true });
   }, [card, field]);
+}
+
+/** Cycle the enabled decisions, starting at the nearest end when the card has focus. */
+export function focusDecision(card: HTMLElement, key: 'ArrowUp' | 'ArrowDown') {
+  const choices = [...card.querySelectorAll<HTMLButtonElement>('.decision-row:not(:disabled)')];
+  const current = choices.indexOf(document.activeElement as HTMLButtonElement);
+  if (key === 'ArrowDown') (choices[current + 1] ?? choices[0])?.focus();
+  else (choices[current - 1] ?? choices.at(-1))?.focus();
 }
 
 /** ↓ or ↑ on the card itself: its first or last choice, as Tab would reach them. */

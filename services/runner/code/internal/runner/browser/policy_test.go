@@ -32,11 +32,12 @@ func TestParseURLJudgesHostsAsABrowserReadsThem(t *testing.T) {
 		"http://08/",
 		"http://example.0x/",
 	} {
-		if u, err := ParseURL(raw, blocked, []int{5173}); !errors.Is(err, ErrBlocked) {
+		if u, err := ParseURL(raw, blocked, func() []int { return []int{5173} }); !errors.Is(err, ErrBlocked) {
 			t.Errorf("ParseURL(%s) = %v, %v; want it refused", raw, u, err)
 		}
 	}
 	for raw, want := range map[string]string{
+		"https://İ.example.com/":     "https://xn--i-9bb.example.com/",
 		"https://example.com/":       "https://example.com/",
 		"https://deadbeef/":          "https://deadbeef/",
 		"https://example.com./":      "https://example.com./",
@@ -47,9 +48,40 @@ func TestParseURLJudgesHostsAsABrowserReadsThem(t *testing.T) {
 		"https://134744072/":         "https://8.8.8.8/",
 		"https://[2606:4700::1111]/": "https://[2606:4700::1111]/",
 	} {
-		u, err := ParseURL(raw, blocked, []int{5173})
+		u, err := ParseURL(raw, blocked, func() []int { return []int{5173} })
 		if err != nil || u.String() != want {
 			t.Errorf("ParseURL(%s) = %v, %v; want %s", raw, u, err, want)
 		}
+	}
+}
+
+func TestPublicSiteSkipsPreviewLookup(t *testing.T) {
+	_, err := ParseURL("https://example.com/", nil, func() []int {
+		t.Fatal("public site queried workspace preview ports")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInternationalSiteGrantMatchesNavigation(t *testing.T) {
+	for entry, want := range map[string]string{
+		"example.123":             "example.123",
+		"[::ffff:127.0.0.1]:3000": "[::ffff:127.0.0.1]:3000",
+		"[::ffff:127.0.0.1]":      "[::ffff:127.0.0.1]",
+		"é-.example.com":          "xn----9fa.example.com",
+	} {
+		if got, err := NormalizeSite(entry); err != nil || got != want {
+			t.Errorf("%q normalized to %q, %v", entry, got, err)
+		}
+	}
+	raw := "https://İ.example.com/"
+	grant, err := NormalizeSite(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant != "xn--i-9bb.example.com" || !SiteMatches(grant, mustURL(raw)) || SiteMatches(grant, mustURL("https://i.example.com/")) {
+		t.Fatalf("incorrect site grant %q", grant)
 	}
 }

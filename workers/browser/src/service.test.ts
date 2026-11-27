@@ -12,7 +12,7 @@ import type { ActParams, Policy } from './protocol.js';
 class FakeRunner implements Runner {
   asks: { method: string; params: any }[] = [];
   events: { method: string; params: any }[] = [];
-  answers: Record<string, (params: any) => unknown> = { site: () => ({ allow: true }), download: () => ({ allow: false }), sign_in: () => ({ allow: false }) };
+  answers: Record<string, (params: any) => unknown> = { preview_port: () => ({ allow: true }), site: () => ({ allow: true }), download: () => ({ allow: false }), sign_in: () => ({ allow: false }) };
   request(method: string, params: unknown) { this.asks.push({ method, params }); return Promise.resolve(this.answers[method]?.(params)); }
   emit(method: string, params: unknown) { this.events.push({ method, params }); }
   asked(method: string) { return this.asks.filter(a => a.method === method).map(a => a.params); }

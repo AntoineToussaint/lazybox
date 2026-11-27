@@ -21,6 +21,10 @@ test('the JSON-lines protocol: open, ask the Runner, act, stream frames, refuse,
     const line = JSON.parse(text);
     if (line.method && line.id) {
       // The service asks the Runner: allow the fixture site.
+      if (line.method === 'preview_port') {
+        write({ id: line.id, result: { allow: line.params.port === sites.ports.home } });
+        return;
+      }
       asks.push(line);
       write({ id: line.id, result: { allow: line.params.origin === sites.home } });
     } else if (line.method) events.push(line);

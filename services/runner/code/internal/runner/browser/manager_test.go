@@ -691,3 +691,148 @@ func mustURL(raw string) *url.URL {
 	}
 	return u
 }
+
+func TestWorkspacePreviewGrantSurvivesPortChange(t *testing.T) {
+	port := 5173
+	m := newManager(t, func(c *Config) {
+		c.LoopbackPorts = func(context.Context, string) []int { return []int{port} }
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, err := call(t, m, alice, "browser_navigate", map[string]string{"url": "http://LOCALHOST:5173/"})
+		done <- err
+	}()
+	r := waitRequest(t, m, alice.Conversation)
+	if _, err := m.Decide(r.ID, "workspace_previews", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	port = 5174
+	restarted, err := New(m.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	bob := Caller{Session: "exec-b", Conversation: "conv-b", Workspace: alice.Workspace, Agent: "Codex"}
+	if _, err := call(t, restarted, bob, "browser_navigate", map[string]string{"url": "http://LocalHost:5174/new"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := call(t, restarted, bob, "browser_navigate", map[string]string{"url": "http://localhost:5173/old"}); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("unregistered port: %v", err)
+	}
+}
+
+func TestFullBrowserAccessResolvesWaitingSitesOnly(t *testing.T) {
+	m := newManager(t)
+	m.mu.Lock()
+	b := m.browserLocked(alice)
+	m.mu.Unlock()
+	answers := make(chan answer, 3)
+	for _, request := range []Request{{Kind: "site", URL: "https://one.example"}, {Kind: "site", URL: "https://two.example"}, {Kind: "sign_in", URL: "https://one.example"}} {
+		go func() { answers <- m.ask(context.Background(), b, request) }()
+	}
+	var site, signin string
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		count := len(m.requests)
+		for id, r := range m.requests {
+			if r.Kind == "site" {
+				site = id
+			} else {
+				signin = id
+			}
+		}
+		m.mu.Unlock()
+		if count == 3 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := m.Decide(site, "browse_freely", ""); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case a := <-answers:
+			if !a.allow {
+				t.Fatal(a.reason)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("site approval left another visit waiting")
+		}
+	}
+	if _, err := m.Decide(signin, "browse_freely", ""); err == nil {
+		t.Fatal("sign-in accepted a navigation grant")
+	}
+	if _, err := m.Decide(signin, "deny", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFailedConversationGrantCanBeRetried(t *testing.T) {
+	m := newManager(t)
+	m.mu.Lock()
+	b := m.browserLocked(alice)
+	m.mu.Unlock()
+	done := make(chan answer, 1)
+	go func() { done <- m.ask(context.Background(), b, Request{Kind: "site", URL: "https://docs.example/"}) }()
+	r := waitRequest(t, m, alice.Conversation)
+	path := filepath.Join(m.cfg.Root, "conversations.json")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, choice := range []string{"conversation", "browse_freely"} {
+		if _, err := m.Decide(r.ID, choice, ""); err == nil {
+			t.Fatal("reported success after failed save", choice)
+		}
+		m.mu.Lock()
+		granted := m.siteGrantedLocked(b, mustURL(r.URL))
+		m.mu.Unlock()
+		if granted {
+			t.Fatal("failed save left permission enabled", choice)
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Decide(r.ID, "browse_freely", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !(<-done).allow {
+		t.Fatal("retry failed")
+	}
+}
+
+func TestLegacyUnicodeConversationGrant(t *testing.T) {
+	m := newManager(t)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.saved[alice.Conversation] = savedConv{Granted: []string{"bücher.example:80"}}
+	b := m.browserLocked(alice)
+	if !m.allowedLocked(b, mustURL("https://xn--bcher-kva.example:80/")) || m.allowedLocked(b, mustURL("https://xn--bcher-kva.example/")) {
+		t.Fatal("legacy site grant lost its hostname or port")
+	}
+}
+
+func TestPreviewRefreshFailureStopsBeforeWorkerNavigation(t *testing.T) {
+	m := newManager(t, func(c *Config) {
+		c.LoopbackPorts = func(context.Context, string) []int { return nil }
+	})
+	ctx := context.Background()
+	m.mu.Lock()
+	b := m.browserLocked(alice)
+	m.mu.Unlock()
+	if err := m.ensureOpen(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	params := map[string]any{"action": "navigate", "browser": b.id, "url": "http://localhost:5173"}
+	if _, err := m.act(ctx, b, params); err == nil || !strings.Contains(err.Error(), "refresh workspace preview ports") {
+		t.Fatalf("failed refresh returned %v", err)
+	}
+	if _, exists := params["previewPorts"]; exists {
+		t.Fatal("failed refresh supplied a replacement policy")
+	}
+}

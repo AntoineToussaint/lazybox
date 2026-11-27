@@ -1,5 +1,5 @@
 use crate::Entry;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 #[derive(Deserialize)]
@@ -20,63 +20,30 @@ where
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SnippetAction {
+enum SnippetAction {
     DeepReview,
     FixAll,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Snippet {
+#[derive(Deserialize)]
+struct Snippet {
     #[serde(default)]
-    pub description: String,
+    description: String,
     #[serde(default)]
-    pub category: String,
-    pub body: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skill: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_next",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub next: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<SnippetAction>,
-    #[serde(skip)]
-    pub origin: SnippetOrigin,
+    category: String,
+    body: String,
+    skill: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_next")]
+    next: Vec<String>,
+    // Validate authored workflow actions even though the picker only exports text.
+    #[serde(rename = "action")]
+    _action: Option<SnippetAction>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SnippetOrigin {
-    #[default]
-    Unknown,
-
-    Global,
-    Repo,
-}
-
-impl SnippetOrigin {
-    pub fn label(self) -> &'static str {
-        match self {
-            SnippetOrigin::Global => "global",
-            SnippetOrigin::Repo => "repo",
-            SnippetOrigin::Unknown => "",
-        }
-    }
-}
 impl Snippet {
-    pub fn normalize_skill(&mut self) {
-        self.skill = self.skill.take().and_then(|name| {
-            let trimmed = name.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        });
-    }
-
-    pub fn normalize_next(&mut self, key: &str) {
+    fn normalize_next(&mut self, key: &str) {
         let mut seen: Vec<String> = Vec::with_capacity(self.next.len());
         for target in std::mem::take(&mut self.next) {
             let trimmed = target.trim();
@@ -88,8 +55,13 @@ impl Snippet {
         self.next = seen;
     }
 
-    pub fn dispatch_body(&self) -> String {
-        match &self.skill {
+    fn delivery_body(&self) -> String {
+        match self
+            .skill
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
             None => self.body.clone(),
             Some(skill) => {
                 let body = self.body.trim();
@@ -101,12 +73,8 @@ impl Snippet {
             }
         }
     }
-
-    pub fn delivery_body(&self) -> String {
-        self.dispatch_body()
-    }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Deserialize, Default)]
 #[serde(default)]
 struct SnippetsFile {
     snippets: BTreeMap<String, Snippet>,
@@ -119,11 +87,8 @@ pub fn load(profile: &Path, directory: &Path) -> Result<Vec<Entry>, Box<dyn std:
         .map(|entry| (entry.key.clone(), entry))
         .collect();
     for (path, origin) in [
-        (profile.join("snippets.yaml"), SnippetOrigin::Global),
-        (
-            directory.join(".lazybox/snippets.yaml"),
-            SnippetOrigin::Repo,
-        ),
+        (profile.join("snippets.yaml"), "global"),
+        (directory.join(".lazybox/snippets.yaml"), "repo"),
     ] {
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
@@ -132,7 +97,6 @@ pub fn load(profile: &Path, directory: &Path) -> Result<Vec<Entry>, Box<dyn std:
         };
         let overrides: SnippetsFile = serde_yaml::from_str(&raw)?;
         for (key, mut snippet) in overrides.snippets {
-            snippet.normalize_skill();
             snippet.normalize_next(&key);
             let body = snippet.delivery_body();
             entries.insert(
@@ -143,10 +107,81 @@ pub fn load(profile: &Path, directory: &Path) -> Result<Vec<Entry>, Box<dyn std:
                     category: snippet.category,
                     description: snippet.description,
                     next: snippet.next,
-                    origin: origin.label().into(),
+                    origin: origin.into(),
                 },
             );
         }
     }
     Ok(entries.into_values().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn bundled_entries_have_bodies_and_origins() {
+        let root = tempdir().unwrap();
+        let shipped: Vec<Entry> = serde_yaml::from_str(include_str!("../builtin.yaml")).unwrap();
+        let loaded = load(root.path(), root.path()).unwrap();
+        assert!(!shipped.is_empty());
+        assert_eq!(shipped.len(), loaded.len());
+        for (expected, actual) in shipped.iter().zip(loaded) {
+            assert_eq!(actual.key, expected.key);
+            assert_eq!(actual.body, expected.body);
+            assert!(!actual.body.trim().is_empty());
+            assert_eq!(actual.origin, "built-in");
+        }
+    }
+
+    #[test]
+    fn workspace_overrides_profile_and_profile_overrides_builtins() {
+        let root = tempdir().unwrap();
+        let profile = root.path();
+        let repo = root.path().join("workspace");
+        fs::create_dir_all(repo.join(".lazybox")).unwrap();
+        fs::write(
+            profile.join("snippets.yaml"),
+            "snippets:\n  adr: {body: global}\n",
+        )
+        .unwrap();
+        let adr = || {
+            load(profile, &repo)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.key == "adr")
+                .unwrap()
+        };
+        assert_eq!(
+            (adr().origin, adr().body),
+            ("global".into(), "global".into())
+        );
+        fs::write(
+            repo.join(".lazybox/snippets.yaml"),
+            "snippets:\n  adr: {body: ' do it ', skill: ' audit ', next: [' pr ', adr, '', pr]}\n",
+        )
+        .unwrap();
+        let entry = adr();
+        assert_eq!(entry.origin, "repo");
+        assert_eq!(
+            entry.body,
+            "Use the `audit` skill to complete this task:\n\ndo it"
+        );
+        assert_eq!(entry.next, ["pr"]);
+    }
+
+    #[test]
+    fn invalid_layers_surface_errors() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("snippets.yaml");
+        for yaml in ["snippets: [", "snippets: {a: {body: a, action: typo}}"] {
+            fs::write(&file, yaml).unwrap();
+            assert!(load(dir.path(), dir.path()).is_err());
+        }
+        fs::remove_file(&file).unwrap();
+        fs::create_dir(&file).unwrap();
+        assert!(load(dir.path(), dir.path()).is_err());
+    }
 }

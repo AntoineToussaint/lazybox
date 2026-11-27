@@ -2,7 +2,7 @@ import { createServer, request as httpRequest, type IncomingHttpHeaders, type Se
 import { connect, isIP, type AddressInfo, type Socket } from 'node:net';
 import { lookup } from 'node:dns/promises';
 import type { Policy } from './protocol.js';
-import { bareHost, isLoopbackName, judgeAddress, type Verdict } from './policy.js';
+import { bareHost, isLoopbackAddress, isLoopbackName, judgeAddress, type Verdict } from './policy.js';
 
 /**
  * Every connection an agent browser makes goes through this loopback proxy
@@ -107,7 +107,7 @@ export class GateProxy {
     }
     const judged = verdict(address);
     if (!judged.allow) return this.refuse(host, port, judged.reason);
-    if (isLoopbackName(address) && !await this.previewActive(port).catch(() => false)) {
+    if (isLoopbackAddress(address) && !await this.previewActive(port).catch(() => false)) {
       return this.refuse(host, port, 'workspace preview is no longer available');
     }
     return { ok: true, address };

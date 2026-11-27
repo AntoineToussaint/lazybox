@@ -281,6 +281,10 @@ try {
   await row.locator('.workspace-link').click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Clone workspace…' }).click();
   const workspace = page.getByRole('dialog', { name: 'Clone workspace', exact: true });
+  const selectedRepos = workspace.getByRole('region', { name: 'Selected repositories', exact: true });
+  const unselectedRepos = workspace.getByRole('region', { name: 'Unselected repositories', exact: true });
+  await expect(selectedRepos.getByRole('checkbox', { checked: true })).toHaveCount(2);
+  await expect(unselectedRepos.getByRole('checkbox', { name: 'fixture-team/api' })).toHaveCount(0);
   await expect(workspace.getByText('feat/v2-command-output', { exact: true })).toBeVisible();
   const workspaceName = workspace.getByRole('textbox', { name: 'Workspace name' });
   await expect(workspaceName).toBeFocused();

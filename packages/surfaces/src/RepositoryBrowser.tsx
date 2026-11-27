@@ -17,6 +17,7 @@ export const RepositoryHostContext = createContext<
   >
 >({});
 type Props = {
+  splitSelection?: boolean;
   renderBranch?(identity: string): ReactNode;
   selected?: ReadonlySet<string>;
   onSelected?(value: Set<string>): void;
@@ -30,6 +31,7 @@ type Props = {
 };
 /** Shared identity browser: selecting is presentation state, never a clone/import. */
 export function RepositoryBrowser({
+  splitSelection = false,
   renderBranch,
   selected = new Set(),
   onSelected,
@@ -52,12 +54,22 @@ export function RepositoryBrowser({
     [replacing, setReplacing] = useState<string>(),
     [replacedNote, setReplacedNote] = useState("");
   const search = useRef<HTMLInputElement>(null);
+  const keyboardToggle = useRef(false);
   const results = useRef<HTMLDivElement>(null);
   useEffect(() => { if (results.current) results.current.scrollTop = 0; }, [query]);
+  // Keep a clicked row under the pointer for the second click of a double-click.
+  const [moving, setMoving] = useState<{ identity: string; wasSelected: boolean }>();
+  useEffect(() => {
+    if (!moving) return;
+    const timer = window.setTimeout(() => setMoving(undefined), 450);
+    return () => window.clearTimeout(timer);
+  }, [moving]);
+  const inSelectedSection = (id: string) => moving?.identity === id ? moving.wasSelected : selected.has(id);
   const entries = [...(catalog?.entries || [])].sort(compareRepositories),
     needle = query.trim().toLowerCase(),
     qualified = needle.includes("/"),
     visible = entries.filter((r) =>
+      (!splitSelection || !inSelectedSection(r.identity)) &&
       (qualified ? r.name : shortName(r.name)).toLowerCase().includes(needle),
     );
   const github = catalog?.sources.find((s) => s.id === "github"),
@@ -79,9 +91,119 @@ export function RepositoryBrowser({
       setBusy(false);
     }
   };
+  const selectedRows = [...new Set([...selected, ...(moving ? [moving.identity] : [])])]
+    .filter(inSelectedSection)
+    .map(identity => entries.find(entry => entry.identity === identity) ??
+      { identity, name: identity.replace(/^github:/, ""), repositoryId: "" })
+    .sort(compareRepositories);
+  const renderRows = (rows: { identity: string; name: string; repositoryId: string }[]) =>
+    rows.map((repo, index) => (
+      <Fragment key={repo.identity}>
+        {(index === 0 ||
+          repositoryOrganization(rows[index - 1].identity) !==
+            repositoryOrganization(repo.identity)) && (
+          <h3>{repositoryOrganization(repo.identity)}</h3>
+        )}
+        <div className="repository-browser-row">
+          {onSelected ? (
+            <label
+              title={onActivate && !included.has(repo.repositoryId) ? "Double-click to choose this repository and continue" : undefined}
+              onClick={(event) => {
+                // The second click of a double-click: keep the repository
+                // chosen (no toggle back) and, if offered, finish at once.
+                if (event.detail !== 2 || disabled || included.has(repo.repositoryId)) return;
+                event.preventDefault();
+                if (onActivate) onActivate(repo.identity);
+                else onSelected(new Set([...selected, repo.identity]));
+              }}
+            >
+              <input
+                type="checkbox"
+                aria-label={repo.name}
+                checked={
+                  included.has(repo.repositoryId) ||
+                  selected.has(repo.identity)
+                }
+                disabled={disabled || included.has(repo.repositoryId)}
+                onKeyDown={(e) => { keyboardToggle.current = e.key === " "; }}
+                onPointerDown={() => { keyboardToggle.current = false; }}
+                onChange={(e) => {
+                  const fromKeyboard = keyboardToggle.current;
+                  keyboardToggle.current = false;
+                  if (splitSelection && !fromKeyboard) {
+                    setMoving({ identity: repo.identity, wasSelected: inSelectedSection(repo.identity) });
+                  }
+                  const next = new Set(selected);
+                  if (e.target.checked) next.add(repo.identity);
+                  else next.delete(repo.identity);
+                  if (splitSelection && (!e.target.checked || fromKeyboard)) {
+                    const neighbor = rows[index + 1] ?? rows[index - 1];
+                    const input = neighbor && e.target.closest(".repository-browser-results")
+                      ?.querySelector<HTMLInputElement>(`input[aria-label="${CSS.escape(neighbor.name)}"]`);
+                    (input || search.current)?.focus({ preventScroll: true });
+                  }
+                  onSelected(next);
+                }}
+              />
+              <span title={repo.name}>{shortName(repo.name)}</span>
+              {included.has(repo.repositoryId) && (
+                <small>In workspace</small>
+              )}
+            </label>
+          ) : (
+            <>
+              <span title={repo.name}>{shortName(repo.name)}</span>
+              {repo.repositoryId && repo.identity.startsWith("github:") && (
+                // A history GitHub replaced (a force-push with a new root,
+                // or a new repository under the name): a fresh copy.
+                <button
+                  type="button"
+                  aria-label={`Replace Lazybox’s copy of ${repo.name}`}
+                  aria-expanded={replacing === repo.identity}
+                  title="Copy it again from GitHub, for example after its history was force-pushed"
+                  onClick={() => setReplacing(replacing === repo.identity ? undefined : repo.identity)}
+                >
+                  Replace copy…
+                </button>
+              )}
+              <button
+                type="button"
+                aria-label={`Remove ${repo.name} from suggestions`}
+                onClick={() => setRemoving(repo.identity)}
+              >
+                Remove
+              </button>
+            </>
+          )}
+          {splitSelection && inSelectedSection(repo.identity) && renderBranch?.(repo.identity)}
+        </div>
+        {replacing === repo.identity && (
+          <div className="repository-browser-replace">
+            <p>Replace Lazybox’s copy of {repo.name} with the repository as GitHub has it now. Do this when its history was replaced on GitHub (a force-push with a new root, or a new repository under the same name).</p>
+            <ReplaceRepositoryCopy
+              replacement={{ identity: repo.identity, name: repo.name, hasCopy: true }}
+              lead={false}
+              autoFocus
+              onCancel={() => setReplacing(undefined)}
+              onReplaced={(done) => {
+                setReplacing(undefined);
+                setReplacedNote(`Replaced Lazybox’s copy of ${done.name || repo.name}. New workspaces start from it.`);
+                void reload();
+              }}
+            />
+          </div>
+        )}
+      </Fragment>
+    ));
   return (
     <section className="repository-browser" aria-label="Repository browser">
-      {onSelected && (
+      {splitSelection && <section aria-label="Selected repositories">
+        <strong>Selected repositories ({selected.size})</strong>
+        <div className="repository-browser-results repository-selected-results">
+          {renderRows(selectedRows)}
+        </div>
+      </section>}
+      {onSelected && !splitSelection && (
         <div
           className="repository-selection"
           role="region"
@@ -124,7 +246,7 @@ export function RepositoryBrowser({
           aria-label="Find repositories"
           placeholder="Search by repository name or owner/repo…"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => { setMoving(undefined); setQuery(e.target.value); }}
         />
         <button
           type="button"
@@ -211,101 +333,21 @@ export function RepositoryBrowser({
             {s.detail}
           </p>
         ))}
+      {splitSelection && <strong>Unselected repositories</strong>}
       <div
         ref={results}
         className="repository-browser-results"
         role="region"
-        aria-label="Available repositories"
+        aria-label={splitSelection ? "Unselected repositories" : "Available repositories"}
       >
         {loading ? (
           <p role="status">Loading repositories…</p>
         ) : (
-          visible.map((repo, index) => (
-            <Fragment key={repo.identity}>
-              {(index === 0 ||
-                repositoryOrganization(visible[index - 1].identity) !==
-                  repositoryOrganization(repo.identity)) && (
-                <h3>{repositoryOrganization(repo.identity)}</h3>
-              )}
-              <div className="repository-browser-row">
-                {onSelected ? (
-                  <label
-                    title={onActivate && !included.has(repo.repositoryId) ? "Double-click to choose this repository and continue" : undefined}
-                    onClick={(event) => {
-                      // The second click of a double-click: keep the repository
-                      // chosen (no toggle back) and, if offered, finish at once.
-                      if (event.detail !== 2 || disabled || included.has(repo.repositoryId)) return;
-                      event.preventDefault();
-                      if (onActivate) onActivate(repo.identity);
-                      else onSelected(new Set([...selected, repo.identity]));
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      aria-label={repo.name}
-                      checked={
-                        included.has(repo.repositoryId) ||
-                        selected.has(repo.identity)
-                      }
-                      disabled={disabled || included.has(repo.repositoryId)}
-                      onChange={(e) => {
-                        const next = new Set(selected);
-                        if (e.target.checked) next.add(repo.identity);
-                        else next.delete(repo.identity);
-                        onSelected(next);
-                      }}
-                    />
-                    <span title={repo.name}>{shortName(repo.name)}</span>
-                    {included.has(repo.repositoryId) && (
-                      <small>In workspace</small>
-                    )}
-                  </label>
-                ) : (
-                  <>
-                    <span title={repo.name}>{shortName(repo.name)}</span>
-                    {repo.repositoryId && repo.identity.startsWith("github:") && (
-                      // A history GitHub replaced (a force-push with a new root,
-                      // or a new repository under the name): a fresh copy.
-                      <button
-                        type="button"
-                        aria-label={`Replace Lazybox’s copy of ${repo.name}`}
-                        aria-expanded={replacing === repo.identity}
-                        title="Copy it again from GitHub, for example after its history was force-pushed"
-                        onClick={() => setReplacing(replacing === repo.identity ? undefined : repo.identity)}
-                      >
-                        Replace copy…
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      aria-label={`Remove ${repo.name} from suggestions`}
-                      onClick={() => setRemoving(repo.identity)}
-                    >
-                      Remove
-                    </button>
-                  </>
-                )}
-              </div>
-              {replacing === repo.identity && (
-                <div className="repository-browser-replace">
-                  <p>Replace Lazybox’s copy of {repo.name} with the repository as GitHub has it now. Do this when its history was replaced on GitHub (a force-push with a new root, or a new repository under the same name).</p>
-                  <ReplaceRepositoryCopy
-                    replacement={{ identity: repo.identity, name: repo.name, hasCopy: true }}
-                    lead={false}
-                    autoFocus
-                    onCancel={() => setReplacing(undefined)}
-                    onReplaced={(done) => {
-                      setReplacing(undefined);
-                      setReplacedNote(`Replaced Lazybox’s copy of ${done.name || repo.name}. New workspaces start from it.`);
-                      void reload();
-                    }}
-                  />
-                </div>
-              )}
-            </Fragment>
-          ))
+          renderRows(visible)
         )}
-        {!loading && !visible.length && (
+        {!loading && !visible.length && splitSelection && !query.trim() && entries.length > 0 ? (
+          <p role="status">All repositories are selected.</p>
+        ) : !loading && !visible.length && (
           <div className="repository-browser-empty">
             <strong>
               {refreshing

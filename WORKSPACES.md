@@ -16,8 +16,10 @@ GitHub API connection supplies repository discovery/import and issue/PR lists.
 1. Open **New workspace** and search by repository name. Include a slash to search by owner and repository, such as `acme/api`. The
    shared catalog includes registered sources, saved local scans and cached
    GitHub discovery. The same catalog appears in Settings → Repositories.
-2. Select repositories. Selection does not clone or register anything. Previously
-   selected repositories remain visible as removable chips while filtering.
+2. Select repositories. Selection does not clone or register anything. When creating
+   or cloning a workspace, selected repositories appear above the searchable
+   list of unselected repositories. Both sections use checkbox rows grouped by
+   owner. Searching keeps the full selection visible.
 3. Accept or edit the workspace name, then choose **Create workspace**. The Runner
    prepares only the selected sources and creates their worktrees. Progress is
    streamed; errors preserve the selection and request identity for retry.

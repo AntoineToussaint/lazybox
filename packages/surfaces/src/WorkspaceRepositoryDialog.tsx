@@ -300,6 +300,7 @@ export function WorkspaceRepositoryDialog({
       )}
       {!empty && <div className="workspace-picker-body">
         <RepositoryBrowser
+          splitSelection={!workspace}
           renderBranch={identity => (<>
             <StartFromChip
               identity={identity}

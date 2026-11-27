@@ -69,12 +69,10 @@ try {
   ).toHaveCount(0);
   assert.deepEqual(await bounds(), unfiltered, "one match uses the same space as the unfiltered catalog");
   assert.equal(f.mutations.length, 0, "discovery must not import or clone");
-  await d
-    .getByRole("checkbox", {
-      name: "codefly-dev/module-datasource",
-      exact: true,
-    })
-    .check();
+  await d.getByRole("checkbox", {name: "codefly-dev/module-datasource", exact: true}).press("Space");
+  await expect(search).toBeFocused();
+  await expect(d.getByRole("region", {name: "Selected repositories", exact: true})
+    .getByRole("checkbox", {name: "codefly-dev/module-datasource"})).toBeChecked();
   await d
     .getByRole("searchbox", { name: "Find repositories" })
     .fill("fixture-team/api");
@@ -209,13 +207,14 @@ try {
   const phoneUnfiltered = await phoneBounds();
   await d.getByRole('searchbox',{name:'Find repositories'}).fill('no-such-repository');
   await expect(d.getByText("No matches in the current catalog")).toBeVisible();
-  const selection = d.getByRole('region',{name:'Selected repositories'});
+  const selection = d.getByRole('region',{name:'Selected repositories',exact:true});
   assert.ok((await selection.boundingBox()).y < (await d.getByRole('searchbox',{name:'Find repositories'}).boundingBox()).y);
-  const remove = selection.getByRole('button',{name:'Unselect large-team/service-with-a-long-name-19',exact:true});
+  const remove = selection.getByRole('checkbox',{name:'large-team/service-with-a-long-name-19',exact:true});
   await expect(selection.locator('[data-start-from="github:large-team/service-with-a-long-name-19"]')).toHaveCount(1);
   await remove.click();
   await expect(remove).toHaveCount(0);
-  await expect(selection.getByRole('button',{name:'Unselect large-team/service-with-a-long-name-18',exact:true})).toBeFocused();
+  await expect(selection.getByRole('checkbox', {name: /large-team/})).toHaveCount(19);
+  await expect(selection.locator('input:focus')).toHaveCount(1);
   assert.deepEqual(await phoneBounds(), phoneUnfiltered, "the phone dialog and its primary action stay put as results disappear");
   await d.getByRole('button',{name:'Clear search',exact:true}).click();
   await expect(d.getByRole('searchbox',{name:'Find repositories'})).toHaveValue('');
@@ -246,8 +245,8 @@ try {
   const before=f.mutations.filter(m=>m.method==='PrepareWorkspace').length;
   await page.getByRole('button',{name:'New workspace',exact:true}).click();
   const quick=page.getByRole('dialog',{name:'New workspace',exact:true});
-  const selected = quick.getByRole('button', {name: /^Unselect /});
-  while (await selected.count()) await selected.first().click();
+  const selected = quick.getByRole('region', {name: 'Selected repositories', exact:true}).getByRole('checkbox', {checked:true});
+  while (await selected.count()) await selected.first().uncheck();
   await quick.getByRole('searchbox',{name:'Find repositories'}).fill('fixture-team/api');
   await quick.locator('.repository-browser-row label').filter({has:page.getByRole('checkbox',{name:'fixture-team/api',exact:true})}).dblclick();
   await expect(quick).toHaveCount(0);

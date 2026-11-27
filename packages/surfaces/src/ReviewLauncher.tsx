@@ -1,6 +1,7 @@
 import { closeReviewersOnSend } from './review-close';
-import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useContext, useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { ReviewRun } from '@lazybox/protocol';
+import { PromptSnippets } from './SnippetPrompt';
 import { ActionMenu } from './ActionMenu';
 import { ActionMenuItems } from './ActionMenuItems';
 import { Icon } from './Icons';
@@ -111,6 +112,11 @@ export function ReviewCard({ data }: { data: ReviewCardData }) {
     catch (error) { showMenuNotice(humanError(error)); }
     finally { setSending(false); }
   };
+  const snippets = useContext(PromptSnippets);
+  const snippet = run.focus && snippets.find(entry => entry.body.trim() === run.focus.trim());
+  // A review snippet's instructions also occupy the focus field in saved runs.
+  // Keep those cards compact even before the catalog loads or after an edit.
+  const focusNote = snippet ? `Snippet: ${snippet.key}` : run.focus && live?.templateId !== 'code-review-v1' ? `Focus: ${run.focus}` : '';
   const canSend = !running && !failed && unsent.length > 0 && !!run.sourceSessionId;
   const stoppedAt = live?.stoppedAtUnix ? new Date(Number(live.stoppedAtUnix) * 1000).toLocaleString([], { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' }) : '';
   // Focusable while it can be cancelled, so Esc on it cancels it.
@@ -119,7 +125,7 @@ export function ReviewCard({ data }: { data: ReviewCardData }) {
     title={ended && live?.stoppedBy ? `${live.stoppedBy} ${run.state === 'cancelled' ? 'cancelled' : 'stopped'} it${stoppedAt ? ` · ${stoppedAt}` : ''}` : undefined}>
     <span className="review-card-icon" aria-hidden="true">{running ? <LiveIndicator tone="busy"/> : <Icon name={ended ? 'stop' : failed ? 'alert' : run.blockers ? 'alert' : 'check'} size={14}/>}</span>
     <span className="review-card-text" role="status" aria-live="polite">{runSummary(run)}{loop && <small className="review-card-loop">{loop}</small>}
-      {(run.fallback || run.focus) && <small className="review-card-note">{[run.fallback, run.focus && `Focus: ${run.focus}`].filter(Boolean).join(' · ')}</small>}</span>
+      {(run.fallback || focusNote) && <small className="review-card-note">{[run.fallback, focusNote].filter(Boolean).join(' · ')}</small>}</span>
     {!running && !failed && findings > 0 && <span className="review-card-counts" aria-hidden="true">
       {run.blockers > 0 && <span className="review-severity sev-blocker">{run.blockers}</span>}
       {run.majors > 0 && <span className="review-severity sev-major">{run.majors}</span>}

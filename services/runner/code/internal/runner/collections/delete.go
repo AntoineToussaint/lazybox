@@ -56,37 +56,30 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 			}
 			return p, fmt.Errorf("%s: %w", member.Name, err)
 		}
-		// Include ignored build artifacts: they are user bytes too.
-		dirty, err := m.git(ctx, member.Path, "status", "--porcelain", "--untracked-files=normal", "--ignored", "--ignore-submodules=none")
+		changed, err := m.git(ctx, member.Path, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
 		if err != nil {
 			return p, err
 		}
-		unsaved := ""
-		if dirty == "" {
-			if unsaved, err = m.unsavedHistory(ctx, member.Path); err != nil {
+		// Apply the dependency exclusion only to ignored files. Tracked changes
+		// and untracked dependencies still appear in the ordinary status above.
+		ignored, err := m.git(ctx, member.Path, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "--", ".", ":(exclude,glob)**/node_modules/**")
+		if err != nil {
+			return p, err
+		}
+		var reason string
+		switch {
+		case changed != "" && ignored != "":
+			reason = "uncommitted or untracked files and Git-ignored files"
+		case changed != "":
+			reason = "uncommitted or untracked files"
+		case ignored != "":
+			reason = "Git-ignored files"
+		default:
+			if reason, err = m.unsavedHistory(ctx, member.Path); err != nil {
 				return p, err
 			}
 		}
-		if dirty != "" || unsaved != "" {
-			reason := unsaved
-			if dirty != "" {
-				var ignored, changed bool
-				for _, line := range strings.Split(dirty, "\n") {
-					if strings.HasPrefix(line, "!! ") {
-						ignored = true
-					} else {
-						changed = true
-					}
-				}
-				switch {
-				case ignored && changed:
-					reason = "uncommitted or untracked files and Git-ignored files"
-				case ignored:
-					reason = "Git-ignored files"
-				default:
-					reason = "uncommitted or untracked files"
-				}
-			}
+		if reason != "" {
 			p.Dirty = append(p.Dirty, member.Name)
 			p.DiscardReasons = append(p.DiscardReasons, member.Name+": "+reason+".")
 		}

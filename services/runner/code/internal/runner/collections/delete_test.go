@@ -60,6 +60,57 @@ func TestDeleteWorktreesFencesStartsAndPreservesSourcesBranchesAndRetryIdentity(
 		t.Fatal("restart restored deleted workspace")
 	}
 }
+func TestDeletionWithIgnoredNodeModules(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	write := func(root, name, data string) {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(repo.Path, ".gitignore", "node_modules/\n.env\n")
+	write(repo.Path, "packages/app/manifest", "app")
+	write(repo.Path, "node_modules/tracked", "original")
+	gitTest(t, repo.Path, "add", ".gitignore", "packages")
+	gitTest(t, repo.Path, "add", "-f", "node_modules/tracked")
+	gitTest(t, repo.Path, "commit", "-m", "dependency fixture")
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "dependencies", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := c.Members[0].Path
+	inactive := func(string) bool { return false }
+	write(root, "node_modules/pkg/index.js", "installed")
+	write(root, "packages/app/node_modules/pkg/index.js", "installed")
+	write(root, ".env", "local")
+	write(root, "node_modules/tracked", "edit")
+	check := func(reason string) {
+		t.Helper()
+		p, err := m.PreviewDeletion(ctx, c.ID, inactive)
+		if err != nil || len(p.DiscardReasons) != 1 || p.DiscardReasons[0] != c.Members[0].Name+": "+reason+"." {
+			t.Fatal(p, err)
+		}
+	}
+	check("uncommitted or untracked files and Git-ignored files")
+	if err := os.Remove(filepath.Join(root, ".env")); err != nil {
+		t.Fatal(err)
+	}
+	check("uncommitted or untracked files")
+	write(root, "node_modules/tracked", "original")
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.FinishDeletion(ctx, c.ID, false, inactive); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDeletionReportsIgnoredFilesWithCleanGitStatus(t *testing.T) {
 	ctx := context.Background()
 	repo := repoTest(t)

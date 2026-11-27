@@ -134,7 +134,7 @@ export function useSlashCommands(o: Options) {
     .map(m => ({ value: m.value, displayName: m.displayName, description: m.description, ...(m.effortLevels?.length ? { effortLevels: m.effortLevels } : {}) })), [availability.report, provider]);
   const models = useMemo(() => mergeModels(providerModels, catalog.models), [providerModels, catalog.models]);
   const context: SlashContext = {
-    provider, agentName: o.agentName, live, busy: !!session?.busy, coding: !!session && (!session.purpose || session.purpose === 'coding'), workspace: !!workspaceId,
+    provider, agentName: o.agentName, live, busy: !!session?.busy, reviewer: session?.purpose === 'reviewer', coding: !!session && (!session.purpose || session.purpose === 'coding'), workspace: !!workspaceId,
     permission: session?.permission || '', planWorkflow: session?.workflow === 'plan', livePermission: !!session?.capabilities?.livePermission,
     model: o.model, effort: session?.effort, liveModel: !!session?.capabilities?.liveModel, resumable: !!session?.capabilities?.resume, models: catalog.models, providerModels,
     agentMessage: !!lastAgentMessage, shellBlock: o.shellBlock, compact: provider === 'claude' || provider === 'codex', detail: o.detail, subscriptions: o.subscriptions,

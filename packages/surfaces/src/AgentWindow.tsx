@@ -851,8 +851,9 @@ export function ChatPanel({ purpose = 'coding', assistantContext = '', agent, co
           {fileLinks.element}
           {slash.dialogs}
           {chatReview.dialog}
-          {chatReview.asReviewer && <div className="reviewer-notice" role="note" aria-label="Read-only review">
-            <span><strong>Read-only review</strong> · Use the author conversation to apply findings and merge.</span>
+          {chatReview.asReviewer && <div className="reviewer-notice" role="note" aria-label="Review permissions">
+            <strong>{session?.permission === 'yolo' ? 'Full access' : session?.permission === 'ask' ? 'Ask for approval' : 'Read only'}</strong>
+            {slash.pickPermissions && <button type="button" onClick={slash.pickPermissions}>Change permissions</button>}
             {embedded && <><button type="button" onClick={() => showConversation({ collectionId: chatReview.workspaceId, sessionId: chatReview.asReviewer!.sourceSessionId })}>Open author conversation</button>
               <button type="button" onClick={() => showReview({ collectionId: chatReview.workspaceId, reviewId: chatReview.asReviewer!.id })}>Review tray</button></>}
           </div>}

@@ -208,7 +208,7 @@ export function useSlashCommands(o: Options) {
     const choice = byNameLatest('model')?.choices?.find(c => c.value.toLowerCase() === model.toLowerCase());
     const label = [choice?.label || modelName(model), effort].filter(Boolean).join(' · ');
     // The model it runs on already: nothing to switch, nothing to confirm.
-    if ((!effort || current.effort === effort) && (choice?.current || sameModel({ value: model, displayName: modelName(model), description: '' }, latest.current.model))) { setRestart(undefined); notice(`Already on ${label}`); return; }
+    if (current.fault !== 'model_required' && (!effort || current.effort === effort) && (choice?.current || sameModel({ value: model, displayName: modelName(model), description: '' }, latest.current.model))) { setRestart(undefined); notice(`Already on ${label}`); return; }
     if (current.capabilities?.liveModel) {
       try {
         const selection = crypto.randomUUID();

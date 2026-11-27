@@ -928,7 +928,9 @@ func (e *Engine) dispatch() {
 	if errors.Is(err, agent.ErrTurnRunning) || errors.Is(err, agent.ErrModelRequired) {
 		if errors.Is(err, agent.ErrModelRequired) {
 			e.state.Busy = false
-			e.state.Fault = agent.ModelRequiredFault
+			if e.state.Fault == "" {
+				e.state.Fault = agent.ModelRequiredFault
+			}
 			e.stop.undelivered()
 		}
 		// Not sent: the agent is in a turn this engine did not start. The

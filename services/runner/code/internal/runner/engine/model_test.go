@@ -137,3 +137,22 @@ func TestRejectedModelRetainsPromptUntilCorrected(t *testing.T) {
 		t.Fatal("lost held input")
 	}
 }
+
+func TestModelRefusalPreservesConcurrentTransportFault(t *testing.T) {
+	e, s := bench(t, false)
+	release := make(chan struct{})
+	s.Hold(agent.Message, release, agent.ErrModelRequired)
+	if _, err := e.Apply(contextFor(t), agent.Operation{ID: "message", Kind: agent.Message, Text: "hold"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "dispatch started", func() bool { return e.Snapshot().Busy })
+	e.mu.Lock()
+	const fault = "provider stream ended: disconnected"
+	e.state.Fault = fault
+	e.mu.Unlock()
+	close(release)
+	eventually(t, "queued after refusal", func() bool { return e.Snapshot().Queued == 1 })
+	if got := e.Snapshot().Fault; got != fault {
+		t.Fatalf("transport fault replaced with %q", got)
+	}
+}

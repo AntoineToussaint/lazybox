@@ -95,7 +95,9 @@ it did.
   Choosing the current model does nothing. The switch is live and applies from
   the next turn: the current turn can finish on its original model. To use the new model immediately, choose
   **Stop and retry** when offered. This resends the running prompt and its attachments
-  before queued messages. Work already performed by the interrupted turn stays in place. An agent that an
+  before queued messages. If the provider refuses a deferred model or reasoning effort,
+  your prompt stays queued. Select a working model or effort in the composer to send it.
+  Work already performed by the interrupted turn stays in place. An agent that an
   older Lazybox started cannot switch live: one card asks to restart it, and the
   conversation continues (**Restart now**, or **Restart after this turn**).
 - **End session** stops the agent but keeps the conversation; sending a new

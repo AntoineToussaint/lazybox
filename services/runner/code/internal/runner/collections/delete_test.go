@@ -60,6 +60,48 @@ func TestDeleteWorktreesFencesStartsAndPreservesSourcesBranchesAndRetryIdentity(
 		t.Fatal("restart restored deleted workspace")
 	}
 }
+func TestDeletionReportsIgnoredFilesWithCleanGitStatus(t *testing.T) {
+	ctx := context.Background()
+	repo := repoTest(t)
+	if err := os.WriteFile(filepath.Join(repo.Path, ".gitignore"), []byte("cache/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo.Path, "add", ".gitignore")
+	gitTest(t, repo.Path, "commit", "-m", "ignore cache")
+	m := newTest(t, t.TempDir(), repo)
+	c, err := m.Create(ctx, "ignored", specTest(repo.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := c.Members[0]
+	cache := filepath.Join(member.Path, "cache")
+	if err := os.Mkdir(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "output"), []byte("cached"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if status := gitTest(t, member.Path, "status", "--porcelain"); status != "" {
+		t.Fatal(status)
+	}
+	inactive := func(string) bool { return false }
+	check := func(reason string) {
+		t.Helper()
+		preview, err := m.PreviewDeletion(ctx, c.ID, inactive)
+		if err != nil || len(preview.Dirty) != 1 || len(preview.DiscardReasons) != 1 || preview.DiscardReasons[0] != member.Name+": "+reason+"." {
+			t.Fatal(preview, err)
+		}
+	}
+	check("Git-ignored files")
+	if _, err := m.BeginDeletion(ctx, c.ID, c.Name, false, false, false, inactive); err == nil {
+		t.Fatal("discard consent missing")
+	}
+	if err := os.WriteFile(filepath.Join(member.Path, "new.txt"), []byte("untracked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check("uncommitted or untracked files and Git-ignored files")
+}
+
 func TestDeletionRequiresConsentAndPreservesChangedFilesOnFailure(t *testing.T) {
 	ctx := context.Background()
 	repo := repoTest(t)

@@ -1161,7 +1161,7 @@ fails, Recently deleted shows the failure until you dismiss it.
 **Workspace actions → Delete workspace** uses a confirmation button without name
 typing. It previews active executions and local
 files, states the detected risks, and asks explicitly before stopping sessions
-or discarding changed/untracked/ignored files. A repository whose HEAD is
+or discarding changed/untracked/ignored files. The preview identifies repositories with Git-ignored files separately from repositories with uncommitted or untracked files. A repository whose HEAD is
 detached (its commits may be on no branch) or with a rebase, merge,
 cherry-pick, revert or bisect stopped part-way counts as changed too, even
 when `git status` is clean: removing the worktree deletes its HEAD history and

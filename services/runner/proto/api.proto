@@ -2374,6 +2374,8 @@ message WorkspaceDeletionPreview {
   bool files_outside_repositories = 3;
   string blocked = 4;
   bool supports_keep_artifacts = 5;
+  // Human-readable reasons for each repository requiring discard consent.
+  repeated string discard_reasons = 6;
 }
 message DeleteWorkspaceRequest {
   string collection_id = 1;

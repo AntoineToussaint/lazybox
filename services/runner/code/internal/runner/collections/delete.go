@@ -13,6 +13,7 @@ import (
 type DeletionPreview struct {
 	Active                   []string
 	Dirty                    []string
+	DiscardReasons           []string
 	FilesOutsideRepositories bool
 	Blocked                  string
 }
@@ -50,6 +51,7 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 				// A pruned registration leaves ordinary files in the owned
 				// workspace. Both cases require explicit discard consent.
 				p.Dirty = append(p.Dirty, member.Name)
+				p.DiscardReasons = append(p.DiscardReasons, member.Name+": files remain after Git worktree registration was removed.")
 				continue
 			}
 			return p, fmt.Errorf("%s: %w", member.Name, err)
@@ -66,7 +68,27 @@ func (m *Manager) deletionPreview(ctx context.Context, c Collection, active func
 			}
 		}
 		if dirty != "" || unsaved != "" {
+			reason := unsaved
+			if dirty != "" {
+				var ignored, changed bool
+				for _, line := range strings.Split(dirty, "\n") {
+					if strings.HasPrefix(line, "!! ") {
+						ignored = true
+					} else {
+						changed = true
+					}
+				}
+				switch {
+				case ignored && changed:
+					reason = "uncommitted or untracked files and Git-ignored files"
+				case ignored:
+					reason = "Git-ignored files"
+				default:
+					reason = "uncommitted or untracked files"
+				}
+			}
 			p.Dirty = append(p.Dirty, member.Name)
+			p.DiscardReasons = append(p.DiscardReasons, member.Name+": "+reason+".")
 		}
 	}
 	entries, err := os.ReadDir(c.Root)

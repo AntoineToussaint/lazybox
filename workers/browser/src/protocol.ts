@@ -44,6 +44,8 @@ export type OpenParams = {
 /** open → PageState. Idempotent: an open browser keeps its page and takes the new policy. */
 
 export type ActParams = {
+  /** Current registered workspace ports on a direct preview navigation. */
+  previewPorts?: number[];
   browser: string;
   /** Who acts: the agent (asks for new sites through `site`) or the person during Take over (never asks; still blocked from blocked addresses). */
   actor: 'agent' | 'person';

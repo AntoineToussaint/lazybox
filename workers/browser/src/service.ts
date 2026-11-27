@@ -261,7 +261,10 @@ export class BrowserService {
   async act(p: ActParams) {
     const browser = this.browser(p?.browser);
     const profile = this.profileOf(browser);
-    if (profile) profile.lastActive = browser;
+    if (profile) {
+      profile.lastActive = browser;
+      if (p.previewPorts) profile.policy = validPolicy({ ...profile.policy, loopbackPorts: p.previewPorts });
+    }
     return browser.act(p);
   }
 

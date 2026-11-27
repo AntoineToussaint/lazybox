@@ -370,10 +370,16 @@ func (m *Manager) ensureOpen(ctx context.Context, b *conv) error {
 // act sends one action to the service and records the page it left.
 func (m *Manager) act(ctx context.Context, b *conv, params map[string]any) (actResult, error) {
 	m.mu.Lock()
-	p := m.proc
+	p, workspace := m.proc, b.workspace
 	m.mu.Unlock()
 	if p == nil {
 		return actResult{}, errors.New("the browser closed; open it again with browser_open")
+	}
+	// A preview can restart on another port while the Chromium page stays open.
+	if raw, ok := params["url"].(string); ok {
+		if u, err := url.Parse(raw); err == nil && isLoopbackName(strings.ToLower(u.Hostname())) {
+			params["previewPorts"] = append([]int{}, m.cfg.LoopbackPorts(ctx, workspace)...)
+		}
 	}
 	call, cancel := context.WithTimeout(ctx, actTimeout)
 	defer cancel()

@@ -133,3 +133,22 @@ func TestClearForgetsALimitButNotSignInOrBilling(t *testing.T) {
 		t.Fatal("a sign-in problem was cleared")
 	}
 }
+
+func TestModelLimitLeavesAccountAvailable(t *testing.T) {
+	state, err := OpenState(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = state.Observe("a", agent.AccountObservation{State: "available", Windows: []agent.UsageWindow{
+		{Name: "model:Fable", UsedPercent: 100}, {Name: "seven_day", UsedPercent: 52},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.RotationCapacity("a", time.Now()) != CapacityReported {
+		t.Fatal("model limit blocked account rotation")
+	}
+	if !errors.Is(state.Clear("a"), ErrNotLimited) {
+		t.Fatal("model limit allowed account override")
+	}
+}

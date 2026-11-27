@@ -121,14 +121,15 @@ one says when it is back.
 Every surface says when a limited subscription can be used again the same way
 (`backAt`/`comeback` in `subscription-model.ts`): the conversation card and
 header, the switch picker, the Inbox line, and **Settings → Subscriptions**. A
-limit lasts until every usage window at 100% has reset, so a card is back at the
+subscription limit lasts until every account-wide window at 100% has reset, so a card is back at the
 latest of those resets ("Back at 6:00 PM (in 2h 10m)"), updated each half
 minute. Once that time has passed the report is stale: the card says "Should be
 available again — checking…", refreshes that subscription's usage once by
 itself, and shows what the provider reports now. A window whose reset has passed
 shows "Reset" instead of a stale percentage. With no reported reset time the
 card says so. An available card names only its next reset, of its most-used
-window.
+window. Claude model and OAuth-app windows stay visible. Filling one leaves
+the subscription eligible for other work.
 
 Opening **Settings → Subscriptions** refreshes usage for each managed
 subscription with a private sign-in. The page shows the last report while
@@ -142,7 +143,7 @@ header.
 recorded limit, offered on limited rows of **Switch subscription…**: at once
 when the reset has passed and only the report is stale, after a confirmation
 while the report still says limited. The Runner records the account as
-available, drops its windows at 100% and keeps the rest; the next provider
+available and clears full account-wide windows. It retains scoped windows. The next provider
 report replaces that either way. It works on a CLI sign-in too, since it asks
 the provider nothing. Sign-in and billing problems are not limits: the Runner
 refuses them (`FAILED_PRECONDITION`), as it does an account with no limit.

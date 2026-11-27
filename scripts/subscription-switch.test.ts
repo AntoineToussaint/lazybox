@@ -2,7 +2,7 @@ import { create } from '@bufbuild/protobuf';
 import { JournalEventSchema, ProfileSchema, SessionSchema, type Profile, type Session } from '@lazybox/protocol';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { backAt, backWhen, bestChoice, clearOffer, comeback, exitFault, failureSentence, faultSentence, limitHeadline, limitStatus, resetTime, sessionLimit, signInDefault, subscriptionChoices, subscriptionName, switchedLine, switchesItself, switchLabel, switchNote, transportFault, turnFault, untilText } from '../packages/surfaces/src/subscription-model.ts';
+import { backAt, backWhen, bestChoice, clearOffer, comeback, exitFault, failureSentence, faultSentence, limitHeadline, limitStatus, resetTime, sessionLimit, signInDefault, subscriptionChoices, subscriptionDetail, subscriptionName, switchedLine, switchesItself, switchLabel, switchNote, transportFault, turnFault, untilText } from '../packages/surfaces/src/subscription-model.ts';
 import { foldTranscript, emptyTranscript } from '../packages/surfaces/src/transcript-model.ts';
 import { liveStatus } from '../packages/surfaces/src/live-status.ts';
 import { continuationPrompt } from '../packages/surfaces/src/continuation-prompt.ts';
@@ -21,6 +21,15 @@ const profiles = [
   profile('work-3', 'Work subscription 3', { state: 'exhausted', resetAt: BigInt(at(15)) }),
   profile('claude-default', '', { state: 'unknown' }, 'inherited'),
 ];
+
+test('a full Fable window leaves the subscription available', () => {
+  const account = profile('a', 'A', { state: 'available', windows: [
+    { name: 'model:Fable', usedPercent: 100, resetAt: BigInt(at(18)) },
+    { name: 'seven_day', usedPercent: 52 },
+  ] });
+  assert.deepEqual(comeback(account, noon), { kind: 'available' });
+  assert.equal(subscriptionDetail(account, noon), 'Available · 52% used');
+});
 
 test('reset times read as a person says them', () => {
   assert.equal(resetTime(BigInt(at(18)), noon), time(at(18)));

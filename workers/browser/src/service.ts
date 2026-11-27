@@ -125,6 +125,11 @@ export class BrowserService {
     const profile = { dir, policy, browsers: new Set<AgentBrowser>(), closing: false, strays: [], unclaimed: [] } as unknown as Profile;
     profile.proxy = new GateProxy(() => profile.policy, refusal => {
       if (profile.lastActive) this.log(profile.lastActive, 'blocked', `Blocked ${refusal.host}:${refusal.port}: ${refusal.reason}`);
+    }, async port => {
+      const browser = profile.lastActive;
+      if (!browser) return false;
+      const reply = await this.runner.request('preview_port', { browser: browser.id, port });
+      return reply?.allow === true;
     });
     const server = await profile.proxy.listen();
     try {

@@ -46,7 +46,7 @@ test('private address ranges', () => {
 
 test('the gate proxy vets names by what they resolve to, and reports refusals', async () => {
   const refusals: Refusal[] = [];
-  const proxy = new GateProxy(() => policy, refusal => refusals.push(refusal));
+  const proxy = new GateProxy(() => policy, refusal => refusals.push(refusal), async port => policy.loopbackPorts.includes(port));
   assert.deepEqual(await proxy.vet('localhost', 5173), { ok: true, address: '127.0.0.1' });
   assert.equal((await proxy.vet('localhost', 22)).ok, false);
   assert.equal((await proxy.vet('127.0.0.1', 7000)).ok, false);
@@ -79,4 +79,12 @@ test('filled text fields are found by line and ref, and lose only their value wh
   assert.equal(hiddenValue(snapshot.split('\n')[1]), '- textbox "Pass [ref=e9]" [active] [ref=f2e6]: "(password hidden)"');
   assert.equal(hiddenValue('  - textbox [ref=e10]: x'), '  - textbox [ref=e10]: "(password hidden)"');
   assert.equal(hiddenValue('- button "Sign in" [ref=e8]'), '- button "Sign in" [ref=e8]');
+});
+
+test('a revoked preview is refused even when listed in the open profile', async () => {
+  let active = true;
+  const proxy = new GateProxy(() => policy, () => {}, async () => active);
+  assert.equal((await proxy.vet('localhost', 5173)).ok, true);
+  active = false;
+  assert.equal((await proxy.vet('localhost', 5173)).ok, false);
 });

@@ -654,6 +654,7 @@ func (m *Manager) pageLocked(b *conv, page PageState) {
 func (m *Manager) serve(p *jsonl.Process, msg jsonl.Message) {
 	var r struct {
 		Browser  string `json:"browser"`
+		Port     int    `json:"port"`
 		URL      string `json:"url"`
 		Origin   string `json:"origin"`
 		FileName string `json:"fileName"`
@@ -675,6 +676,9 @@ func (m *Manager) serve(p *jsonl.Process, msg jsonl.Message) {
 	}
 	ctx := m.ctx
 	switch msg.Method {
+	case "preview_port":
+		allowed := r.Port > 0 && r.Port <= 65535 && slices.Contains(m.cfg.LoopbackPorts(ctx, workspace), r.Port)
+		_ = p.Reply(msg.ID, map[string]any{"allow": allowed})
 	case "site":
 		u, err := m.parseURL(ctx, workspace, r.URL)
 		if err != nil {

@@ -323,13 +323,14 @@ function RunningExtension({ extension, panelId, collections, workspaceId, onShow
     </div>
     {runs && extension.grants.includes('scan:disk') && extension.approvedGrants.includes('scan:disk') && onReviewDiskCleanup &&
       <div className="disk-cleanup-actions">
-        <button type="button" className="primary" disabled={startingCleanup} onClick={async () => {
-          setStartingCleanup(true);
-          try { await onReviewDiskCleanup(); }
-          catch (error) { notify({ key: 'cleanup', tone: 'bad', text: String(error instanceof Error ? error.message : error) }); }
-          finally { setStartingCleanup(false); }
-        }}>{startingCleanup ? 'Opening terminal…' : 'Review and clean…'}</button>
-        <span>Scan again, select items and confirm removal in the Runner terminal. The terminal shows what was cleaned.</span>
+        <div><strong>Clean Runner storage</strong><p>Review targets in the terminal and confirm removal.</p></div>
+        {(['go', 'all'] as const).map(scope =>
+          <button key={scope} type="button" className={scope === 'go' ? 'primary' : 'quiet'} disabled={startingCleanup} onClick={async () => {
+            setStartingCleanup(true);
+            try { await onReviewDiskCleanup(scope); }
+            catch (error) { notify({ key: 'cleanup', tone: 'bad', text: String(error instanceof Error ? error.message : error) }); }
+            finally { setStartingCleanup(false); }
+          }}>{scope === 'go' ? 'Clean Go caches…' : 'Review all targets…'}</button>)}
       </div>}
     {!runs ? <div className="extension-state"><Icon name="lock" size={18}/><p>{extension.name || extension.id}: {extensionStateLabel[extension.state]?.toLowerCase()}.</p>
         {extension.state === 'new' ? <button type="button" className="primary" onClick={() => setReviewing(true)}>Enable…</button> : <button type="button" onClick={() => runAction('settings.open', 'extensions')}>Open Settings → Extensions</button>}</div>

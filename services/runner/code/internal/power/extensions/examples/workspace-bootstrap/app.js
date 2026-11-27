@@ -1,15 +1,17 @@
 const attentionOnly = document.getElementById('attention');
+const idleServices = document.getElementById('idle-services');
 const count = document.getElementById('attention-count');
 let entries = [];
 
 function render() {
   const needsAttention = entries.filter(entry => entry.tone === 'warn' || entry.tone === 'danger');
   count.textContent = String(needsAttention.length);
-  const visible = attentionOnly.checked ? needsAttention : entries;
+  const visible = attentionOnly.checked ? needsAttention : entries.filter(item => !item.idle || idleServices.checked);
   workflow.list(visible.map(entry => entry.row), attentionOnly.checked
     ? 'No setup issues need attention.' : 'No setup or service activity in this workspace.');
 }
 attentionOnly.onchange = render;
+idleServices.onchange = render;
 
 function entry(key, title, detail, state, tone, actions) {
   const row = workflow.row(key, title, detail, ...actions);
@@ -38,12 +40,15 @@ workflow.poll(5000, async () => {
     return entry('setup:' + setup.member, setup.member, detail.join(' · '), state, tone, [show(label, 'setup', setup.member)]);
   });
   for (const service of services) {
-    if (service.state === 'idle') continue;
+
     const actions = [];
     if (service.hasLog) actions.push(show('Open logs', 'logs', service.id));
     if (service.preview) actions.push(show('Open preview', 'preview', service.id));
     const tone = service.state === 'failed' ? 'danger' : service.state === 'running' ? 'ok' : 'muted';
-    entries.push(entry('service:' + service.id, service.name, service.member + ' · Service', service.state, tone, actions));
+    const idle = service.state === 'idle';
+    if (idle) actions.push(show('Open in Actions', 'service', service.id));
+    entries.push({ ...entry('service:' + service.id, service.name, service.member + ' · Service',
+      idle ? 'Not running' : service.state, tone, actions), idle });
   }
   const order = { danger: 0, warn: 1, muted: 2, ok: 3 };
   entries.sort((a, b) => order[a.tone] - order[b.tone]);

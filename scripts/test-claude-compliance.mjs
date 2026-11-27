@@ -143,6 +143,7 @@ try{
  assert.deepEqual(f.mutations.findLast(m=>m.method==='ApproveExtension').body.grants,['switch:codex','switch:claude']);
  await card.getByRole('button',{name:'Manage rotation accounts'}).click();
  const savedCodex = page.getByRole('article',{name:'Saved Codex subscription'}).getByRole('switch',{name:'Automatic switching'});
+ await expect(page.getByText(/Codex automatic switching · 1 saved account included/)).toBeVisible();
  await expect(savedCodex).toBeChecked();
  await savedCodex.uncheck();
  await expect.poll(()=>saves().at(-1)?.rotationExcludedProfileIds).toContain('codex-saved');

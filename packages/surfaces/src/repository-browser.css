@@ -311,3 +311,12 @@
 
 .workspace-branch-field input[aria-invalid="true"] { border-color: var(--danger); }
 .workspace-branch-error { margin: 6px 0 0; color: var(--danger); font-size: 0.875rem; }
+
+.repository-selected-results {
+  margin-top: 6px;
+  height: auto;
+  max-height: min(260px, 30dvh);
+}
+.repository-selected-results:empty { display: none; }
+.repository-selected-results .repository-browser-row:has(.start-from-picker) { flex-wrap: wrap; }
+.repository-selected-results .start-from-picker { position: static; flex: 0 0 100%; height: min(200px, 28dvh); }

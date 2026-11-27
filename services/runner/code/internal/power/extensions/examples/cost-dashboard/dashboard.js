@@ -195,13 +195,21 @@ function render() {
   const conversationView = selected ? summarize(rows.filter(row => row.at >= selected.start && row.at < selected.end), null) : view;
   $('conversations-title').textContent = selected ? 'Conversations · ' + selected.long : 'By conversation';
   $('clear-peak').hidden = !selected;
-  renderRank($('by-conversation'), 'conversation', conversationView.conversations.map(c => {
+  renderConversations(conversationView);
+  $('conversation-search').oninput = () => renderConversations(conversationView);
+}
+
+function renderConversations(conversationView) {
+  const term = $('conversation-search').value.trim().toLowerCase();
+  const matches = conversationView.conversations.filter(c => !term ||
+    [state.conversations.get(c.key)?.title || 'Untitled conversation', c.workspaceName].some(value => value?.toLowerCase().includes(term)));
+  renderRank($('by-conversation'), 'conversation', matches.map(c => {
     const known = state.conversations.get(c.key);
     return {
       key: c.key, label: known?.title || 'Untitled conversation', sub: [c.workspaceName, [...c.models].map(modelName).join(', ')].filter(Boolean).join(' · '), usd: c.usd, detail: c,
       action: state.canShow && known?.sessionId ? () => show(known.sessionId) : null, actionLabel: 'Show',
     };
-  }), conversationView.total.usd, 8, 'No conversation spent anything in this period');
+  }), conversationView.total.usd, 8, term ? 'No matching conversations in this period' : 'No conversation spent anything in this period');
 }
 
 function renderPullCosts(view, rows, win) {

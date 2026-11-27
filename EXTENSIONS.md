@@ -376,6 +376,14 @@ app window (Lazybox origin)
   navigating its frame, and forging messages — with a leak server that must
   receive nothing — while its approved host works; Settings turning it off.
   Screenshots `.cache/extensions-*.png`.
+- Local visual review uses the web app, WebKit and the fixture Runner. With the
+  workspace npm dependencies and Playwright WebKit installed, run
+  `npm run review:extensions` to capture every bundled surface in
+  `.cache/extension-review/`. Append `-- disk-cleanup` to select one or `-- --light` for light-mode captures.
+  `npm run inspect:extensions -- disk-cleanup` opens a visible browser and
+  pauses for interaction. Resume in Playwright Inspector to continue. These
+  modes leave the catalog thumbnails alone. Fixture terminals record commands;
+  live filesystem effects, provider writes and agent jobs need separate tests.
 - The Cost dashboard: `npm run test:cost-dashboard` (WebKit, the fake Runner
   answering six weeks of hourly usage): added and allowed through the sheet;
   the total, the delta against the period before, the tiles, the chart and the
@@ -403,9 +411,9 @@ The Runner needs the installed `dev-cleaner` executable on its PATH.
 While any enabled extension holds this grant, the Runner runs
 `dev-cleaner --dry-run --sizes --json` when due, at most once per 24 hours. Startup gives agents five minutes to restore before a scan. It uses the cleaner's configured roots. Closing the panel
 leaves scans running. Turning off the last approved extension cancels scanning.
-Open Disk Cleanup and choose **Review latest disk scan** for free space and
+Open Disk Cleanup to see free space and
 candidate paths ordered by size. The last attempt and latest report are saved in private Runner state. A tight or critical result shows a notice in the main workspace window until a healthy scan or disablement.
-Choose **Review and clean…** to open dev-cleaner’s interactive review in a fresh
+Choose **Clean Go caches…** for a focused confirmation of rebuildable Go caches, or **Review all targets…** to open dev-cleaner’s interactive review in a fresh
 Runner-home terminal. It scans current candidates, excludes process termination,
 and removes the items the person selects and confirms. The terminal shows each
 cleanup result. The report below the button is the last scheduled scan. Lazybox

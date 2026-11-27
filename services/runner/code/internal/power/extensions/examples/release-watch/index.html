@@ -12,7 +12,7 @@
 </head>
 <body class="workflow">
 <header><h1>Release Watch</h1><p id="scope">Runner</p></header>
-<div class="release-tools"><label><input type="checkbox" id="all-pulls"> Show other open pull requests</label><button type="button" id="inbox">Open Inbox</button></div>
+<div class="release-tools"><label>Show <select aria-label="Release activity filter" id="activity"><option value="attention">Needs attention</option><option value="approval">Deployment approvals</option><option value="failures">Failed checks and deployments</option><option value="all">All release activity</option></select></label><button type="button" id="inbox">Open Inbox</button></div>
 <p id="notice" role="status">Loading…</p>
 <ul id="rows" aria-label="Release activity"></ul>
 </body>

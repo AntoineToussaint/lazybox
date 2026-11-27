@@ -37,7 +37,7 @@ export type ModuleProps = {
   currentLayoutYaml?(): string;
   onReviewLayout?(yaml: string): void;
   /** User-initiated interactive review in a new shell on this Runner. Never exposed to extension frames. */
-  onReviewDiskCleanup?(): Promise<void>;
+  onReviewDiskCleanup?(scope: 'go' | 'all'): Promise<void>;
   extensionRequest?: { choice?: ExtensionPanelChoice; onOpened(): void };
   workspaceId: string;
   /** This panel's identity on its page, stable while it is open. */

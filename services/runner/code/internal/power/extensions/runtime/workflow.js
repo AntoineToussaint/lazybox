@@ -21,7 +21,7 @@ const workflow = (() => {
       const text = [item.querySelector('strong')?.textContent, item.querySelector('small')?.textContent].join(' ');
       item.hidden = !text.toLowerCase().includes(query);
     }
-    filter.hidden = !items.length && !filter.value;
+    filter.hidden = items.length < 2 && !filter.value && document.activeElement !== filter;
     empty.hidden = !items.length || items.some(item => !item.hidden);
   };
   applyFilter();

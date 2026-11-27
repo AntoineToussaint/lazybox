@@ -12,3 +12,11 @@
 .clone-question { width: 100%; padding: 12px; border-radius: 8px; background: var(--surface-raised); border: 1px solid var(--line-subtle); }
 .clone-question .clone-destination { display: flex; flex-flow: row wrap; align-items: center; gap: 6px; margin-top: 6px; color: var(--text-muted); }
 .clone-destination select { width: auto; max-width: 100%; }
+
+.clone-profile-dialog .clone-interview label { color: var(--text-secondary); }
+.clone-profile-dialog .clone-suggestions button:disabled {
+  opacity: 1; color: var(--ok); border-color: var(--line); background: var(--ok-bg);
+}
+.clone-profile-dialog textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+.clone-profile-dialog .clone-suggestions button:disabled::before { content: "✓ "; }

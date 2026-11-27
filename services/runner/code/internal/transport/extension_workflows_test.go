@@ -157,7 +157,7 @@ func TestCompoundEngineeringReviewsAnArchiveOnce(t *testing.T) {
 			ctx := context.Background()
 			ws := createTestCollection(t, s)
 			approveWorkflow(t, s, "compound-engineering", power.GrantCompound)
-			for dir, rule := range map[string]string{"checks": "Run the narrow verifier first.", "unrelated": "Unrelated directory rule."} {
+			for dir, rule := range map[string]string{"checks": "Run the narrow verifier first.\n" + strings.Repeat("Existing guidance.\n", 900), "unrelated": "Unrelated directory rule."} {
 				folder := filepath.Join(ws.Root, "api", dir)
 				if err := os.MkdirAll(folder, 0755); err != nil {
 					t.Fatal(err)
@@ -218,7 +218,7 @@ func TestCompoundEngineeringReviewsAnArchiveOnce(t *testing.T) {
 			if reviewer.Open.Permission != "read-only" || !strings.Contains(reviewer.Open.Context, "repository gate") {
 				t.Fatalf("unexpected reviewer context: %s", reviewer.Open.Context)
 			}
-			if scope == "conversation" && (!strings.Contains(reviewer.Open.Context, "Current api/checks/AGENTS.md") || !strings.Contains(reviewer.Open.Context, "Run the narrow verifier first.") || strings.Contains(reviewer.Open.Context, "Unrelated directory rule.")) {
+			if scope == "conversation" && (!strings.Contains(reviewer.Open.Context, "Current api/checks/AGENTS.md") || !strings.Contains(reviewer.Open.Context, "Run the narrow verifier first.") || !strings.Contains(reviewer.Open.Context, "[Partial document.") || strings.Contains(reviewer.Open.Context, "Unrelated directory rule.")) {
 				t.Fatalf("archive review missing scoped evidence: %s", reviewer.Open.Context)
 			}
 			<-reviewer.Applied

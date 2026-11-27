@@ -4,7 +4,7 @@ import { attentionWindowFocused, useAttentionHost, useAttentionRoot, useNotifica
 import { extensionsChanged } from './useExtensions';
 import { useRunner } from './RunnerContext';
 import { playAlert } from './sounds';
-import { listReminders, remindersChanged, removeReminder, type Reminder } from './reminders';
+import { listReminders, remindersChanged, removeReminder, snoozeReminder, type Reminder } from './reminders';
 
 export function ReminderNotices() {
   const root = useAttentionRoot();
@@ -76,7 +76,7 @@ export function ReminderNotices() {
     <section className="account-notice" role="status" key={row.id}>
       <div className="account-notice-body"><strong>Reminder</strong><p>{row.text}</p>
         <small>{row.ownerName} · {new Date(row.due).toLocaleString()}</small>
-        <div className="account-notice-actions"><button onClick={() => removeReminder(localStorage, root, row.owner, row.id)}>Done</button></div>
+        <div className="account-notice-actions"><button onClick={() => snoozeReminder(localStorage, root, row.owner, row.id)}>Snooze 15 min</button><button onClick={() => removeReminder(localStorage, root, row.owner, row.id)}>Done</button></div>
       </div>
     </section>)}</>;
 }

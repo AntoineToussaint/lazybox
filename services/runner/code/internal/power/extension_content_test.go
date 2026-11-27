@@ -158,8 +158,19 @@ func TestDiskReportRequiresLiveScanGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp, body := get(t, session.Base+resource); resp.StatusCode != http.StatusOK || !strings.Contains(body, "Waiting") {
+	if resp, body := get(t, session.Base+resource); resp.StatusCode != http.StatusOK || !strings.Contains(body, "Waiting") || !strings.Contains(body, "available now") {
 		t.Fatalf("%s %s", resp.Status, body)
+	}
+	// Existing installs still have the original link-only landing page.
+	legacy, err := os.ReadFile("extensions/legacy/disk-cleanup-v1-index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.Dir(), "disk-cleanup", "index.html"), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := get(t, session.Base+"index.html"); resp.StatusCode != http.StatusOK || !strings.Contains(body, "Waiting for the first scan.") {
+		t.Fatalf("legacy panel did not open its report: %s %s", resp.Status, body)
 	}
 	if _, err := e.SetEnabled("disk-cleanup", false); err != nil {
 		t.Fatal(err)

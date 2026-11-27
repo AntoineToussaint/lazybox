@@ -271,3 +271,7 @@ p.settings-empty[role=status]{border-style:solid;border-color:transparent;text-a
 .settings-search-results button:hover,.settings-search-results button:focus-visible{background:var(--surface-hover)}
 .settings-search-results small,.settings-search-results p{color:var(--s-faint)}
 .settings-search-results .settings-ask{justify-content:flex-start;align-items:center}
+
+.subscription-card > header { padding: 16px 16px 10px; }
+.subscription-card h3 { font-size: calc(15px * var(--text-scale)); letter-spacing: -.015em; }
+.subscription-card footer { background: var(--surface-sunken); padding-block: 8px; }

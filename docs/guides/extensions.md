@@ -21,19 +21,19 @@ Open **Extensions** in the main navigation to browse installed and available ext
 
 | Extension | What you can do |
 | --- | --- |
-| Agent board | Search conversations or select **Needs attention only**. Open a card to answer the agent. Use **Older conversations** to browse earlier history. |
-| Clone Me | Choose **Teach Clone Me** to review and save coding preferences for your agents. |
-| Compound Engineering | Archive a conversation or workspace, then review the proposed documentation edits in Artifacts. |
-| Cost dashboard | Filter spend by period, workspace, or model. **Inspect peak spend** ranks conversations in the most expensive interval. |
+| Agent board | Search conversations or combine **Unread only** and **Needs attention only**. Open a card to answer the agent. Use **Older conversations** to browse earlier history. |
+| Clone Me | Choose **Teach Clone Me** to assign suggestions to style, verification or decisions, then save preferences for your agents. |
+| Compound Engineering | Archive a conversation or workspace, then review the proposed documentation edits in Artifacts. Long instruction files are excerpted and marked for verification. |
+| Cost dashboard | Filter spend by period, workspace, or model. Search the conversation breakdown by title or workspace. **Inspect peak spend** ranks conversations in the most expensive interval. |
 | Disk Cleanup | Review the saved scan, then choose which build directories and caches to clean. |
 | Subscription rotation | Choose **Manage rotation accounts** to select which signed-in accounts may take over at a limit. |
-| Mailbox | Use **Needs you** to find review requests, assignments and mentions. Open the item on GitHub. |
-| Release Watch | Find deployments awaiting approval, failed deployments, and failing checks. Open the deployment or failing check. |
-| Runner Radar | Filter blocked conversations by failure or pending input, see how long they have waited, and open one. |
-| Preview Desk | Find a running preview, inspect service logs, or open the repository setup that needs approval. Choose **Show in Actions** to manage a stopped service. |
-| Workspace Bootstrap | Find failed or stopped setup, missing files or pending approvals and open the relevant setup or logs. |
-| Handoff Brief | Pick the pull requests and artifacts to include, write the next step, then review the draft before publishing. If a source is unavailable or capped at 100 entries, the panel identifies it and you can draft with the sources that loaded. |
-| Reminders | Schedule a follow-up at a local time, tomorrow morning or next Monday morning. Cancel it from the scheduled list. |
+| Mailbox | Select a repository or use **Needs you** to find review requests, assignments and mentions. Open the item on GitHub. |
+| Release Watch | Switch between approvals, failures and all release activity. Open the deployment or failing check. |
+| Runner Radar | Filter blocked conversations by failure or pending input, sort oldest or newest first, and open one. |
+| Preview Desk | Find a running preview, inspect a failed service’s log directly, or open the repository setup that needs approval. Choose **Show in Actions** to manage a stopped service. |
+| Workspace Bootstrap | Find failed or stopped setup, missing files or pending approvals and open the relevant setup or logs. Include idle services to open one in Actions. |
+| Handoff Brief | Pick the pull requests and artifacts to include, write the next step, then review the draft before publishing. If a source is unavailable or capped at 100 entries, the panel identifies it. If a refresh fails, it keeps the last loaded sources for that workspace and labels them. |
+| Reminders | Schedule a follow-up at a local time, tomorrow morning or next Monday morning. Cancel it from the scheduled list or snooze a due notice for 15 minutes. |
 
 The panel's bar switches between your extensions (*All extensions…* lists
 them, and what waits for your approval), shows what the one in front may do
@@ -41,7 +41,7 @@ them, and what waits for your approval), shows what the one in front may do
 
 Opening a specific extension from Settings or a workspace alert shows its docked panel maximized. Choose **Restore layout** to see your other panels again.
 
-A low-disk-space alert has an **Open Disk Cleanup** button. The bundled panel opens the saved report with free space and cleanup candidates, largest measured items first. Earlier installed copies have a **Review latest disk scan** link. Choose **Review and clean…** to start a fresh scan in a new terminal in the Runner’s home folder. Select items in dev-cleaner and confirm to remove them, or quit to keep them. The terminal reports cleaned, skipped or failed items. The panel shows the time of its last scheduled scan. **Dismiss** hides the current warning in this window, including after reload. A change in pressure can show a new warning.
+A low-disk-space alert has an **Open Disk Cleanup** button. Refresh space reads the current free space on the Runner home volume. The panel compares current free space with the last scan. Other processes can contribute to that change. The candidate list uses the saved scan. Search by cache name or path, or select **At least 1 GiB** to narrow the list to measured targets. The bundled panel opens the saved report with free space and cleanup candidates, largest measured items first. The original bundled link-only page also opens the report directly. Choose **Clean Go caches…** for a focused confirmation of rebuildable Go caches, or **Review all targets…** to start a fresh scan in a new terminal in the Runner’s home folder. Select items in dev-cleaner and confirm to remove them, or quit to keep them. The terminal reports cleaned, skipped or failed items. The panel shows the time of its last scheduled scan. **Dismiss** hides the current warning in this window, including after reload. A change in pressure can show a new warning.
 
 Mailbox, Release Watch, Preview Desk, Runner Radar, Workspace Bootstrap and Handoff Brief support filtering their current list and refreshing it on demand. Row actions open the corresponding conversation, preview, log or GitHub item where available.
 
@@ -153,6 +153,8 @@ lazybox.every(5000, async () => {
 Every call, its grant and what it returns: [the bridge
 reference](../reference/extensions.md). How it is kept safe:
 [EXTENSIONS.md](../../EXTENSIONS.md).
+
+Handoff Brief can include all sources or clear the selection before drafting. Preview Desk shows setup approvals, missing-file counts and interrupted setup beside the affected service, with a link to its repository setup.
 
 ### PR Create / Explain and Mission Planning
 

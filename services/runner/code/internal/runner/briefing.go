@@ -61,6 +61,7 @@ var builtinBriefings = []builtinBriefing{
 		{version: 8, since: "lazybox workspace rename", note: "When the person asks to rename this workspace, use `lazybox workspace rename \"DISPLAY NAME\"` to update its sidebar name."},
 		{version: 9, since: "ask once using a blocking question tool", note: "When progress requires the person's decision, ask once using a blocking question tool if available, then wait for their answer. If a goal hook continues the turn while the same decision is pending, leave the action pending and work only on independent steps. Silence is not authorization."},
 		{version: 10, since: "with agentInput enabled", note: "Use interactive with agentInput enabled for ordinary prompts. After approval, use interactive_read to see the prompt and interactive_write to answer. Keep sign-in handoffs private."},
+		{version: 11, since: "In Full Access the command starts immediately", note: "Interactive commands start immediately in Full Access. Keep sign-in handoffs private so the person enters credentials in the terminal."},
 	}},
 	{id: "run", text: runBriefing, changes: []briefingChange{
 		{version: 1, since: "## Running commands in Lazybox", note: "Run tests, builds and other noisy commands as `lazybox run -- <command>`: the person sees the full output; you get a compact view that keeps the failures."},

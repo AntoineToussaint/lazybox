@@ -44,9 +44,9 @@ An argument holding a character you could not see (an escape, a carriage
 return, a direction mark) is written in ANSI-C quoting, `$'safe\e[2K'`, so
 nothing in it is hidden. **Working directory** names the folder from the
 workspace (`lazybox/scripts`); expand it to see the full path.
-Choose **Run and take over** to launch the command and focus its terminal, or
-**Decline** to tell the agent to continue without it. This decision is required
-even in full-access mode. Pending requests appear in the inbox and use the
+In Full Access, the command starts immediately. Open its terminal to enter input.
+In approval mode, choose **Run and take over** to launch the command and focus its terminal, or
+**Decline** to tell the agent to continue without it. Pending requests appear in the inbox and use the
 existing approval notification preferences. After expiry, the transcript keeps
 the command under **View command**. A new request is needed to run it.
 

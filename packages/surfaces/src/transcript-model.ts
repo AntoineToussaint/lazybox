@@ -283,15 +283,20 @@ export function foldTranscript(state: Transcript, records: readonly JournalEvent
       continue;
     }
     if (event.type === 'terminal_handoff') {
-      if (event.status === 'pending') {
+      if (event.status === 'pending' || (event.status === 'running' && event.providerDataJson.length > 0)) {
+        let cwd = event.text;
         let argv: unknown;
         try { argv = JSON.parse(new TextDecoder().decode(event.providerDataJson)); } catch { continue; }
+        if (event.status === 'running' && argv && typeof argv === 'object' && 'cwd' in argv && typeof argv.cwd === 'string' && 'argv' in argv) {
+          cwd = argv.cwd;
+          argv = argv.argv;
+        }
         const legacyShared = !!argv && typeof argv === 'object' && 'agentInput' in argv && argv.agentInput === true;
         const agentInput = event.terminalAgentInput || legacyShared;
         if (legacyShared && argv && typeof argv === 'object' && 'argv' in argv) argv = argv.argv;
         if (!Array.isArray(argv) || argv.some(value => typeof value !== 'string')) continue;
         add({ id: record.cursor.toString(), type: event.type, text: '', turnId: event.turnId,
-          terminalHandoff: { id: event.requestId, workspaceId: event.name, cwd: event.text, argv, agentInput, status: 'pending' } });
+          terminalHandoff: { id: event.requestId, workspaceId: event.name, cwd, argv, agentInput, status: event.status, terminalId: event.status === 'running' ? event.text : undefined } });
         next.appendToLast = false;
       } else {
         const current = messages ?? state.messages;

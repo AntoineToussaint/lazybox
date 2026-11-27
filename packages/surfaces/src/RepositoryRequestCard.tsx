@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } f
 import type { Collection } from '@lazybox/protocol';
 import { Icon } from './Icons';
 import { humanError } from './human-error';
-import { CardHead, editable, Kbd, useChatKeys, useInitialFocus } from './request-parts';
+import { CardHead, editable, focusDecision, Kbd, useChatKeys, useInitialFocus } from './request-parts';
 import type { RequestCardProps } from './RequestCards';
 import { additionKey, pickerQuery, repositoryRequestOf, sourceLabel, sourceTag } from './repository-request-model';
 import { shortPath } from './tool-lines';
@@ -89,11 +89,9 @@ export function RepositoryRequestCard({ request, api, onError, position, agentNa
   useChatKeys(card, onKey);
   useInitialFocus(card);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.repeat || editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      const buttons = [...card.current!.querySelectorAll<HTMLButtonElement>('.decision-row:not(:disabled)')];
-      const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-      buttons[(at + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      focusDecision(event.currentTarget, event.key);
       event.preventDefault(); return;
     }
     if (onKey(event)) event.preventDefault();

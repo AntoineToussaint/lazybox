@@ -21,7 +21,7 @@ const updateShape = {
   reason: z.string().min(1).max(2000).describe('One or two plain sentences for the user: what changes and why. Shown on the approval card.'),
   changes: z.strictObject({
     naming: z.enum(['repositories', 'generated']).optional().describe('Suggested workspace names.'),
-    permission: z.enum(['', 'ask', 'read-only', 'yolo']).optional().describe('Default permissions for new coding sessions; "" keeps the current CLI settings, "yolo" is full access with no approval prompts.'),
+    permission: z.enum(['', 'ask', 'read-only', 'yolo']).optional().describe('Default permissions for new coding sessions; "" keeps the current CLI settings, "yolo" is full access to edit files and run ordinary commands.'),
     context: z.string().max(32768).optional().describe('Lazybox context for every new agent; replaces the current text whole.'),
     claudeContext: z.string().max(16384).optional().describe('Additional Claude context; replaces the current text whole.'),
     codexContext: z.string().max(16384).optional().describe('Additional Codex context; replaces the current text whole.'),

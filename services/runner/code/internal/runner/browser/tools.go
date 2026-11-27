@@ -477,8 +477,13 @@ func (m *Manager) Control(ctx context.Context, c Caller, action, raw string) (St
 	case "browse_freely", "ask_sites":
 		freely := action == "browse_freely"
 		if b.freely != freely {
-			b.freely = freely
-			m.persistLocked(b)
+			if err := m.setFreelyLocked(b, freely); err != nil {
+				m.mu.Unlock()
+				return State{}, err
+			}
+			if freely {
+				m.resolveSiteGrantsLocked()
+			}
 			summary := agentName + " opens any site in this conversation"
 			if !freely {
 				summary = agentName + " asks before each new site again"

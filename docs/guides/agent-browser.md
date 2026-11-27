@@ -46,6 +46,8 @@ full access:
 | `a` | Always allow in this workspace |
 | `n` | Deny…, with a reason the agent reads |
 
+For a registered localhost preview, **Always allow workspace previews** remembers the choice across port changes and conversations in that workspace. Remove `localhost:*` in Settings → Browser to ask again. Older approvals for individual ports keep their original scope.
+
 A redirect to another site asks before that site is contacted. Downloads and
 submitting a sign-in form ask too, however the agent would submit it. The
 agent never types or sees passwords: when it needs one it asks you to take
@@ -55,7 +57,7 @@ agent's to stay on; if a page moves itself to another site meanwhile, the
 agent asks you before it uses that page.
 
 To stop being asked in one conversation, choose **Browse freely in this
-conversation** from the panel's menu.
+conversation** from the panel's menu or **Allow and enable full browser access** directly on a site request. This choice applies to navigation. Downloads and sign-ins still ask.
 
 ## Take over, give back, stop
 

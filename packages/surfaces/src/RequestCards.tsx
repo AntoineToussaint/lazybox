@@ -7,7 +7,7 @@ import { Icon } from './Icons';
 import { isSettingsUpdate, SettingsProposal } from './SettingsProposal';
 import { approvalOf, decisionForKey, decisionRows, questionsOf, scopeWords, type Approval, type AnswerNote, type DecisionRow, type Question } from './request-model';
 import { shortPath } from './tool-lines';
-import { arrowIntoCard, CardHead, editable, Kbd, useChatKeys, useInitialFocus, type RequestPosition } from './request-parts';
+import { arrowIntoCard, CardHead, editable, focusDecision, Kbd, useChatKeys, useInitialFocus, type RequestPosition } from './request-parts';
 import { RepositoryRequestCard } from './RepositoryRequestCard';
 import { BrowserRequestCard } from './BrowserRequestCard';
 import { ConversationRequestCard } from './ConversationRequestCard';
@@ -38,6 +38,20 @@ export type RequestCardProps = {
 };
 
 export function AgentRequestCard(props: RequestCardProps) {
+  const [changing, setChanging] = useState(false);
+  const canChange = props.enableFullAccess && ['browser_request', 'repository_request', 'conversation_request'].includes(props.request.type);
+  return <><RequestBody {...props}/>{canChange && <div className="request-access-action">
+    <button type="button" disabled={changing} onClick={async () => {
+      setChanging(true);
+      try { await props.enableFullAccess?.(); }
+      catch (error) { props.onError(humanError(error)); }
+      finally { setChanging(false); }
+    }}>{changing ? 'Enabling Full access…' : 'Enable Full access for this conversation'}</button>
+    <small>Allows the agent to edit files and run commands. Answer the request above separately.</small>
+  </div>}</>;
+}
+
+function RequestBody(props: RequestCardProps) {
   if (props.request.type === 'repository_request') return <RepositoryRequestCard {...props}/>;
   if (props.request.type === 'browser_request') return <BrowserRequestCard {...props}/>;
   if (props.request.type === 'conversation_request') return <ConversationRequestCard {...props}/>;
@@ -96,11 +110,9 @@ function ApprovalCard({ request, api, session, onError, root = '', position, age
   useChatKeys(card, onKey);
   useInitialFocus(card);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.repeat || editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      const buttons = [...card.current!.querySelectorAll<HTMLButtonElement>('.decision-row:not(:disabled)')];
-      const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-      buttons[(at + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      focusDecision(event.currentTarget, event.key);
       event.preventDefault(); return;
     }
     if (onKey(event)) event.preventDefault();
@@ -210,7 +222,7 @@ function QuestionCard({ request, api, session, onError, position, canRemember = 
   useInitialFocus(card, questions[0] && !questions[0].options.length ? '.question-free input, .question-free textarea' : undefined);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void send(); return; }
-    if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.repeat || editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
     // From the card itself, ↓ and ↑ go to the first and last option, as on the other cards.
     if (arrowIntoCard(event, card.current, '[role=radio], [role=checkbox]')) return;
     if (onKey(event)) event.preventDefault();

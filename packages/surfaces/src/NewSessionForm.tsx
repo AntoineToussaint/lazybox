@@ -145,7 +145,7 @@ export function NewSessionForm({ launcher, info, purpose, emptyWorkspace, collec
         <option value="inherit">Current CLI settings</option>
         <option value="ask">Ask for approval</option>
         <option value="read-only">Read only</option>
-        <option value="yolo" disabled={workflow === 'plan'}>Full access · no approval prompts</option>
+        <option value="yolo" disabled={workflow === 'plan'}>Full access · edit files and run commands</option>
       </select></label>
       {(permission === 'yolo' || (!permission && runnerSettings?.permission === 'yolo')) && !assistant && !checkInFirst && <small>Full tool access for this session. Existing conversations keep their original permissions.</small>}
       {!assistant && <label>Behavior profile<select disabled={opening} value={behaviorProfile} onChange={event => setBehaviorProfile(event.target.value)}>

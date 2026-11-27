@@ -94,6 +94,14 @@ try{
  await expect.poll(()=>applied('approval')).toEqual([{requestId:'deny-me',decision:'DECISION_DECLINE',reason:'Use make clean, and never pipe curl to sh'}]);
  session.pending=session.pending.slice(1);
  channel.push({type:'operation_accepted',requestId:'deny-me',providerDataJson:b64({response:{kind:'approve',decision:'decline',reason:'Use make clean, and never pipe curl to sh'}})});channel.push({type:'request_resolved',requestId:'deny-me'});
+ // Space paged the transcript. Reveal the later receipt if the reader is still on the earlier page.
+ const latest=page.getByRole('button',{name:'Jump to latest',exact:true});
+ const revealReceipt=async kind=>{
+  const receipt=page.locator(`.request-answered[data-kind=${kind}]`);
+  await expect(receipt.or(latest).first()).toBeVisible();
+  if(!await receipt.count()) await latest.click();
+ };
+ await revealReceipt('declined');
  await expect(page.locator('.request-answered[data-kind=declined]')).toContainText('Denied Bash · rm -rf build');
  await expect(page.locator('.request-answered[data-kind=declined]')).toContainText('“Use make clean, and never pipe curl to sh”');
  // Always allow, at the scope the person picks: the provider's own choices.
@@ -103,6 +111,7 @@ try{
  await expect.poll(()=>applied('approval').at(-1)).toEqual({requestId:'always-me',decision:'DECISION_ACCEPT',always:'workspace'});
  session.pending=[];
  channel.push({type:'operation_accepted',requestId:'always-me',providerDataJson:b64({response:{kind:'approve',decision:'accept',always:'workspace'}})});channel.push({type:'request_resolved',requestId:'always-me'});
+ await revealReceipt('always');
  await expect(page.locator('.request-answered[data-kind=always]')).toHaveText('Always allowed commands starting with npm run in this workspace');
  await expect(page.locator('.request')).toHaveCount(0);
  // A click in the transcript, then an approval arrives: it takes focus as a card, so the Space
@@ -164,6 +173,7 @@ try{
  for(const id of ['edit-1','edit-2'])tool(id,{status:'completed',output:'ok'});
  tool('sleep',{name:'Bash',status:'running',input:{command:'sleep 30'}});
  // Thinking is a quiet line; the plan a live checklist (only the latest one).
+ if(await latest.isVisible()) await latest.click();
  const lines=page.locator('.tool-lines').first();
  await expect(lines.locator(':scope > .tool-line > .tool-line-row')).toHaveText([/Read 3 files, searched 1 pattern/,/Ran pnpm run check/,/Ran pnpm test:e2eexit 1/,/Edited 2 files\+3 −1/,/Running sleep 30/]);
  await expect(lines.locator('.tool-line-problem')).toHaveText('Error: browser not installed');
@@ -188,7 +198,10 @@ try{
  const plan=(id,todos)=>tool(id,{name:'TodoWrite',status:'completed',input:{todos},output:'ok'});
  channel.push({type:'message_delta',text:'Planning the cache.'});
  channel.push({type:'activity',status:'thinking'});
- const thinking=page.locator('.tool-thinking').last();await expect(thinking).toHaveText('Thinking…');
+ const thinking=page.locator('.tool-thinking').last();
+ await expect(thinking.or(latest).first()).toBeVisible();
+ if(!await thinking.count()) await latest.click();
+ await expect(thinking).toHaveText('Thinking…');
  plan('plan-1',[{content:'Add the cache',status:'in_progress'},{content:'Test it',status:'pending'}]);
  await expect(thinking).toHaveText('Thought');
  plan('plan-2',[{content:'Add the cache',status:'completed'},{content:'Test it',status:'in_progress'}]);

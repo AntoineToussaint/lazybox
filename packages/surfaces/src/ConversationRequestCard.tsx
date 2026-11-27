@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { SubscriptionOptions } from './SubscriptionGroups';
 import { Icon } from './Icons';
-import { CardHead, editable, Kbd, useChatKeys, useInitialFocus } from './request-parts';
+import { CardHead, editable, focusDecision, Kbd, useChatKeys, useInitialFocus } from './request-parts';
 import type { RequestCardProps } from './RequestCards';
 import { briefPreview, startRequestOf, workspaceWords } from './conversation-request-model';
 import { agentModelText } from './conversation-model';
@@ -97,11 +97,9 @@ export function ConversationRequestCard({ request, api, session, onError, positi
   useChatKeys(card, onKey);
   useInitialFocus(card);
   const cardKeys = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.repeat || editable(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      const buttons = [...card.current!.querySelectorAll<HTMLButtonElement>('.decision-row:not(:disabled)')];
-      const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-      buttons[(at + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      focusDecision(event.currentTarget, event.key);
       event.preventDefault(); return;
     }
     if (onKey(event)) event.preventDefault();

@@ -66,7 +66,7 @@ export function AgentSettings() {
         <select id="setting-naming" value={settings.naming} onChange={e => change({ naming: e.target.value })}><option value="repositories">Repository names</option><option value="generated">Memorable generated names</option></select>
       </SettingsRow>
       <SettingsRow label="Default permissions" htmlFor="setting-permission" description="What a new agent may do without asking. Each conversation can choose differently when it starts.">
-        <select id="setting-permission" value={settings.permission} onChange={e => change({ permission: e.target.value })}><option value="">Current CLI settings</option><option value="ask">Ask for approval</option><option value="read-only">Read only</option><option value="yolo">Full access · no approval prompts</option></select>
+        <select id="setting-permission" value={settings.permission} onChange={e => change({ permission: e.target.value })}><option value="">Current CLI settings</option><option value="ask">Ask for approval</option><option value="read-only">Read only</option><option value="yolo">Full access · edit files and run commands</option></select>
       </SettingsRow>
       {settings.permission === 'yolo' && <p className="settings-callout tone-warn" role="note"><Icon name="alert" size={14}/>New coding agents will run with unrestricted tool access and never ask first.</p>}
     </SettingsGroup>

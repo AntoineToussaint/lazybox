@@ -569,20 +569,25 @@ If the provider stops responding during a turn, the chat reports any background 
 
 <video controls playsinline preload="none" aria-label="Demo: annotate an upload diagram and attach it to an agent draft" src="/demos/annotate-diagram.mp4" poster="/demos/annotate-diagram.webp" style="width:100%;height:auto"></video>
 
-In the silent demo, choose **Annotate**, circle the upload step, undo and redo the mark, then attach the drawing and ask the agent to add a retry.
+The 11-second demo shows how to circle the upload step, undo and redo the stroke, and attach the result. The message asks the agent to add a retry if that step fails.
 
-Choose **Draw** beside the attachment button to sketch in the embedded
-Excalidraw editor. **Attach drawing** puts a PNG in the draft. Choose **Edit**
-on its thumbnail to reopen the strokes. Editing an attached picture adds the
-annotated copy beside the original. In an artifact with an agent companion, choose **Annotate** on a
-Mermaid diagram to attach the marked image with its Mermaid source and version
-reference. Add your instructions and send the draft to the agent.
+| Start here | What to do |
+| --- | --- |
+| Blank canvas | Choose **Draw** beside the attachment button. Sketch, then choose **Attach drawing** to add a PNG to your draft. |
+| Attached picture | Choose **Edit** on the thumbnail. Attach the annotated copy beside the original. You can reopen the drawing to adjust its strokes. |
+| Mermaid diagram | Choose **Annotate** in an artifact with an agent companion. The draft includes the marked diagram, its Mermaid source and its version reference. |
+
+Before sending, open the annotated attachment and check that both the original and your marks are visible. Add a sentence describing the change you want.
+
+### Image generation and edit masks
 
 For image generation, attach the sketch as a reference and describe the
 picture you want to an agent with an image-generation tool. For a localized
 edit, open an attached picture, brush over the region, and choose **Attach
 marks as edit mask**. The draft contains the original and a same-size PNG
 whose transparent pixels identify the area to regenerate.
+
+### Drawing shortcuts
 
 The canvas opens with the pen selected. Press **P** for pen, **V** for
 selection, **R** for rectangle, **O** for ellipse, **A** for arrow, **T** for

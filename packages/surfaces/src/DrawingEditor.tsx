@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Excalidraw, convertToExcalidrawElements, exportToBlob, exportToCanvas, getCommonBounds, loadFromBlob, MainMenu } from '@excalidraw/excalidraw';
 import type { BinaryFileData, ExcalidrawImperativeAPI, ExcalidrawInitialDataState } from '@excalidraw/excalidraw/types';
 import '@excalidraw/excalidraw/index.css';
+import { Icon } from './Icons';
+import { useAppearance } from './appearance/useAppearance';
 import { getAppearance } from './appearance/apply';
 import type { Rendered } from './diagram-svg';
 
@@ -34,6 +36,7 @@ async function initialScene(diagram?: Rendered, file?: File): Promise<Excalidraw
 export default function DrawingEditor({ diagram, file, onAttach, onMask, onError }: {
   diagram?: Rendered; file?: File; onAttach(file: File): void; onMask?(file: File): void; onError(message: string): void;
 }) {
+  const { theme } = useAppearance();
   const [scene, setScene] = useState<ExcalidrawInitialDataState>();
   const [api, setApi] = useState<ExcalidrawImperativeAPI>();
   const [saving, setSaving] = useState(false);
@@ -89,9 +92,9 @@ export default function DrawingEditor({ diagram, file, onAttach, onMask, onError
     } catch (error) { onError(String(error)); }
     finally { URL.revokeObjectURL(original.src); setSaving(false); }
   }
-  return <><div style={{ flex: 1, minHeight: 0 }}>{scene && <Excalidraw initialData={scene} excalidrawAPI={setApi}
+  return <><div className="drawing-canvas">{scene && <Excalidraw theme={theme.scheme} initialData={scene} excalidrawAPI={setApi}
     UIOptions={{ canvasActions: { export: false, saveAsImage: false } }}><MainMenu><MainMenu.DefaultItems.ClearCanvas/></MainMenu></Excalidraw>}</div>
-    {onMask && <button type="button" disabled={!api || saving} onClick={() => void attachMask()}
+    <div className="drawing-actions">{onMask && <button type="button" disabled={!api || saving} onClick={() => void attachMask()}
       title="Keep the original picture and attach a same-size PNG mask. Marks identify pixels to regenerate.">Attach marks as edit mask</button>}
-    <button type="button" className="primary" disabled={!api || saving} onClick={() => void attach()}>{saving ? 'Preparing image…' : 'Attach drawing'}</button></>;
+    <button type="button" className="drawing-attach" disabled={!api || saving} onClick={() => void attach()}><Icon name="attach" size={14}/>{saving ? 'Preparing image…' : 'Attach drawing'}</button></div></>;
 }

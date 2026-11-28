@@ -18,7 +18,7 @@ try {
   const errors = [];
   const submissions = [];
   for (const view of ['agent', 'chat', 'workspace']) {
-    const context = await browser.newContext();
+    const context = await browser.newContext({ colorScheme: 'dark' });
     const page = await context.newPage();
     await collectPageErrors(page, errors);
     let drawingLimits = view === 'agent';
@@ -43,6 +43,8 @@ try {
     if (drawingLimits) {
       await chat.getByRole('button', { name: 'Draw', exact: true }).click();
       const editor = page.getByRole('dialog', { name: 'Drawing editor' });
+      await expect(editor.locator('canvas.interactive')).toBeVisible();
+      await page.screenshot({ path: '.cache/drawing-editor.png' });
       await editor.getByRole('button', { name: 'Attach drawing' }).click();
       await expect(editor.getByRole('alert')).toContainText('Draw something');
       async function drawRectangle() {
@@ -55,6 +57,10 @@ try {
         await page.mouse.move(bounds.x + bounds.width * 0.68, bounds.y + bounds.height * 0.65, { steps: 5 });
         await page.mouse.up();
       }
+      const attachBounds = await editor.getByRole('button', { name: 'Attach drawing' }).boundingBox();
+      const canvasBounds = await editor.locator('canvas.interactive').boundingBox();
+      assert.ok(attachBounds.width < canvasBounds.width / 2);
+      assert.ok(attachBounds.y + attachBounds.height <= canvasBounds.y + 1);
       await drawRectangle();
       await page.keyboard.press('Escape');
       await expect(editor).toBeVisible();

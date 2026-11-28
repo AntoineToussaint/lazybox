@@ -113,7 +113,7 @@ certify live provider authorization or every resumability path.
 
 Promotion changes only the release selected for the next Working launch. It
 neither replaces a running app nor restarts its Runner, copies credentials,
-or migrates its database. Restart Working explicitly to adopt a candidate. The
+or migrates its database. Restart Working explicitly to adopt a candidate. Stopping the terminal launcher also closes the desktop it started, so the next launch opens the selected release. The
 restart keeps running agents. They stay on the binary that started their
 session host until they end.
 The pointer records the previous release; selecting an older binary is **not**

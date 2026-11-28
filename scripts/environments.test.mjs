@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
-import { environmentPaths, releasePath, includeSource, validateEnvironmentRoot, shareSubscriptions, sharedSubscriptionState, freezeRunnerReload, workingTauriConfig, pruneFailedCandidate, sweepFailedCandidates } from './environments.mjs';
+import { startWorkingDesktop, environmentPaths, releasePath, includeSource, validateEnvironmentRoot, shareSubscriptions, sharedSubscriptionState, freezeRunnerReload, workingTauriConfig, pruneFailedCandidate, sweepFailedCandidates } from './environments.mjs';
 import { startDesktopDevServer, desktopDevConfig, stopProcessGroup, spawnProcessGroup } from './desktop-dev.mjs';
 import { uiWatcher } from './ui-watch.mjs';
 import { spawn } from 'node:child_process';
@@ -39,6 +39,23 @@ test('launcher cleans up a watcher that ignores termination without touching ano
     await stopProcessGroup(undefined);
   } finally {
     await Promise.all([stopProcessGroup(owned, 50), stopProcessGroup(other, 50)]);
+  }
+});
+
+test('the terminal-launched Working desktop can be stopped as an owned group', async () => {
+  const app = await mkdtemp(join(tmpdir(), 'lazybox-working-client-'));
+  const bin = join(app, 'Contents/MacOS');
+  await mkdir(bin, { recursive: true });
+  await writeFile(join(bin, 'lazybox-v2-desktop'), '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 });
+  const desktop = startWorkingDesktop(app, join(app, 'endpoint.json'), process.env);
+  try {
+    await once(desktop, 'spawn');
+    const exited = once(desktop, 'exit');
+    await stopProcessGroup(desktop);
+    assert.equal((await exited)[1], 'SIGTERM');
+  } finally {
+    desktop.kill();
+    await rm(app, { recursive: true, force: true });
   }
 });
 

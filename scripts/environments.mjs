@@ -378,7 +378,7 @@ export async function waitForDesktop(receipt, desktop, stopping) {
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     await new Promise(resolve => setTimeout(resolve, 250));
   }
-  throw new Error('Dev desktop did not finish starting');
+  throw new Error('Desktop did not finish starting');
 }
 
 async function launch(environmentRoot, channel) {
@@ -454,9 +454,10 @@ async function launch(environmentRoot, channel) {
         ? join(paths.lock, 'desktop-' + randomUUID()) : undefined;
       desktop = channel === 'dev'
         ? spawn(join(source, 'node_modules/.bin/tauri'), ['dev', '--config', JSON.stringify(desktopDevConfig(paths, ui.url, ui.nonce)), '--', '--', '--endpoint', paths.endpoint], { cwd: join(source, 'apps/desktop'), env: { ...buildEnv, ...(desktopReceipt && { LAZYBOX_DEV_DESKTOP_READY: desktopReceipt }), CARGO_TARGET_DIR: join(environmentRoot, 'build', 'dev') }, stdio: 'inherit', detached: true })
-        : spawn(join(app, 'Contents/MacOS/lazybox-v2-desktop'), ['--endpoint', paths.endpoint], { env: buildEnv, stdio: 'inherit' });
+        : spawn(join(app, 'Contents/MacOS/lazybox-v2-desktop'), ['--endpoint', paths.endpoint], { env: { ...buildEnv, ...(process.env.LAZYBOX_WORKING_DESKTOP_READY && { LAZYBOX_DEV_DESKTOP_READY: process.env.LAZYBOX_WORKING_DESKTOP_READY }) }, stdio: 'inherit' });
       desktop.on('error', error => console.error(`Desktop launch failed: ${error.message}`));
-      if (desktopReceipt) await waitForDesktop(desktopReceipt, desktop, () => stopping);
+      const readyFile = desktopReceipt || (channel === 'working' && process.env.LAZYBOX_WORKING_DESKTOP_READY);
+      if (readyFile) await waitForDesktop(readyFile, desktop, () => stopping);
       if (channel === 'dev') {
         control = await listenForDevStop(paths.lock, {
           request: process.env.LAZYBOX_BUILD_REQUEST,

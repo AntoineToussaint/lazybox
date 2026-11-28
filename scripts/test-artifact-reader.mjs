@@ -267,6 +267,7 @@ try {
   assert.match(JSON.stringify(discussion.body.message), /Could you check this/);
   assert.equal(fixture.sessions.find(item => item.id === discussion.body.sessionId)?.collectionId, 'alpha');
 
+  await expect(draft).toHaveValue(''); // The client has received the send acknowledgement.
   // Reopening a saved companion keeps the prompt empty; an explicit selection is still offered.
   await page.reload();
   await page.getByRole('button', { name: 'Agent companion', exact: true }).click();

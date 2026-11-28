@@ -32,7 +32,7 @@ p { max-width: 64ch; }
 .lead { max-width: 43rem; font-size: clamp(1.1rem, 2vw, 1.4rem); color: var(--muted); }
 .action { display: inline-block; padding: .68rem 1.1rem; color: var(--bg); background: var(--fg); border-radius: .45rem; text-decoration: none; font-weight: 650; }
 .hero picture { display: block; margin: 2.25rem 0; }
-.hero img, .feature img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: .6rem; }
+.hero img, .feature img, .feature video { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: .6rem; }
 .feature { border-top: 1px solid var(--line); padding-block: clamp(2rem, 5vw, 4rem); display: grid; align-items: center; gap: 2rem; grid-template-columns: 2fr 3fr; }
 .install { border-top: 1px solid var(--line); padding-block: 3rem; }
 pre { width: fit-content; max-width: 100%; overflow-x: auto; padding: 1rem; border: 1px solid var(--line); border-radius: .45rem; }

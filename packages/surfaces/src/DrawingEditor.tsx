@@ -1,11 +1,29 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Excalidraw, convertToExcalidrawElements, exportToBlob, exportToCanvas, getCommonBounds, loadFromBlob, MainMenu } from '@excalidraw/excalidraw';
 import type { BinaryFileData, ExcalidrawImperativeAPI, ExcalidrawInitialDataState } from '@excalidraw/excalidraw/types';
 import '@excalidraw/excalidraw/index.css';
+import { isMac } from './actions';
 import { Icon } from './Icons';
 import { useAppearance } from './appearance/useAppearance';
 import { getAppearance } from './appearance/apply';
 import type { Rendered } from './diagram-svg';
+
+// Excalidraw owns the history stack. Normalize alternate shortcuts to its
+// platform binding while leaving native text editing and composition alone.
+function drawingHistoryShortcut(event: ReactKeyboardEvent<HTMLDivElement>) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement) || target.closest('input, textarea, [contenteditable=true], [role=textbox]') ||
+      event.nativeEvent.isComposing || event.altKey || event.metaKey || !event.ctrlKey) return;
+  const key = event.key.toLowerCase();
+  const redoWithY = key === 'y' && !event.shiftKey;
+  if (!(isMac && key === 'z') && !redoWithY) return;
+  event.preventDefault();
+  event.stopPropagation();
+  target.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'z', code: 'KeyZ', ctrlKey: !isMac, metaKey: isMac,
+    shiftKey: redoWithY || event.shiftKey, bubbles: true, cancelable: true,
+  }));
+}
 
 async function initialScene(diagram?: Rendered, file?: File): Promise<ExcalidrawInitialDataState> {
   if (file?.name.endsWith('.excalidraw.png')) return { ...await loadFromBlob(file, null, null), scrollToContent: true };
@@ -39,6 +57,7 @@ export default function DrawingEditor({ diagram, file, onAttach, onMask, onError
   const { theme } = useAppearance();
   const [scene, setScene] = useState<ExcalidrawInitialDataState>();
   const [api, setApi] = useState<ExcalidrawImperativeAPI>();
+  const [hasElements, setHasElements] = useState(false);
   const [saving, setSaving] = useState(false);
   const mounted = useRef(false);
   useEffect(() => {
@@ -47,12 +66,14 @@ export default function DrawingEditor({ diagram, file, onAttach, onMask, onError
   }, []);
   useEffect(() => {
     let active = true;
-    initialScene(diagram, file).then(data => { if (active) setScene(data); }, error => { if (active) onError(String(error)); });
+    initialScene(diagram, file).then(data => {
+      if (active) setScene({
+        ...data,
+        appState: { ...data.appState, activeTool: { type: 'freedraw', customType: null, locked: false, lastActiveTool: null } },
+      });
+    }, error => { if (active) onError(String(error)); });
     return () => { active = false; };
   }, [diagram, file, onError]);
-  useEffect(() => {
-    api?.setActiveTool({ type: 'freedraw' });
-  }, [api]);
   async function attach() {
     if (!api || saving) return;
     const elements = api.getSceneElements();
@@ -92,9 +113,9 @@ export default function DrawingEditor({ diagram, file, onAttach, onMask, onError
     } catch (error) { onError(String(error)); }
     finally { URL.revokeObjectURL(original.src); setSaving(false); }
   }
-  return <><div className="drawing-canvas">{scene && <Excalidraw theme={theme.scheme} initialData={scene} excalidrawAPI={setApi}
-    UIOptions={{ canvasActions: { export: false, saveAsImage: false } }}><MainMenu><MainMenu.DefaultItems.ClearCanvas/></MainMenu></Excalidraw>}</div>
+  return <><div className="drawing-canvas" onKeyDownCapture={drawingHistoryShortcut}>{scene && <Excalidraw autoFocus onChange={elements => setHasElements(elements.some(element => !element.isDeleted))} theme={theme.scheme} initialData={scene} excalidrawAPI={setApi}
+    UIOptions={{ canvasActions: { export: false, saveAsImage: false } }}><MainMenu><MainMenu.DefaultItems.Help/><MainMenu.DefaultItems.ClearCanvas/></MainMenu></Excalidraw>}</div>
     <div className="drawing-actions">{onMask && <button type="button" disabled={!api || saving} onClick={() => void attachMask()}
       title="Keep the original picture and attach a same-size PNG mask. Marks identify pixels to regenerate.">Attach marks as edit mask</button>}
-    <button type="button" className="drawing-attach" disabled={!api || saving} onClick={() => void attach()}><Icon name="attach" size={14}/>{saving ? 'Preparing image…' : 'Attach drawing'}</button></div></>;
+    <button type="button" className="drawing-attach" disabled={!api || saving || !hasElements} onClick={() => void attach()}><Icon name="attach" size={14}/>{saving ? 'Preparing image…' : 'Attach drawing'}</button></div></>;
 }

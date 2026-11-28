@@ -32,10 +32,18 @@ try {
   await page.goto(url);
   assert.equal(await page.locator('h1').innerText(), 'A workspace for\nyour coding agents.');
   assert.ok(await page.locator('.hero img').evaluate(img => img.complete && img.naturalWidth > 0));
+  async function playDrawingDemo() {
+    const video = page.locator('video[src$="annotate-diagram.mp4"]');
+    await video.evaluate(async el => { el.muted = true; await el.play(); });
+    await page.waitForFunction(() => document.querySelector('video[src$="annotate-diagram.mp4"]')?.currentTime > 0);
+    assert.ok(await video.evaluate(el => el.videoWidth > 0 && el.controls));
+  }
+  await playDrawingDemo();
   await page.getByRole('link', { name: 'Guides', exact: true }).click();
   await page.waitForURL(url + 'guide/');
   await page.goto(url + 'guides/chat#conversation');
   await page.waitForURL(url + 'guide/guides/chat#conversation');
+  await playDrawingDemo();
   await page.goto(url + 'docs/tutorials/quickstart/');
   await page.locator('button[data-open-modal]').click();
   await page.locator('#starlight__search input').fill('workspace');

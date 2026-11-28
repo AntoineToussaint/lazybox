@@ -39,3 +39,7 @@ under its project path first. A domain cutover requires a coordinated owner
 change in GitHub Pages and verification of HTTPS and both generations' routes.
 Rollback consists of returning the domain to the V1 Pages site, which this
 build does not modify.
+
+The homepage and chat guide share the drawing demo in `docs-site/public/demos/`.
+With Chromium installed for Playwright and `ffmpeg` and `cwebp` on PATH,
+run `node scripts/record-drawing-demo.mjs` to record it again against fixture data.

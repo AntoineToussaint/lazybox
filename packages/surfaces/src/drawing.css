@@ -11,16 +11,16 @@ dialog.drawing-dialog {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 14px;
-  box-shadow: 0 18px 64px #0005;
+  box-shadow: 0 18px 64px color-mix(in srgb, var(--shadow) calc(34% * var(--shadow-strength)), transparent);
 }
-.drawing-dialog::backdrop { background: #08090d80; }
+.drawing-dialog::backdrop { background: color-mix(in srgb, var(--shadow) calc(50% * var(--shadow-strength)), transparent); }
 .drawing-layout {
   display: grid;
   height: 100%;
   grid-template: "title actions close" auto "error error error" auto "canvas canvas canvas" minmax(0, 1fr) / 1fr auto auto;
   align-items: center;
 }
-.drawing-title { grid-area: title; padding: 12px 16px; font-size: 14px; }
+.drawing-title { grid-area: title; padding: 12px 16px; font-size: calc(14px * var(--text-scale)); }
 .drawing-actions { grid-area: actions; display: flex; gap: 6px; align-items: center; }
 .drawing-dialog .drawing-attach, .drawing-dialog .drawing-close {
   display: inline-flex;
@@ -35,7 +35,7 @@ dialog.drawing-dialog {
   color: var(--text);
   border: 1px solid var(--line-strong);
   background: var(--surface-raised);
-  font-size: 13px;
+  font-size: calc(13px * var(--text-scale));
 }
 .drawing-dialog .drawing-close {
   grid-area: close;

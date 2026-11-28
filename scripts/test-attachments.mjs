@@ -2,7 +2,7 @@ import {testViteCache} from './fixtures/vite-cache.mjs';
 import { createServer } from './fixtures/vite-cache.mjs';
 import { drawingAssets } from './drawing-assets.mjs';
 import react from '@vitejs/plugin-react';
-import { chromium, expect } from './fixtures/playwright.mjs';
+import { chromium, webkit, expect } from './fixtures/playwright.mjs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { startRunnerFixture } from './fixtures/runner-ui.mjs';
@@ -14,7 +14,7 @@ const server = await createServer({...testViteCache(import.meta.url), configFile
 let browser;
 try {
   await server.listen();
-  browser = await chromium.launch({ headless: true });
+  browser = await (process.env.TEST_WEBKIT ? webkit : chromium).launch({ headless: true });
   const errors = [];
   const submissions = [];
   for (const view of ['agent', 'chat', 'workspace']) {
@@ -45,8 +45,9 @@ try {
       const editor = page.getByRole('dialog', { name: 'Drawing editor' });
       await expect(editor.locator('canvas.interactive')).toBeVisible();
       await page.screenshot({ path: '.cache/drawing-editor.png' });
-      await editor.getByRole('button', { name: 'Attach drawing' }).click();
-      await expect(editor.getByRole('alert')).toContainText('Draw something');
+      const attach = editor.getByRole('button', { name: 'Attach drawing' });
+      await expect(attach).toBeDisabled();
+      await expect(editor.getByRole('radio', { name: /draw/i }).first()).toBeChecked();
       async function drawRectangle() {
         const canvas = editor.locator('canvas.interactive');
         const bounds = await canvas.boundingBox();
@@ -61,7 +62,56 @@ try {
       const canvasBounds = await editor.locator('canvas.interactive').boundingBox();
       assert.ok(attachBounds.width < canvasBounds.width / 2);
       assert.ok(attachBounds.y + attachBounds.height <= canvasBounds.y + 1);
+      // Tool shortcuts work on first open, before clicking the toolbar.
+      for (const [key, label] of [['v', /selection/i], ['r', /rectangle/i], ['d', /diamond/i],
+        ['o', /ellipse/i], ['a', /arrow/i], ['l', /^line/i], ['t', /^text/i], ['e', /eraser/i], ['p', /draw/i]]) {
+        await page.keyboard.press(key);
+        await expect(editor.getByRole('radio', { name: label }).first()).toBeChecked();
+      }
+      const cx = canvasBounds.x + canvasBounds.width / 2;
+      const cy = canvasBounds.y + canvasBounds.height / 2;
+      await page.mouse.move(cx, cy);
+      await page.mouse.down();
+      await page.mouse.move(cx + 60, cy + 25, { steps: 6 });
+      await page.mouse.up();
+      await expect(attach).toBeEnabled();
+      await page.keyboard.press('e');
+      await page.mouse.move(cx + 30, cy - 10);
+      await page.mouse.down();
+      await page.mouse.move(cx + 30, cy + 40, { steps: 10 });
+      await page.mouse.up();
+      await expect(attach).toBeDisabled();
+      await editor.getByRole('button', { name: 'Undo', exact: true }).click();
+      await expect(attach).toBeEnabled();
+      await editor.getByRole('button', { name: 'Redo', exact: true }).click();
+      await expect(attach).toBeDisabled();
+      await page.keyboard.press('t');
+      await page.mouse.click(cx, cy);
+      const label = editor.locator('textarea.excalidraw-wysiwyg');
+      await label.pressSequentially('Retry here');
+      await expect(label).toHaveValue('Retry here');
+      await page.keyboard.press('Escape');
+      await expect(attach).toBeEnabled();
+      await page.keyboard.press('Control+z');
+      await expect(attach).toBeDisabled();
       await drawRectangle();
+      const undo = editor.getByRole('button', { name: 'Undo', exact: true });
+      const redo = editor.getByRole('button', { name: 'Redo', exact: true });
+      await expect(undo).toBeEnabled();
+      await page.keyboard.press('Control+z');
+      await expect(redo).toBeEnabled();
+      await expect(attach).toBeDisabled();
+      await page.keyboard.press('Control+Shift+z');
+      await expect(redo).toBeDisabled();
+      await page.keyboard.press('Meta+z');
+      await expect(redo).toBeEnabled();
+      await page.keyboard.press('Control+y');
+      await expect(redo).toBeDisabled();
+      await page.keyboard.press('Meta+a');
+      await page.keyboard.press('Backspace');
+      await expect(attach).toBeDisabled();
+      await page.keyboard.press('Control+z');
+      await expect(attach).toBeEnabled();
       await page.keyboard.press('Escape');
       await expect(editor).toBeVisible();
       await editor.getByRole('button', { name: 'Attach drawing' }).click();

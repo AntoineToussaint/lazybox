@@ -47,11 +47,12 @@ test('Working starts the archived staging script without installing dependencies
     assert.equal(existsSync('node_modules'), false);
     process.send({ id: 'working-candidate', revision: process.env.LAZYBOX_BUILD_REVISION });
   `);
+  await writeFile(join(f.remote, 'scripts/activate-working.mjs'), "import assert from 'node:assert/strict'; assert.equal(process.argv[2], 'working-candidate');");
   f.git(f.remote, 'add', 'scripts');
   f.git(f.remote, 'commit', '-m', 'stage fixture');
   const messages = [];
   await rebuild({ ...f, channel: 'working', report: message => messages.push(message) });
-  assert.ok(messages.some(message => message.includes('staged working-candidate')));
+  assert.ok(messages.some(message => message.includes('running working-candidate')));
 });
 test('either standalone action runs only the requested channel', async t => {
   const f = await fixture(t), calls = [];
@@ -105,7 +106,7 @@ test('running Dev must acknowledge its launcher-specific request and release its
   }
 });
 
-test('standalone Dev restarts and Working stages without touching Dev or the Working pin', async t => {
+test('standalone Dev restarts and Working activates the staged revision without touching Dev', async t => {
   const f = await fixture(t);
   await mkdir(join(f.remote, 'scripts'));
   await writeFile(join(f.remote, 'scripts/managed-build.mjs'), '// supported');
@@ -134,6 +135,11 @@ test('standalone Dev restarts and Working stages without touching Dev or the Wor
       process.send({ id: 'fixture-candidate', revision });
     }
   `);
+  await writeFile(join(f.remote, 'scripts/activate-working.mjs'), `
+    import { writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    writeFileSync(join(process.env.LAZYBOX_V2_ENVIRONMENTS, 'working/current.json'), process.argv[2]);
+  `);
   f.git(f.remote, 'add', '.');
   f.git(f.remote, 'commit', '-m', 'fixture channel tools');
   const revision = f.git(f.remote, 'rev-parse', 'HEAD');
@@ -154,9 +160,61 @@ test('standalone Dev restarts and Working stages without touching Dev or the Wor
     assert.ok(!lines.some(line => line.startsWith('[Working]')));
     lines.length = 0;
     await rebuild({ ...request, channel: 'working' });
-    assert.ok(lines.includes('[Working] staged fixture-candidate ' + revision));
+    assert.ok(lines.includes('[Working] running fixture-candidate ' + revision));
     assert.ok(!lines.some(line => line.startsWith('[Dev]')));
     assert.deepEqual(JSON.parse(await readFile(join(lock, 'control.json'))), second);
-    assert.equal(await readFile(pin, 'utf8'), 'pinned-before');
+    assert.equal(await readFile(pin, 'utf8'), 'fixture-candidate');
   } finally { await stopDev(lock); }
+});
+
+test('Working activation replaces a running launcher, waits for its desktop and restores the pin after a failed launch', async t => {
+  const { activateWorking } = await import('./activate-working.mjs');
+  const { digestTree } = await import('./environments.mjs');
+  const { chmod } = await import('node:fs/promises');
+  const root = await mkdtemp(join(tmpdir(), 'working-activation-'));
+  const working = join(root, 'working'), lock = join(working, 'launch.lock');
+  const fake = join(root, 'codefly');
+  await writeFile(fake, '#!/bin/sh\nprintf \'{"ref":{"label":"%s"},"installed":false,"running":false}\\n\' "$3"\n');
+  await chmod(fake, 0o700);
+  const priorCodefly = process.env.LAZYBOX_V2_CODEFLY, priorRevision = process.env.LAZYBOX_BUILD_REVISION;
+  process.env.LAZYBOX_V2_CODEFLY = fake;
+  process.env.LAZYBOX_BUILD_REVISION = 'fixture-revision';
+  t.after(async () => {
+    if (priorCodefly === undefined) delete process.env.LAZYBOX_V2_CODEFLY; else process.env.LAZYBOX_V2_CODEFLY = priorCodefly;
+    if (priorRevision === undefined) delete process.env.LAZYBOX_BUILD_REVISION; else process.env.LAZYBOX_BUILD_REVISION = priorRevision;
+    try { process.kill(JSON.parse(await readFile(join(lock, 'owner.json'))).pid, 'SIGINT'); } catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error; }
+    await rm(root, { recursive: true, force: true });
+  });
+  for (const id of ['first', 'second', 'broken']) {
+    const dir = join(root, 'releases', id), source = join(dir, 'source'), app = join(dir, 'Lazybox.app');
+    const worker = join(source, 'workers/claude-sdk/dist');
+    await mkdir(join(source, 'scripts'), { recursive: true });
+    await mkdir(app);
+    await mkdir(worker, { recursive: true });
+    await writeFile(join(source, 'scripts/environments.mjs'), `
+      import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      const dir = join(process.env.LAZYBOX_V2_ENVIRONMENTS, 'working');
+      const pin = JSON.parse(readFileSync(join(dir, 'current.json')));
+      if (pin.id === 'broken') process.exit(1);
+      const lock = join(dir, 'launch.lock');
+      mkdirSync(lock);
+      writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid }));
+      process.once('SIGINT', () => { rmSync(lock, { recursive: true, force: true }); process.exit(); });
+      if (process.env.LAZYBOX_WORKING_DESKTOP_READY) writeFileSync(process.env.LAZYBOX_WORKING_DESKTOP_READY, 'ready');
+      setInterval(() => {}, 1000);
+    `);
+    await writeFile(join(dir, 'release.json'), JSON.stringify({ id, version: 3, revision: 'fixture-revision',
+      sourceDigest: await digestTree(source), appDigest: await digestTree(app, () => true), workerDigest: await digestTree(worker, () => true) }));
+  }
+  const owner = async () => JSON.parse(await readFile(join(lock, 'owner.json'))).pid;
+  await activateWorking(root, 'first');
+  const first = await owner();
+  await activateWorking(root, 'second');
+  assert.notEqual(await owner(), first);
+  assert.equal(JSON.parse(await readFile(join(working, 'current.json'))).id, 'second');
+  await assert.rejects(activateWorking(root, 'broken'), /activation failed/);
+  assert.equal(JSON.parse(await readFile(join(working, 'current.json'))).id, 'second');
+  for (let i = 0; i < 100 && !fs.existsSync(join(lock, 'owner.json')); i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(await owner());
 });

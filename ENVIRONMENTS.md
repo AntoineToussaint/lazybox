@@ -321,15 +321,20 @@ reinstalling dependencies underneath a running development environment.
 
 In the Lazybox workspace Actions panel, run **Rebuild Dev**
 (`lazybox/rebuild-dev`) to build and launch Dev, or **Stage Working**
-(`lazybox/stage-working`) to build a Working candidate. Each action
+(`lazybox/stage-working`) to build and open Working from main. Each action
 fast-forwards the configured repository home's clean `main` and uses its
 existing environment root. Run one action at a time so both can safely update
 the same checkout.
 
 Dev reports readiness when its Runner answers and the rebuilt desktop opens.
 If a launcher predates the managed shutdown receipt, close it yourself before
-the first managed rebuild. Stage Working builds from a Git archive of the selected
-commit and prints the candidate ID when the build succeeds. Promotion is separate.
+the first managed rebuild. Stage Working builds from a Git archive of the selected commit while the old
+Working app runs. After the build succeeds, the action promotes the candidate,
+restarts the Working Runner and opens its desktop. It reports the running
+candidate ID and revision after Runner and desktop readiness. A Codefly-managed
+Runner is updated through its service installation. A failed activation attempts
+to restore the previous pin and running installation. The command-line
+`make stage` still builds a candidate for explicit promotion.
 
 An interrupted action can leave `managed-build.lock` in the environment root.
 Confirm the build has ended before moving that lock aside and retrying.

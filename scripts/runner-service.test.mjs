@@ -184,3 +184,45 @@ test('terminal Working entry point rejects a managed service before building or 
   });
   await assert.rejects(readFile(join(f.paths.lock, 'owner.json')), { code: 'ENOENT' });
 });
+
+test('the Working action replaces an installed Codefly service and waits for its new client', async t => {
+  const { activateWorking } = await import('./activate-working.mjs');
+  const { createServer } = await import('node:http');
+  const f = await fixture(t);
+  const http = createServer((_req, res) => res.end('{}'));
+  await new Promise(resolve => http.listen(0, '127.0.0.1', resolve));
+  t.after(() => http.close());
+  const endpoint = { url: 'http://127.0.0.1:' + http.address().port, token: 'fresh-token' };
+  const statusPath = join(f.root, 'service.json'), calls = join(f.root, 'calls');
+  await writeFile(statusPath, JSON.stringify({ ref: { label: serviceLabel(f.root) }, installed: true, running: true, version: 'old' }));
+  await writeFile(f.executable, `#!${process.execPath}
+    const fs = require('node:fs'), action = process.argv[3];
+    const path = ${JSON.stringify(statusPath)}, status = JSON.parse(fs.readFileSync(path));
+    if (action !== 'status') fs.appendFileSync(${JSON.stringify(calls)}, action + '\\n');
+    if (action === 'stop') status.running = false;
+    if (action === 'install') status.version = process.argv[process.argv.indexOf('--version') + 1];
+    if (action === 'start') {
+      status.running = true;
+      fs.writeFileSync(${JSON.stringify(f.paths.endpoint)}, ${JSON.stringify(JSON.stringify(endpoint))});
+    }
+    fs.writeFileSync(path, JSON.stringify(status));
+    console.log(JSON.stringify(status));
+  `);
+  await mkdir(join(f.app, 'Contents/MacOS'), { recursive: true });
+  await writeFile(join(f.app, 'Contents/MacOS/lazybox-v2-desktop'), '#!/bin/sh\nprintf ready > "$LAZYBOX_DEV_DESKTOP_READY"\nsleep 1\n', { mode: 0o700 });
+  await writeFile(join(f.root, 'releases/candidate/release.json'), JSON.stringify({
+    version: 3, id: 'candidate', revision: 'fixture', sourceDigest: await digestTree(f.source),
+    appDigest: await digestTree(f.app, () => true), workerDigest: await digestTree(join(f.source, 'workers/claude-sdk/dist'), () => true),
+  }));
+  const previous = [process.env.LAZYBOX_V2_CODEFLY, process.env.LAZYBOX_BUILD_REVISION];
+  process.env.LAZYBOX_V2_CODEFLY = f.executable;
+  process.env.LAZYBOX_BUILD_REVISION = 'fixture';
+  try {
+    await activateWorking(f.root, 'candidate');
+    assert.equal(await readFile(calls, 'utf8'), 'stop\ninstall\nstart\n');
+  } finally {
+    for (const [index, key] of ['LAZYBOX_V2_CODEFLY', 'LAZYBOX_BUILD_REVISION'].entries()) {
+      if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index];
+    }
+  }
+});

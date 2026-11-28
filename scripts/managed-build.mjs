@@ -121,7 +121,8 @@ async function working({ home, root, revision, env }) {
     const [code, signal] = await once(stage, 'close');
     if (code !== 0) throw new Error('Staging exited with ' + (signal || code));
     if (!candidate?.id || candidate.revision !== revision) throw new Error('Missing candidate revision receipt');
-    return 'staged ' + candidate.id;
+    await run(source, process.execPath, ['scripts/activate-working.mjs', candidate.id], env);
+    return 'running ' + candidate.id;
   } finally { await rm(temp, { recursive: true, force: true }); }
 }
 export async function rebuild({ home, root, channel, channels = { Dev: dev, Working: working }, report = console.log }) {

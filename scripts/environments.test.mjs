@@ -52,8 +52,7 @@ test('the terminal-launched Working desktop can be stopped as an owned group', a
     await once(desktop, 'spawn');
     const exited = once(desktop, 'exit');
     await stopProcessGroup(desktop);
-    assert.equal(desktop.signalCode, 'SIGTERM');
-    await exited;
+    assert.equal((await exited)[1], 'SIGTERM');
   } finally {
     desktop.kill();
     await rm(app, { recursive: true, force: true });

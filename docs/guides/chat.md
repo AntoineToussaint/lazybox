@@ -565,6 +565,12 @@ In the sub-agent panel, the timer shows elapsed run time. After a minute without
 
 If the provider stops responding during a turn, the chat reports any background work still running. With an empty composer, choose **Continue from here** to ask the agent to check existing commands and results before finishing the task. Once the Runner accepts the continuation, the button shows a delivery confirmation while the chat waits for updated turn status. You can also send your own follow-up.
 
+## Draw and annotate
+
+<video controls playsinline preload="none" aria-label="Demo: annotate an upload diagram and attach it to an agent draft" src="/demos/annotate-diagram.mp4" poster="/demos/annotate-diagram.webp" style="width:100%;height:auto"></video>
+
+In the silent demo, choose **Annotate**, circle the upload step, undo and redo the mark, then attach the drawing and ask the agent to add a retry.
+
 Choose **Draw** beside the attachment button to sketch in the embedded
 Excalidraw editor. **Attach drawing** puts a PNG in the draft. Choose **Edit**
 on its thumbnail to reopen the strokes. Editing an attached picture adds the

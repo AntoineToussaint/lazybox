@@ -381,6 +381,12 @@ export async function waitForDesktop(receipt, desktop, stopping) {
   throw new Error('Desktop did not finish starting');
 }
 
+export function startWorkingDesktop(app, endpoint, env, readyFile) {
+  return spawnProcessGroup(join(app, 'Contents/MacOS/lazybox-v2-desktop'), ['--endpoint', endpoint], {
+    env: { ...env, ...(readyFile && { LAZYBOX_DEV_DESKTOP_READY: readyFile }) }, stdio: 'inherit',
+  });
+}
+
 async function launch(environmentRoot, channel) {
   const paths = environmentPaths(environmentRoot, channel);
   const unlock = await acquireLock(paths.lock);
@@ -454,7 +460,10 @@ async function launch(environmentRoot, channel) {
         ? join(paths.lock, 'desktop-' + randomUUID()) : undefined;
       desktop = channel === 'dev'
         ? spawn(join(source, 'node_modules/.bin/tauri'), ['dev', '--config', JSON.stringify(desktopDevConfig(paths, ui.url, ui.nonce)), '--', '--', '--endpoint', paths.endpoint], { cwd: join(source, 'apps/desktop'), env: { ...buildEnv, ...(desktopReceipt && { LAZYBOX_DEV_DESKTOP_READY: desktopReceipt }), CARGO_TARGET_DIR: join(environmentRoot, 'build', 'dev') }, stdio: 'inherit', detached: true })
-        : spawn(join(app, 'Contents/MacOS/lazybox-v2-desktop'), ['--endpoint', paths.endpoint], { env: { ...buildEnv, ...(process.env.LAZYBOX_WORKING_DESKTOP_READY && { LAZYBOX_DEV_DESKTOP_READY: process.env.LAZYBOX_WORKING_DESKTOP_READY }) }, stdio: 'inherit' });
+        : startWorkingDesktop(app, paths.endpoint, buildEnv, process.env.LAZYBOX_WORKING_DESKTOP_READY);
+      // Once the Working app exits there is no client left to close. Avoid
+      // retaining a PID that could be reused before the launcher stops.
+      if (channel === 'working') desktop.once('exit', () => { desktop = undefined; });
       desktop.on('error', error => console.error(`Desktop launch failed: ${error.message}`));
       const readyFile = desktopReceipt || (channel === 'working' && process.env.LAZYBOX_WORKING_DESKTOP_READY);
       if (readyFile) await waitForDesktop(readyFile, desktop, () => stopping);
@@ -470,7 +479,7 @@ async function launch(environmentRoot, channel) {
     await superviseRunner({ start, restartRequest, stopping: () => stopping, onReady });
   } finally {
     control?.close();
-    await Promise.all([stopProcessGroup(channel === 'dev' ? desktop : undefined), stopProcessGroup(worker), cliWatch?.close()]);
+    await Promise.all([stopProcessGroup(desktop), stopProcessGroup(worker), cliWatch?.close()]);
     await ui?.server.close();
     runner?.kill('SIGINT');
     if (finished) await finished;

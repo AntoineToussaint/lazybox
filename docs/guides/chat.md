@@ -577,3 +577,10 @@ picture you want to an agent with an image-generation tool. For a localized
 edit, open an attached picture, brush over the region, and choose **Attach
 marks as edit mask**. The draft contains the original and a same-size PNG
 whose transparent pixels identify the area to regenerate.
+
+The canvas opens with the pen selected. Press **P** for pen, **V** for
+selection, **R** for rectangle, **O** for ellipse, **A** for arrow, **T** for
+text, or **E** for eraser. Delete or Backspace removes the selection.
+**Ctrl+Z** undoes a canvas edit. **Ctrl+Shift+Z** or **Ctrl+Y** redoes it.
+On Mac, **⌘Z** and **⌘⇧Z** also work. Undo and Redo are available in the
+canvas toolbar. Open the editor menu’s help for the full shortcut list.

@@ -146,7 +146,7 @@ export function Composer({ workingTurn, textarea, fileInput, agentName, embedded
     if (!attachments.select([mask])) throw new Error('The edit mask exceeds the conversation’s attachment limits.');
     setDrawing(undefined);
   } : undefined} onClose={() => setDrawing(undefined)} onAttach={file => {
-    const index = drawing.file?.name.endsWith('.excalidraw.png') ? files.indexOf(drawing.file) : -1;
+    const index = drawing.file ? files.indexOf(drawing.file) : -1;
     const accepted = index >= 0 ? attachments.replace(index, file) : attachments.select([file]);
     if (!accepted) throw new Error('This drawing exceeds the conversation’s attachment limits.');
     setDrawing(undefined);

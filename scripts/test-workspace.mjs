@@ -92,7 +92,6 @@ try {
   await expect(page.getByRole('menuitem', { name: 'Use as preview tab', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
   await session.selectOption('alpha-second');
-  await expect(chat).toContainText('Retained conversation for alpha-session');
   await expect(page.locator('.page-layout .panel-chat')).toHaveCount(2);
   await expect(previewChat).toContainText('Retained conversation for alpha-second');
   await expect(page.locator('.dock-tab[data-kind="chat"][data-preview]')).toContainText('Second alpha conversation');
@@ -105,6 +104,10 @@ try {
   await chatTab('Agent chat').click({ button: 'right' });
   await expect(page.getByRole('menuitem', { name: 'Keep open', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
+  // Activate the retained tab before reading its transcript. Hidden chats can suspend their journal.
+  await chatTab('Agent chat').click();
+  await expect(chat).toContainText('Retained conversation for alpha-session');
+  await expect(chat.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('unsent cross-repository draft');
   // Closing the second conversation's tab leaves the page with one chat again; the conversation goes on.
   await chatTab('Second alpha conversation').locator('.dock-tab-close').click();
   await expect(page.locator('.page-layout .panel-chat')).toHaveCount(1);

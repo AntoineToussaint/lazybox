@@ -115,7 +115,7 @@ export default function DrawingEditor({ diagram, file, onAttach, onMask, onError
   }
   return <><div className="drawing-canvas" onKeyDownCapture={drawingHistoryShortcut}>{scene && <Excalidraw autoFocus onChange={elements => setHasElements(elements.some(element => !element.isDeleted))} theme={theme.scheme} initialData={scene} excalidrawAPI={setApi}
     UIOptions={{ canvasActions: { export: false, saveAsImage: false } }}><MainMenu><MainMenu.DefaultItems.Help/><MainMenu.DefaultItems.ClearCanvas/></MainMenu></Excalidraw>}</div>
-    <div className="drawing-actions">{onMask && <button type="button" disabled={!api || saving} onClick={() => void attachMask()}
-      title="Keep the original picture and attach a same-size PNG mask. Marks identify pixels to regenerate.">Attach marks as edit mask</button>}
+    <div className="drawing-actions">{onMask && <details><summary>Image generation options</summary><button type="button" disabled={!api || saving} onClick={() => void attachMask()}
+      title="Keep the original picture and attach a same-size PNG mask. Marks identify pixels to regenerate.">Attach marks as edit mask</button></details>}
     <button type="button" className="drawing-attach" disabled={!api || saving || !hasElements} onClick={() => void attach()}><Icon name="attach" size={14}/>{saving ? 'Preparing image…' : 'Attach drawing'}</button></div></>;
 }

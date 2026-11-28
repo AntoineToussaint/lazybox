@@ -123,12 +123,14 @@ try {
       const picture = await page.evaluate(() => {
         const canvas = document.createElement('canvas');
         canvas.width = 700; canvas.height = 480;
-        const ctx = canvas.getContext('2d'); ctx.fillRect(0, 0, 700, 480);
+        const ctx = canvas.getContext('2d'); ctx.fillStyle = '#00bb66'; ctx.fillRect(0, 0, 700, 480);
         return canvas.toDataURL().split(',')[1];
       });
       await chat.locator('input[type=file]').setInputFiles({ name: 'original.png', mimeType: 'image/png', buffer: Buffer.from(picture, 'base64') });
       await chat.getByRole('button', { name: 'Annotate original.png' }).click();
       await drawRectangle();
+      await expect(editor.getByRole('button', { name: 'Attach marks as edit mask' })).toBeHidden();
+      await editor.getByText('Image generation options', { exact: true }).click();
       await editor.getByRole('button', { name: 'Attach marks as edit mask' }).click();
       const mask = chat.getByRole('button', { name: /^Open edit-mask.png/ }).locator('img');
       await expect(mask).toBeVisible();
@@ -146,9 +148,25 @@ try {
       await chat.getByRole('button', { name: 'Annotate original.png' }).click();
       await drawRectangle();
       await editor.getByRole('button', { name: 'Attach drawing' }).click();
-      await expect(chat.getByRole('button', { name: 'Annotate original.png' })).toBeVisible();
+      await expect(chat.getByRole('button', { name: 'Annotate original.png' })).toHaveCount(0);
+      await chat.getByRole('button', { name: /^Open drawing.excalidraw.png/ }).hover();
+      const composite = page.locator('.attachment-preview img');
+      const colors = await composite.evaluate(async image => {
+        await image.decode();
+        const canvas = document.createElement('canvas');
+        canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(image, 0, 0);
+        const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        let background = false, stroke = false;
+        for (let i = 0; i < pixels.length; i += 4) {
+          background ||= pixels[i] < 20 && pixels[i + 1] > 150 && pixels[i + 2] < 130;
+          stroke ||= pixels[i] > 150 && pixels[i + 1] < 120 && pixels[i + 2] < 120;
+        }
+        return { background, stroke };
+      });
+      assert.deepEqual(colors, { background: true, stroke: true });
       await chat.getByRole('button', { name: 'Remove drawing.excalidraw.png' }).click();
-      await chat.getByRole('button', { name: 'Remove original.png' }).click();
       drawingLimits = false;
       await page.reload();
       await expect(composer).toBeEnabled();

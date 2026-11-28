@@ -41,3 +41,22 @@ pre { width: fit-content; max-width: 100%; overflow-x: auto; padding: 1rem; bord
   .feature { grid-template-columns: 1fr; }
   pre { font-size: .82rem; }
 }
+
+.demo-link { display: inline-block; margin: .6rem 1rem; }
+.studio {
+  background: #242137; color: #faf7ff;
+  background-image: radial-gradient(ellipse at top right, #483853, transparent 66%);
+  padding: clamp(1.25rem, 4vw, 4rem); margin-block: 3rem;
+  border-radius: 1.4rem;
+}
+.studio-intro, .studio-links, .studio figcaption { display: flex; justify-content: space-between; align-items: end; gap: 1rem 2rem; }
+.studio-intro p { color: #e1d9e9; max-width: 32ch; margin: 0; }
+.studio figure { margin: 2rem 0 1.5rem; }
+.studio video { display: block; width: 100%; height: auto; border-radius: .75rem; background: #1a1920; box-shadow: 0 .6rem 2rem #18132155; }
+.studio figcaption { margin-top: .75rem; color: #ded4e5; font-size: .85rem; flex-wrap: wrap; }
+.studio-links { border-top: 1px solid #706578; padding-top: 1.25rem; flex-wrap: wrap; }
+.studio a { color: #f7e4ff; }
+@media (max-width: 42rem) {
+  .studio-intro { align-items: start; flex-direction: column; }
+  .studio-links { gap: .75rem; }
+}

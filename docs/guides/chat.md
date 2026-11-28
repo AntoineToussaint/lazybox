@@ -574,7 +574,7 @@ The 11-second demo shows how to circle the upload step, undo and redo the stroke
 | Start here | What to do |
 | --- | --- |
 | Blank canvas | Choose **Draw** beside the attachment button. Sketch, then choose **Attach drawing** to add a PNG to your draft. |
-| Attached picture | Choose **Edit** on the thumbnail. Attach the annotated copy beside the original. You can reopen the drawing to adjust its strokes. |
+| Attached picture | Choose **Edit** on the thumbnail. Choose **Attach drawing** to replace the draft attachment with one PNG containing the picture and your marks (up to 4096 px on its longest edge). You can reopen the drawing to adjust its strokes. |
 | Mermaid diagram | Choose **Annotate** in an artifact with an agent companion. The draft includes the marked diagram, its Mermaid source and its version reference. |
 
 Before sending, open the annotated attachment and check that both the original and your marks are visible. Add a sentence describing the change you want.
@@ -583,7 +583,7 @@ Before sending, open the annotated attachment and check that both the original a
 
 For image generation, attach the sketch as a reference and describe the
 picture you want to an agent with an image-generation tool. For a localized
-edit, open an attached picture, brush over the region, and choose **Attach
+edit, open an attached picture, brush over the region, and open **Image generation options**. Choose **Attach
 marks as edit mask**. The draft contains the original and a same-size PNG
 whose transparent pixels identify the area to regenerate.
 
